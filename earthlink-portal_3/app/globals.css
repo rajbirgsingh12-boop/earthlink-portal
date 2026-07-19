@@ -1,0 +1,17 @@
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@400;500;600&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+body { @apply bg-paper text-ink font-body; }
+.stamp { @apply inline-block border-2 rounded-sm px-2 py-px font-display uppercase tracking-widest text-[11px] font-semibold; }
+.btn { @apply cursor-pointer rounded-sm border-[1.5px] border-ink bg-white px-4 py-2 font-display uppercase tracking-wider text-[15px] font-semibold; }
+.btn-primary { @apply bg-work border-work text-white; }
+.btn-ghost { @apply border-rule text-inksoft; }
+.field { @apply w-full rounded-sm border border-rule bg-white px-3 py-2.5 text-base outline-none focus:border-ink; }
+.card { @apply rounded-sm border border-rule bg-card; }
+@media print {
+  body * { visibility: hidden !important; }
+  .printable, .printable * { visibility: visible !important; }
+  .printable { position: absolute !important; left: 0; top: 0; width: 100%; }
+  .no-print { display: none !important; }
+}

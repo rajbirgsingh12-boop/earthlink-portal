@@ -8,6 +8,81 @@ import type { Contract, Release } from "@/lib/types";
 
 type Filter = "all" | "chase" | "payroll" | "canceled" | "hours";
 
+// ---- read red-filled (canceled) rows straight out of the xlsx zip ----
+async function unzipEntries(buf: ArrayBuffer, names: string[]): Promise<Record<string, string>> {
+  const dv = new DataView(buf); const u8 = new Uint8Array(buf); const td = new TextDecoder();
+  let eocd = -1;
+  for (let i = buf.byteLength - 22; i >= Math.max(0, buf.byteLength - 65558); i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error("no eocd");
+  const count = dv.getUint16(eocd + 10, true);
+  let off = dv.getUint32(eocd + 16, true);
+  const out: Record<string, string> = {};
+  for (let i = 0; i < count; i++) {
+    if (dv.getUint32(off, true) !== 0x02014b50) break;
+    const method = dv.getUint16(off + 10, true);
+    const csize = dv.getUint32(off + 20, true);
+    const nlen = dv.getUint16(off + 28, true);
+    const elen = dv.getUint16(off + 30, true);
+    const clen = dv.getUint16(off + 32, true);
+    const lho = dv.getUint32(off + 42, true);
+    const name = td.decode(u8.subarray(off + 46, off + 46 + nlen));
+    if (names.includes(name)) {
+      const lnlen = dv.getUint16(lho + 26, true);
+      const lelen = dv.getUint16(lho + 28, true);
+      const start = lho + 30 + lnlen + lelen;
+      const comp = u8.slice(start, start + csize);
+      if (method === 0) out[name] = td.decode(new Uint8Array(comp));
+      else {
+        const stream = new Blob([comp]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+        out[name] = await new Response(stream).text();
+      }
+    }
+    off += 46 + nlen + elen + clen;
+  }
+  return out;
+}
+function isRedHex(rgb: string | null): boolean {
+  if (!rgb) return false;
+  const h = rgb.slice(-6);
+  const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+  return r >= 0xc0 && g <= 0x50 && b <= 0x50;
+}
+async function detectRedRows(buf: ArrayBuffer): Promise<Set<number>> {
+  const red = new Set<number>();
+  try {
+    const files = await unzipEntries(buf, ["xl/styles.xml", "xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml"]);
+    const styles = files["xl/styles.xml"]; const sheet = files["xl/worksheets/sheet1.xml"] || files["xl/worksheets/sheet2.xml"];
+    if (!styles || !sheet) return red;
+    const dp = new DOMParser();
+    const sd = dp.parseFromString(styles, "application/xml");
+    const redFills = new Set<number>(); const redFonts = new Set<number>();
+    Array.from(sd.getElementsByTagName("fills")[0]?.getElementsByTagName("fill") || []).forEach((f, i) => {
+      const c = f.getElementsByTagName("fgColor")[0];
+      if (c && isRedHex(c.getAttribute("rgb"))) redFills.add(i);
+    });
+    Array.from(sd.getElementsByTagName("fonts")[0]?.getElementsByTagName("font") || []).forEach((f, i) => {
+      const c = f.getElementsByTagName("color")[0];
+      if (c && isRedHex(c.getAttribute("rgb"))) redFonts.add(i);
+    });
+    const redXf = new Set<number>();
+    const cellXfs = sd.getElementsByTagName("cellXfs")[0];
+    Array.from(cellXfs?.getElementsByTagName("xf") || []).forEach((xf, i) => {
+      if (redFills.has(Number(xf.getAttribute("fillId"))) || redFonts.has(Number(xf.getAttribute("fontId")))) redXf.add(i);
+    });
+    if (redXf.size === 0) return red;
+    const wd = dp.parseFromString(sheet, "application/xml");
+    Array.from(wd.getElementsByTagName("row")).forEach((row) => {
+      const n = Number(row.getAttribute("r"));
+      const hit = Array.from(row.getElementsByTagName("c")).some((c) => redXf.has(Number(c.getAttribute("s"))));
+      if (hit && n) red.add(n);
+    });
+  } catch { /* not a zip (csv) or unreadable styles — fall back to text flags */ }
+  return red;
+}
+
+
 export default function Releases() {
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [active, setActive] = useState<string>("");
@@ -85,11 +160,13 @@ export default function Releases() {
     if (!file) return;
     const fname = file.name || "";
     const reader = new FileReader();
-    reader.onload = (ev) => {
+    reader.onload = async (ev) => {
       try {
-        const wb = XLSX.read(ev.target?.result, { type: "array" });
+        const buf = ev.target?.result as ArrayBuffer;
+        const redRows = await detectRedRows(buf);
+        const wb = XLSX.read(buf, { type: "array" });
         const sheet = wb.Sheets[wb.SheetNames[0]];
-        const raw: string[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false });
+        const raw: string[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false, blankrows: true });
         const hIdx = raw.findIndex((r) => r.some((c) => /release/i.test(c)) && r.some((c) => /amount/i.test(c)));
         if (hIdx < 0) { flash("No header row with Release + Amount found"); return; }
         const headers = raw[hIdx].map((h) => String(h).toLowerCase());
@@ -98,15 +175,16 @@ export default function Releases() {
         const pre = raw.slice(0, hIdx).flat().join(" ");
         const gm = pre.match(/contract\s*#?\s*([A-Za-z0-9-]+)/i) || fname.match(/(\d{5,})/);
         const items = raw.slice(hIdx + 1)
-          .filter((r) => r.some((c) => String(c).trim() !== ""))
-          .map((r) => {
+          .map((r, k) => ({ r, sheetRow: hIdx + 2 + k }))
+          .filter(({ r }) => r.some((c) => String(c).trim() !== ""))
+          .map(({ r, sheetRow }) => {
             const g = (i: number) => (i >= 0 ? String(r[i] ?? "").trim() : "");
             const rowText = r.join(" ");
             return {
               rel_number: g(m.rel), location: g(m.location), buildings: g(m.buildings), ticket: g(m.ticket),
               amount: m.amount >= 0 ? parseNum(r[m.amount]) : 0, pre_check: g(m.pre), date_completed: g(m.date),
               payroll_done: /^d/i.test(g(m.payroll)), received: /^y/i.test(g(m.received)),
-              canceled: /cancel|void/i.test(g(m.status) || rowText), labor_hours: m.hours >= 0 ? parseNum(r[m.hours]) : 0, assigned_to: null,
+              canceled: redRows.has(sheetRow) || /cancel|void/i.test(g(m.status) || rowText), labor_hours: m.hours >= 0 ? parseNum(r[m.hours]) : 0, assigned_to: null,
             };
           })
           .filter((it) => it.rel_number || it.amount > 0);

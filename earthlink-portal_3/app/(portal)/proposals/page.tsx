@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { sb } from "@/lib/supabase";
 import { fmt, parseNum } from "@/lib/format";
@@ -11,100 +11,139 @@ import type { Contract } from "@/lib/types";
 interface Proposal {
   id: string; number: string; client_name: string; job: string; date: string; tax_pct: number; status: string; notes: string;
   contract_id?: string | null; development?: string; address?: string; apt?: string; stairhall?: string;
-  walk_date?: string; release_number?: string; total?: number;
+  walk_date?: string; release_number?: string; nycha_staff?: string; vendor_staff?: string;
+  start_date?: string; finish_date?: string; total?: number; qty_map?: Record<string, number> | null;
 }
-interface PriceItem { id: string; code: string; description: string; unit: string; unit_price: number; }
 interface ContractItem { id: string; line: number; code: string; category: string; description: string; uom: string; unit_price: number; }
 type NychaLineItem = LineItem & { category?: string; line?: number };
 
 const tone = (s: string) => (s === "approved" ? "work" : s === "sent" ? "carbon" : s === "invoiced" ? "mute" : s === "declined" ? "alert" : "mute");
+const HEAD_FIELDS = [
+  ["development", "Development"], ["address", "Address"], ["apt", "Apt"], ["stairhall", "Stairhall"],
+  ["nycha_staff", "NYCHA staff"], ["vendor_staff", "Vendor staff"], ["walk_date", "Walk date"],
+  ["release_number", "Release #"], ["start_date", "Start date"], ["finish_date", "Finish date"],
+] as const;
 
 export default function Proposals() {
   const [list, setList] = useState<Proposal[]>([]);
-  const [totals, setTotals] = useState<Record<string, number>>({});
-  const [openId, setOpenId] = useState<string | null>(null);
   const [doc, setDoc] = useState<Proposal | null>(null);
-  const [items, setItems] = useState<NychaLineItem[]>([]);
-  const [book, setBook] = useState<PriceItem[]>([]);
+  const [items, setItems] = useState<NychaLineItem[]>([]); // legacy (non-contract) proposals only
   const [contracts, setContracts] = useState<Contract[]>([]);
-  const [contractItems, setContractItems] = useState<ContractItem[] | null>(null);
-  const sheetRef = useRef<HTMLInputElement>(null);
-  const [clients, setClients] = useState<string[]>([]);
+  const [catalog, setCatalog] = useState<ContractItem[] | null>(null);
+  const [qty, setQty] = useState<Record<string, string>>({});
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [org, setOrg] = useState<Org | null>(null);
   const [search, setSearch] = useState("");
   const [printOpen, setPrintOpen] = useState(false);
+  const [pickOpen, setPickOpen] = useState(false);
+  const [pickId, setPickId] = useState("");
+  const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
   const [msg, setMsg] = useState("");
-  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
+  const sheetRef = useRef<HTMLInputElement>(null);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3000); };
+  const upgradeHint = (m: string) => (/column|schema|relation|qty_map/i.test(m) ? "Database needs the upgrade — run supabase/upgrade_proposal_creator.sql" : m);
 
   const load = async () => {
     const { data } = await sb().from("proposals").select("*").order("created_at", { ascending: false });
     setList((data || []) as Proposal[]);
-    const { data: its } = await sb().from("proposal_items").select("proposal_id,qty,unit_price");
-    const t: Record<string, number> = {};
-    (its || []).forEach((r: { proposal_id: string; qty: number; unit_price: number }) => { t[r.proposal_id] = (t[r.proposal_id] || 0) + Number(r.qty) * Number(r.unit_price); });
-    setTotals(t);
   };
   useEffect(() => {
     load();
-    sb().from("price_items").select("id,code,description,unit,unit_price").then(({ data }) => setBook((data || []) as PriceItem[]));
-    sb().from("clients").select("name").then(({ data }) => setClients((data || []).map((c: { name: string }) => c.name)));
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
-    sb().from("contracts").select("id,number,name").order("number").then(({ data }) => setContracts((data || []) as Contract[]));
+    sb().from("contracts").select("id,number,name").order("number").then(({ data }) => {
+      const cs = (data || []) as Contract[];
+      setContracts(cs); if (cs[0]) setPickId(cs[0].id);
+    });
   }, []);
 
-  // NYCHA mode: load the contract's price catalog whenever the proposal's contract changes
+  // load the contract's catalog whenever the open walk sheet's contract changes
   useEffect(() => {
-    if (!doc?.contract_id) { setContractItems(null); return; }
+    if (!doc?.contract_id) { setCatalog(null); return; }
     sb().from("contract_items").select("*").eq("contract_id", doc.contract_id).order("line")
-      .then(({ data }) => setContractItems((data || []) as ContractItem[]));
+      .then(({ data }) => setCatalog((data || []) as ContractItem[]));
   }, [doc?.contract_id]);
 
+  // ---------- open / create ----------
   const openEditor = async (p: Proposal) => {
-    setDoc(p); setOpenId(p.id);
-    const { data } = await sb().from("proposal_items").select("*").eq("proposal_id", p.id).order("sort");
-    setItems(((data || []) as LineItem[]));
+    setDoc(p); setSearch(""); setCollapsed(new Set());
+    const m: Record<string, string> = {};
+    Object.entries(p.qty_map || {}).forEach(([k, v]) => { if (Number(v) > 0) m[k] = String(v); });
+    if (Object.keys(m).length === 0) {
+      // resume older drafts saved before qty_map existed
+      const { data } = await sb().from("proposal_items").select("*").eq("proposal_id", p.id).order("sort");
+      ((data || []) as NychaLineItem[]).forEach((it) => { if (Number(it.qty) > 0 && it.code) m[it.code] = String(it.qty); });
+      if (!p.contract_id) setItems((data || []) as NychaLineItem[]);
+    }
+    setQty(m);
   };
-  const newProposal = async () => {
-    const number = await nextNumber("proposals", "PROP");
-    const { data, error } = await sb().from("proposals").insert({ number }).select().single();
-    if (error) { flash(error.message); return; }
-    await load(); openEditor(data as Proposal);
-  };
-  const newNychaProposal = async () => {
-    if (contracts.length === 0) { flash("Add a contract first (upload releases or a price sheet)"); return; }
+  const newWalkSheet = async () => {
+    if (contracts.length === 0) { flash("No contracts yet — upload a release sheet or release PDF first"); return; }
+    if (contracts.length > 1 && !pickOpen) { setPickOpen(true); return; }
+    setPickOpen(false);
     const number = await nextNumber("proposals", "PROP");
     const { data, error } = await sb().from("proposals").insert({
-      number, client_name: "New York City Housing Authority", contract_id: contracts[0].id,
+      number, client_name: "New York City Housing Authority", contract_id: pickId || contracts[0].id,
     }).select().single();
-    if (error) { flash(/column|schema/i.test(error.message) ? "Database needs the upgrade — run supabase/upgrade_proposal_creator.sql" : error.message); return; }
+    if (error) { flash(upgradeHint(error.message)); return; }
     await load(); openEditor(data as Proposal);
   };
+
+  // ---------- saving ----------
   const saveDoc = async (patch: Partial<Proposal>, silent = false) => {
     if (!doc) return;
-    const next = { ...doc, ...patch }; setDoc(next);
+    setDoc({ ...doc, ...patch });
     const { error } = await sb().from("proposals").update(patch).eq("id", doc.id);
-    if (error) flash(error.message); else if (!silent) flash("Saved");
-    load();
-  };
-  const saveItems = async (next: NychaLineItem[]) => {
-    if (!doc) return;
-    setItems(next);
-    await sb().from("proposal_items").delete().eq("proposal_id", doc.id);
-    if (next.length) {
-      const full = next.map((it, i) => ({ proposal_id: doc.id, code: it.code, description: it.description, unit: it.unit, qty: Number(it.qty) || 0, unit_price: Number(it.unit_price) || 0, sort: i, category: it.category || "", line: it.line || 0 }));
-      let { error } = await sb().from("proposal_items").insert(full);
-      if (error && /column/i.test(error.message)) {
-        // pre-upgrade database — insert without the NYCHA columns
-        ({ error } = await sb().from("proposal_items").insert(full.map(({ category: _c, line: _l, ...rest }) => rest)));
-      }
-      if (error) flash(error.message);
-    }
-    // keep proposals.total in sync (best-effort; column exists after the upgrade)
-    await sb().from("proposals").update({ total: next.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0) }).eq("id", doc.id);
+    if (error) flash(upgradeHint(error.message)); else if (!silent) flash("Saved");
     load();
   };
 
-  // ---------- NYCHA: contract price sheet upload + walk sheet export ----------
+  const billed = useMemo<NychaLineItem[]>(() => {
+    if (!catalog) return [];
+    return catalog
+      .map((ci) => ({ line: ci.line, code: ci.code, category: ci.category, description: ci.description, unit: ci.uom, qty: parseNum(qty[ci.code] || ""), unit_price: Number(ci.unit_price) }))
+      .filter((it) => it.qty > 0);
+  }, [catalog, qty]);
+  const grand = billed.reduce((s, it) => s + it.qty * it.unit_price, 0);
+
+  // autosave quantities (debounced) so a walkthrough can't be lost
+  const scheduleAutosave = (nextQty: Record<string, string>) => {
+    if (!doc) return;
+    setSaveState("saving");
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    const docId = doc.id;
+    saveTimer.current = setTimeout(async () => {
+      const map: Record<string, number> = {};
+      Object.entries(nextQty).forEach(([k, v]) => { const n = parseNum(v); if (n > 0) map[k] = n; });
+      const total = (catalog || []).reduce((s, ci) => s + (map[ci.code] || 0) * Number(ci.unit_price), 0);
+      const { error } = await sb().from("proposals").update({ qty_map: map, total }).eq("id", docId);
+      if (error) { setSaveState(""); flash(upgradeHint(error.message)); return; }
+      setSaveState("saved");
+      setTimeout(() => setSaveState(""), 1500);
+    }, 700);
+  };
+  const setLineQty = (code: string, v: string) => {
+    const next = { ...qty, [code]: v };
+    if (!v) delete next[code];
+    setQty(next); scheduleAutosave(next);
+  };
+
+  // write the billed lines to proposal_items (used by print, invoices, statements)
+  const materialize = async (): Promise<NychaLineItem[]> => {
+    if (!doc) return [];
+    const rows = doc.contract_id ? billed : items;
+    await sb().from("proposal_items").delete().eq("proposal_id", doc.id);
+    if (rows.length) {
+      const full = rows.map((it, i) => ({ proposal_id: doc.id, code: it.code, description: it.description, unit: it.unit, qty: Number(it.qty) || 0, unit_price: Number(it.unit_price) || 0, sort: i, category: it.category || "", line: it.line || 0 }));
+      let { error } = await sb().from("proposal_items").insert(full);
+      if (error && /column/i.test(error.message)) ({ error } = await sb().from("proposal_items").insert(full.map(({ category: _c, line: _l, ...rest }) => rest)));
+      if (error) flash(error.message);
+    }
+    return rows;
+  };
+  const closeEditor = async () => { if (doc?.contract_id) await materialize(); setDoc(null); setItems([]); };
+
+  // ---------- catalog upload (per contract, header-name matched) ----------
   const handleContractSheet = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !doc?.contract_id) return;
@@ -112,67 +151,74 @@ export default function Proposals() {
     reader.onload = async (ev) => {
       try {
         const wb = XLSX.read(ev.target?.result as ArrayBuffer, { type: "array" });
-        const raw: string[][] = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "", raw: false, blankrows: false });
+        const raw: (string | number)[][] = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "", raw: false, blankrows: false });
         const hIdx = raw.findIndex((r) => r.some((c) => /^item$/i.test(String(c).trim())) && r.some((c) => /^price$/i.test(String(c).trim())));
         if (hIdx < 0) { flash("No header row with Item + Price columns found"); return; }
         const headers = raw[hIdx].map((h) => String(h).toLowerCase().trim());
         const col = (re: RegExp) => headers.findIndex((h) => re.test(h));
         const m = { line: col(/^line/), code: col(/^item/), category: col(/^categ/), description: col(/^desc/), uom: col(/^uom|^unit$/), price: col(/^price/) };
+        if (m.code < 0 || m.description < 0) { flash("Couldn't find Item and Description columns in the header row"); return; }
         const rows = raw.slice(hIdx + 1)
-          .map((r, i) => ({
-            line: m.line >= 0 ? parseInt(String(r[m.line]), 10) || i + 1 : i + 1,
-            code: m.code >= 0 ? String(r[m.code]).trim() : "",
-            category: m.category >= 0 ? String(r[m.category]).trim() : "",
-            description: m.description >= 0 ? String(r[m.description]).trim() : "",
-            uom: m.uom >= 0 ? String(r[m.uom]).trim() : "",
-            unit_price: m.price >= 0 ? parseNum(r[m.price]) : 0,
-          }))
+          .map((r, i) => {
+            const g = (ix: number) => (ix >= 0 && ix < r.length ? String(r[ix]).trim() : "");
+            return {
+              line: parseInt(g(m.line), 10) || i + 1, code: g(m.code), category: g(m.category),
+              description: g(m.description), uom: g(m.uom), unit_price: m.price >= 0 ? parseNum(r[m.price]) : 0,
+            };
+          })
           .filter((r) => r.code && r.description && !/^total$/i.test(r.description));
         if (rows.length === 0) { flash("No item rows found in that sheet"); return; }
         await sb().from("contract_items").delete().eq("contract_id", doc.contract_id!);
         for (let i = 0; i < rows.length; i += 500) {
           const { error } = await sb().from("contract_items").insert(rows.slice(i, i + 500).map((r) => ({ ...r, contract_id: doc.contract_id })));
-          if (error) { flash(/relation|column/i.test(error.message) ? "Database needs the upgrade — run supabase/upgrade_proposal_creator.sql" : error.message); return; }
+          if (error) { flash(upgradeHint(error.message)); return; }
         }
         const { data } = await sb().from("contract_items").select("*").eq("contract_id", doc.contract_id!).order("line");
-        setContractItems((data || []) as ContractItem[]);
-        flash(`Loaded ${rows.length} catalog lines for this contract`);
+        setCatalog((data || []) as ContractItem[]);
+        flash(`Loaded ${rows.length} price book lines for this contract`);
       } catch { flash("Couldn't read that sheet — save as .xlsx or .csv"); }
     };
     reader.readAsArrayBuffer(file);
     e.target.value = "";
   };
 
-  const exportWalkSheet = () => {
-    if (!doc) return;
+  // ---------- export in the exact NYCHA walk-sheet layout ----------
+  const exportWalkSheet = async () => {
+    if (!doc || !catalog) return;
+    await materialize();
     const c = contracts.find((x) => x.id === doc.contract_id);
-    const qtyByCode = new Map(items.map((it) => [it.code, Number(it.qty) || 0]));
-    const catalog = (contractItems && contractItems.length > 0)
-      ? contractItems
-      : items.map((it, i) => ({ line: it.line || i + 1, code: it.code, category: it.category || "", description: it.description, uom: it.unit, unit_price: Number(it.unit_price) }));
+    const asCode = (s: string) => (/^\d+$/.test(s) ? Number(s) : s);
     const aoa: (string | number)[][] = [
-      ["PO:", "", c?.number || "", "", "NYCHA Staff:", ""],
-      ["Vendor:", "", org?.company?.toUpperCase() || "", "", "Vendor Staff:", ""],
+      ["PO:", "", c ? asCode(c.number) : "", "", "NYCHA Staff:", doc.nycha_staff || ""],
+      ["Vendor:", "", (org?.company || "").toUpperCase(), "", "Vendor Staff:", doc.vendor_staff || ""],
       ["Development:", "", doc.development || "", "", "Walk Date:", doc.walk_date || ""],
       ["Stairhall:", "", doc.stairhall || "", "", "Release #:", doc.release_number || ""],
-      ["Apt:", "", doc.apt || "", "", "Start Date:", ""],
-      ["Address:", "", doc.address || "", "", "Finish Date:", ""],
+      ["Apt:", "", doc.apt || "", "", "Start Date:", doc.start_date || ""],
+      ["Address:", "", doc.address || "", "", "Finish Date:", doc.finish_date || ""],
       [],
       ["Line", "Item", "Category", "Description", "UOM", "Quantity Authorized", "Price", "Total Cost"],
-      ...catalog.map((r) => {
-        const qty = qtyByCode.get(r.code) || 0;
-        return [r.line, r.code, r.category, r.description, r.uom, qty || "", Number(r.unit_price), qty * Number(r.unit_price)];
+      ...catalog.map((ci) => {
+        const n = parseNum(qty[ci.code] || "");
+        return [ci.line, asCode(ci.code), ci.category, ci.description, ci.uom, n || "", Number(ci.unit_price), n * Number(ci.unit_price)];
       }),
-      ["", "", "", "", "", "Total", "", items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0)],
+      ["", "", "", "", "", "Total", "", grand],
     ];
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 6 }, { wch: 10 }, { wch: 28 }, { wch: 60 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 12 }];
+    ws["!cols"] = [{ wch: 6 }, { wch: 10 }, { wch: 30 }, { wch: 70 }, { wch: 13 }, { wch: 10 }, { wch: 10 }, { wch: 12 }];
+    ws["!merges"] = Array.from({ length: 6 }, (_, r) => [
+      { s: { r, c: 0 }, e: { r, c: 1 } },
+      { s: { r, c: 5 }, e: { r, c: 6 } },
+    ]).flat();
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
-    XLSX.writeFile(wb, `proposal_${c?.number || "sheet"}${doc.release_number ? `_rel${doc.release_number}` : ""}.xlsx`);
+    XLSX.writeFile(wb, `proposal_sheet_${c?.number || ""}${doc.release_number ? `_rel${doc.release_number}` : ""}.xlsx`);
   };
+
+  // ---------- convert to invoice ----------
   const convert = async () => {
     if (!doc || !org) return;
+    const its = await materialize();
+    if (its.length === 0) { flash("No quantities entered yet"); return; }
     const number = await nextNumber("invoices", "INV");
     const termDays = parseInt(org.terms.match(/\d+/)?.[0] || "30", 10);
     const today = new Date().toISOString().slice(0, 10);
@@ -182,7 +228,7 @@ export default function Proposals() {
     let { data, error } = await sb().from("invoices").insert({ ...base, ...nychaExtra }).select().single();
     if (error && /column/i.test(error.message)) ({ data, error } = await sb().from("invoices").insert(base).select().single());
     if (error || !data) { flash(error?.message || "Failed"); return; }
-    const full = items.map((it, i) => ({ invoice_id: data.id, code: it.code, description: it.description, unit: it.unit, qty: Number(it.qty) || 0, unit_price: Number(it.unit_price) || 0, sort: i, category: it.category || "" }));
+    const full = its.map((it, i) => ({ invoice_id: data.id, code: it.code, description: it.description, unit: it.unit, qty: Number(it.qty) || 0, unit_price: Number(it.unit_price) || 0, sort: i, category: it.category || "" }));
     let { error: e2 } = await sb().from("invoice_items").insert(full);
     if (e2 && /column/i.test(e2.message)) ({ error: e2 } = await sb().from("invoice_items").insert(full.map(({ category: _c, ...rest }) => rest)));
     if (e2) flash(e2.message);
@@ -190,118 +236,179 @@ export default function Proposals() {
     flash(`${number} created`); window.location.href = "/invoices";
   };
 
-  const nychaBook: PriceItem[] | null = doc?.contract_id && contractItems && contractItems.length > 0
-    ? contractItems.map((ci) => ({ id: ci.id, code: ci.code, description: ci.description, unit: ci.uom, unit_price: Number(ci.unit_price) }))
-    : null;
-  const matches = search ? (nychaBook || book).filter((b) => `${b.code} ${b.description}`.toLowerCase().includes(search.toLowerCase())).slice(0, 6) : [];
-  const catFor = (code: string) => (contractItems || []).find((ci) => ci.code === code);
+  // ---------- walk sheet grouping / filtering ----------
+  const groups = useMemo(() => {
+    if (!catalog) return [];
+    const q = search.trim().toLowerCase();
+    const rows = q
+      ? catalog.filter((ci) => String(ci.line) === q || ci.code.toLowerCase().includes(q) || ci.description.toLowerCase().includes(q) || ci.category.toLowerCase().includes(q))
+      : catalog;
+    const out: { category: string; rows: ContractItem[] }[] = [];
+    rows.forEach((ci) => {
+      const g = out[out.length - 1];
+      if (g && g.category === ci.category) g.rows.push(ci);
+      else out.push({ category: ci.category, rows: [ci] });
+    });
+    return out;
+  }, [catalog, search]);
 
-  if (openId && doc) {
-    const total = grandTotal(items, doc.tax_pct);
+  // ================= WALK SHEET EDITOR =================
+  if (doc && doc.contract_id) {
+    const c = contracts.find((x) => x.id === doc.contract_id);
     return (
-      <div>
+      <div className="pb-24">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2.5">
-            <button className="btn btn-ghost" onClick={() => { setOpenId(null); setDoc(null); }}>← Back</button>
+            <button className="btn btn-ghost" onClick={closeEditor}>← Back</button>
             <span className="font-mono font-semibold">{doc.number}</span>
             <Stamp label={doc.status.toUpperCase()} tone={tone(doc.status) as "ok"} />
+            {saveState && <span className="text-xs text-inksoft">{saveState === "saving" ? "Saving…" : "Saved ✓"}</span>}
           </div>
           <div className="flex flex-wrap gap-2">
-            {doc.contract_id && <button className="btn" onClick={exportWalkSheet}>Walk sheet (xlsx)</button>}
-            {doc.contract_id && <button className="btn btn-ghost" onClick={() => sheetRef.current?.click()}>{(contractItems || []).length > 0 ? "Reload catalog" : "Upload contract catalog"}</button>}
-            <button className="btn" onClick={() => setPrintOpen(true)}>Print / PDF</button>
+            <button className="btn" onClick={exportWalkSheet}>Walk sheet (xlsx)</button>
+            <button className="btn btn-ghost" onClick={() => sheetRef.current?.click()}>{(catalog || []).length > 0 ? "Reload price book" : "Upload price book"}</button>
+            <button className="btn" onClick={async () => { await materialize(); setPrintOpen(true); }}>Print / PDF</button>
             {doc.status === "draft" && <button className="btn" onClick={() => saveDoc({ status: "sent" })}>Mark sent</button>}
             {doc.status === "sent" && <button className="btn" onClick={() => saveDoc({ status: "approved" })}>Mark approved</button>}
             {doc.status !== "invoiced" && <button className="btn btn-primary" onClick={convert}>→ Invoice</button>}
           </div>
         </div>
         <input ref={sheetRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleContractSheet} />
-        {doc.contract_id ? (
-          <div className="card mb-3 grid grid-cols-2 gap-2.5 p-3.5 md:grid-cols-4">
-            <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Contract / PO</div>
-              <select className="field" value={doc.contract_id} onChange={(e) => saveDoc({ contract_id: e.target.value }, true)}>
-                {contracts.map((c) => <option key={c.id} value={c.id}>{c.number}</option>)}
-              </select></div>
-            {([["development", "Development"], ["address", "Address"], ["apt", "Apt"], ["stairhall", "Stairhall"], ["walk_date", "Walk date"], ["release_number", "Release #"]] as ["development" | "address" | "apt" | "stairhall" | "walk_date" | "release_number", string][]).map(([k, label]) => (
-              <div key={k}><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
-                <input className="field" type={k === "walk_date" ? "date" : "text"} value={doc[k] || ""}
-                  onChange={(e) => setDoc({ ...doc, [k]: e.target.value })} onBlur={(e) => saveDoc({ [k]: e.target.value } as Partial<Proposal>, true)} /></div>
-            ))}
-            <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Date</div>
-              <input className="field" type="date" value={doc.date} onChange={(e) => saveDoc({ date: e.target.value }, true)} /></div>
+
+        <div className="card mb-3 grid grid-cols-2 gap-2.5 p-3.5 md:grid-cols-4">
+          <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Contract / PO</div>
+            <select className="field" value={doc.contract_id} onChange={(e) => saveDoc({ contract_id: e.target.value }, true)}>
+              {contracts.map((x) => <option key={x.id} value={x.id}>{x.number}</option>)}
+            </select></div>
+          {HEAD_FIELDS.map(([k, label]) => (
+            <div key={k}><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
+              <input className="field" type={/date/.test(k) ? "date" : "text"} value={doc[k] || ""}
+                onChange={(e) => setDoc({ ...doc, [k]: e.target.value })}
+                onBlur={(e) => saveDoc({ [k]: e.target.value } as Partial<Proposal>, true)} /></div>
+          ))}
+        </div>
+
+        {(catalog || []).length === 0 ? (
+          <div className="card border-work p-4 text-sm text-inksoft">
+            No price book loaded for contract {c?.number} yet. Tap <b>Upload price book</b> and pick the contract price sheet —
+            the xlsx with Line / Item / Category / Description / UOM / Price columns (a blank walk sheet works). One time per contract.
           </div>
         ) : (
-        <div className="card mb-3 grid gap-2.5 p-3.5 md:grid-cols-3">
-          <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Client</div>
-            <input className="field" list="clientlist" value={doc.client_name} onChange={(e) => setDoc({ ...doc, client_name: e.target.value })} onBlur={(e) => saveDoc({ client_name: e.target.value }, true)} />
-            <datalist id="clientlist">{clients.map((c) => <option key={c} value={c} />)}</datalist></div>
-          <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Job / location</div>
-            <input className="field" value={doc.job} onChange={(e) => setDoc({ ...doc, job: e.target.value })} onBlur={(e) => saveDoc({ job: e.target.value }, true)} /></div>
-          <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Date</div>
-            <input className="field" type="date" value={doc.date} onChange={(e) => saveDoc({ date: e.target.value }, true)} /></div>
-        </div>
+          <>
+            <input className="field mb-3" placeholder={`Search ${catalog!.length} lines — line #, item code, or any word (“cabinet”)…`}
+              value={search} onChange={(e) => setSearch(e.target.value)} />
+            {groups.map((g, gi) => {
+              const isOpen = !!search || !collapsed.has(g.category);
+              const filled = g.rows.filter((ci) => parseNum(qty[ci.code] || "") > 0).length;
+              return (
+                <div key={`${g.category}-${gi}`} className="card mb-2 overflow-hidden">
+                  <button className="flex w-full items-center justify-between gap-2 bg-ink/5 px-3 py-2.5 text-left"
+                    onClick={() => { const next = new Set(collapsed); if (next.has(g.category)) next.delete(g.category); else next.add(g.category); setCollapsed(next); }}>
+                    <span className="font-display text-[13px] font-semibold uppercase tracking-wider">{isOpen ? "▾" : "▸"} {g.category || "Uncategorized"}</span>
+                    <span className="shrink-0 font-mono text-xs text-inksoft">{filled > 0 ? `${filled} filled · ` : ""}{g.rows.length} lines</span>
+                  </button>
+                  {isOpen && g.rows.map((ci) => {
+                    const n = parseNum(qty[ci.code] || "");
+                    return (
+                      <div key={ci.id} className={`flex items-start gap-3 border-t border-rulesoft px-3 py-2.5 ${n > 0 ? "bg-work/5" : ""}`}>
+                        <div className="min-w-0 flex-1">
+                          <div className="font-mono text-[11px] text-inksoft">#{ci.line} · {ci.code}</div>
+                          <div className="text-[13px] leading-snug">{ci.description}</div>
+                          <div className="font-mono text-[11px] text-inksoft">{fmt(Number(ci.unit_price))} / {ci.uom}</div>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <input className="w-20 rounded-sm border border-rulesoft p-2 text-right font-mono text-base" inputMode="decimal" placeholder="qty"
+                            value={qty[ci.code] || ""} onChange={(e) => setLineQty(ci.code, e.target.value)} />
+                          <div className="mt-0.5 font-mono text-xs font-semibold">{n > 0 ? fmt(n * Number(ci.unit_price)) : ""}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+            {groups.length === 0 && <div className="card p-4 text-sm text-inksoft">Nothing matches “{search}”.</div>}
+          </>
         )}
-        {doc.contract_id && (contractItems || []).length === 0 && (
-          <div className="card mb-3 border-work p-3 text-sm text-inksoft">
-            No price catalog loaded for this contract yet. Click <b>Upload contract catalog</b> and drop the contract price sheet
-            (the xlsx with Line / Item / Category / Description / UOM / Price columns) — after that, item search and the walk-sheet
-            export use the contract's own lines and prices.
+
+        <div className="fixed inset-x-0 bottom-0 z-30 border-t-2 border-ink bg-card px-4 py-3">
+          <div className="mx-auto flex max-w-5xl items-center justify-between">
+            <span className="text-xs uppercase tracking-widest text-inksoft">{billed.length} lines with qty</span>
+            <span className="font-mono text-xl font-semibold">Total {fmt(grand)}</span>
           </div>
-        )}
-        <div className="relative mb-3">
-          <input className="field" placeholder="Type a line item… (searches your price book)" value={search} onChange={(e) => setSearch(e.target.value)} />
-          {search && (
-            <div className="card absolute inset-x-0 top-full z-10 shadow-lg">
-              {matches.map((b) => (
-                <button key={b.id} className="flex w-full justify-between gap-2 border-b border-rulesoft p-2.5 text-left text-sm" onClick={() => { const ci = catFor(b.code); saveItems([...items, { code: b.code, description: b.description, unit: b.unit, qty: 1, unit_price: Number(b.unit_price), category: ci?.category, line: ci?.line }]); setSearch(""); }}>
-                  <span><span className="font-mono text-[11px] text-inksoft">{b.code}</span> {b.description}</span>
-                  <span className="shrink-0 font-mono text-xs">{fmt(Number(b.unit_price))}/{b.unit}</span>
-                </button>
-              ))}
-              <button className="w-full p-2.5 text-left text-sm text-work" onClick={() => { saveItems([...items, { code: "", description: search, unit: "EA", qty: 1, unit_price: 0 }]); setSearch(""); }}>+ Add "{search}" as custom line</button>
-            </div>
-          )}
+        </div>
+
+        {printOpen && org && <DocPrint org={org} title="Proposal" number={doc.number} date={doc.date}
+          clientName={doc.client_name} job={[doc.development, doc.address, doc.apt && `Apt ${doc.apt}`].filter(Boolean).join(" · ")}
+          items={billed} taxPct={0} terms close={() => setPrintOpen(false)} />}
+        {msg && <div className="fixed bottom-16 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
+      </div>
+    );
+  }
+
+  // ================= LEGACY EDITOR (old proposals without a contract) =================
+  if (doc) {
+    const total = grandTotal(items, doc.tax_pct);
+    return (
+      <div>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5">
+            <button className="btn btn-ghost" onClick={closeEditor}>← Back</button>
+            <span className="font-mono font-semibold">{doc.number}</span>
+            <Stamp label={doc.status.toUpperCase()} tone={tone(doc.status) as "ok"} />
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button className="btn" onClick={() => setPrintOpen(true)}>Print / PDF</button>
+            {doc.status !== "invoiced" && <button className="btn btn-primary" onClick={convert}>→ Invoice</button>}
+          </div>
+        </div>
+        <div className="card mb-3 p-3.5 text-sm text-inksoft">
+          {doc.client_name || "No client"}{doc.job ? ` · ${doc.job}` : ""} — this is an old-style proposal (read-only line list below). New work happens in NYCHA walk sheets.
         </div>
         <div className="card mb-3 overflow-x-auto">
           <table className="w-full border-collapse text-sm" style={{ minWidth: 540 }}>
             <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
-              <th className="w-2/5 p-2.5">Item</th><th className="p-2.5">Unit</th><th className="p-2.5 text-right">Qty</th><th className="p-2.5 text-right">Unit $</th><th className="p-2.5 text-right">Total</th><th></th></tr></thead>
+              <th className="w-3/5 p-2.5">Item</th><th className="p-2.5">Unit</th><th className="p-2.5 text-right">Qty</th><th className="p-2.5 text-right">Unit $</th><th className="p-2.5 text-right">Total</th></tr></thead>
             <tbody>
               {items.map((it, i) => (
                 <tr key={i} className="border-b border-rulesoft">
-                  <td className="p-1.5"><input className="w-full bg-transparent p-1" value={it.description} onChange={(e) => setItems(items.map((x, j) => j === i ? { ...x, description: e.target.value } : x))} onBlur={() => saveItems(items)} /></td>
-                  <td className="p-1.5"><input className="w-14 bg-transparent p-1 font-mono" value={it.unit} onChange={(e) => setItems(items.map((x, j) => j === i ? { ...x, unit: e.target.value } : x))} onBlur={() => saveItems(items)} /></td>
-                  <td className="p-1.5 text-right"><input className="w-16 rounded-sm border border-rulesoft p-1.5 text-right font-mono" inputMode="decimal" value={it.qty} onChange={(e) => setItems(items.map((x, j) => j === i ? { ...x, qty: parseNum(e.target.value) || (e.target.value as unknown as number) } : x))} onBlur={() => saveItems(items)} /></td>
-                  <td className="p-1.5 text-right"><input className="w-24 rounded-sm border border-rulesoft p-1.5 text-right font-mono" inputMode="decimal" value={it.unit_price} onChange={(e) => setItems(items.map((x, j) => j === i ? { ...x, unit_price: parseNum(e.target.value) || (e.target.value as unknown as number) } : x))} onBlur={() => saveItems(items)} /></td>
+                  <td className="p-2.5">{it.code ? <span className="font-mono text-[11px] text-inksoft">{it.code} · </span> : null}{it.description}</td>
+                  <td className="p-2.5 font-mono text-xs">{it.unit}</td>
+                  <td className="p-2.5 text-right font-mono">{it.qty}</td>
+                  <td className="p-2.5 text-right font-mono">{fmt(Number(it.unit_price))}</td>
                   <td className="p-2.5 text-right font-mono font-semibold">{fmt(Number(it.qty) * Number(it.unit_price))}</td>
-                  <td className="p-2.5"><button className="text-xs text-alert" onClick={() => saveItems(items.filter((_, j) => j !== i))}>✕</button></td>
                 </tr>
               ))}
-              {items.length === 0 && <tr><td colSpan={6} className="p-4 text-inksoft">No lines yet — type in the search box above.</td></tr>}
+              {items.length === 0 && <tr><td colSpan={5} className="p-4 text-inksoft">No lines.</td></tr>}
             </tbody>
           </table>
         </div>
-        <div className="card flex flex-wrap items-center justify-end gap-5 p-3.5">
-          <label className="flex items-center gap-2 text-xs uppercase tracking-widest text-inksoft">Tax %
-            <input className="field w-20 text-right font-mono" inputMode="decimal" value={doc.tax_pct} onChange={(e) => saveDoc({ tax_pct: parseNum(e.target.value) }, true)} /></label>
-          <div className="font-mono text-xl font-semibold">Total {fmt(total)}</div>
-        </div>
-        <textarea className="field mt-3 min-h-[70px]" placeholder="Notes / exclusions (shows on the proposal)" value={doc.notes} onChange={(e) => setDoc({ ...doc, notes: e.target.value })} onBlur={(e) => saveDoc({ notes: e.target.value }, true)} />
+        <div className="card flex justify-end p-3.5"><div className="font-mono text-xl font-semibold">Total {fmt(total)}</div></div>
         {printOpen && org && <DocPrint org={org} title="Proposal" number={doc.number} date={doc.date} clientName={doc.client_name} job={doc.job} items={items} taxPct={doc.tax_pct} terms notes={doc.notes} close={() => setPrintOpen(false)} />}
         {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
       </div>
     );
   }
 
+  // ================= LIST =================
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div className="font-display text-2xl font-bold uppercase">Proposals</div>
-        <div className="flex gap-2">
-          <button className="btn btn-primary" onClick={newNychaProposal}>+ NYCHA walk sheet</button>
-          <button className="btn" onClick={newProposal}>+ Blank proposal</button>
-        </div>
+        <button className="btn btn-primary" onClick={newWalkSheet}>+ New NYCHA walk sheet</button>
       </div>
+      {pickOpen && (
+        <div className="card mb-3 border-work p-4">
+          <div className="mb-2 text-[11px] uppercase tracking-widest text-inksoft">Which contract is this walk for?</div>
+          <select className="field mb-3" value={pickId} onChange={(e) => setPickId(e.target.value)}>
+            {contracts.map((x) => <option key={x.id} value={x.id}>{x.number}{x.name && x.name !== x.number ? ` — ${x.name}` : ""}</option>)}
+          </select>
+          <div className="flex gap-2">
+            <button className="btn btn-primary" onClick={newWalkSheet}>Start walk sheet</button>
+            <button className="btn btn-ghost" onClick={() => setPickOpen(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
       <div className="card divide-y divide-rulesoft">
         {list.map((p) => (
           <button key={p.id} className="flex w-full items-center justify-between gap-2 p-3.5 text-left" onClick={() => openEditor(p)}>
@@ -309,17 +416,17 @@ export default function Proposals() {
               <div className="font-mono text-[13px] font-semibold">{p.number}</div>
               <div className="truncate text-[13px] text-inksoft">
                 {p.contract_id
-                  ? [p.development || "NYCHA", p.address, p.apt && `Apt ${p.apt}`, p.release_number && `Rel ${p.release_number}`].filter(Boolean).join(" · ")
+                  ? [p.development || "NYCHA walk", p.address, p.apt && `Apt ${p.apt}`, p.stairhall && `Stair ${p.stairhall}`, p.release_number && `Rel ${p.release_number}`].filter(Boolean).join(" · ")
                   : `${p.client_name || "No client"}${p.job ? ` · ${p.job}` : ""}`}
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2.5">
-              <span className="font-mono text-[13px]">{fmt((totals[p.id] || 0) * (1 + Number(p.tax_pct) / 100))}</span>
+              <span className="font-mono text-[13px]">{fmt(Number(p.total) || 0)}</span>
               <Stamp label={p.status.toUpperCase()} tone={tone(p.status) as "ok"} />
             </div>
           </button>
         ))}
-        {list.length === 0 && <div className="p-5 text-sm text-inksoft">No proposals yet. Hit + New proposal, type line items, done in five minutes.</div>}
+        {list.length === 0 && <div className="p-5 text-sm text-inksoft">No walk sheets yet. Tap + New NYCHA walk sheet, load the contract price book once, and fill quantities as you walk the unit.</div>}
       </div>
       {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
     </div>

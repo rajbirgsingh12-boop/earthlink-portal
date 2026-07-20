@@ -191,12 +191,12 @@ export default function Proposals() {
     const asCode = (s: string) => (/^\d+$/.test(s) ? Number(s) : s);
     const used = catalog.filter((ci) => parseNum(qty[ci.code] || "") > 0);
     const aoa: (string | number)[][] = [
-      ["PO:", "", c ? asCode(c.number) : "", "", "NYCHA Staff:", doc.nycha_staff || ""],
-      ["Vendor:", "", (org?.company || "").toUpperCase(), "", "Vendor Staff:", doc.vendor_staff || ""],
-      ["Development:", "", doc.development || "", "", "Walk Date:", doc.walk_date || ""],
-      ["Stairhall:", "", doc.stairhall || "", "", "Release #:", doc.release_number || ""],
-      ["Apt:", "", doc.apt || "", "", "Start Date:", doc.start_date || ""],
-      ["Address:", "", doc.address || "", "", "Finish Date:", doc.finish_date || ""],
+      ["PO:", "", c ? asCode(c.number) : "", "", "NYCHA Staff:", doc.nycha_staff || "", ""],
+      ["Vendor:", "", (org?.company || "").toUpperCase(), "", "Vendor Staff:", doc.vendor_staff || "", ""],
+      ["Development:", "", doc.development || "", "", "Walk Date:", doc.walk_date || "", ""],
+      ["Stairhall:", "", doc.stairhall || "", "", "Release #:", doc.release_number || "", ""],
+      ["Apt:", "", doc.apt || "", "", "Start Date:", doc.start_date || "", ""],
+      ["Address:", "", doc.address || "", "", "Finish Date:", doc.finish_date || "", ""],
       [],
       ["Line", "Item", "Category", "Description", "UOM", "Quantity Authorized", "Price", "Total Cost"],
       ...used.map((ci) => {
@@ -214,9 +214,12 @@ export default function Proposals() {
     // styling: bold header labels, bordered table grid, money formats
     const thin = { style: "thin", color: { rgb: "000000" } };
     const box = { top: thin, bottom: thin, left: thin, right: thin };
+    const shade = { patternType: "solid", fgColor: { rgb: "E8E4DA" } };
     const cellAt = (r: number, col: number) => ws[XLSX.utils.encode_cell({ r, c: col })];
+    // header block: shaded bold labels in bordered boxes, bordered value cells
     for (let r = 0; r < 6; r++) {
-      for (const col of [0, 4]) { const cell = cellAt(r, col); if (cell) cell.s = { font: { bold: true } }; }
+      for (const col of [0, 1, 4]) { const cell = cellAt(r, col); if (cell) cell.s = { font: { bold: true }, fill: shade, border: box }; }
+      for (const col of [2, 5, 6]) { const cell = cellAt(r, col); if (cell) cell.s = { border: box, alignment: { horizontal: col === 2 ? "left" : "center" } }; }
     }
     const headerRow = 7, firstItem = 8, totalRow = firstItem + used.length;
     for (let r = headerRow; r <= totalRow; r++) {

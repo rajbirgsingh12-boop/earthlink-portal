@@ -31,7 +31,7 @@ export default function Home() {
   const live = rows.filter((r) => !r.canceled);
   const tot = live.reduce((s, r) => s + Number(r.amount), 0);
   const notR = live.filter((r) => !r.received && r.amount > 0);
-  const prPend = live.filter((r) => !r.payroll_done && r.amount > 0);
+  const prPend = live.filter((r) => !r.payroll_done && !r.received && r.amount > 0);
 
   const cards: [string, string, string][] = [
     ["Contracts", String(contracts), "text-ink"],

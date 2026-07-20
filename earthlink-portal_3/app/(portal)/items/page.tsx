@@ -14,6 +14,7 @@ export default function Items() {
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState({ code: "", description: "", unit: "EA", unit_price: "", category: "" });
   const [confirmWipe, setConfirmWipe] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
@@ -134,6 +135,7 @@ export default function Items() {
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div className="font-display text-2xl font-bold uppercase">Price Book</div>
         <div className="flex gap-2">
+          <button className="btn btn-ghost" onClick={() => setAddOpen(!addOpen)}>+ Add item</button>
           <button className="btn btn-ghost" onClick={() => fileRef.current?.click()}>Upload sheet</button>
           {items.length > 0 && !confirmWipe && <button className="btn btn-ghost text-alert" onClick={() => setConfirmWipe(true)}>Remove all</button>}
         </div>
@@ -156,13 +158,15 @@ export default function Items() {
         </div>
       )}
       <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFile} />
-      <div className="card mb-3 grid grid-cols-2 gap-2 p-3 md:grid-cols-6">
-        <input className="field" placeholder="Code" value={draft.code} onChange={(e) => setDraft({ ...draft, code: e.target.value })} />
-        <input className="field md:col-span-2" placeholder="Description" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
-        <input className="field" placeholder="Unit" value={draft.unit} onChange={(e) => setDraft({ ...draft, unit: e.target.value })} />
-        <input className="field" placeholder="Price" inputMode="decimal" value={draft.unit_price} onChange={(e) => setDraft({ ...draft, unit_price: e.target.value })} />
-        <button className="btn btn-primary" onClick={add}>Add</button>
-      </div>
+      {addOpen && (
+        <div className="card mb-3 grid grid-cols-2 gap-2 p-3 md:grid-cols-6">
+          <input className="field" placeholder="Code" value={draft.code} onChange={(e) => setDraft({ ...draft, code: e.target.value })} />
+          <input className="field md:col-span-2" placeholder="Description" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
+          <input className="field" placeholder="Unit" value={draft.unit} onChange={(e) => setDraft({ ...draft, unit: e.target.value })} />
+          <input className="field" placeholder="Price" inputMode="decimal" value={draft.unit_price} onChange={(e) => setDraft({ ...draft, unit_price: e.target.value })} />
+          <button className="btn btn-primary" onClick={add}>Add</button>
+        </div>
+      )}
       <input className="field mb-3" placeholder="Search line #, code, description…" value={q} onChange={(e) => setQ(e.target.value)} />
       <div className="card overflow-x-auto">
         <table className="w-full border-collapse text-sm" style={{ minWidth: 560 }}>

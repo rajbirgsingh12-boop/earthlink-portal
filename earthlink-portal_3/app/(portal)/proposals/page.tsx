@@ -6,7 +6,7 @@ import { sb } from "@/lib/supabase";
 import { fmt, parseNum } from "@/lib/format";
 import Stamp from "@/components/Stamp";
 import DocPrint from "@/components/DocPrint";
-import { LineItem, Org, nextNumber, grandTotal, addDays } from "@/lib/docs";
+import { LineItem, Org, nextNumber, grandTotal } from "@/lib/docs";
 import type { Contract } from "@/lib/types";
 
 interface Proposal {
@@ -321,28 +321,6 @@ export default function Proposals() {
     load(); flash("Walk sheet deleted");
   };
 
-  // ---------- convert to invoice ----------
-  const convert = async () => {
-    if (!doc || !org) return;
-    const its = await materialize();
-    if (its.length === 0) { flash("No quantities entered yet"); return; }
-    const number = await nextNumber("invoices", "INV");
-    const termDays = parseInt(org.terms.match(/\d+/)?.[0] || "30", 10);
-    const today = new Date().toISOString().slice(0, 10);
-    const c = contracts.find((x) => x.id === doc.contract_id);
-    const base = { number, proposal_id: doc.id, client_name: doc.client_name, job: doc.job || [doc.development, doc.address].filter(Boolean).join(" · "), date: today, due_date: addDays(today, termDays), tax_pct: doc.tax_pct };
-    const nychaExtra = c ? { contract_number: c.number, release_number: doc.release_number || "", development: doc.development || "" } : {};
-    let { data, error } = await sb().from("invoices").insert({ ...base, ...nychaExtra }).select().single();
-    if (error && /column/i.test(error.message)) ({ data, error } = await sb().from("invoices").insert(base).select().single());
-    if (error || !data) { flash(error?.message || "Failed"); return; }
-    const full = its.map((it, i) => ({ invoice_id: data.id, code: it.code, description: it.description, unit: it.unit, qty: Number(it.qty) || 0, unit_price: Number(it.unit_price) || 0, sort: i, category: it.category || "" }));
-    let { error: e2 } = await sb().from("invoice_items").insert(full);
-    if (e2 && /column/i.test(e2.message)) ({ error: e2 } = await sb().from("invoice_items").insert(full.map(({ category: _c, ...rest }) => rest)));
-    if (e2) flash(e2.message);
-    await saveDoc({ status: "invoiced" }, true);
-    flash(`${number} created`); window.location.href = "/invoices";
-  };
-
   // ---------- walk sheet grouping / filtering ----------
   const groups = useMemo(() => {
     if (!catalog) return [];
@@ -374,8 +352,7 @@ export default function Proposals() {
           <div className="flex flex-wrap gap-2">
             <button className="btn btn-primary" onClick={saveNow}>Save</button>
             <button className="btn" onClick={() => setPrintOpen(true)}>Preview</button>
-            <button className="btn" onClick={exportWalkSheet}>Excel</button>
-            <button className="btn btn-ghost" onClick={() => sheetRef.current?.click()}>{(catalog || []).length > 0 ? "Reload price book" : "Upload price book"}</button>
+            {(catalog || []).length === 0 && <button className="btn btn-ghost" onClick={() => sheetRef.current?.click()}>Upload price book</button>}
           </div>
         </div>
         <input ref={sheetRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleContractSheet} />
@@ -506,7 +483,6 @@ export default function Proposals() {
           </div>
           <div className="flex flex-wrap gap-2">
             <button className="btn" onClick={() => setPrintOpen(true)}>Print / PDF</button>
-            {doc.status !== "invoiced" && <button className="btn btn-primary" onClick={convert}>→ Invoice</button>}
           </div>
         </div>
         <div className="card mb-3 p-3.5 text-sm text-inksoft">

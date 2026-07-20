@@ -4,16 +4,21 @@ import { sb } from "@/lib/supabase";
 import { fmt } from "@/lib/format";
 import Stamp from "@/components/Stamp";
 import DocPrint from "@/components/DocPrint";
+import NychaInvoicePrint, { type NychaItem } from "@/components/NychaInvoicePrint";
 import { LineItem, Org, prettyDate } from "@/lib/docs";
 
-interface Invoice { id: string; number: string; client_name: string; job: string; date: string; due_date: string | null; tax_pct: number; status: string; paid_date: string | null; }
+interface Invoice {
+  id: string; number: string; client_name: string; job: string; date: string; due_date: string | null; tax_pct: number; status: string; paid_date: string | null;
+  contract_number?: string; release_number?: string; development?: string; work_order?: string;
+  period_from?: string | null; period_to?: string | null;
+}
 
 export default function Invoices() {
   const [list, setList] = useState<Invoice[]>([]);
   const [totals, setTotals] = useState<Record<string, number>>({});
   const [org, setOrg] = useState<Org | null>(null);
   const [printInv, setPrintInv] = useState<Invoice | null>(null);
-  const [printItems, setPrintItems] = useState<LineItem[]>([]);
+  const [printItems, setPrintItems] = useState<(LineItem & { category?: string })[]>([]);
   const today = new Date().toISOString().slice(0, 10);
 
   const load = async () => {
@@ -66,7 +71,16 @@ export default function Invoices() {
         })}
         {list.length === 0 && <div className="p-5 text-sm text-inksoft">No invoices yet. Convert a proposal and it lands here with the same line items.</div>}
       </div>
-      {printInv && org && <DocPrint org={org} title="Invoice" number={printInv.number} date={printInv.date} clientName={printInv.client_name} job={printInv.job} items={printItems} taxPct={printInv.tax_pct} due={printInv.due_date} close={() => setPrintInv(null)} />}
+      {printInv && org && (printInv.contract_number ? (
+        <NychaInvoicePrint org={org} number={printInv.number} date={printInv.date}
+          contractNumber={printInv.contract_number} releaseNumber={printInv.release_number || ""}
+          development={printInv.development || ""} workOrder={printInv.work_order}
+          periodFrom={printInv.period_from} periodTo={printInv.period_to}
+          items={printItems.map((it): NychaItem => ({ line: null, code: it.code, category: it.category, description: it.description, unit: it.unit, qty: Number(it.qty), unit_price: Number(it.unit_price) }))}
+          close={() => setPrintInv(null)} />
+      ) : (
+        <DocPrint org={org} title="Invoice" number={printInv.number} date={printInv.date} clientName={printInv.client_name} job={printInv.job} items={printItems} taxPct={printInv.tax_pct} due={printInv.due_date} close={() => setPrintInv(null)} />
+      ))}
     </div>
   );
 }

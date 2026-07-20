@@ -6,4 +6,6 @@ export interface Release {
   ticket: string; amount: number; pre_check: string; date_completed: string;
   payroll_done: boolean; received: boolean; canceled: boolean; labor_hours: number; assigned_to: string | null;
   labor_breakdown?: { cls: string; hours: number }[] | null; address?: string;
+  invoice_sent?: string | null; paid_date?: string | null;
+  attachments?: { name: string; path: string }[] | null;
 }

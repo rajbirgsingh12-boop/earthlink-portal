@@ -49,3 +49,4 @@ npm run dev
 
 ## Still on the roadmap (Phase 4 — build with Claude Code from PORTAL_SPEC.md)
 Job photos, assigning releases to foremen + notifications, ceiling dashboard.
+

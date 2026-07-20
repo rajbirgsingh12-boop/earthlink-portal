@@ -38,6 +38,7 @@ export default function Proposals() {
   const [printOpen, setPrintOpen] = useState(false);
   const [pickOpen, setPickOpen] = useState(false);
   const [pickId, setPickId] = useState("");
+  const [relAsk, setRelAsk] = useState<{ p: Proposal; value: string } | null>(null);
   const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
   const [msg, setMsg] = useState("");
   const sheetRef = useRef<HTMLInputElement>(null);
@@ -127,6 +128,22 @@ export default function Proposals() {
     const next = { ...qty, [code]: v };
     if (!v) delete next[code];
     setQty(next); scheduleAutosave(next);
+  };
+
+  // explicit save: flush quantities + line items right now
+  const saveNow = async () => {
+    if (!doc) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    setSaveState("saving");
+    const map: Record<string, number> = {};
+    Object.entries(qty).forEach(([k, v]) => { const n = parseNum(v); if (n > 0) map[k] = n; });
+    const total = (catalog || []).reduce((s, ci) => s + (map[ci.code] || 0) * Number(ci.unit_price), 0);
+    const { error } = await sb().from("proposals").update({ qty_map: map, total }).eq("id", doc.id);
+    if (error) { setSaveState(""); flash(upgradeHint(error.message)); return; }
+    await materialize();
+    setSaveState("saved"); flash("Saved");
+    setTimeout(() => setSaveState(""), 1500);
+    load();
   };
 
   // write the billed lines to proposal_items (used by print, invoices, statements)
@@ -247,11 +264,19 @@ export default function Proposals() {
       .filter((ci) => Number(map[ci.code]) > 0)
       .map((ci) => ({ line: ci.line, code: ci.code, category: ci.category, description: ci.description, unit: ci.uom, qty: Number(map[ci.code]), unit_price: Number(ci.unit_price) }));
   };
-  const addToRelease = async (p: Proposal) => {
+  // step 1: ask which release number this walk sheet becomes
+  const addToRelease = (p: Proposal) => {
+    if (!contracts.find((x) => x.id === p.contract_id)) { flash("That proposal isn't tied to a contract"); return; }
+    setRelAsk({ p, value: (p.release_number || "").trim() });
+  };
+  // step 2: create/update the release under that number
+  const performAddToRelease = async (p: Proposal, rel: string) => {
     const c = contracts.find((x) => x.id === p.contract_id);
-    if (!c) { flash("That proposal isn't tied to a contract"); return; }
-    const rel = (p.release_number || "").trim();
-    if (!rel) { flash(`Open ${p.number} and fill in Release # first — the release needs its number`); return; }
+    if (!c) return;
+    if (rel !== (p.release_number || "").trim()) {
+      await sb().from("proposals").update({ release_number: rel }).eq("id", p.id);
+      p = { ...p, release_number: rel };
+    }
     const its = await itemsFor(p);
     if (its.length === 0) { flash("No quantities entered on that walk sheet yet"); return; }
     const total = its.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
@@ -347,6 +372,7 @@ export default function Proposals() {
             {saveState && <span className="text-xs text-inksoft">{saveState === "saving" ? "Saving…" : "Saved ✓"}</span>}
           </div>
           <div className="flex flex-wrap gap-2">
+            <button className="btn btn-primary" onClick={saveNow}>Save</button>
             <button className="btn" onClick={exportWalkSheet}>Walk sheet (xlsx)</button>
             <button className="btn btn-ghost" onClick={() => sheetRef.current?.click()}>{(catalog || []).length > 0 ? "Reload price book" : "Upload price book"}</button>
           </div>
@@ -509,6 +535,28 @@ export default function Proposals() {
         ))}
         {list.length === 0 && <div className="p-5 text-sm text-inksoft">No walk sheets yet. Tap + New NYCHA walk sheet, load the contract price book once, and fill quantities as you walk the unit.</div>}
       </div>
+
+      {relAsk && (
+        <div className="fixed inset-0 z-40 grid place-items-center bg-ink/50 px-4" onClick={() => setRelAsk(null)}>
+          <div className="card w-full max-w-sm bg-card p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-1 font-display text-lg font-bold uppercase">Add to release</div>
+            <div className="mb-3 text-sm text-inksoft">
+              {relAsk.p.number} · {[relAsk.p.development, relAsk.p.address].filter(Boolean).join(" · ") || "NYCHA walk"} — {fmt(Number(relAsk.p.total) || 0)}
+            </div>
+            <label className="text-[11px] uppercase tracking-widest text-inksoft">Release number</label>
+            <input className="field mb-2 mt-1" autoFocus placeholder="e.g. 12" value={relAsk.value}
+              onChange={(e) => setRelAsk({ ...relAsk, value: e.target.value })}
+              onKeyDown={(e) => { if (e.key === "Enter" && relAsk.value.trim()) { const { p, value } = relAsk; setRelAsk(null); performAddToRelease(p, value.trim()); } }} />
+            <div className="mb-4 text-xs text-inksoft">The release is created on contract {contracts.find((x) => x.id === relAsk.p.contract_id)?.number} with this walk sheet&apos;s lines and total. If release {relAsk.value.trim() || "…"} already exists there, it&apos;s updated — never duplicated.</div>
+            <div className="flex justify-end gap-2">
+              <button className="btn btn-ghost" onClick={() => setRelAsk(null)}>Cancel</button>
+              <button className="btn btn-primary" disabled={!relAsk.value.trim()}
+                onClick={() => { const { p, value } = relAsk; setRelAsk(null); performAddToRelease(p, value.trim()); }}>Create release</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
     </div>
   );

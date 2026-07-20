@@ -1,8 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-// Lightweight gatekeeper: checks for the Supabase auth cookie and redirects
-// accordingly. Session validity is enforced by Supabase RLS on every data
-// query, so middleware only needs to handle the redirect UX.
+// Lightweight gatekeeper (v2): checks for the Supabase auth cookie and
+// redirects accordingly. Session validity is enforced by Supabase RLS on
+// every data query, so middleware only needs to handle the redirect UX.
 export function middleware(request: NextRequest) {
   const hasSession = request.cookies
     .getAll()

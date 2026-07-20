@@ -9,7 +9,7 @@ import type { Contract, Release } from "@/lib/types";
 import { parseReleasePdfText, type ReleaseItem } from "@/lib/parseRelease";
 import { nextNumber, type Org } from "@/lib/docs";
 
-type Filter = "all" | "chase" | "payroll" | "canceled" | "hours" | "aging";
+type Filter = "all" | "chase" | "payroll" | "canceled" | "hours" | "aging" | "fix";
 type InvRow = { line: number | null; code: string; category: string; description: string; unit: string; qty: number; unit_price: number };
 type PriceRow = { code: string; category: string; description: string; unit: string; unit_price: number };
 
@@ -167,13 +167,18 @@ export default function Releases() {
 
   const live = rows.filter((r) => !r.canceled);
   const canceledRows = rows.filter((r) => r.canceled);
-  const notR = live.filter((r) => !r.received && Number(r.amount) > 0);
-  const prPend = live.filter((r) => !r.payroll_done && Number(r.amount) > 0);
+  // chase = work done and payroll submitted, waiting on NYCHA's money
+  const notR = live.filter((r) => r.payroll_done && !r.received && Number(r.amount) > 0);
+  // payroll to submit = still open releases whose payroll isn't in yet
+  const prPend = live.filter((r) => !r.payroll_done && !r.received && Number(r.amount) > 0);
+  // received but payroll never done — these need to be canceled
+  const fixup = live.filter((r) => r.received && !r.payroll_done && Number(r.amount) > 0);
   const tot = live.reduce((s, r) => s + Number(r.amount), 0);
 
   let list = live;
   if (filter === "chase") list = notR;
   if (filter === "payroll") list = prPend;
+  if (filter === "fix") list = fixup;
   if (filter === "canceled") list = canceledRows;
   if (q) list = list.filter((r) => `${r.rel_number} ${r.location} ${r.buildings} ${r.ticket}`.toLowerCase().includes(q.toLowerCase()));
   const shown = list.slice(0, limit);
@@ -624,7 +629,7 @@ export default function Releases() {
 
       {rows.length > 0 && (
         <div className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-4">
-          {([["Released", fmt(tot), "text-ink"], ["Received", fmt(live.filter((r) => r.received).reduce((s, r) => s + Number(r.amount), 0)), "text-ok"], ["Not received", fmt(notR.reduce((s, r) => s + Number(r.amount), 0)), "text-work"], ["Payroll pending", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
+          {([["Released", fmt(tot), "text-ink"], ["Received", fmt(live.filter((r) => r.received).reduce((s, r) => s + Number(r.amount), 0)), "text-ok"], ["To chase", fmt(notR.reduce((s, r) => s + Number(r.amount), 0)), "text-work"], ["Payroll pending", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
             <div key={l} className="card p-3">
               <div className="text-[10px] uppercase tracking-[.12em] text-inksoft">{l}</div>
               <div className={`font-mono text-base font-semibold ${cls}`}>{v}</div>
@@ -634,7 +639,7 @@ export default function Releases() {
       )}
 
       <div className="mb-3 flex flex-wrap gap-2">
-        {([["all", "All"], ["chase", `Chase list (${notR.length})`], ["payroll", `Payroll to submit (${prPend.length})`], ["aging", "Aging"], ["canceled", `Canceled (${canceledRows.length})`], ["hours", "Payroll check"]] as [Filter, string][]).map(([f, l]) => (
+        {([["all", "All"], ["chase", `Chase list (${notR.length})`], ["payroll", `Payroll to submit (${prPend.length})`], ...(fixup.length > 0 ? [["fix", `Needs cancel (${fixup.length})`]] : []), ["aging", "Aging"], ["canceled", `Canceled (${canceledRows.length})`], ["hours", "Payroll check"]] as [Filter, string][]).map(([f, l]) => (
           <button key={f} className={`btn ${filter === f ? "btn-primary" : "btn-ghost"} px-3 py-1.5 text-[13px]`} onClick={() => { setFilter(f); setLimit(100); if (f === "hours" && !logged) loadLogged(); }}>{l}</button>
         ))}
       </div>

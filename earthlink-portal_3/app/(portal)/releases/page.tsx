@@ -114,6 +114,7 @@ export default function Releases() {
   const [priceBook, setPriceBook] = useState<PriceRow[] | null>(null);
   const [attachRel, setAttachRel] = useState<Release | null>(null);
   const attachInputRef = useRef<HTMLInputElement>(null);
+  const [sosView, setSosView] = useState<{ relNum: string; ticket: string; cNumber: string; dev: string; addr: string; stair: string; apt: string; rows: SosRow[]; total: number } | null>(null);
 
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
 
@@ -236,10 +237,18 @@ export default function Releases() {
     }
     setBusy(false);
     if (rows.length === 0) { flash("No line items for this release — make a walk sheet with quantities for it, or import the release PDF"); return; }
-    const total = rows.reduce((s, it) => s + it.qty * it.unit_price, 0);
+    setSosView({
+      relNum: r.rel_number, ticket: r.ticket || "", cNumber: c?.number || "",
+      dev: r.location || prop?.development || "", addr: r.address || r.buildings || prop?.address || "",
+      stair: prop?.stairhall || "", apt: prop?.apt || "",
+      rows, total: rows.reduce((s, it) => s + it.qty * it.unit_price, 0),
+    });
+  };
+
+  const downloadSOS = () => {
+    if (!sosView) return;
+    const { relNum, ticket, cNumber, dev, addr, stair, apt, rows, total } = sosView;
     const today = prettyDate(new Date().toISOString().slice(0, 10));
-    const dev = r.location || prop?.development || "";
-    const addr = r.address || r.buildings || prop?.address || "";
 
     const aoa: (string | number)[][] = [];
     const merges: { s: { r: number; c: number }; e: { r: number; c: number } }[] = [];
@@ -250,12 +259,12 @@ export default function Releases() {
     aoa.push(["Telephone:", "", org?.phone || ""]);
     aoa.push(["Email:", "", org?.email || ""]);
     aoa.push([]);
-    aoa.push(["PO:", "", c ? (/^\d+$/.test(c.number) ? Number(c.number) : c.number) : ""]);
-    aoa.push(["Work order:", "", r.ticket || ""]);
-    aoa.push(["Release:", "", /^\d+$/.test(r.rel_number) ? Number(r.rel_number) : r.rel_number]);
+    aoa.push(["PO:", "", /^\d+$/.test(cNumber) ? Number(cNumber) : cNumber]);
+    aoa.push(["Work order:", "", ticket]);
+    aoa.push(["Release:", "", /^\d+$/.test(relNum) ? Number(relNum) : relNum]);
     aoa.push(["Development:", "", dev]);
-    aoa.push(["Stairhall:", "", prop?.stairhall || ""]);
-    aoa.push(["Apt:", "", prop?.apt || ""]);
+    aoa.push(["Stairhall:", "", stair]);
+    aoa.push(["Apt:", "", apt]);
     aoa.push(["Address:", "", addr]);
     aoa.push([]);
     const headerRow = aoa.length;
@@ -294,17 +303,20 @@ export default function Releases() {
     aoa.push(["NYCHA 042.726 (Rev. 04/05/24) v2"]);
 
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 8 }, { wch: 14 }, { wch: 32 }, { wch: 70 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 16 }, { wch: 14 }];
+    ws["!cols"] = [{ wch: 9 }, { wch: 15 }, { wch: 38 }, { wch: 90 }, { wch: 16 }, { wch: 14 }, { wch: 14 }, { wch: 18 }, { wch: 16 }];
     ws["!merges"] = merges;
     const thin = { style: "thin", color: { rgb: "000000" } };
     const box = { top: thin, bottom: thin, left: thin, right: thin };
     const shade = { patternType: "solid", fgColor: { rgb: "E8E4DA" } };
     const cellAt = (row: number, col: number) => ws[XLSX.utils.encode_cell({ r: row, c: col })];
+    const ensure = (row: number, col: number) => cellAt(row, col) || (ws[XLSX.utils.encode_cell({ r: row, c: col })] = { t: "s", v: "" });
     const style = (row: number, col: number, s: Record<string, unknown>) => { const cell = cellAt(row, col); if (cell) cell.s = s; };
-    style(0, 0, { font: { bold: true, sz: 14 }, alignment: { horizontal: "center" }, fill: shade, border: box });
+    style(0, 0, { font: { bold: true, sz: 14 }, alignment: { horizontal: "center", vertical: "center" }, fill: shade, border: { top: { style: "medium", color: { rgb: "000000" } }, bottom: thin, left: thin, right: thin } });
+    // bordered vendor + job header blocks (labels shaded bold, values boxed)
     for (const row of [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12]) {
-      style(row, 0, { font: { bold: true } });
-      if (row === 2) style(row, 5, { font: { bold: true } });
+      for (const col of [0, 1]) { ensure(row, col); style(row, col, { font: { bold: true }, fill: shade, border: box }); }
+      ensure(row, 2); style(row, 2, { border: box });
+      if (row === 2) { style(row, 5, { font: { bold: true }, fill: shade, border: box }); ensure(row, 6); style(row, 6, { border: box, alignment: { horizontal: "center" } }); }
     }
     for (let row = headerRow; row <= totalRow; row++) {
       for (let col = 0; col < 8; col++) {
@@ -334,7 +346,7 @@ export default function Releases() {
     ws["!rows"] = []; ws["!rows"][ack1] = { hpt: 26 }; ws["!rows"][cert] = { hpt: 26 }; ws["!rows"][ack2] = { hpt: 26 };
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
-    XLSX.writeFile(wb, `SOS_${c?.number || ""}_rel${r.rel_number}.xlsx`);
+    XLSX.writeFile(wb, `SOS_${cNumber}_rel${relNum}.xlsx`);
   };
 
   // ---------- attachments ----------
@@ -863,6 +875,68 @@ export default function Releases() {
       )}
       <input ref={attachInputRef} type="file" className="hidden"
         onChange={(e) => { const f = e.target.files?.[0]; if (f && attachRel) attachFile(attachRel, f); e.target.value = ""; }} />
+
+      {sosView && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
+          <div className="printable mx-auto max-w-4xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
+            <div className="border-2 border-ink bg-paper p-2 text-center font-display text-xl font-bold uppercase">NYCHA Statement of Service</div>
+            <div className="my-4 grid grid-cols-2 gap-x-8 gap-y-1.5 border border-rulesoft p-3 text-[13px]">
+              {([["Vendor", (org?.company || "").toUpperCase()], ["Date", prettyDate(new Date().toISOString().slice(0, 10))],
+                ["Address", [org?.address1, org?.address2].filter(Boolean).join(", ")], ["PO", sosView.cNumber],
+                ["Telephone", org?.phone || ""], ["Work order", sosView.ticket], ["Email", org?.email || ""], ["Release", sosView.relNum],
+                ["Development", sosView.dev], ["Stairhall", sosView.stair], ["Apt", sosView.apt], ["Job address", sosView.addr]] as [string, string][]).map(([l, v]) => (
+                <div key={l} className="flex gap-2 border-b border-rulesoft py-0.5"><span className="w-28 shrink-0 text-[11px] font-semibold uppercase tracking-wider text-inksoft">{l}</span><span>{v || "—"}</span></div>
+              ))}
+            </div>
+            <table className="w-full border-collapse border border-ink text-[12px]">
+              <thead><tr className="bg-paper text-left font-display text-[10px] uppercase tracking-widest">
+                <th className="border border-ink p-1.5">Line</th><th className="border border-ink p-1.5">Item</th><th className="border border-ink p-1.5">Category</th>
+                <th className="border border-ink p-1.5">Description</th><th className="border border-ink p-1.5">UOM</th>
+                <th className="border border-ink p-1.5 text-right">Qty</th><th className="border border-ink p-1.5 text-right">Price</th><th className="border border-ink p-1.5 text-right">Total</th>
+              </tr></thead>
+              <tbody>
+                {sosView.rows.map((it, i) => (
+                  <tr key={i} className="align-top">
+                    <td className="border border-rulesoft p-1.5 font-mono">{it.line}</td>
+                    <td className="border border-rulesoft p-1.5 font-mono">{it.code}</td>
+                    <td className="border border-rulesoft p-1.5 text-[11px]">{it.category}</td>
+                    <td className="border border-rulesoft p-1.5">{it.description}</td>
+                    <td className="border border-rulesoft p-1.5 font-mono text-[11px]">{it.uom}</td>
+                    <td className="border border-rulesoft p-1.5 text-right font-mono">{it.qty}</td>
+                    <td className="border border-rulesoft p-1.5 text-right font-mono">{fmt(it.unit_price)}</td>
+                    <td className="border border-rulesoft p-1.5 text-right font-mono font-semibold">{fmt(it.qty * it.unit_price)}</td>
+                  </tr>
+                ))}
+                <tr><td colSpan={7} className="border border-ink p-1.5 text-right font-display font-bold uppercase">Total</td>
+                  <td className="border border-ink p-1.5 text-right font-mono text-base font-bold">{fmt(sosView.total)}</td></tr>
+              </tbody>
+            </table>
+            <div className="mt-4 text-[11px] italic text-inksoft">
+              I acknowledge and understand that offering, giving and/or accepting bribes, gratuities and/or gifts is a criminal offense under federal and New York state law.
+            </div>
+            <div className="mt-6 grid grid-cols-2 gap-10 text-[12px]">
+              <div><div className="border-t border-ink pt-1 font-semibold">Vendor signature</div></div>
+              <div><div className="border-t border-ink pt-1">Date</div></div>
+            </div>
+            <div className="mt-5 border-t-2 border-ink pt-2 text-[12px]">
+              <div className="font-semibold">For NYCHA Internal Use Only:</div>
+              <div className="mt-1 text-[11px] italic text-inksoft">I hereby certify that the above-described work, labor, material, equipment, and/or services as referenced in accordance with the above referenced Purchase Order has been completed and inspected by me to my satisfaction.</div>
+              <div className="mt-5 grid grid-cols-2 gap-10">
+                <div><div className="border-t border-ink pt-1">Inspected by — name and title</div></div>
+                <div><div className="border-t border-ink pt-1">Signature</div></div>
+                <div><div className="border-t border-ink pt-1">Contract Manager signature</div></div>
+                <div><div className="border-t border-ink pt-1">WO # / Date</div></div>
+              </div>
+            </div>
+            <div className="mt-4 text-[10px] text-inksoft">NYCHA 042.726 (Rev. 04/05/24) v2 · the Excel version includes the Itemized List of Materials section to fill in</div>
+          </div>
+          <div className="no-print mx-auto mt-3 flex max-w-4xl justify-end gap-2">
+            <button className="btn bg-white" onClick={downloadSOS}>Download Excel</button>
+            <button className="btn bg-white" onClick={() => window.print()}>Print / Save as PDF</button>
+            <button className="btn btn-ghost bg-white" onClick={() => setSosView(null)}>Close</button>
+          </div>
+        </div>
+      )}
 
       {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
     </div>

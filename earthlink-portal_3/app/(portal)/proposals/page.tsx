@@ -215,7 +215,7 @@ export default function Proposals() {
       ["Apt:", "", doc.apt || "", "", "Start Date:", doc.start_date || "", ""],
       ["Address:", "", doc.address || "", "", "Finish Date:", doc.finish_date || "", ""],
       [],
-      ["Line", "Item", "Category", "Description", "UOM", "Quantity Authorized", "Price", "Total Cost"],
+      ["Line", "Item", "Category", "Description", "UOM", "Quantity", "Price", "Total Cost"],
       ...used.map((ci) => {
         const n = parseNum(qty[ci.code] || "");
         return [ci.line, asCode(ci.code), ci.category, ci.description, ci.uom, n, Number(ci.unit_price), n * Number(ci.unit_price)];
@@ -373,7 +373,8 @@ export default function Proposals() {
           </div>
           <div className="flex flex-wrap gap-2">
             <button className="btn btn-primary" onClick={saveNow}>Save</button>
-            <button className="btn" onClick={exportWalkSheet}>Walk sheet (xlsx)</button>
+            <button className="btn" onClick={() => setPrintOpen(true)}>Preview</button>
+            <button className="btn" onClick={exportWalkSheet}>Excel</button>
             <button className="btn btn-ghost" onClick={() => sheetRef.current?.click()}>{(catalog || []).length > 0 ? "Reload price book" : "Upload price book"}</button>
           </div>
         </div>
@@ -445,6 +446,48 @@ export default function Proposals() {
           </div>
         </div>
 
+        {printOpen && (
+          <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
+            <div className="printable mx-auto max-w-4xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
+              <div className="border-2 border-ink bg-paper p-2 text-center font-display text-xl font-bold uppercase">Proposal — NYCHA Walk Sheet</div>
+              <div className="my-4 grid grid-cols-2 gap-x-8 gap-y-1.5 border border-rulesoft p-3 text-[13px]">
+                {([["PO", c?.number || ""], ["NYCHA Staff", doc.nycha_staff], ["Vendor", (org?.company || "").toUpperCase()], ["Vendor Staff", doc.vendor_staff],
+                  ["Development", doc.development], ["Walk Date", doc.walk_date], ["Stairhall", doc.stairhall], ["Release #", doc.release_number],
+                  ["Apt", doc.apt], ["Start Date", doc.start_date], ["Address", doc.address], ["Finish Date", doc.finish_date]] as [string, string | undefined][]).map(([l, v]) => (
+                  <div key={l} className="flex gap-2 border-b border-rulesoft py-0.5"><span className="w-28 shrink-0 font-semibold uppercase text-[11px] tracking-wider text-inksoft">{l}</span><span>{v || "—"}</span></div>
+                ))}
+              </div>
+              <table className="w-full border-collapse border border-ink text-[12px]">
+                <thead><tr className="bg-paper text-left font-display text-[10px] uppercase tracking-widest">
+                  <th className="border border-ink p-1.5">Line</th><th className="border border-ink p-1.5">Item</th><th className="border border-ink p-1.5">Category</th>
+                  <th className="border border-ink p-1.5">Description</th><th className="border border-ink p-1.5">UOM</th>
+                  <th className="border border-ink p-1.5 text-right">Qty</th><th className="border border-ink p-1.5 text-right">Price</th><th className="border border-ink p-1.5 text-right">Total</th>
+                </tr></thead>
+                <tbody>
+                  {billed.map((it, i) => (
+                    <tr key={i} className="align-top">
+                      <td className="border border-rulesoft p-1.5 font-mono">{it.line}</td>
+                      <td className="border border-rulesoft p-1.5 font-mono">{it.code}</td>
+                      <td className="border border-rulesoft p-1.5 text-[11px]">{it.category}</td>
+                      <td className="border border-rulesoft p-1.5">{it.description}</td>
+                      <td className="border border-rulesoft p-1.5 font-mono text-[11px]">{it.unit}</td>
+                      <td className="border border-rulesoft p-1.5 text-right font-mono">{it.qty}</td>
+                      <td className="border border-rulesoft p-1.5 text-right font-mono">{fmt(it.unit_price)}</td>
+                      <td className="border border-rulesoft p-1.5 text-right font-mono font-semibold">{fmt(it.qty * it.unit_price)}</td>
+                    </tr>
+                  ))}
+                  <tr><td colSpan={7} className="border border-ink p-1.5 text-right font-display font-bold uppercase">Total</td>
+                    <td className="border border-ink p-1.5 text-right font-mono text-base font-bold">{fmt(grand)}</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div className="no-print mx-auto mt-3 flex max-w-4xl justify-end gap-2">
+              <button className="btn bg-white" onClick={exportWalkSheet}>Download Excel</button>
+              <button className="btn bg-white" onClick={() => window.print()}>Print / Save as PDF</button>
+              <button className="btn btn-ghost bg-white" onClick={() => setPrintOpen(false)}>Close</button>
+            </div>
+          </div>
+        )}
         {msg && <div className="fixed bottom-16 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
       </div>
     );

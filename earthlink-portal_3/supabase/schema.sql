@@ -327,5 +327,6 @@ alter table proposals add column if not exists vendor_staff text default '';
 alter table proposals add column if not exists start_date text default '';
 alter table proposals add column if not exists finish_date text default '';
 alter table proposals add column if not exists qty_map jsonb default '{}'::jsonb;
+alter table price_items add column if not exists line int default 0;
 alter table proposal_items add column if not exists category text default '';
 alter table proposal_items add column if not exists line int default 0;

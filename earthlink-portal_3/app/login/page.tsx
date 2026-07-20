@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { sb } from "@/lib/supabase";
 
 export default function Login() {
@@ -7,6 +7,13 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Already signed in → straight to the portal (was middleware's job).
+  useEffect(() => {
+    sb().auth.getUser().then(({ data: { user } }) => {
+      if (user) window.location.href = "/";
+    });
+  }, []);
 
   const signIn = async () => {
     setBusy(true); setErr("");

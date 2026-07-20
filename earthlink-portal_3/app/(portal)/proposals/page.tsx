@@ -380,6 +380,9 @@ export default function Proposals() {
         <input ref={sheetRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleContractSheet} />
 
         <div className="card mb-3 grid grid-cols-2 gap-2.5 p-3.5 md:grid-cols-4">
+          <div className="col-span-2"><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Name</div>
+            <input className="field" placeholder="e.g. Queensbridge 41st Ave Apt 3F move-out" value={doc.job || ""}
+              onChange={(e) => setDoc({ ...doc, job: e.target.value })} onBlur={(e) => saveDoc({ job: e.target.value }, true)} /></div>
           <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Contract / PO</div>
             <select className="field" value={doc.contract_id} onChange={(e) => saveDoc({ contract_id: e.target.value }, true)}>
               {contracts.map((x) => <option key={x.id} value={x.id}>{x.number}</option>)}
@@ -515,10 +518,13 @@ export default function Proposals() {
           <div key={p.id} className="p-3.5">
             <button className="flex w-full items-center justify-between gap-2 text-left" onClick={() => openEditor(p)}>
               <div className="min-w-0">
-                <div className="font-mono text-[13px] font-semibold">{p.number}</div>
+                <div className="text-[13px] font-semibold">
+                  <span className="font-mono">{p.number}</span>
+                  {p.contract_id && p.job && <span className="ml-2">{p.job}</span>}
+                </div>
                 <div className="truncate text-[13px] text-inksoft">
                   {p.contract_id
-                    ? [p.development || "NYCHA walk", p.address, p.apt && `Apt ${p.apt}`, p.stairhall && `Stair ${p.stairhall}`, p.release_number && `Rel ${p.release_number}`].filter(Boolean).join(" · ")
+                    ? [p.development || (p.job ? "" : "NYCHA walk"), p.address, p.apt && `Apt ${p.apt}`, p.stairhall && `Stair ${p.stairhall}`, p.release_number && `Rel ${p.release_number}`].filter(Boolean).join(" · ")
                     : `${p.client_name || "No client"}${p.job ? ` · ${p.job}` : ""}`}
                 </div>
               </div>
@@ -541,7 +547,7 @@ export default function Proposals() {
           <div className="card w-full max-w-sm bg-card p-5" onClick={(e) => e.stopPropagation()}>
             <div className="mb-1 font-display text-lg font-bold uppercase">Add to release</div>
             <div className="mb-3 text-sm text-inksoft">
-              {relAsk.p.number} · {[relAsk.p.development, relAsk.p.address].filter(Boolean).join(" · ") || "NYCHA walk"} — {fmt(Number(relAsk.p.total) || 0)}
+              {relAsk.p.number} · {[relAsk.p.job, relAsk.p.development, relAsk.p.address].filter(Boolean).join(" · ") || "NYCHA walk"} — {fmt(Number(relAsk.p.total) || 0)}
             </div>
             <label className="text-[11px] uppercase tracking-widest text-inksoft">Release number</label>
             <input className="field mb-2 mt-1" autoFocus placeholder="e.g. 12" value={relAsk.value}

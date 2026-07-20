@@ -8,6 +8,7 @@ import Stamp from "@/components/Stamp";
 import type { Contract, Release } from "@/lib/types";
 import { parseReleasePdfText, type ReleaseItem } from "@/lib/parseRelease";
 import { prettyDate, type Org } from "@/lib/docs";
+import { canonTrade, checkLabor, aggregateLogged } from "@/lib/labor";
 
 type Filter = "all" | "chase" | "payroll" | "canceled" | "hours";
 type PriceRow = { code: string; category: string; description: string; unit: string; unit_price: number };
@@ -200,6 +201,29 @@ export default function Releases() {
     bookFor.current = active;
     setPriceBook(list);
     return list;
+  };
+
+  // payroll can be marked DONE only when logged hours meet the release's
+  // labor minimum — per classification and in total (more is fine, less never)
+  const togglePayroll = async (r: Release) => {
+    if (!r.payroll_done) {
+      const breakdown = r.labor_breakdown || [];
+      const reqTotal = Number(r.labor_hours) || 0;
+      if (reqTotal > 0 || breakdown.length > 0) {
+        const { data: ents } = await sb().from("timesheet_entries").select("release_id,employee_id,hours").eq("release_id", r.id);
+        const { data: allEmps } = await sb().from("employees").select("id,trade");
+        const tradeById = new Map(((allEmps || []) as { id: string; trade: string }[]).map((e) => [e.id, canonTrade(e.trade)]));
+        const logged = aggregateLogged((ents || []) as { release_id: string | null; employee_id: string; hours: number[] }[], tradeById)[r.id] || {};
+        const res = checkLabor(breakdown, reqTotal, logged);
+        if (!res.ok) {
+          const parts = res.shorts.map((s) => `${s.cls} ${s.logged}/${s.required}h`);
+          if (res.totalLogged < res.totalRequired) parts.push(`total ${res.totalLogged}/${res.totalRequired}h`);
+          flash(`Short of the release minimum: ${[...new Set(parts)].join(" · ")} — log the hours in Payroll first`);
+          return;
+        }
+      }
+    }
+    toggle(r, { payroll_done: !r.payroll_done });
   };
 
   // ---------- Statement of Services (NYCHA form 042.726) ----------
@@ -849,7 +873,7 @@ export default function Releases() {
                 </td>
                 <td className={`p-2.5 text-right font-mono ${r.canceled ? "line-through" : ""}`}>{fmt(Number(r.amount))}</td>
                 <td className="p-2.5 text-center">
-                  {!r.canceled && <button onClick={() => toggle(r, { payroll_done: !r.payroll_done })}><Stamp label={r.payroll_done ? "DONE" : "TO DO"} tone={r.payroll_done ? "ok" : "alert"} /></button>}
+                  {!r.canceled && <button onClick={() => togglePayroll(r)}><Stamp label={r.payroll_done ? "DONE" : "TO DO"} tone={r.payroll_done ? "ok" : "alert"} /></button>}
                 </td>
                 <td className="p-2.5 text-center">
                   {!r.canceled ? <button onClick={() => toggle(r, { received: !r.received, paid_date: !r.received ? new Date().toISOString().slice(0, 10) : null })}><Stamp label={r.received ? "YES" : "NO"} tone={r.received ? "ok" : "work"} /></button> : <Stamp label="CANCELED" tone="mute" />}

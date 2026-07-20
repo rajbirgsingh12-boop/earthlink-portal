@@ -4,6 +4,8 @@ import * as XLSX from "xlsx";
 import { sb } from "@/lib/supabase";
 import { fmt, parseNum } from "@/lib/format";
 import { prettyDate } from "@/lib/docs";
+import { canonTrade, checkLabor, aggregateLogged, type LaborResult } from "@/lib/labor";
+import Stamp from "@/components/Stamp";
 
 interface Emp { id: string; name: string; trade: string; base_rate: number; active: boolean; }
 interface Week { id: string; week_ending: string; }
@@ -40,6 +42,8 @@ export default function Payroll() {
   const [newDate, setNewDate] = useState(new Date().toISOString().slice(0, 10));
   const [rels, setRels] = useState<RelLite[]>([]);
   const [relQ, setRelQ] = useState<Record<string, string>>({});
+  const [check, setCheck] = useState<{ id: string; rel_number: string; location: string; payroll_done: boolean; result: LaborResult }[] | null>(null);
+  const [checkOpen, setCheckOpen] = useState(false);
   const [msg, setMsg] = useState("");
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
 
@@ -77,6 +81,23 @@ export default function Payroll() {
     await sb().from("timesheet_entries").update({ job_label: en.job_label, rate: Number(en.rate) || 0, hours: en.hours.map((h) => Number(h) || 0), release_id: en.release_id || null }).eq("id", en.id!);
   };
   const delEntry = async (id: string) => { await sb().from("timesheet_entries").delete().eq("id", id); setEntries(entries.filter((e) => e.id !== id)); };
+
+  // release cross-check: logged hours must meet the release's labor minimum,
+  // per classification and in total — more is fine, less never is
+  const loadCheck = async () => {
+    setCheckOpen(true); setCheck(null);
+    const { data: allRels } = await sb().from("releases")
+      .select("id,rel_number,location,labor_hours,labor_breakdown,payroll_done,canceled").eq("canceled", false);
+    type RelRow = { id: string; rel_number: string; location: string; labor_hours: number; labor_breakdown: { cls: string; hours: number }[] | null; payroll_done: boolean };
+    const withReq = ((allRels || []) as RelRow[]).filter((r) => Number(r.labor_hours) > 0 || (r.labor_breakdown || []).length > 0);
+    const { data: ents } = await sb().from("timesheet_entries").select("release_id,employee_id,hours");
+    const { data: allEmps } = await sb().from("employees").select("id,trade");
+    const tradeById = new Map(((allEmps || []) as { id: string; trade: string }[]).map((e) => [e.id, canonTrade(e.trade)]));
+    const byRel = aggregateLogged((ents || []) as { release_id: string | null; employee_id: string; hours: number[] }[], tradeById);
+    setCheck(withReq
+      .map((r) => ({ id: r.id, rel_number: r.rel_number, location: r.location, payroll_done: r.payroll_done, result: checkLabor(r.labor_breakdown || [], Number(r.labor_hours) || 0, byRel[r.id] || {}) }))
+      .sort((a, b) => Number(a.result.ok) - Number(b.result.ok) || (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0)));
+  };
 
   const summ = summarize(entries, emps);
   const totGross = summ.reduce((s, x) => s + x.gross, 0);
@@ -189,10 +210,43 @@ export default function Payroll() {
 
   return (
     <div>
-      <div className="mb-3 flex items-baseline justify-between">
+      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div className="font-display text-2xl font-bold uppercase">Payroll</div>
-        <button className="btn btn-ghost" onClick={() => setShowCrew(!showCrew)}>Crew ({emps.length})</button>
+        <div className="flex gap-2">
+          <button className="btn btn-ghost" onClick={() => (checkOpen ? setCheckOpen(false) : loadCheck())}>Release check</button>
+          <button className="btn btn-ghost" onClick={() => setShowCrew(!showCrew)}>Crew ({emps.length})</button>
+        </div>
       </div>
+      {checkOpen && (
+        <div className="card mb-3 p-3.5">
+          <div className="mb-2 flex items-baseline justify-between">
+            <div className="font-display text-base font-semibold uppercase">Payroll vs release minimums</div>
+            <span className="text-[11px] text-inksoft">hours can be more than the release, never less</span>
+          </div>
+          {check === null && <div className="text-sm text-inksoft">Checking…</div>}
+          {check !== null && check.length === 0 && <div className="text-sm text-inksoft">No releases with labor-hour requirements yet — import release PDFs and their HOUR lines land here.</div>}
+          {(check || []).map((r) => (
+            <div key={r.id} className="border-t border-rulesoft py-2.5 first:border-t-0">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span><span className="font-mono text-[13px] font-semibold">#{r.rel_number}</span><span className="ml-2 text-[13px] text-inksoft">{r.location}</span></span>
+                <span className="flex items-center gap-2">
+                  <span className="font-mono text-xs">{r.result.totalLogged} / {r.result.totalRequired}h</span>
+                  {r.payroll_done
+                    ? <Stamp label="DONE" tone="ok" />
+                    : r.result.ok ? <Stamp label="MEETS MIN" tone="ok" /> : <Stamp label={`SHORT ${Math.max(r.result.totalRequired - r.result.totalLogged, r.result.shorts.reduce((s, x) => s + (x.required - x.logged), 0))}H`} tone="alert" />}
+                </span>
+              </div>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {r.result.rows.map((row) => (
+                  <span key={row.cls} className={`rounded-sm border px-2 py-0.5 font-mono text-[11px] ${row.logged < row.required ? "border-alert text-alert" : "border-rulesoft text-inksoft"}`}>
+                    {row.cls} {row.logged}/{row.required}h
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       {showCrew && (
         <div className="card mb-3 p-3.5">
           <div className="grid grid-cols-2 gap-2 md:grid-cols-4">

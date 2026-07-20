@@ -191,10 +191,18 @@ export default function Releases() {
   };
 
   // ---------- invoice generator ----------
+  const bookFor = useRef<string>("");
   const loadPriceBook = async (): Promise<PriceRow[]> => {
-    if (priceBook) return priceBook;
-    const { data } = await sb().from("price_items").select("code,category,description,unit,unit_price");
-    const list = (data || []) as PriceRow[];
+    if (priceBook && bookFor.current === active) return priceBook;
+    // prefer the active contract's own price book; fall back to the general book
+    const { data: cd } = await sb().from("contract_items").select("code,category,description,uom,unit_price").eq("contract_id", active).order("line");
+    let list: PriceRow[] = ((cd || []) as { code: string; category: string; description: string; uom: string; unit_price: number }[])
+      .map((r) => ({ code: r.code, category: r.category, description: r.description, unit: r.uom, unit_price: r.unit_price }));
+    if (list.length === 0) {
+      const { data } = await sb().from("price_items").select("code,category,description,unit,unit_price");
+      list = (data || []) as PriceRow[];
+    }
+    bookFor.current = active;
     setPriceBook(list);
     return list;
   };

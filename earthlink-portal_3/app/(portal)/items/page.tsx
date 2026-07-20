@@ -3,10 +3,13 @@ import { useEffect, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { sb } from "@/lib/supabase";
 import { fmt, parseNum } from "@/lib/format";
+import type { Contract } from "@/lib/types";
 
 interface Item { id: string; code: string; description: string; unit: string; unit_price: number; category: string; line?: number; }
 
 export default function Items() {
+  const [contracts, setContracts] = useState<Contract[]>([]);
+  const [sel, setSel] = useState<string>(""); // contract id, or "" = general book
   const [items, setItems] = useState<Item[]>([]);
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState({ code: "", description: "", unit: "EA", unit_price: "", category: "" });
@@ -15,25 +18,48 @@ export default function Items() {
   const [msg, setMsg] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
+  const isContract = sel !== "";
 
-  const load = async () => {
-    let { data, error } = await sb().from("price_items").select("*").order("line").order("code");
-    if (error) ({ data } = await sb().from("price_items").select("*").order("code")); // pre-upgrade: no line column yet
-    setItems((data || []) as Item[]);
+  useEffect(() => {
+    sb().from("contracts").select("id,number,name").order("number").then(({ data }) => {
+      const cs = (data || []) as Contract[];
+      setContracts(cs);
+      if (cs[0]) setSel(cs[0].id); // default to the first contract's book
+    });
+  }, []);
+
+  const load = async (target = sel) => {
+    if (target) {
+      const { data, error } = await sb().from("contract_items").select("*").eq("contract_id", target).order("line");
+      if (error) { flash(/relation/i.test(error.message) ? "Run supabase/upgrade_proposal_creator.sql first" : error.message); setItems([]); return; }
+      setItems(((data || []) as { id: string; line: number; code: string; category: string; description: string; uom: string; unit_price: number }[])
+        .map((r) => ({ id: r.id, line: r.line, code: r.code, category: r.category, description: r.description, unit: r.uom, unit_price: r.unit_price })));
+    } else {
+      let { data, error } = await sb().from("price_items").select("*").order("line").order("code");
+      if (error) ({ data } = await sb().from("price_items").select("*").order("code"));
+      setItems((data || []) as Item[]);
+    }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(sel); setConfirmWipe(false); }, [sel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const add = async () => {
     if (!draft.description) return;
-    const { error } = await sb().from("price_items").insert({ ...draft, unit_price: parseNum(draft.unit_price) });
+    const { error } = isContract
+      ? await sb().from("contract_items").insert({
+          contract_id: sel, line: (items.reduce((mx, it) => Math.max(mx, it.line || 0), 0) + 1),
+          code: draft.code, category: draft.category, description: draft.description, uom: draft.unit, unit_price: parseNum(draft.unit_price),
+        })
+      : await sb().from("price_items").insert({ ...draft, unit_price: parseNum(draft.unit_price) });
     if (error) { flash(error.message); return; }
     setDraft({ code: "", description: "", unit: "EA", unit_price: "", category: "" });
     load();
   };
-  const del = async (id: string) => { await sb().from("price_items").delete().eq("id", id); load(); };
+  const del = async (id: string) => { await sb().from(isContract ? "contract_items" : "price_items").delete().eq("id", id); load(); };
   const removeAll = async () => {
     setBusy(true);
-    const { error } = await sb().from("price_items").delete().not("id", "is", null);
+    const { error } = isContract
+      ? await sb().from("contract_items").delete().eq("contract_id", sel)
+      : await sb().from("price_items").delete().not("id", "is", null);
     setBusy(false); setConfirmWipe(false);
     if (error) { flash(error.message); return; }
     flash("Price book cleared");
@@ -72,15 +98,29 @@ export default function Items() {
             unit_price: m.price >= 0 ? parseNum(r[m.price]) : 0,
             category: m.category >= 0 ? String(r[m.category]).trim() : "",
           })).filter((it) => it.description && !/^total$/i.test(it.description));
-        for (let i = 0; i < rows.length; i += 500) {
-          let { error } = await sb().from("price_items").insert(rows.slice(i, i + 500));
-          if (error && /column/i.test(error.message)) {
-            // pre-upgrade database — insert without the line column
-            ({ error } = await sb().from("price_items").insert(rows.slice(i, i + 500).map(({ line: _l, ...rest }) => rest)));
+        if (rows.length === 0) { flash("No item rows found"); return; }
+        if (isContract) {
+          // replace this contract's book so re-uploads never duplicate
+          await sb().from("contract_items").delete().eq("contract_id", sel);
+          for (let i = 0; i < rows.length; i += 500) {
+            const { error } = await sb().from("contract_items").insert(rows.slice(i, i + 500).map((r) => ({
+              contract_id: sel, line: r.line, code: r.code, category: r.category, description: r.description, uom: r.unit, unit_price: r.unit_price,
+            })));
+            if (error) { flash(/relation/i.test(error.message) ? "Run supabase/upgrade_proposal_creator.sql first" : error.message); return; }
           }
-          if (error) { flash(error.message); break; }
+          const c = contracts.find((x) => x.id === sel);
+          flash(`${rows.length} lines loaded into contract ${c?.number || ""}`);
+        } else {
+          for (let i = 0; i < rows.length; i += 500) {
+            let { error } = await sb().from("price_items").insert(rows.slice(i, i + 500));
+            if (error && /column/i.test(error.message)) {
+              ({ error } = await sb().from("price_items").insert(rows.slice(i, i + 500).map(({ line: _l, ...rest }) => rest)));
+            }
+            if (error) { flash(error.message); break; }
+          }
+          flash(`${rows.length} items added to the general book`);
         }
-        flash(`${rows.length} items added`); load();
+        load();
       } catch { flash("Couldn't read that file"); }
     };
     reader.readAsArrayBuffer(file);
@@ -98,9 +138,17 @@ export default function Items() {
           {items.length > 0 && !confirmWipe && <button className="btn btn-ghost text-alert" onClick={() => setConfirmWipe(true)}>Remove all</button>}
         </div>
       </div>
+      <div className="mb-3">
+        <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Which price book?</div>
+        <select className="field" value={sel} onChange={(e) => setSel(e.target.value)}>
+          {contracts.map((c) => <option key={c.id} value={c.id}>Contract {c.number}{c.name && c.name !== c.number ? ` — ${c.name}` : ""}</option>)}
+          <option value="">General (no contract)</option>
+        </select>
+        {isContract && <div className="mt-1 text-xs text-inksoft">Uploads replace this contract&apos;s book — re-uploading never duplicates. Walk sheets and invoices for this contract use these lines and prices.</div>}
+      </div>
       {confirmWipe && (
         <div className="card mb-3 border-alert p-3.5">
-          <div className="mb-2 text-sm">Delete all <b>{items.length}</b> price book items? This can&apos;t be undone — proposals and invoices already created keep their own copies of the lines.</div>
+          <div className="mb-2 text-sm">Delete all <b>{items.length}</b> items from {isContract ? `contract ${contracts.find((x) => x.id === sel)?.number}'s book` : "the general book"}? This can&apos;t be undone — proposals and invoices already created keep their own copies of the lines.</div>
           <div className="flex gap-2">
             <button className="btn border-alert text-alert" onClick={removeAll} disabled={busy}>Yes, remove all</button>
             <button className="btn btn-ghost" onClick={() => setConfirmWipe(false)}>Cancel</button>
@@ -134,7 +182,7 @@ export default function Items() {
                 <td className="p-2.5 text-right"><button className="text-xs text-alert" onClick={() => del(it.id)}>✕</button></td>
               </tr>
             ))}
-            {list.length === 0 && <tr><td colSpan={6} className="p-4 text-inksoft">No items yet. Upload your price sheet or add the first item.</td></tr>}
+            {list.length === 0 && <tr><td colSpan={6} className="p-4 text-inksoft">{isContract ? "This contract has no price book yet — hit Upload sheet and drop the contract's price sheet." : "No items yet. Upload a sheet or add the first item."}</td></tr>}
           </tbody>
         </table>
       </div>

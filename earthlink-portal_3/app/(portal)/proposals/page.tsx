@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import * as XLSX from "xlsx";
+// styled fork of SheetJS — same API, plus cell borders/fonts for the export
+import * as XLSX from "xlsx-js-style";
 import { sb } from "@/lib/supabase";
 import { fmt, parseNum } from "@/lib/format";
 import Stamp from "@/components/Stamp";
@@ -182,12 +183,13 @@ export default function Proposals() {
     e.target.value = "";
   };
 
-  // ---------- export in the exact NYCHA walk-sheet layout ----------
+  // ---------- export: NYCHA walk-sheet layout, used lines only, bordered ----------
   const exportWalkSheet = async () => {
     if (!doc || !catalog) return;
     await materialize();
     const c = contracts.find((x) => x.id === doc.contract_id);
     const asCode = (s: string) => (/^\d+$/.test(s) ? Number(s) : s);
+    const used = catalog.filter((ci) => parseNum(qty[ci.code] || "") > 0);
     const aoa: (string | number)[][] = [
       ["PO:", "", c ? asCode(c.number) : "", "", "NYCHA Staff:", doc.nycha_staff || ""],
       ["Vendor:", "", (org?.company || "").toUpperCase(), "", "Vendor Staff:", doc.vendor_staff || ""],
@@ -197,21 +199,89 @@ export default function Proposals() {
       ["Address:", "", doc.address || "", "", "Finish Date:", doc.finish_date || ""],
       [],
       ["Line", "Item", "Category", "Description", "UOM", "Quantity Authorized", "Price", "Total Cost"],
-      ...catalog.map((ci) => {
+      ...used.map((ci) => {
         const n = parseNum(qty[ci.code] || "");
-        return [ci.line, asCode(ci.code), ci.category, ci.description, ci.uom, n || "", Number(ci.unit_price), n * Number(ci.unit_price)];
+        return [ci.line, asCode(ci.code), ci.category, ci.description, ci.uom, n, Number(ci.unit_price), n * Number(ci.unit_price)];
       }),
       ["", "", "", "", "", "Total", "", grand],
     ];
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 6 }, { wch: 10 }, { wch: 30 }, { wch: 70 }, { wch: 13 }, { wch: 10 }, { wch: 10 }, { wch: 12 }];
+    ws["!cols"] = [{ wch: 7 }, { wch: 12 }, { wch: 34 }, { wch: 80 }, { wch: 15 }, { wch: 12 }, { wch: 12 }, { wch: 14 }];
     ws["!merges"] = Array.from({ length: 6 }, (_, r) => [
       { s: { r, c: 0 }, e: { r, c: 1 } },
       { s: { r, c: 5 }, e: { r, c: 6 } },
     ]).flat();
+    // styling: bold header labels, bordered table grid, money formats
+    const thin = { style: "thin", color: { rgb: "000000" } };
+    const box = { top: thin, bottom: thin, left: thin, right: thin };
+    const cellAt = (r: number, col: number) => ws[XLSX.utils.encode_cell({ r, c: col })];
+    for (let r = 0; r < 6; r++) {
+      for (const col of [0, 4]) { const cell = cellAt(r, col); if (cell) cell.s = { font: { bold: true } }; }
+    }
+    const headerRow = 7, firstItem = 8, totalRow = firstItem + used.length;
+    for (let r = headerRow; r <= totalRow; r++) {
+      for (let col = 0; col < 8; col++) {
+        const cell = cellAt(r, col);
+        if (!cell) continue;
+        const s: Record<string, unknown> = { border: box, alignment: { vertical: "top", wrapText: col === 3 } };
+        if (r === headerRow || r === totalRow) s.font = { bold: true };
+        if (r === headerRow) s.fill = { patternType: "solid", fgColor: { rgb: "E8E4DA" } };
+        cell.s = s;
+        if (r > headerRow && (col === 6 || col === 7) && typeof cell.v === "number") cell.z = "#,##0.00";
+      }
+    }
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
     XLSX.writeFile(wb, `proposal_sheet_${c?.number || ""}${doc.release_number ? `_rel${doc.release_number}` : ""}.xlsx`);
+  };
+
+  // ---------- add the proposal to the contract as a release ----------
+  const addToRelease = async () => {
+    if (!doc) return;
+    const c = contracts.find((x) => x.id === doc.contract_id);
+    if (!c) return;
+    const rel = (doc.release_number || "").trim();
+    if (!rel) { flash("Fill in Release # in the header first — the release needs its number"); return; }
+    const its = await materialize();
+    if (its.length === 0) { flash("No quantities entered yet"); return; }
+    const total = its.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
+    const addr = [doc.address, doc.apt && `Apt ${doc.apt}`, doc.stairhall && `Stairhall ${doc.stairhall}`].filter(Boolean).join(", ");
+    // same update-or-create rule as the PDF import: one release per number per contract
+    const { data: existing } = await sb().from("releases").select("id").eq("contract_id", c.id).eq("rel_number", rel).limit(1);
+    let relId: string;
+    if (existing && existing[0]) {
+      relId = (existing[0] as { id: string }).id;
+      let { error } = await sb().from("releases").update({ amount: total, location: doc.development || "", buildings: addr, address: addr }).eq("id", relId);
+      if (error && /column/i.test(error.message)) ({ error } = await sb().from("releases").update({ amount: total, location: doc.development || "", buildings: addr }).eq("id", relId));
+      if (error) { flash(error.message); return; }
+      await sb().from("release_items").delete().eq("release_id", relId);
+    } else {
+      const base = {
+        contract_id: c.id, rel_number: rel, location: doc.development || "", buildings: addr,
+        ticket: "", amount: total, pre_check: "", date_completed: "", payroll_done: false, received: false, canceled: false, labor_hours: 0, assigned_to: null,
+      };
+      let { data, error } = await sb().from("releases").insert({ ...base, address: addr }).select().single();
+      if (error && /column/i.test(error.message)) ({ data, error } = await sb().from("releases").insert(base).select().single());
+      if (error || !data) { flash(error?.message || "Couldn't create the release"); return; }
+      relId = (data as { id: string }).id;
+    }
+    const { error: e2 } = await sb().from("release_items").insert(its.map((it) => ({
+      release_id: relId, line: it.line || 0, code: it.code, description: it.description,
+      qty: Number(it.qty) || 0, uom: it.unit, unit_price: Number(it.unit_price) || 0,
+      amount: (Number(it.qty) || 0) * (Number(it.unit_price) || 0),
+    })));
+    if (e2) { flash(`Release saved, but line items failed: ${e2.message}`); return; }
+    await saveDoc({ status: "approved" }, true);
+    flash(`Release ${rel} ${existing && existing[0] ? "updated" : "created"} on contract ${c.number} — see the Releases tab`);
+  };
+
+  // ---------- delete draft ----------
+  const deleteProposal = async () => {
+    if (!doc) return;
+    if (!window.confirm(`Delete walk sheet ${doc.number}? This can't be undone.`)) return;
+    const { error } = await sb().from("proposals").delete().eq("id", doc.id);
+    if (error) { flash(error.message); return; }
+    setDoc(null); load(); flash("Walk sheet deleted");
   };
 
   // ---------- convert to invoice ----------
@@ -267,10 +337,8 @@ export default function Proposals() {
           <div className="flex flex-wrap gap-2">
             <button className="btn" onClick={exportWalkSheet}>Walk sheet (xlsx)</button>
             <button className="btn btn-ghost" onClick={() => sheetRef.current?.click()}>{(catalog || []).length > 0 ? "Reload price book" : "Upload price book"}</button>
-            <button className="btn" onClick={async () => { await materialize(); setPrintOpen(true); }}>Print / PDF</button>
-            {doc.status === "draft" && <button className="btn" onClick={() => saveDoc({ status: "sent" })}>Mark sent</button>}
-            {doc.status === "sent" && <button className="btn" onClick={() => saveDoc({ status: "approved" })}>Mark approved</button>}
-            {doc.status !== "invoiced" && <button className="btn btn-primary" onClick={convert}>→ Invoice</button>}
+            <button className="btn btn-primary" onClick={addToRelease}>→ Add to release</button>
+            <button className="btn btn-ghost text-alert" onClick={deleteProposal}>Delete</button>
           </div>
         </div>
         <input ref={sheetRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleContractSheet} />
@@ -338,9 +406,6 @@ export default function Proposals() {
           </div>
         </div>
 
-        {printOpen && org && <DocPrint org={org} title="Proposal" number={doc.number} date={doc.date}
-          clientName={doc.client_name} job={[doc.development, doc.address, doc.apt && `Apt ${doc.apt}`].filter(Boolean).join(" · ")}
-          items={billed} taxPct={0} terms close={() => setPrintOpen(false)} />}
         {msg && <div className="fixed bottom-16 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
       </div>
     );

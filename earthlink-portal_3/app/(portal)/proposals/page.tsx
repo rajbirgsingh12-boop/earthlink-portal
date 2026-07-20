@@ -235,29 +235,36 @@ export default function Proposals() {
     XLSX.writeFile(wb, `proposal_sheet_${c?.number || ""}${doc.release_number ? `_rel${doc.release_number}` : ""}.xlsx`);
   };
 
-  // ---------- add the proposal to the contract as a release ----------
-  const addToRelease = async () => {
-    if (!doc) return;
-    const c = contracts.find((x) => x.id === doc.contract_id);
-    if (!c) return;
-    const rel = (doc.release_number || "").trim();
-    if (!rel) { flash("Fill in Release # in the header first — the release needs its number"); return; }
-    const its = await materialize();
-    if (its.length === 0) { flash("No quantities entered yet"); return; }
+  // ---------- add a proposal to its contract as a release (works from the dashboard) ----------
+  const itemsFor = async (p: Proposal): Promise<NychaLineItem[]> => {
+    if (doc && doc.id === p.id) return materialize(); // editor open: use live quantities
+    const { data } = await sb().from("contract_items").select("*").eq("contract_id", p.contract_id!).order("line");
+    const map = p.qty_map || {};
+    return ((data || []) as ContractItem[])
+      .filter((ci) => Number(map[ci.code]) > 0)
+      .map((ci) => ({ line: ci.line, code: ci.code, category: ci.category, description: ci.description, unit: ci.uom, qty: Number(map[ci.code]), unit_price: Number(ci.unit_price) }));
+  };
+  const addToRelease = async (p: Proposal) => {
+    const c = contracts.find((x) => x.id === p.contract_id);
+    if (!c) { flash("That proposal isn't tied to a contract"); return; }
+    const rel = (p.release_number || "").trim();
+    if (!rel) { flash(`Open ${p.number} and fill in Release # first — the release needs its number`); return; }
+    const its = await itemsFor(p);
+    if (its.length === 0) { flash("No quantities entered on that walk sheet yet"); return; }
     const total = its.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
-    const addr = [doc.address, doc.apt && `Apt ${doc.apt}`, doc.stairhall && `Stairhall ${doc.stairhall}`].filter(Boolean).join(", ");
+    const addr = [p.address, p.apt && `Apt ${p.apt}`, p.stairhall && `Stairhall ${p.stairhall}`].filter(Boolean).join(", ");
     // same update-or-create rule as the PDF import: one release per number per contract
     const { data: existing } = await sb().from("releases").select("id").eq("contract_id", c.id).eq("rel_number", rel).limit(1);
     let relId: string;
     if (existing && existing[0]) {
       relId = (existing[0] as { id: string }).id;
-      let { error } = await sb().from("releases").update({ amount: total, location: doc.development || "", buildings: addr, address: addr }).eq("id", relId);
-      if (error && /column/i.test(error.message)) ({ error } = await sb().from("releases").update({ amount: total, location: doc.development || "", buildings: addr }).eq("id", relId));
+      let { error } = await sb().from("releases").update({ amount: total, location: p.development || "", buildings: addr, address: addr }).eq("id", relId);
+      if (error && /column/i.test(error.message)) ({ error } = await sb().from("releases").update({ amount: total, location: p.development || "", buildings: addr }).eq("id", relId));
       if (error) { flash(error.message); return; }
       await sb().from("release_items").delete().eq("release_id", relId);
     } else {
       const base = {
-        contract_id: c.id, rel_number: rel, location: doc.development || "", buildings: addr,
+        contract_id: c.id, rel_number: rel, location: p.development || "", buildings: addr,
         ticket: "", amount: total, pre_check: "", date_completed: "", payroll_done: false, received: false, canceled: false, labor_hours: 0, assigned_to: null,
       };
       let { data, error } = await sb().from("releases").insert({ ...base, address: addr }).select().single();
@@ -271,17 +278,19 @@ export default function Proposals() {
       amount: (Number(it.qty) || 0) * (Number(it.unit_price) || 0),
     })));
     if (e2) { flash(`Release saved, but line items failed: ${e2.message}`); return; }
-    await saveDoc({ status: "approved" }, true);
+    await sb().from("proposals").update({ status: "approved" }).eq("id", p.id);
+    if (doc && doc.id === p.id) setDoc({ ...doc, status: "approved" });
+    load();
     flash(`Release ${rel} ${existing && existing[0] ? "updated" : "created"} on contract ${c.number} — see the Releases tab`);
   };
 
-  // ---------- delete draft ----------
-  const deleteProposal = async () => {
-    if (!doc) return;
-    if (!window.confirm(`Delete walk sheet ${doc.number}? This can't be undone.`)) return;
-    const { error } = await sb().from("proposals").delete().eq("id", doc.id);
+  // ---------- delete (works from the dashboard) ----------
+  const deleteProposal = async (p: Proposal) => {
+    if (!window.confirm(`Delete walk sheet ${p.number}? This can't be undone.`)) return;
+    const { error } = await sb().from("proposals").delete().eq("id", p.id);
     if (error) { flash(error.message); return; }
-    setDoc(null); load(); flash("Walk sheet deleted");
+    if (doc && doc.id === p.id) setDoc(null);
+    load(); flash("Walk sheet deleted");
   };
 
   // ---------- convert to invoice ----------
@@ -337,8 +346,6 @@ export default function Proposals() {
           <div className="flex flex-wrap gap-2">
             <button className="btn" onClick={exportWalkSheet}>Walk sheet (xlsx)</button>
             <button className="btn btn-ghost" onClick={() => sheetRef.current?.click()}>{(catalog || []).length > 0 ? "Reload price book" : "Upload price book"}</button>
-            <button className="btn btn-primary" onClick={addToRelease}>→ Add to release</button>
-            <button className="btn btn-ghost text-alert" onClick={deleteProposal}>Delete</button>
           </div>
         </div>
         <input ref={sheetRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleContractSheet} />
@@ -476,20 +483,26 @@ export default function Proposals() {
       )}
       <div className="card divide-y divide-rulesoft">
         {list.map((p) => (
-          <button key={p.id} className="flex w-full items-center justify-between gap-2 p-3.5 text-left" onClick={() => openEditor(p)}>
-            <div className="min-w-0">
-              <div className="font-mono text-[13px] font-semibold">{p.number}</div>
-              <div className="truncate text-[13px] text-inksoft">
-                {p.contract_id
-                  ? [p.development || "NYCHA walk", p.address, p.apt && `Apt ${p.apt}`, p.stairhall && `Stair ${p.stairhall}`, p.release_number && `Rel ${p.release_number}`].filter(Boolean).join(" · ")
-                  : `${p.client_name || "No client"}${p.job ? ` · ${p.job}` : ""}`}
+          <div key={p.id} className="p-3.5">
+            <button className="flex w-full items-center justify-between gap-2 text-left" onClick={() => openEditor(p)}>
+              <div className="min-w-0">
+                <div className="font-mono text-[13px] font-semibold">{p.number}</div>
+                <div className="truncate text-[13px] text-inksoft">
+                  {p.contract_id
+                    ? [p.development || "NYCHA walk", p.address, p.apt && `Apt ${p.apt}`, p.stairhall && `Stair ${p.stairhall}`, p.release_number && `Rel ${p.release_number}`].filter(Boolean).join(" · ")
+                    : `${p.client_name || "No client"}${p.job ? ` · ${p.job}` : ""}`}
+                </div>
               </div>
+              <div className="flex shrink-0 items-center gap-2.5">
+                <span className="font-mono text-[13px]">{fmt(Number(p.total) || 0)}</span>
+                <Stamp label={p.status.toUpperCase()} tone={tone(p.status) as "ok"} />
+              </div>
+            </button>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {p.contract_id && <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => addToRelease(p)}>→ Add to release</button>}
+              <button className="btn btn-ghost px-3 py-1.5 text-[13px] text-alert" onClick={() => deleteProposal(p)}>Delete</button>
             </div>
-            <div className="flex shrink-0 items-center gap-2.5">
-              <span className="font-mono text-[13px]">{fmt(Number(p.total) || 0)}</span>
-              <Stamp label={p.status.toUpperCase()} tone={tone(p.status) as "ok"} />
-            </div>
-          </button>
+          </div>
         ))}
         {list.length === 0 && <div className="p-5 text-sm text-inksoft">No walk sheets yet. Tap + New NYCHA walk sheet, load the contract price book once, and fill quantities as you walk the unit.</div>}
       </div>

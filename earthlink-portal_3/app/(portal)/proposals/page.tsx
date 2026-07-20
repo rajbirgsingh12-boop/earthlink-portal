@@ -39,6 +39,8 @@ export default function Proposals() {
   const [pickOpen, setPickOpen] = useState(false);
   const [pickId, setPickId] = useState("");
   const [relAsk, setRelAsk] = useState<{ p: Proposal; value: string } | null>(null);
+  const [listQ, setListQ] = useState("");
+  const [listFilter, setListFilter] = useState<"all" | "draft" | "approved">("all");
   const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
   const [msg, setMsg] = useState("");
   const sheetRef = useRef<HTMLInputElement>(null);
@@ -532,8 +534,22 @@ export default function Proposals() {
           </div>
         </div>
       )}
+      <div className="mb-3 flex flex-wrap gap-2">
+        {([["all", `All (${list.length})`], ["draft", `Drafts (${list.filter((p) => p.status === "draft").length})`], ["approved", `Released (${list.filter((p) => p.status === "approved").length})`]] as ["all" | "draft" | "approved", string][]).map(([f, l]) => (
+          <button key={f} className={`btn ${listFilter === f ? "btn-primary" : "btn-ghost"} px-3 py-1.5 text-[13px]`} onClick={() => setListFilter(f)}>{l}</button>
+        ))}
+      </div>
+      <input className="field mb-3" placeholder="Search name, development, address, release #…" value={listQ} onChange={(e) => setListQ(e.target.value)} />
       <div className="card divide-y divide-rulesoft">
-        {list.map((p) => (
+        {list
+          .filter((p) => listFilter === "all" || p.status === listFilter)
+          .filter((p) => {
+            if (!listQ) return true;
+            const c = contracts.find((x) => x.id === p.contract_id);
+            return `${p.number} ${p.job} ${p.client_name} ${p.development || ""} ${p.address || ""} ${p.apt || ""} ${p.stairhall || ""} ${p.release_number || ""} ${c?.number || ""}`
+              .toLowerCase().includes(listQ.toLowerCase());
+          })
+          .map((p) => (
           <div key={p.id} className="p-3.5">
             <button className="flex w-full items-center justify-between gap-2 text-left" onClick={() => openEditor(p)}>
               <div className="min-w-0">

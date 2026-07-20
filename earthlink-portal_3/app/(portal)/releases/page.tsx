@@ -1,17 +1,17 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import * as XLSX from "xlsx";
+// styled fork of SheetJS — same API, plus cell borders/fonts for the SOS export
+import * as XLSX from "xlsx-js-style";
 import { sb } from "@/lib/supabase";
 import { fmt, parseNum } from "@/lib/format";
 import Stamp from "@/components/Stamp";
-import NychaInvoicePrint, { type NychaItem } from "@/components/NychaInvoicePrint";
 import type { Contract, Release } from "@/lib/types";
 import { parseReleasePdfText, type ReleaseItem } from "@/lib/parseRelease";
-import { nextNumber, type Org } from "@/lib/docs";
+import { prettyDate, type Org } from "@/lib/docs";
 
 type Filter = "all" | "chase" | "payroll" | "canceled" | "hours" | "aging" | "fix";
-type InvRow = { line: number | null; code: string; category: string; description: string; unit: string; qty: number; unit_price: number };
 type PriceRow = { code: string; category: string; description: string; unit: string; unit_price: number };
+type SosRow = { line: number; code: string; category: string; description: string; uom: string; qty: number; unit_price: number };
 
 // ---- read red-filled (canceled) rows straight out of the xlsx zip ----
 async function unzipEntries(buf: ArrayBuffer, names: string[]): Promise<Record<string, string>> {
@@ -109,17 +109,9 @@ export default function Releases() {
   const pdfRef = useRef<HTMLInputElement>(null);
   const propRef = useRef<HTMLInputElement>(null);
 
-  // ---- invoice generator / attachments / aging state ----
+  // ---- SOS / attachments / aging state ----
   const [org, setOrg] = useState<Org | null>(null);
   const [priceBook, setPriceBook] = useState<PriceRow[] | null>(null);
-  const [invDraft, setInvDraft] = useState<{
-    release: Release; number: string; date: string; periodFrom: string; periodTo: string;
-    workOrder: string; rows: InvRow[]; search: string;
-  } | null>(null);
-  const [printInv, setPrintInv] = useState<{
-    number: string; date: string; contractNumber: string; releaseNumber: string; development: string;
-    workOrder?: string; periodFrom?: string | null; periodTo?: string | null; items: NychaItem[];
-  } | null>(null);
   const [attachRel, setAttachRel] = useState<Release | null>(null);
   const attachInputRef = useRef<HTMLInputElement>(null);
 
@@ -212,60 +204,137 @@ export default function Releases() {
     return list;
   };
 
-  const openInvoice = async (r: Release) => {
+  // ---------- Statement of Services (NYCHA form 042.726) ----------
+  const genSOS = async (r: Release) => {
     setBusy(true);
-    const book = await loadPriceBook();
-    const cat = new Map(book.map((b) => [b.code, b.category]));
-    const { data: its } = await sb().from("release_items").select("*").eq("release_id", r.id).order("line");
-    const rows2: InvRow[] = ((its || []) as { line: number; code: string; description: string; qty: number; uom: string; unit_price: number; amount: number }[]).map((it) => ({
-      line: it.line || null, code: it.code, category: cat.get(it.code) || "", description: it.description,
-      unit: it.uom || "EA", qty: Number(it.qty) || 0,
-      unit_price: Number(it.unit_price) || (Number(it.qty) ? (Number(it.amount) || 0) / Number(it.qty) : 0),
-    }));
-    let number = `INV-${new Date().getFullYear()}-001`;
-    try { number = await nextNumber("invoices", "INV"); } catch { /* keep fallback */ }
-    setInvDraft({
-      release: r, number, date: new Date().toISOString().slice(0, 10),
-      periodFrom: "", periodTo: "", workOrder: r.ticket || "", rows: rows2, search: "",
-    });
-    setBusy(false);
-  };
-
-  const saveInvoice = async () => {
-    if (!invDraft) return;
     const c = contracts.find((x) => x.id === active);
-    const billed = invDraft.rows.filter((x) => Number(x.qty) > 0);
-    if (billed.length === 0) { flash("Set a quantity on at least one line first"); return; }
-    setBusy(true);
-    const r = invDraft.release;
-    const { data: inv, error } = await sb().from("invoices").insert({
-      number: invDraft.number, client_name: "New York City Housing Authority",
-      job: `Contract ${c?.number || ""} · Release ${r.rel_number}${r.location ? ` · ${r.location}` : ""}`,
-      date: invDraft.date, tax_pct: 0, status: "open",
-      release_id: r.id, contract_number: c?.number || "", release_number: r.rel_number,
-      development: r.location || "", work_order: invDraft.workOrder,
-      period_from: invDraft.periodFrom || null, period_to: invDraft.periodTo || null,
-    }).select().single();
-    if (error || !inv) {
-      setBusy(false);
-      flash(error && /column|schema/i.test(error.message) ? "Database needs the one-time upgrade — run supabase/upgrade_invoices_aging_docs.sql" : error?.message || "Save failed");
-      return;
+    // prefer the walk sheet (proposal) tied to this release number
+    const { data: props } = await sb().from("proposals").select("*")
+      .eq("contract_id", active).eq("release_number", r.rel_number)
+      .order("created_at", { ascending: false }).limit(1);
+    const prop = (props || [])[0] as { qty_map?: Record<string, number> | null; development?: string; address?: string; apt?: string; stairhall?: string } | undefined;
+    let rows: SosRow[] = [];
+    if (prop && prop.qty_map && Object.keys(prop.qty_map).length > 0) {
+      const { data: cat } = await sb().from("contract_items").select("*").eq("contract_id", active).order("line");
+      const map = prop.qty_map;
+      rows = ((cat || []) as { line: number; code: string; category: string; description: string; uom: string; unit_price: number }[])
+        .filter((ci) => Number(map[ci.code]) > 0)
+        .map((ci) => ({ line: ci.line, code: ci.code, category: ci.category, description: ci.description, uom: ci.uom, qty: Number(map[ci.code]), unit_price: Number(ci.unit_price) }));
     }
-    const { error: e2 } = await sb().from("invoice_items").insert(billed.map((x, i) => ({
-      invoice_id: (inv as { id: string }).id, code: x.code, description: x.description, unit: x.unit,
-      qty: x.qty, unit_price: x.unit_price, sort: i, category: x.category,
-    })));
-    if (e2) { setBusy(false); flash(`Invoice saved but line items failed: ${e2.message}`); return; }
-    await sb().from("releases").update({ invoice_sent: invDraft.date }).eq("id", r.id);
-    setPrintInv({
-      number: invDraft.number, date: invDraft.date, contractNumber: c?.number || "",
-      releaseNumber: r.rel_number, development: r.location || "", workOrder: invDraft.workOrder,
-      periodFrom: invDraft.periodFrom || null, periodTo: invDraft.periodTo || null, items: billed,
-    });
-    const savedNum = invDraft.number;
-    setInvDraft(null); setBusy(false);
-    loadRows(active);
-    flash(`Invoice ${savedNum} created — it's also in the Invoices tab`);
+    if (rows.length === 0) {
+      // fall back to the line items imported from the release PDF
+      const book = await loadPriceBook();
+      const cat = new Map(book.map((b) => [b.code, b.category]));
+      const { data: its } = await sb().from("release_items").select("*").eq("release_id", r.id).order("line");
+      rows = ((its || []) as { line: number; code: string; description: string; qty: number; uom: string; unit_price: number; amount: number }[])
+        .filter((it) => Number(it.qty) > 0)
+        .map((it) => ({
+          line: it.line || 0, code: it.code, category: cat.get(it.code) || "", description: it.description,
+          uom: it.uom || "EA", qty: Number(it.qty),
+          unit_price: Number(it.unit_price) || (Number(it.qty) ? (Number(it.amount) || 0) / Number(it.qty) : 0),
+        }));
+    }
+    setBusy(false);
+    if (rows.length === 0) { flash("No line items for this release — make a walk sheet with quantities for it, or import the release PDF"); return; }
+    const total = rows.reduce((s, it) => s + it.qty * it.unit_price, 0);
+    const today = prettyDate(new Date().toISOString().slice(0, 10));
+    const dev = r.location || prop?.development || "";
+    const addr = r.address || r.buildings || prop?.address || "";
+
+    const aoa: (string | number)[][] = [];
+    const merges: { s: { r: number; c: number }; e: { r: number; c: number } }[] = [];
+    const wide = (row: number, from = 0, to = 8) => merges.push({ s: { r: row, c: from }, e: { r: row, c: to } });
+    aoa.push(["NYCHA STATEMENT OF SERVICE"]); wide(0);
+    aoa.push(["Vendor:", "", (org?.company || "").toUpperCase()]);
+    aoa.push(["Address:", "", [org?.address1, org?.address2].filter(Boolean).join(", "), "", "", "Date:", today]);
+    aoa.push(["Telephone:", "", org?.phone || ""]);
+    aoa.push(["Email:", "", org?.email || ""]);
+    aoa.push([]);
+    aoa.push(["PO:", "", c ? (/^\d+$/.test(c.number) ? Number(c.number) : c.number) : ""]);
+    aoa.push(["Work order:", "", r.ticket || ""]);
+    aoa.push(["Release:", "", /^\d+$/.test(r.rel_number) ? Number(r.rel_number) : r.rel_number]);
+    aoa.push(["Development:", "", dev]);
+    aoa.push(["Stairhall:", "", prop?.stairhall || ""]);
+    aoa.push(["Apt:", "", prop?.apt || ""]);
+    aoa.push(["Address:", "", addr]);
+    aoa.push([]);
+    const headerRow = aoa.length;
+    aoa.push(["Line", "Item", "Category", "Description", "UOM", "Quantity Authorized", "Price", "Total Cost"]);
+    rows.forEach((it) => aoa.push([it.line, /^\d+$/.test(it.code) ? Number(it.code) : it.code, it.category, it.description, it.uom, it.qty, it.unit_price, it.qty * it.unit_price]));
+    const totalRow = aoa.length;
+    aoa.push(["", "", "", "", "", "Total", "", total]);
+    aoa.push([]);
+    const matHeader = aoa.length;
+    aoa.push(["ITEMIZED LIST OF MATERIALS", "", "", "", "QTY", "UOM", "UNIT PRICE", "Cost Plus 10% Markup", "TOTAL COST"]);
+    for (let i = 1; i <= 10; i++) aoa.push([i]);
+    const matTotal = aoa.length;
+    aoa.push(["", "Total"]);
+    aoa.push(["", "Overhead", "$", "(not required for blanket agreements)"]);
+    aoa.push(["", "Profit", "$", "(not required for blanket agreements)"]);
+    aoa.push(["", "Total cost", "$"]);
+    aoa.push([]);
+    const ack1 = aoa.length;
+    aoa.push(["I acknowledge and understand that offering, giving and/or accepting bribes, gratuities and/or gifts is a criminal offense under federal and New York state law."]); wide(ack1);
+    const vendorSig = aoa.length;
+    aoa.push(["VENDOR SIGNATURE", "", "", "", "", "Date:"]);
+    aoa.push([]);
+    const internal = aoa.length;
+    aoa.push(["For NYCHA Internal Use Only:"]); wide(internal);
+    const cert = aoa.length;
+    aoa.push(["I hereby certify that the above-described work, labor, material, equipment, and/or services as referenced in accordance with the above referenced Purchase Order has been completed and inspected by me to my satisfaction."]); wide(cert);
+    const ack2 = aoa.length;
+    aoa.push(["I acknowledge and understand that offering, giving and/or accepting bribes, gratuities and/or gifts is a criminal offense under federal and New York state law."]); wide(ack2);
+    const inspSig = aoa.length;
+    aoa.push(["Inspected by Name and title", "", "", "", "Signature"]);
+    const cmSig = aoa.length;
+    aoa.push(["Contract Manager Signature"]);
+    aoa.push(["WO #", "", "", "Date:", "receipt"]);
+    aoa.push(["", "", "", "", "(for filing reference — fill in after the document is uploaded)"]);
+    aoa.push([]);
+    aoa.push(["NYCHA 042.726 (Rev. 04/05/24) v2"]);
+
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = [{ wch: 8 }, { wch: 14 }, { wch: 32 }, { wch: 70 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 16 }, { wch: 14 }];
+    ws["!merges"] = merges;
+    const thin = { style: "thin", color: { rgb: "000000" } };
+    const box = { top: thin, bottom: thin, left: thin, right: thin };
+    const shade = { patternType: "solid", fgColor: { rgb: "E8E4DA" } };
+    const cellAt = (row: number, col: number) => ws[XLSX.utils.encode_cell({ r: row, c: col })];
+    const style = (row: number, col: number, s: Record<string, unknown>) => { const cell = cellAt(row, col); if (cell) cell.s = s; };
+    style(0, 0, { font: { bold: true, sz: 14 }, alignment: { horizontal: "center" }, fill: shade, border: box });
+    for (const row of [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12]) {
+      style(row, 0, { font: { bold: true } });
+      if (row === 2) style(row, 5, { font: { bold: true } });
+    }
+    for (let row = headerRow; row <= totalRow; row++) {
+      for (let col = 0; col < 8; col++) {
+        const cell = cellAt(row, col);
+        if (!cell) continue;
+        const s: Record<string, unknown> = { border: box, alignment: { vertical: "top", wrapText: col === 3 } };
+        if (row === headerRow || row === totalRow) s.font = { bold: true };
+        if (row === headerRow) s.fill = shade;
+        cell.s = s;
+        if (row > headerRow && (col === 6 || col === 7) && typeof cell.v === "number") cell.z = "#,##0.00";
+      }
+    }
+    for (let row = matHeader; row <= matTotal; row++) {
+      for (let col = 0; col < 9; col++) {
+        const cell = cellAt(row, col) || (ws[XLSX.utils.encode_cell({ r: row, c: col })] = { t: "s", v: "" });
+        cell.s = { border: box, ...(row === matHeader ? { font: { bold: true }, fill: shade } : {}), ...(row === matTotal ? { font: { bold: true } } : {}) };
+      }
+    }
+    for (const [row, from, to] of [[vendorSig, 1, 4], [vendorSig, 6, 7], [inspSig, 1, 3], [inspSig, 5, 7], [cmSig, 2, 5]] as [number, number, number][]) {
+      for (let col = from; col <= to; col++) {
+        const cell = cellAt(row, col) || (ws[XLSX.utils.encode_cell({ r: row, c: col })] = { t: "s", v: "" });
+        cell.s = { border: { bottom: thin } };
+      }
+    }
+    for (const row of [vendorSig, inspSig, cmSig, internal]) style(row, 0, { font: { bold: true } });
+    for (const row of [ack1, cert, ack2]) style(row, 0, { font: { italic: true }, alignment: { wrapText: true, vertical: "top" } });
+    ws["!rows"] = []; ws["!rows"][ack1] = { hpt: 26 }; ws["!rows"][cert] = { hpt: 26 }; ws["!rows"][ack2] = { hpt: 26 };
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
+    XLSX.writeFile(wb, `SOS_${c?.number || ""}_rel${r.rel_number}.xlsx`);
   };
 
   // ---------- attachments ----------
@@ -755,7 +824,7 @@ export default function Releases() {
                 </td>
                 <td className="p-2.5">
                   <div className="flex items-center justify-end gap-2 whitespace-nowrap">
-                    {!r.canceled && <button className="font-mono text-xs font-semibold text-carbon underline" title="Generate NYCHA invoice" onClick={() => openInvoice(r)}>INV</button>}
+                    {!r.canceled && <button className="font-mono text-xs font-semibold text-carbon underline" title="Download Statement of Services" onClick={() => genSOS(r)}>SOS</button>}
                     <button className="text-inksoft" title="Documents" onClick={() => setAttachRel(r)}>📎{(r.attachments || []).length > 0 ? <span className="font-mono text-[10px]">{(r.attachments || []).length}</span> : null}</button>
                     <button className={r.canceled ? "text-ok" : "text-alert"} title={r.canceled ? "Restore" : "Mark canceled"} onClick={() => toggle(r, { canceled: !r.canceled })}>{r.canceled ? "↺" : "✕"}</button>
                   </div>
@@ -773,87 +842,6 @@ export default function Releases() {
       )}
       {busy && <div className="mt-3 text-sm text-inksoft">Working…</div>}
 
-      {/* ---------- invoice builder ---------- */}
-      {invDraft && (
-        <div className="fixed inset-0 z-40 overflow-y-auto bg-ink/50 px-2 py-6">
-          <div className="card mx-auto max-w-4xl border-work bg-card p-4">
-            <div className="mb-3 font-display text-lg font-bold uppercase">
-              Invoice · Release {invDraft.release.rel_number}{invDraft.release.location ? ` · ${invDraft.release.location}` : ""}
-            </div>
-            <div className="mb-3 grid grid-cols-2 gap-2.5 md:grid-cols-5">
-              <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Invoice #</div>
-                <input className="field" value={invDraft.number} onChange={(e) => setInvDraft({ ...invDraft, number: e.target.value })} /></div>
-              <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Date</div>
-                <input type="date" className="field" value={invDraft.date} onChange={(e) => setInvDraft({ ...invDraft, date: e.target.value })} /></div>
-              <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Period from</div>
-                <input type="date" className="field" value={invDraft.periodFrom} onChange={(e) => setInvDraft({ ...invDraft, periodFrom: e.target.value })} /></div>
-              <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Period to</div>
-                <input type="date" className="field" value={invDraft.periodTo} onChange={(e) => setInvDraft({ ...invDraft, periodTo: e.target.value })} /></div>
-              <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Work order</div>
-                <input className="field" value={invDraft.workOrder} onChange={(e) => setInvDraft({ ...invDraft, workOrder: e.target.value })} /></div>
-            </div>
-            {invDraft.rows.length === 0 && (
-              <div className="mb-3 text-sm text-inksoft">
-                No line items are stored for this release — import its PDF first (+ From PDF button), or add lines from the price book below.
-              </div>
-            )}
-            {invDraft.rows.length > 0 && (
-              <div className="mb-3 max-h-72 overflow-y-auto rounded-sm border border-rulesoft">
-                <table className="w-full border-collapse text-xs">
-                  <thead><tr className="border-b border-rulesoft text-left font-display uppercase tracking-widest text-inksoft">
-                    <th className="p-2">Ln</th><th className="p-2">Item</th><th className="p-2">Description</th><th className="p-2">UOM</th>
-                    <th className="p-2 text-right">Qty</th><th className="p-2 text-right">Price</th><th className="p-2 text-right">Total</th><th></th>
-                  </tr></thead>
-                  <tbody>
-                    {invDraft.rows.map((it, i) => (
-                      <tr key={i} className="border-b border-rulesoft">
-                        <td className="p-2 font-mono">{it.line || i + 1}</td>
-                        <td className="p-2 font-mono">{it.code}</td>
-                        <td className="max-w-[280px] truncate p-2" title={it.description}>{it.description}</td>
-                        <td className="p-2">{it.unit}</td>
-                        <td className="p-2 text-right">
-                          <input className="w-16 rounded-sm border border-rulesoft p-1 text-right font-mono" inputMode="decimal" value={String(it.qty)}
-                            onChange={(e) => setInvDraft({ ...invDraft, rows: invDraft.rows.map((x, j) => (j === i ? { ...x, qty: parseNum(e.target.value) } : x)) })} />
-                        </td>
-                        <td className="p-2 text-right">
-                          <input className="w-20 rounded-sm border border-rulesoft p-1 text-right font-mono" inputMode="decimal" value={String(it.unit_price)}
-                            onChange={(e) => setInvDraft({ ...invDraft, rows: invDraft.rows.map((x, j) => (j === i ? { ...x, unit_price: parseNum(e.target.value) } : x)) })} />
-                        </td>
-                        <td className="p-2 text-right font-mono font-semibold">{fmt((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</td>
-                        <td className="p-2 text-center"><button className="text-alert" title="Remove line" onClick={() => setInvDraft({ ...invDraft, rows: invDraft.rows.filter((_, j) => j !== i) })}>✕</button></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-            <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Add from price book</div>
-            <input className="field mb-2" placeholder="Search item #, description or category…" value={invDraft.search}
-              onChange={(e) => setInvDraft({ ...invDraft, search: e.target.value })} />
-            {invDraft.search && (priceBook || [])
-              .filter((b) => `${b.code} ${b.description} ${b.category}`.toLowerCase().includes(invDraft.search.toLowerCase()))
-              .slice(0, 8).map((b, i) => (
-                <button key={i} className="mb-1 block w-full rounded-sm border border-rulesoft p-2 text-left text-xs hover:border-work"
-                  onClick={() => setInvDraft({
-                    ...invDraft, search: "",
-                    rows: [...invDraft.rows, { line: null, code: b.code, category: b.category, description: b.description, unit: b.unit, qty: 1, unit_price: Number(b.unit_price) }],
-                  })}>
-                  <span className="font-mono">{b.code}</span> · {b.description} <span className="font-mono text-inksoft">{fmt(Number(b.unit_price))}/{b.unit}</span>
-                </button>
-              ))}
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-              <div className="font-mono text-sm font-semibold">
-                Total {fmt(invDraft.rows.reduce((s, x) => s + (Number(x.qty) || 0) * (Number(x.unit_price) || 0), 0))}
-                <span className="ml-2 text-xs font-normal text-inksoft">({invDraft.rows.filter((x) => Number(x.qty) > 0).length} billed lines — zero-qty lines are left off the invoice)</span>
-              </div>
-              <div className="flex gap-2">
-                <button className="btn btn-primary" onClick={saveInvoice} disabled={busy}>Create invoice & print</button>
-                <button className="btn btn-ghost" onClick={() => setInvDraft(null)}>Cancel</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ---------- attachments panel ---------- */}
       {attachRel && (
@@ -875,8 +863,6 @@ export default function Releases() {
       )}
       <input ref={attachInputRef} type="file" className="hidden"
         onChange={(e) => { const f = e.target.files?.[0]; if (f && attachRel) attachFile(attachRel, f); e.target.value = ""; }} />
-
-      {printInv && org && <NychaInvoicePrint org={org} {...printInv} close={() => setPrintInv(null)} />}
 
       {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
     </div>

@@ -9,7 +9,7 @@ import type { Contract, Release } from "@/lib/types";
 import { parseReleasePdfText, type ReleaseItem } from "@/lib/parseRelease";
 import { prettyDate, type Org } from "@/lib/docs";
 
-type Filter = "all" | "chase" | "payroll" | "canceled" | "hours" | "aging" | "fix";
+type Filter = "all" | "chase" | "payroll" | "canceled" | "hours";
 type PriceRow = { code: string; category: string; description: string; unit: string; unit_price: number };
 type SosRow = { line: number; code: string; category: string; description: string; uom: string; qty: number; unit_price: number };
 
@@ -164,14 +164,11 @@ export default function Releases() {
   const notR = live.filter((r) => r.payroll_done && !r.received && Number(r.amount) > 0);
   // payroll to submit = still open releases whose payroll isn't in yet
   const prPend = live.filter((r) => !r.payroll_done && !r.received && Number(r.amount) > 0);
-  // received but payroll never done — these need to be canceled
-  const fixup = live.filter((r) => r.received && !r.payroll_done && Number(r.amount) > 0);
   const tot = live.reduce((s, r) => s + Number(r.amount), 0);
 
   let list = live;
   if (filter === "chase") list = notR;
   if (filter === "payroll") list = prPend;
-  if (filter === "fix") list = fixup;
   if (filter === "canceled") list = canceledRows;
   if (q) list = list.filter((r) => `${r.rel_number} ${r.location} ${r.buildings} ${r.ticket}`.toLowerCase().includes(q.toLowerCase()));
   const shown = list.slice(0, limit);
@@ -444,9 +441,84 @@ export default function Releases() {
     flash(`Loaded into ${num}`);
   };
 
+  // ---------- mass import: several release PDFs at once, saved automatically ----------
+  const importPdfBatch = async (files: File[]) => {
+    setBusy(true);
+    flash(`Reading ${files.length} PDFs…`);
+    const done: string[] = []; const failed: string[] = [];
+    const cCache = new Map<string, Contract>();
+    contracts.forEach((c) => cCache.set(c.number, c));
+    const used = new Set<string>();
+    try {
+      const pdfjs = await import("pdfjs-dist");
+      pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+      for (const file of files) {
+        try {
+          const buf = await file.arrayBuffer();
+          const docp = await pdfjs.getDocument({ data: buf }).promise;
+          let text = "";
+          for (let pg = 1; pg <= docp.numPages; pg++) {
+            const tc = await (await docp.getPage(pg)).getTextContent();
+            text += tc.items.map((it) => ("str" in it ? it.str : "")).join(" ") + "\n";
+          }
+          const parsed = parseReleasePdfText(text);
+          if (!parsed) { failed.push(file.name); continue; }
+          const num = parsed.contract.trim() || "Contract";
+          let contract = cCache.get(num);
+          if (!contract) {
+            const { data: nc, error } = await sb().from("contracts").insert({ number: num, name: num }).select().single();
+            if (error || !nc) { failed.push(file.name); continue; }
+            contract = nc as Contract; cCache.set(num, contract);
+          }
+          used.add(contract.id);
+          const breakdown = parsed.items.filter((it) => it.uom === "HOUR")
+            .map((it) => ({ cls: it.description.replace(/,?\s*Regular Hours/i, "").trim(), hours: it.qty }));
+          const { data: existing } = await sb().from("releases").select("id").eq("contract_id", contract.id).eq("rel_number", parsed.rel).limit(1);
+          let relId: string;
+          if (existing && existing[0]) {
+            relId = (existing[0] as { id: string }).id;
+            const { error } = await sb().from("releases").update({
+              amount: parsed.total, labor_hours: parsed.laborHours, labor_breakdown: breakdown,
+              ticket: parsed.workOrders[0] || "", location: parsed.development,
+            }).eq("id", relId);
+            if (error) { failed.push(file.name); continue; }
+            await sb().from("release_items").delete().eq("release_id", relId);
+          } else {
+            const { data: rel, error } = await sb().from("releases").insert({
+              contract_id: contract.id, rel_number: parsed.rel, location: parsed.development,
+              buildings: "", ticket: parsed.workOrders[0] || "", amount: parsed.total,
+              labor_hours: parsed.laborHours, labor_breakdown: breakdown,
+              date_completed: "", pre_check: "", payroll_done: false, received: false, canceled: false, assigned_to: null,
+            }).select().single();
+            if (error || !rel) { failed.push(file.name); continue; }
+            relId = (rel as Release).id;
+          }
+          if (parsed.items.length > 0) {
+            await sb().from("release_items").insert(parsed.items.map((it) => ({ release_id: relId, ...it })));
+          }
+          const path = `${relId}/${file.name}`;
+          const { error: ue } = await sb().storage.from("docs").upload(path, file, { upsert: true });
+          if (!ue) {
+            const { data: cur } = await sb().from("releases").select("attachments").eq("id", relId).single();
+            const prev = ((cur as { attachments?: { name: string; path: string }[] } | null)?.attachments || []).filter((a) => a.path !== path);
+            await sb().from("releases").update({ attachments: [...prev, { name: file.name, path }] }).eq("id", relId);
+          }
+          done.push(parsed.rel);
+        } catch { failed.push(file.name); }
+      }
+    } catch { /* pdfjs failed to load */ }
+    setBusy(false);
+    await loadContracts();
+    const target = used.size === 1 ? [...used][0] : active;
+    if (target) { setActive(target); loadRows(target); }
+    flash(`${done.length} release${done.length === 1 ? "" : "s"} added${done.length ? ` (${done.slice(0, 10).join(", ")})` : ""}${failed.length ? ` · ${failed.length} failed` : ""} — SOS is ready on each row`);
+  };
+
   // ---------- release PDF import ----------
   const handlePdf = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const files = Array.from(e.target.files || []);
+    if (files.length > 1) { importPdfBatch(files); e.target.value = ""; return; }
+    const file = files[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = async (ev) => {
@@ -605,13 +677,13 @@ export default function Releases() {
       <div className="mb-3 flex items-baseline justify-between gap-2">
         <div className="font-display text-2xl font-bold uppercase">Releases</div>
         <div className="flex gap-2">
-          <button className="btn btn-ghost" onClick={() => pdfRef.current?.click()}>+ From PDF</button>
+          <button className="btn btn-ghost" onClick={() => pdfRef.current?.click()}>+ From PDF(s)</button>
           <button className="btn btn-ghost" onClick={() => fileRef.current?.click()}>Upload sheet</button>
           {rows.length > 0 && <button className="btn btn-ghost" onClick={exportSheet}>Download</button>}
         </div>
       </div>
       <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFile} />
-      <input ref={pdfRef} type="file" accept="application/pdf" className="hidden" onChange={handlePdf} />
+      <input ref={pdfRef} type="file" accept="application/pdf" multiple className="hidden" onChange={handlePdf} />
       <input ref={propRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleProposal} />
 
       {pending && (
@@ -720,7 +792,7 @@ export default function Releases() {
       )}
 
       <div className="mb-3 flex flex-wrap gap-2">
-        {([["all", "All"], ["chase", `Chase list (${notR.length})`], ["payroll", `Payroll to submit (${prPend.length})`], ...(fixup.length > 0 ? [["fix", `Needs cancel (${fixup.length})`]] : []), ["aging", "Aging"], ["canceled", `Canceled (${canceledRows.length})`], ["hours", "Payroll check"]] as [Filter, string][]).map(([f, l]) => (
+        {([["all", "All"], ["chase", `Chase list (${notR.length})`], ["payroll", `Payroll to submit (${prPend.length})`], ["canceled", `Canceled (${canceledRows.length})`], ["hours", "Payroll check"]] as [Filter, string][]).map(([f, l]) => (
           <button key={f} className={`btn ${filter === f ? "btn-primary" : "btn-ghost"} px-3 py-1.5 text-[13px]`} onClick={() => { setFilter(f); setLimit(100); if (f === "hours" && !logged) loadLogged(); }}>{l}</button>
         ))}
       </div>
@@ -759,59 +831,7 @@ export default function Releases() {
           </table>
         </div>
       )}
-      {filter === "aging" && (() => {
-        const open = live.filter((r) => Number(r.amount) > 0 && !r.received && (!q || `${r.rel_number} ${r.location} ${r.buildings} ${r.ticket}`.toLowerCase().includes(q.toLowerCase())));
-        const days = (r: Release) => (r.invoice_sent ? Math.max(0, Math.floor((Date.now() - new Date(r.invoice_sent + "T00:00:00").getTime()) / 86400000)) : null);
-        const bucket = (d: number) => (d <= 30 ? 0 : d <= 60 ? 1 : d <= 90 ? 2 : 3);
-        const sums = [0, 0, 0, 0]; let notSent = 0;
-        open.forEach((r) => { const d = days(r); if (d === null) notSent += Number(r.amount); else sums[bucket(d)] += Number(r.amount); });
-        const sorted = [...open].sort((a, b) => (days(b) ?? -1) - (days(a) ?? -1));
-        return (
-          <div>
-            <div className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-5">
-              {([["0–30 days", sums[0], "text-ink"], ["31–60 days", sums[1], "text-work"], ["61–90 days", sums[2], "text-work"], ["90+ days", sums[3], "text-alert"], ["Not invoiced", notSent, "text-inksoft"]] as [string, number, string][]).map(([l, v, cls]) => (
-                <div key={l} className="card p-3">
-                  <div className="text-[10px] uppercase tracking-[.12em] text-inksoft">{l}</div>
-                  <div className={`font-mono text-base font-semibold ${cls}`}>{fmt(v)}</div>
-                </div>
-              ))}
-            </div>
-            <div className="card overflow-x-auto">
-              <table className="w-full border-collapse text-sm" style={{ minWidth: 640 }}>
-                <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
-                  <th className="p-2.5">Rel</th><th className="p-2.5">Location</th><th className="p-2.5 text-right">Amount</th>
-                  <th className="p-2.5">Invoice sent</th><th className="p-2.5 text-center">Days out</th><th className="p-2.5 text-center">Received</th>
-                </tr></thead>
-                <tbody>
-                  {sorted.map((r) => {
-                    const d = days(r);
-                    return (
-                      <tr key={r.id} className="border-b border-rulesoft">
-                        <td className="p-2.5 font-mono text-xs">{r.rel_number}</td>
-                        <td className="p-2.5">{r.location}<div className="max-w-[220px] truncate text-[11px] text-inksoft">{r.buildings}</div></td>
-                        <td className="p-2.5 text-right font-mono">{fmt(Number(r.amount))}</td>
-                        <td className="p-2.5">
-                          <input type="date" className="rounded-sm border border-rulesoft p-1 font-mono text-xs" defaultValue={r.invoice_sent || ""}
-                            onChange={(e) => toggle(r, { invoice_sent: e.target.value || null })} />
-                        </td>
-                        <td className="p-2.5 text-center">
-                          {d === null ? <Stamp label="NOT INVOICED" tone="mute" /> : <Stamp label={`${d} DAYS`} tone={d > 90 ? "alert" : d > 60 ? "alert" : d > 30 ? "work" : "ok"} />}
-                        </td>
-                        <td className="p-2.5 text-center">
-                          <button onClick={() => toggle(r, { received: true, paid_date: new Date().toISOString().slice(0, 10) })}><Stamp label="MARK PAID" tone="carbon" /></button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {sorted.length === 0 && <tr><td colSpan={6} className="p-4 text-inksoft">Nothing outstanding — everything released has been received. 🎉</td></tr>}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        );
-      })()}
-
-      {filter !== "hours" && filter !== "aging" && <div className="card overflow-x-auto">
+      {filter !== "hours" && <div className="card overflow-x-auto">
         <table className="w-full border-collapse text-sm" style={{ minWidth: 560 }}>
           <thead>
             <tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
@@ -849,7 +869,7 @@ export default function Releases() {
           </tbody>
         </table>
       </div>}
-      {filter !== "hours" && filter !== "aging" && list.length > limit && (
+      {filter !== "hours" && list.length > limit && (
         <div className="mt-3 text-center"><button className="btn btn-ghost" onClick={() => setLimit(limit + 200)}>Show more ({list.length - limit} left)</button></div>
       )}
       {busy && <div className="mt-3 text-sm text-inksoft">Working…</div>}

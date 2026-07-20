@@ -105,7 +105,14 @@ export default function Statements() {
                     <tr key={r.id} className="border-b border-rulesoft">
                       <td className="p-2.5 font-mono text-[13px]">{r.rel_number}</td>
                       <td className="p-2.5">{r.location}<div className="max-w-[220px] truncate text-[11px] text-inksoft">{r.buildings}</div></td>
-                      <td className="p-2.5 font-mono text-xs">{r.invoice_sent ? prettyDate(r.invoice_sent) : "—"}</td>
+                      <td className="p-2.5">
+                        <input type="date" className="rounded-sm border border-rulesoft p-1 font-mono text-xs" defaultValue={r.invoice_sent || ""}
+                          onChange={async (e) => {
+                            const v = e.target.value || null;
+                            await sb().from("releases").update({ invoice_sent: v }).eq("id", r.id);
+                            setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: v } : x)));
+                          }} />
+                      </td>
                       <td className={`p-2.5 text-right font-mono ${d !== null && d > 60 ? "text-alert" : ""}`}>{d === null ? "—" : d}</td>
                       <td className="p-2.5 text-right font-mono font-semibold">{fmt(Number(r.amount))}</td>
                     </tr>

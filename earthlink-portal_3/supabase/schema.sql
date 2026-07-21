@@ -362,6 +362,7 @@ alter table pact_jobs add column if not exists contact text default '';
 alter table pact_jobs add column if not exists bill_to text default '';
 alter table pact_jobs add column if not exists items jsonb default '[]'::jsonb;
 alter table pact_jobs add column if not exists invoice_number text default '';
+alter table pact_jobs add column if not exists tax_pct numeric default 8.875;
 alter table pact_jobs enable row level security;
 drop policy if exists "pact_jobs read" on pact_jobs;
 create policy "pact_jobs read" on pact_jobs for select

@@ -13,7 +13,7 @@ interface Job {
   received: boolean; paid_date: string | null; canceled: boolean;
   attachments?: { name: string; path: string }[] | null; notes: string; created_at: string;
   po_number?: string; po_date?: string; address?: string; property_unit?: string;
-  contact?: string; bill_to?: string; items?: Item[] | null; invoice_number?: string;
+  contact?: string; bill_to?: string; items?: Item[] | null; invoice_number?: string; tax_pct?: number | null;
 }
 const BLANK = { partner: "", development: "", job_number: "", description: "", amount: "" };
 
@@ -47,7 +47,11 @@ export default function Pact() {
   const today = () => new Date().toISOString().slice(0, 10);
   const isImg = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n);
   const itemsOf = (j: Job): Item[] => (Array.isArray(j.items) ? j.items : []);
-  const invTotal = (j: Job) => itemsOf(j).reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
+  // private work is taxable — NYC sales tax by default, editable per job
+  const taxRate = (j: Job) => (j.tax_pct === null || j.tax_pct === undefined ? 8.875 : Number(j.tax_pct));
+  const invSubtotal = (j: Job) => itemsOf(j).reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
+  const invTax = (j: Job) => invSubtotal(j) * taxRate(j) / 100;
+  const invTotal = (j: Job) => invSubtotal(j) + invTax(j);
 
   const load = async () => {
     const { data, error } = await sb().from("pact_jobs").select("*").order("created_at", { ascending: false });
@@ -130,7 +134,8 @@ export default function Pact() {
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, items } : x)));
     setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, items } : prev));
     if (persist) {
-      const amount = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
+      const sub = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
+      const amount = sub * (1 + taxRate(j) / 100); // billed total includes tax
       patch({ ...j, items }, { items, amount });
     }
   };
@@ -248,10 +253,13 @@ export default function Pact() {
         y -= 2;
       });
       y -= 4; line(L, R, y + 8);
+      const taxAmt = subtotal * taxRate(j) / 100;
       page.drawText("Subtotal:", { x: 440, y: y - 6, size: 10, font: bold });
-      page.drawText(subtotal.toFixed(2), { x: 515, y: y - 6, size: 10, font: helv }); y -= 16;
+      page.drawText(subtotal.toFixed(2), { x: 515, y: y - 6, size: 10, font: helv }); y -= 15;
+      page.drawText(`Tax (${taxRate(j)}%):`, { x: 440, y: y - 6, size: 10, font: bold });
+      page.drawText(taxAmt.toFixed(2), { x: 515, y: y - 6, size: 10, font: helv }); y -= 16;
       page.drawText("Total Due:", { x: 440, y: y - 6, size: 11, font: bold });
-      page.drawText(`$${subtotal.toFixed(2)}`, { x: 515, y: y - 6, size: 11, font: bold }); y -= 30;
+      page.drawText(`$${(subtotal + taxAmt).toFixed(2)}`, { x: 515, y: y - 6, size: 11, font: bold }); y -= 30;
       page.drawText("Please make all checks payable to " + (org.company || "").toUpperCase() + ".", { x: L, y, size: 9, font: helv }); y -= 12;
       page.drawText("Thank you for your business!", { x: L, y, size: 9, font: helv });
       // --- the PO pdf(s) ---
@@ -414,10 +422,16 @@ export default function Pact() {
             <div className="card mx-auto max-w-3xl border-work bg-card p-4">
               <div className="mb-1 font-display text-lg font-bold uppercase">Invoice · PO {j.po_number || j.job_number}</div>
               <div className="mb-3 text-[13px] text-inksoft">{j.partner} · {j.address}{j.property_unit ? ` · Unit ${j.property_unit}` : ""}</div>
-              <div className="mb-3 grid grid-cols-2 gap-2.5">
+              <div className="mb-3 grid grid-cols-2 gap-2.5 md:grid-cols-4">
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Invoice #</div>
                   <input className="field" value={j.invoice_number || ""} onChange={(e) => patch(j, { invoice_number: e.target.value })} /></div>
-                <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Total</div>
+                <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Subtotal</div>
+                  <div className="field bg-paper font-mono">{fmt(invSubtotal(j))}</div></div>
+                <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Tax %</div>
+                  <input className="field text-right font-mono" inputMode="decimal" value={String(taxRate(j))}
+                    onChange={(e) => patch(j, { tax_pct: parseNum(e.target.value) })}
+                    onBlur={() => setItems(j, itemsOf(j), true)} /></div>
+                <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Total (with tax)</div>
                   <div className="field bg-paper font-mono font-semibold">{fmt(invTotal(j))}</div></div>
               </div>
               {items.map((it, i) => (

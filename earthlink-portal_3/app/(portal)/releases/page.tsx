@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the SOS export
 import * as XLSX from "xlsx-js-style";
 import { sb } from "@/lib/supabase";
-import { fmt, parseNum } from "@/lib/format";
+import { fmt, parseNum, askFileName } from "@/lib/format";
 import Stamp from "@/components/Stamp";
 import type { Contract, Release } from "@/lib/types";
 import { parseReleasePdfText, type ReleaseItem } from "@/lib/parseRelease";
@@ -424,7 +424,9 @@ export default function Releases() {
     ws["!rows"] = []; ws["!rows"][ack1] = { hpt: 26 }; ws["!rows"][cert] = { hpt: 26 }; ws["!rows"][ack2] = { hpt: 26 };
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
-    XLSX.writeFile(wb, `SOS_${cNumber}_rel${relNum}.xlsx`);
+    const fname = askFileName(`SOS_${cNumber}_rel${relNum}.xlsx`);
+    if (!fname) return;
+    XLSX.writeFile(wb, fname);
   };
 
   // ---------- attachments ----------
@@ -1055,7 +1057,7 @@ export default function Releases() {
           contractNumber={invPreview.cNumber} releaseNumber={invPreview.relNum} development={invPreview.dev}
           workOrder={invPreview.workOrder}
           items={invPreview.rows.map((it) => ({ line: it.line, code: it.code, category: it.category, description: it.description, unit: it.uom, qty: it.qty, unit_price: it.unit_price }))}
-          onExcel={() => buildInvoiceXlsx({ org, cNumber: invPreview.cNumber, relNum: invPreview.relNum, workOrder: invPreview.workOrder, dev: invPreview.dev, number: invPreview.number, date: invPreview.date, rows: invPreview.rows })}
+          onExcel={() => { const fname = askFileName(`invoice_${invPreview.cNumber}_rel${invPreview.relNum}.xlsx`); if (fname) buildInvoiceXlsx({ org, cNumber: invPreview.cNumber, relNum: invPreview.relNum, workOrder: invPreview.workOrder, dev: invPreview.dev, number: invPreview.number, date: invPreview.date, rows: invPreview.rows, filename: fname }); }}
           close={() => setInvPreview(null)} />
       )}
 

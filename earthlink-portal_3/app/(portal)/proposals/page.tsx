@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the export
 import * as XLSX from "xlsx-js-style";
 import { sb } from "@/lib/supabase";
-import { fmt, parseNum } from "@/lib/format";
+import { fmt, parseNum, askFileName } from "@/lib/format";
 import Stamp from "@/components/Stamp";
 import { LineItem, Org, nextNumber, grandTotal } from "@/lib/docs";
 import type { Contract } from "@/lib/types";
@@ -265,7 +265,9 @@ export default function Proposals() {
     }
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
-    XLSX.writeFile(wb, `proposal_sheet_${c?.number || ""}${doc.release_number ? `_rel${doc.release_number}` : ""}.xlsx`);
+    const fname = askFileName(`proposal_sheet_${c?.number || ""}${doc.release_number ? `_rel${doc.release_number}` : ""}.xlsx`);
+    if (!fname) return;
+    XLSX.writeFile(wb, fname);
   };
 
   // ---------- add a proposal to its contract as a release (works from the dashboard) ----------

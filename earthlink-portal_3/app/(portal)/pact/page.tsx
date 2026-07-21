@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { sb } from "@/lib/supabase";
-import { fmt, parseNum } from "@/lib/format";
+import { fmt, parseNum, askFileName } from "@/lib/format";
 import { prettyDate, type Org } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
 import { useLive } from "@/lib/useLive";
@@ -307,7 +307,9 @@ export default function Pact() {
       const blob = new Blob([out.buffer as ArrayBuffer], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
       const aEl = document.createElement("a");
-      aEl.href = url; aEl.download = `package_PO${j.po_number || j.job_number || ""}.pdf`; aEl.click();
+      const fname = askFileName(`package_PO${j.po_number || j.job_number || ""}.pdf`);
+      if (!fname) { URL.revokeObjectURL(url); setBusy(false); return; }
+      aEl.href = url; aEl.download = fname; aEl.click();
       URL.revokeObjectURL(url);
       if (!j.invoice_sent) patch(j, { invoice_sent: today() });
       flash("Package downloaded — invoice, PO, and photos in one PDF");
@@ -412,7 +414,7 @@ export default function Pact() {
                   <button onClick={() => patch(j, j.received ? { received: false, paid_date: null } : { received: true, paid_date: today() })}><Stamp label={j.received ? `PAID ${prettyDate(j.paid_date)}` : "MARK PAID"} tone={j.received ? "ok" : "work"} /></button>
                 </div>
                 <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
-                  {([["partner", "Partner"], ["address", "Work address (ship to)"], ["po_number", "PO #"], ["property_unit", "Property unit"], ["contact", "Contact"], ["description", "Work description"]] as ["partner" | "address" | "po_number" | "property_unit" | "contact" | "description", string][]).map(([k, label]) => (
+                  {([["partner", "Partner"], ["address", "Work address (ship to)"], ["po_number", "PO #"], ...(canInvoice ? [["invoice_number", "Invoice #"]] : []), ["property_unit", "Property unit"], ["contact", "Contact"], ["description", "Work description"]] as ["partner" | "address" | "po_number" | "invoice_number" | "property_unit" | "contact" | "description", string][]).map(([k, label]) => (
                     <div key={k} className={k === "description" || k === "address" ? "col-span-2" : ""}><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
                       <input className="field" value={j[k] || ""} onChange={(e) => setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, [k]: e.target.value } : x)))}
                         onBlur={(e) => patch(j, { [k]: e.target.value } as Partial<Job>)} /></div>

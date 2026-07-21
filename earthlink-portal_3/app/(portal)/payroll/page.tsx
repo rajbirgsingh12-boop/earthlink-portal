@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the export
 import * as XLSX from "xlsx-js-style";
 import { sb } from "@/lib/supabase";
-import { fmt, parseNum } from "@/lib/format";
+import { fmt, parseNum, askFileName } from "@/lib/format";
 import { prettyDate, addDays } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged, type LaborResult } from "@/lib/labor";
 import Stamp from "@/components/Stamp";
@@ -207,7 +207,9 @@ export default function Payroll() {
       usedNames.add(name);
       XLSX.utils.book_append_sheet(wb, ws, name);
     }
-    XLSX.writeFile(wb, `payroll_WE_${openWeek.week_ending}.xlsx`);
+    const fname = askFileName(`payroll_WE_${openWeek.week_ending}.xlsx`);
+    if (!fname) return;
+    XLSX.writeFile(wb, fname);
   };
 
   const relLabel = (r: RelRow) => {

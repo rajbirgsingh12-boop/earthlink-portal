@@ -54,7 +54,7 @@ export async function gatherReleaseDoc(
 // development-period block, item table), styled like the SOS export.
 export function buildInvoiceXlsx(a: {
   org: Org; cNumber: string; relNum: string; workOrder: string; dev: string;
-  number: string; date: string; rows: DocRow[];
+  number: string; date: string; rows: DocRow[]; filename?: string;
 }) {
   const total = a.rows.reduce((s, it) => s + it.qty * it.unit_price, 0);
   const asNum = (s: string) => (/^\d+$/.test(s) ? Number(s) : s);
@@ -119,5 +119,5 @@ export function buildInvoiceXlsx(a: {
   }
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Invoice");
-  XLSX.writeFile(wb, `invoice_${a.cNumber}_rel${a.relNum}.xlsx`);
+  XLSX.writeFile(wb, a.filename || `invoice_${a.cNumber}_rel${a.relNum}.xlsx`);
 }

@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the export
 import * as XLSX from "xlsx-js-style";
 import { sb } from "@/lib/supabase";
-import { fmt } from "@/lib/format";
+import { fmt, askFileName } from "@/lib/format";
 import { Org, prettyDate } from "@/lib/docs";
 import type { Contract, Release } from "@/lib/types";
 import ContractPicker from "@/components/ContractPicker";
@@ -129,7 +129,9 @@ export default function Statements() {
     }
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
-    XLSX.writeFile(wb, `statement_${contract.number}.xlsx`);
+    const fname = askFileName(`statement_${contract.number}.xlsx`);
+    if (!fname) return;
+    XLSX.writeFile(wb, fname);
   };
 
   return (
@@ -240,7 +242,7 @@ export default function Statements() {
           contractNumber={invPreview.cNumber} releaseNumber={invPreview.relNum} development={invPreview.dev}
           workOrder={invPreview.workOrder}
           items={invPreview.rows.map((it) => ({ line: it.line, code: it.code, category: it.category, description: it.description, unit: it.uom, qty: it.qty, unit_price: it.unit_price }))}
-          onExcel={() => buildInvoiceXlsx({ org, cNumber: invPreview.cNumber, relNum: invPreview.relNum, workOrder: invPreview.workOrder, dev: invPreview.dev, number: invPreview.number, date: invPreview.date, rows: invPreview.rows })}
+          onExcel={() => { const fname = askFileName(`invoice_${invPreview.cNumber}_rel${invPreview.relNum}.xlsx`); if (fname) buildInvoiceXlsx({ org, cNumber: invPreview.cNumber, relNum: invPreview.relNum, workOrder: invPreview.workOrder, dev: invPreview.dev, number: invPreview.number, date: invPreview.date, rows: invPreview.rows, filename: fname }); }}
           close={() => setInvPreview(null)} />
       )}
       {contracts.length === 0 && <div className="text-sm text-inksoft">No active statements — nothing is currently owed on any contract. Releases you haven&apos;t been paid for show up here automatically.</div>}

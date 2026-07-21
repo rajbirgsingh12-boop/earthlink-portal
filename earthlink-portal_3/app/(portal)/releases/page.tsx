@@ -803,16 +803,26 @@ export default function Releases() {
         <div className="mb-3"><ContractPicker contracts={contracts} value={active} onChange={(id) => { setActive(id); setLimit(100); }} /></div>
       )}
 
-      {rows.length > 0 && (
-        <div className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-4">
-          {([["Released", fmt(tot), "text-ink"], ["Received", fmt(live.filter((r) => r.received).reduce((s, r) => s + Number(r.amount), 0)), "text-ok"], ["To chase", fmt(notR.reduce((s, r) => s + Number(r.amount), 0)), "text-work"], ["Payroll pending", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
-            <div key={l} className="card p-3">
-              <div className="text-[10px] uppercase tracking-[.12em] text-inksoft">{l}</div>
-              <div className={`font-mono text-base font-semibold ${cls}`}>{v}</div>
+      {rows.length > 0 && (() => {
+        const rec = live.filter((r) => r.received).reduce((s, r) => s + Number(r.amount), 0);
+        const outst = live.filter((r) => !r.received).reduce((s, r) => s + Number(r.amount), 0);
+        const pct = tot > 0 ? Math.round((rec / tot) * 100) : 0;
+        return (
+          <div className="mb-3">
+            <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
+              {([["Released", fmt(tot), "text-ink"], [`Received · ${pct}%`, fmt(rec), "text-ok"], ["Not received", fmt(outst), "text-work"], ["To chase", fmt(notR.reduce((s, r) => s + Number(r.amount), 0)), "text-work"], ["Payroll pending", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
+                <div key={l} className="card p-3">
+                  <div className="text-[10px] uppercase tracking-[.12em] text-inksoft">{l}</div>
+                  <div className={`font-mono text-base font-semibold ${cls}`}>{v}</div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      )}
+            <div className="mt-2 h-1.5 overflow-hidden rounded-sm bg-rulesoft">
+              <div className="h-full bg-ok transition-all duration-300" style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="mb-3 flex flex-wrap gap-2">
         {([["all", "All"], ["chase", `Chase list (${notR.length})`], ["payroll", `Payroll to submit (${prPend.length})`], ["canceled", `Canceled (${canceledRows.length})`], ["hours", "Payroll check"]] as [Filter, string][]).map(([f, l]) => (

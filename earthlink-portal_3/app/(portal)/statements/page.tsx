@@ -7,6 +7,8 @@ import { fmt } from "@/lib/format";
 import { Org, prettyDate } from "@/lib/docs";
 import type { Contract, Release } from "@/lib/types";
 import ContractPicker from "@/components/ContractPicker";
+import NychaInvoicePrint from "@/components/NychaInvoicePrint";
+import { gatherReleaseDoc, buildInvoiceXlsx, type DocRow } from "@/lib/releaseDoc";
 
 export default function Statements() {
   const [contracts, setContracts] = useState<Contract[]>([]);
@@ -14,7 +16,19 @@ export default function Statements() {
   const [rows, setRows] = useState<Release[]>([]);
   const [org, setOrg] = useState<Org | null>(null);
   const [printOpen, setPrintOpen] = useState(false);
+  const [invPreview, setInvPreview] = useState<{ number: string; date: string; cNumber: string; relNum: string; dev: string; workOrder: string; rows: DocRow[] } | null>(null);
   const today = new Date().toISOString().slice(0, 10);
+
+  const genInvoice = async (r: Release) => {
+    const c = contracts.find((x) => x.id === sel);
+    const d = await gatherReleaseDoc(sel, r);
+    if (d.rows.length === 0) { return; }
+    if (!r.invoice_sent) {
+      await sb().from("releases").update({ invoice_sent: today }).eq("id", r.id);
+      setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: today } : x)));
+    }
+    setInvPreview({ number: `${c?.number || ""}-${r.rel_number}`, date: today, cNumber: c?.number || "", relNum: r.rel_number, dev: r.location || d.dev, workOrder: r.ticket || "", rows: d.rows });
+  };
 
   useEffect(() => {
     (async () => {
@@ -115,14 +129,14 @@ export default function Statements() {
 
   return (
     <div>
-      <div className="mb-3 font-display text-2xl font-bold uppercase">Statements</div>
+      <div className="mb-3 font-display text-2xl font-bold uppercase">Invoices &amp; Statements</div>
       <div className="mb-3"><ContractPicker contracts={contracts} value={sel} onChange={setSel} /></div>
       {contract && (
         <>
           <div className="card overflow-x-auto">
             <table className="w-full border-collapse text-sm" style={{ minWidth: 560 }}>
               <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
-                <th className="p-2.5">Release</th><th className="p-2.5">Location</th><th className="p-2.5">Invoiced</th><th className="p-2.5 text-right">Days out</th><th className="p-2.5 text-right">Balance</th></tr></thead>
+                <th className="p-2.5">Release</th><th className="p-2.5">Location</th><th className="p-2.5">Invoiced</th><th className="p-2.5 text-right">Days out</th><th className="p-2.5 text-right">Balance</th><th className="p-2.5"></th></tr></thead>
               <tbody>
                 {sorted.map((r) => {
                   const d = days(r);
@@ -140,11 +154,12 @@ export default function Statements() {
                       </td>
                       <td className={`p-2.5 text-right font-mono ${d !== null && d > 60 ? "text-alert" : ""}`}>{d === null ? "—" : d}</td>
                       <td className="p-2.5 text-right font-mono font-semibold">{fmt(Number(r.amount))}</td>
+                      <td className="p-2.5 text-right"><button className="font-mono text-xs font-semibold text-work underline" title="NYCHA invoice" onClick={() => genInvoice(r)}>INV</button></td>
                     </tr>
                   );
                 })}
-                {sorted.length === 0 && <tr><td colSpan={5} className="p-4 text-inksoft">Nothing outstanding on contract {contract.number}. All square. 🎉</td></tr>}
-                {sorted.length > 0 && <tr><td colSpan={4} className="p-2.5 font-display font-bold uppercase">Total due</td><td className="p-2.5 text-right font-mono text-base font-bold">{fmt(total)}</td></tr>}
+                {sorted.length === 0 && <tr><td colSpan={6} className="p-4 text-inksoft">Nothing outstanding on contract {contract.number}. All square. 🎉</td></tr>}
+                {sorted.length > 0 && <tr><td colSpan={5} className="p-2.5 font-display font-bold uppercase">Total due</td><td className="p-2.5 text-right font-mono text-base font-bold">{fmt(total)}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -214,6 +229,14 @@ export default function Statements() {
             </div>
           )}
         </>
+      )}
+      {invPreview && org && (
+        <NychaInvoicePrint org={org} number={invPreview.number} date={invPreview.date}
+          contractNumber={invPreview.cNumber} releaseNumber={invPreview.relNum} development={invPreview.dev}
+          workOrder={invPreview.workOrder}
+          items={invPreview.rows.map((it) => ({ line: it.line, code: it.code, category: it.category, description: it.description, unit: it.uom, qty: it.qty, unit_price: it.unit_price }))}
+          onExcel={() => buildInvoiceXlsx({ org, cNumber: invPreview.cNumber, relNum: invPreview.relNum, workOrder: invPreview.workOrder, dev: invPreview.dev, number: invPreview.number, date: invPreview.date, rows: invPreview.rows })}
+          close={() => setInvPreview(null)} />
       )}
       {contracts.length === 0 && <div className="text-sm text-inksoft">No active statements — nothing is currently owed on any contract. Releases you haven&apos;t been paid for show up here automatically.</div>}
     </div>

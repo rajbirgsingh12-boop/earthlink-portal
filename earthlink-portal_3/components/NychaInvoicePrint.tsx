@@ -13,7 +13,7 @@ interface Props {
   org: Org; number: string; date: string;
   contractNumber: string; releaseNumber: string; development: string;
   workOrder?: string; periodFrom?: string | null; periodTo?: string | null;
-  items: NychaItem[]; close: () => void;
+  items: NychaItem[]; close: () => void; onExcel?: () => void;
 }
 
 export default function NychaInvoicePrint(p: Props) {
@@ -107,6 +107,7 @@ export default function NychaInvoicePrint(p: Props) {
         </div>
       </div>
       <div className="no-print mx-auto mt-3 flex max-w-4xl justify-end gap-2">
+        {p.onExcel && <button className="btn bg-white" onClick={p.onExcel}>Download Excel</button>}
         <button className="btn bg-white" onClick={() => window.print()}>Print / Save as PDF</button>
         <button className="btn btn-ghost bg-white" onClick={p.close}>Close</button>
       </div>

@@ -10,6 +10,8 @@ import { parseReleasePdfText, type ReleaseItem } from "@/lib/parseRelease";
 import { prettyDate, type Org } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged } from "@/lib/labor";
 import ContractPicker from "@/components/ContractPicker";
+import NychaInvoicePrint from "@/components/NychaInvoicePrint";
+import { gatherReleaseDoc, buildInvoiceXlsx, type DocRow } from "@/lib/releaseDoc";
 
 type Filter = "all" | "chase" | "payroll" | "canceled" | "hours";
 type PriceRow = { code: string; category: string; description: string; unit: string; unit_price: number };
@@ -118,6 +120,7 @@ export default function Releases() {
   const attachInputRef = useRef<HTMLInputElement>(null);
   const [sosView, setSosView] = useState<{ relNum: string; ticket: string; cNumber: string; dev: string; addr: string; stair: string; apt: string; rows: SosRow[]; total: number } | null>(null);
   const [sosReady, setSosReady] = useState<Set<string>>(new Set());
+  const [invPreview, setInvPreview] = useState<{ number: string; date: string; cNumber: string; relNum: string; dev: string; workOrder: string; rows: DocRow[] } | null>(null);
 
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
 
@@ -242,6 +245,22 @@ export default function Releases() {
       }
     }
     toggle(r, { payroll_done: !r.payroll_done });
+  };
+
+  // ---------- NYCHA Standard Invoice ----------
+  const genInvoice = async (r: Release) => {
+    setBusy(true);
+    const c = contracts.find((x) => x.id === active);
+    const d = await gatherReleaseDoc(active, r);
+    setBusy(false);
+    if (d.rows.length === 0) { flash("No line items for this release — make a walk sheet for it, or import the release PDF"); return; }
+    const today = new Date().toISOString().slice(0, 10);
+    if (!r.invoice_sent) {
+      // generating the invoice records the sent date (feeds the statement aging)
+      await sb().from("releases").update({ invoice_sent: today }).eq("id", r.id);
+      setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: today } : x)));
+    }
+    setInvPreview({ number: `${c?.number || ""}-${r.rel_number}`, date: today, cNumber: c?.number || "", relNum: r.rel_number, dev: d.dev, workOrder: r.ticket || "", rows: d.rows });
   };
 
   // ---------- Statement of Services (NYCHA form 042.726) ----------
@@ -906,6 +925,7 @@ export default function Releases() {
                 </td>
                 <td className="p-2.5">
                   <div className="flex items-center justify-end gap-2 whitespace-nowrap">
+                    {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-work underline" title="NYCHA invoice" onClick={() => genInvoice(r)}>INV</button>}
                     {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-carbon underline" title="Statement of Services" onClick={() => genSOS(r)}>SOS</button>}
                     <button className="text-inksoft" title="Documents" onClick={() => setAttachRel(r)}>📎{(r.attachments || []).length > 0 ? <span className="font-mono text-[10px]">{(r.attachments || []).length}</span> : null}</button>
                     <button className={r.canceled ? "text-ok" : "text-alert"} title={r.canceled ? "Restore" : "Mark canceled"} onClick={() => toggle(r, { canceled: !r.canceled })}>{r.canceled ? "↺" : "✕"}</button>
@@ -945,6 +965,15 @@ export default function Releases() {
       )}
       <input ref={attachInputRef} type="file" className="hidden"
         onChange={(e) => { const f = e.target.files?.[0]; if (f && attachRel) attachFile(attachRel, f); e.target.value = ""; }} />
+
+      {invPreview && org && (
+        <NychaInvoicePrint org={org} number={invPreview.number} date={invPreview.date}
+          contractNumber={invPreview.cNumber} releaseNumber={invPreview.relNum} development={invPreview.dev}
+          workOrder={invPreview.workOrder}
+          items={invPreview.rows.map((it) => ({ line: it.line, code: it.code, category: it.category, description: it.description, unit: it.uom, qty: it.qty, unit_price: it.unit_price }))}
+          onExcel={() => buildInvoiceXlsx({ org, cNumber: invPreview.cNumber, relNum: invPreview.relNum, workOrder: invPreview.workOrder, dev: invPreview.dev, number: invPreview.number, date: invPreview.date, rows: invPreview.rows })}
+          close={() => setInvPreview(null)} />
+      )}
 
       {sosView && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">

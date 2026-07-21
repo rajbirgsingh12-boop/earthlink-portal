@@ -16,10 +16,20 @@ export default function Statements() {
   const today = new Date().toISOString().slice(0, 10);
 
   useEffect(() => {
-    sb().from("contracts").select("id,number,name").order("number").then(({ data }) => {
+    (async () => {
+      const { data } = await sb().from("contracts").select("id,number,name").order("number");
       const cs = (data || []) as Contract[];
-      setContracts(cs); if (cs[0]) setSel(cs[0].id);
-    });
+      // only contracts with an active statement (something still owed)
+      const { data: rel } = await sb().from("releases").select("contract_id,amount,received,canceled");
+      const open = new Set(
+        ((rel || []) as { contract_id: string; amount: number; received: boolean; canceled: boolean }[])
+          .filter((r) => !r.canceled && !r.received && Number(r.amount) > 0)
+          .map((r) => r.contract_id)
+      );
+      const activeContracts = cs.filter((c) => open.has(c.id));
+      setContracts(activeContracts);
+      if (activeContracts[0]) setSel(activeContracts[0].id);
+    })();
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
   }, []);
 
@@ -190,7 +200,7 @@ export default function Statements() {
           )}
         </>
       )}
-      {contracts.length === 0 && <div className="text-sm text-inksoft">Statements build themselves from each contract&apos;s outstanding releases. Nothing here until a contract exists.</div>}
+      {contracts.length === 0 && <div className="text-sm text-inksoft">No active statements — nothing is currently owed on any contract. Releases you haven&apos;t been paid for show up here automatically.</div>}
     </div>
   );
 }

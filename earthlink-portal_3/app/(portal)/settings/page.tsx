@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { sb } from "@/lib/supabase";
 import type { Org } from "@/lib/docs";
+import type { Profile, Role } from "@/lib/types";
 
 const FIELDS: [keyof Org, string][] = [
   ["company", "Company name"], ["address1", "Street address"], ["address2", "City, State ZIP"],
@@ -10,17 +11,43 @@ const FIELDS: [keyof Org, string][] = [
 
 export default function Settings() {
   const [org, setOrg] = useState<Org | null>(null);
+  const [me, setMe] = useState<Profile | null>(null);
+  const [people, setPeople] = useState<Profile[]>([]);
   const [msg, setMsg] = useState("");
-  useEffect(() => { sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org)); }, []);
+  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2000); };
+
+  const loadUsers = async () => {
+    const { data: { user } } = await sb().auth.getUser();
+    if (!user) return;
+    const { data: p } = await sb().from("profiles").select("id,name,role").eq("id", user.id).single();
+    setMe(p as Profile);
+    if ((p as Profile)?.role === "admin") {
+      const { data: all } = await sb().from("profiles").select("id,name,role").order("name");
+      setPeople((all || []) as Profile[]);
+    }
+  };
+  useEffect(() => {
+    sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
+    loadUsers();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const save = async (k: keyof Org, v: string) => {
     if (!org) return;
     const { error } = await sb().from("org").update({ [k]: v }).eq("id", 1);
-    setMsg(error ? error.message : "Saved"); setTimeout(() => setMsg(""), 2000);
+    flash(error ? error.message : "Saved");
   };
+  const setRole = async (id: string, role: Role) => {
+    const { error } = await sb().from("profiles").update({ role }).eq("id", id);
+    flash(error ? error.message : "Role updated");
+    loadUsers();
+  };
+
   if (!org) return <div className="text-sm text-inksoft">Loading…</div>;
   return (
     <div>
       <div className="mb-3 font-display text-2xl font-bold uppercase">Settings</div>
+
+      <div className="mb-2 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Company letterhead</div>
       <div className="card grid gap-3 p-4 md:grid-cols-2">
         {FIELDS.map(([k, label]) => (
           <div key={k}>
@@ -29,7 +56,27 @@ export default function Settings() {
           </div>
         ))}
       </div>
-      <div className="mt-3 text-xs text-inksoft">Fill the letterhead once — every proposal, invoice, and statement carries it. Fields save when you tap out of them.</div>
+      <div className="mt-2 text-xs text-inksoft">Every proposal, SOS, and statement carries this letterhead. Fields save when you tap out of them.</div>
+
+      {me?.role === "admin" && (
+        <>
+          <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Users &amp; roles</div>
+          <div className="card divide-y divide-rulesoft">
+            {people.map((p) => (
+              <div key={p.id} className="flex items-center justify-between gap-3 p-3">
+                <div className="text-sm font-medium">{p.name || p.id.slice(0, 8)}{p.id === me.id && <span className="ml-2 text-[11px] text-inksoft">(you)</span>}</div>
+                <select className="field max-w-[160px]" value={p.role} onChange={(e) => setRole(p.id, e.target.value as Role)}>
+                  {["admin", "office", "foreman", "accountant"].map((r) => <option key={r} value={r}>{r}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 text-xs text-inksoft">
+            To add a person: Supabase dashboard → Authentication → Add user (email + password). They appear here after first sign-in — new accounts start as foreman.
+          </div>
+        </>
+      )}
+
       {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
     </div>
   );

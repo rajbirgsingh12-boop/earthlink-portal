@@ -24,7 +24,6 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
   } else if (role === "accountant") {
     tabs.push(["/payroll", "Payroll"], ["/statements", "Statements"]);
   }
-  if (role === "admin") tabs.push(["/admin", "Users"]);
 
   return (
     <div className="min-h-screen">
@@ -44,7 +43,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
         <div className="mx-auto flex max-w-5xl">
           {tabs.map(([href, label]) => (
             <a key={href} href={href}
-              className={`whitespace-nowrap px-4 py-3 font-display text-[15px] font-semibold uppercase tracking-wider ${path === href ? "border-b-[3px] border-work text-work" : "text-inksoft"}`}>
+              className={`whitespace-nowrap px-4 py-3 font-display text-[15px] font-semibold uppercase tracking-wider transition-colors duration-150 ${path === href ? "border-b-[3px] border-work text-work" : "text-inksoft hover:text-ink"}`}>
               {label}
             </a>
           ))}

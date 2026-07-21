@@ -335,3 +335,35 @@ alter table proposal_items add column if not exists line int default 0;
 
 -- ===== Phase 4c: worker payment tracking =====
 alter table timesheet_weeks add column if not exists paid_map jsonb default '{}'::jsonb;
+
+-- ===== Phase 4d: PACT job tracking =====
+-- (same statements as upgrade_pact.sql — idempotent)
+  id uuid primary key default gen_random_uuid(),
+  partner text default '',
+  development text default '',
+  job_number text default '',
+  description text default '',
+  amount numeric default 0,
+  approved boolean default false,
+  work_done boolean default false,
+  invoice_sent date,
+  received boolean default false,
+  paid_date date,
+  canceled boolean default false,
+  attachments jsonb default '[]'::jsonb,
+  notes text default '',
+  created_at timestamptz default now()
+);
+alter table pact_jobs enable row level security;
+drop policy if exists "pact_jobs read" on pact_jobs;
+create policy "pact_jobs read" on pact_jobs for select
+  using (my_role() in ('admin','office','accountant'));
+drop policy if exists "pact_jobs ins" on pact_jobs;
+create policy "pact_jobs ins" on pact_jobs for insert
+  with check (my_role() in ('admin','office'));
+drop policy if exists "pact_jobs upd" on pact_jobs;
+create policy "pact_jobs upd" on pact_jobs for update
+  using (my_role() in ('admin','office'));
+drop policy if exists "pact_jobs del" on pact_jobs;
+create policy "pact_jobs del" on pact_jobs for delete
+  using (my_role() in ('admin','office'));

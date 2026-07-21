@@ -4,6 +4,7 @@ import * as XLSX from "xlsx";
 import { sb } from "@/lib/supabase";
 import { fmt, parseNum } from "@/lib/format";
 import type { Contract } from "@/lib/types";
+import ContractPicker from "@/components/ContractPicker";
 
 interface Item { id: string; code: string; description: string; unit: string; unit_price: number; category: string; line?: number; }
 
@@ -142,10 +143,7 @@ export default function Items() {
       </div>
       <div className="mb-3">
         <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Which price book?</div>
-        <select className="field" value={sel} onChange={(e) => setSel(e.target.value)}>
-          {contracts.map((c) => <option key={c.id} value={c.id}>Contract {c.number}{c.name && c.name !== c.number ? ` — ${c.name}` : ""}</option>)}
-          <option value="">General (no contract)</option>
-        </select>
+        <ContractPicker contracts={contracts} value={sel} onChange={setSel} extra={[{ id: "", label: "General (no contract)" }]} />
         {isContract && <div className="mt-1 text-xs text-inksoft">Uploads replace this contract&apos;s book — re-uploading never duplicates. Walk sheets and invoices for this contract use these lines and prices.</div>}
       </div>
       {confirmWipe && (

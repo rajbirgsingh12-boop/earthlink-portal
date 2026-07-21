@@ -9,6 +9,7 @@ import type { Contract, Release } from "@/lib/types";
 import { parseReleasePdfText, type ReleaseItem } from "@/lib/parseRelease";
 import { prettyDate, type Org } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged } from "@/lib/labor";
+import ContractPicker from "@/components/ContractPicker";
 
 type Filter = "all" | "chase" | "payroll" | "canceled" | "hours";
 type PriceRow = { code: string; category: string; description: string; unit: string; unit_price: number };
@@ -799,9 +800,7 @@ export default function Releases() {
       )}
 
       {contracts.length > 1 && (
-        <select className="field mb-3" value={active} onChange={(e) => { setActive(e.target.value); setLimit(100); }}>
-          {contracts.map((c) => <option key={c.id} value={c.id}>{c.number}{c.name && c.name !== c.number ? ` — ${c.name}` : ""}</option>)}
-        </select>
+        <div className="mb-3"><ContractPicker contracts={contracts} value={active} onChange={(id) => { setActive(id); setLimit(100); }} /></div>
       )}
 
       {rows.length > 0 && (

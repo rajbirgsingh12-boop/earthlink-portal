@@ -6,6 +6,7 @@ import { sb } from "@/lib/supabase";
 import { fmt } from "@/lib/format";
 import { Org, prettyDate } from "@/lib/docs";
 import type { Contract, Release } from "@/lib/types";
+import ContractPicker from "@/components/ContractPicker";
 
 export default function Statements() {
   const [contracts, setContracts] = useState<Contract[]>([]);
@@ -99,9 +100,7 @@ export default function Statements() {
   return (
     <div>
       <div className="mb-3 font-display text-2xl font-bold uppercase">Statements</div>
-      <select className="field mb-3" value={sel} onChange={(e) => setSel(e.target.value)}>
-        {contracts.map((c) => <option key={c.id} value={c.id}>Contract {c.number}{c.name && c.name !== c.number ? ` — ${c.name}` : ""}</option>)}
-      </select>
+      <div className="mb-3"><ContractPicker contracts={contracts} value={sel} onChange={setSel} /></div>
       {contract && (
         <>
           <div className="card overflow-x-auto">

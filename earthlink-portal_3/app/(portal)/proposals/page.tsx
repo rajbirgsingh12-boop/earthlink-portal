@@ -8,6 +8,7 @@ import Stamp from "@/components/Stamp";
 import DocPrint from "@/components/DocPrint";
 import { LineItem, Org, nextNumber, grandTotal } from "@/lib/docs";
 import type { Contract } from "@/lib/types";
+import ContractPicker from "@/components/ContractPicker";
 
 interface Proposal {
   id: string; number: string; client_name: string; job: string; date: string; tax_pct: number; status: string; notes: string;
@@ -364,9 +365,7 @@ export default function Proposals() {
             <input className="field" placeholder="e.g. Queensbridge 41st Ave Apt 3F move-out" value={doc.job || ""}
               onChange={(e) => setDoc({ ...doc, job: e.target.value })} onBlur={(e) => saveDoc({ job: e.target.value }, true)} /></div>
           <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Contract / PO</div>
-            <select className="field" value={doc.contract_id} onChange={(e) => saveDoc({ contract_id: e.target.value }, true)}>
-              {contracts.map((x) => <option key={x.id} value={x.id}>{x.number}</option>)}
-            </select></div>
+            <ContractPicker contracts={contracts} value={doc.contract_id || ""} onChange={(id) => saveDoc({ contract_id: id }, true)} /></div>
           {HEAD_FIELDS.map(([k, label]) => (
             <div key={k}><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
               <input className="field" type={/date/.test(k) ? "date" : "text"} value={doc[k] || ""}
@@ -525,9 +524,7 @@ export default function Proposals() {
       {pickOpen && (
         <div className="card mb-3 border-work p-4">
           <div className="mb-2 text-[11px] uppercase tracking-widest text-inksoft">Which contract is this walk for?</div>
-          <select className="field mb-3" value={pickId} onChange={(e) => setPickId(e.target.value)}>
-            {contracts.map((x) => <option key={x.id} value={x.id}>{x.number}{x.name && x.name !== x.number ? ` — ${x.name}` : ""}</option>)}
-          </select>
+          <div className="mb-3"><ContractPicker contracts={contracts} value={pickId} onChange={setPickId} /></div>
           <div className="flex gap-2">
             <button className="btn btn-primary" onClick={newWalkSheet}>Start walk sheet</button>
             <button className="btn btn-ghost" onClick={() => setPickOpen(false)}>Cancel</button>

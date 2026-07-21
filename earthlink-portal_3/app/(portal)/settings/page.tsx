@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { sb } from "@/lib/supabase";
 import type { Org } from "@/lib/docs";
-import type { Profile, Role } from "@/lib/types";
+import type { Contract, Profile, Role } from "@/lib/types";
 
 const FIELDS: [keyof Org, string][] = [
   ["company", "Company name"], ["address1", "Street address"], ["address2", "City, State ZIP"],
@@ -27,10 +27,19 @@ export default function Settings() {
       setPeople((all || []) as Profile[]);
     }
   };
+  const [contracts, setContracts] = useState<Contract[]>([]);
   useEffect(() => {
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
+    sb().from("contracts").select("id,number,name").order("number").then(({ data }) => setContracts((data || []) as Contract[]));
     loadUsers();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const renameContract = async (c: Contract, name: string) => {
+    const clean = name.trim() || c.number; // blank = back to the number
+    const { error } = await sb().from("contracts").update({ name: clean }).eq("id", c.id);
+    flash(error ? error.message : "Contract name saved");
+    setContracts((prev) => prev.map((x) => (x.id === c.id ? { ...x, name: clean } : x)));
+  };
 
   const save = async (k: keyof Org, v: string) => {
     if (!org) return;
@@ -86,6 +95,22 @@ export default function Settings() {
         ))}
       </div>
       <div className="mt-2 text-xs text-inksoft">Every proposal, SOS, and statement carries this letterhead. Fields save when you tap out of them.</div>
+
+      {contracts.length > 0 && (
+        <>
+          <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Contract names</div>
+          <div className="card divide-y divide-rulesoft">
+            {contracts.map((c) => (
+              <div key={c.id} className="flex items-center gap-3 p-3">
+                <span className="w-28 shrink-0 font-mono text-[13px] font-semibold">{c.number}</span>
+                <input className="field" placeholder={`e.g. Queensbridge IDIQ`} defaultValue={c.name && c.name !== c.number ? c.name : ""}
+                  onBlur={(e) => renameContract(c, e.target.value)} />
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 text-xs text-inksoft">Give contracts a name you recognize — dropdowns everywhere show the name instead of just the number. Leave blank to show the number.</div>
+        </>
+      )}
 
       {me?.role === "admin" && (
         <>

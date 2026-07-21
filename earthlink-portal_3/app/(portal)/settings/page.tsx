@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
 import { sb } from "@/lib/supabase";
 import type { Org } from "@/lib/docs";
 import type { Profile, Role } from "@/lib/types";
@@ -42,6 +43,34 @@ export default function Settings() {
     loadUsers();
   };
 
+  const [addOpen, setAddOpen] = useState(false);
+  const [newUser, setNewUser] = useState({ name: "", email: "", password: "", role: "foreman" as Role });
+  const [adding, setAdding] = useState(false);
+  const addUser = async () => {
+    if (!newUser.email || newUser.password.length < 6) { flash("Enter an email and a password of at least 6 characters"); return; }
+    setAdding(true);
+    // separate throwaway client so creating the account never touches YOUR login
+    const temp = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+      { auth: { persistSession: false, autoRefreshToken: false } }
+    );
+    const { data, error } = await temp.auth.signUp({ email: newUser.email.trim(), password: newUser.password });
+    if (error) { setAdding(false); flash(error.message); return; }
+    const newId = data.user?.id;
+    if (newId) {
+      // the profile row is created automatically; set the display name and role
+      const patch: { name?: string; role?: Role } = {};
+      if (newUser.name.trim()) patch.name = newUser.name.trim();
+      if (newUser.role !== "foreman") patch.role = newUser.role;
+      if (Object.keys(patch).length > 0) await sb().from("profiles").update(patch).eq("id", newId);
+    }
+    setAdding(false); setAddOpen(false);
+    setNewUser({ name: "", email: "", password: "", role: "foreman" });
+    flash(`Account created — they sign in with that email and password${data.session ? "" : " (if they can't log in yet, they may need to click the confirmation email, or turn off “Confirm email” in Supabase → Authentication → Providers)"}`);
+    loadUsers();
+  };
+
   if (!org) return <div className="text-sm text-inksoft">Loading…</div>;
   return (
     <div>
@@ -60,7 +89,31 @@ export default function Settings() {
 
       {me?.role === "admin" && (
         <>
-          <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Users &amp; roles</div>
+          <div className="mb-2 mt-6 flex items-baseline justify-between">
+            <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Users &amp; roles</div>
+            <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => setAddOpen(!addOpen)}>+ Add user</button>
+          </div>
+          {addOpen && (
+            <div className="card mb-3 border-work p-3.5">
+              <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
+                <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Name</div>
+                  <input className="field" value={newUser.name} onChange={(e) => setNewUser({ ...newUser, name: e.target.value })} /></div>
+                <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Email</div>
+                  <input className="field" inputMode="email" autoCapitalize="none" value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} /></div>
+                <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Password</div>
+                  <input className="field" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} /></div>
+                <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Role</div>
+                  <select className="field" value={newUser.role} onChange={(e) => setNewUser({ ...newUser, role: e.target.value as Role })}>
+                    {["foreman", "office", "accountant", "admin"].map((r) => <option key={r} value={r}>{r}</option>)}
+                  </select></div>
+              </div>
+              <div className="mt-3 flex gap-2">
+                <button className="btn btn-primary" onClick={addUser} disabled={adding}>{adding ? "Creating…" : "Create account"}</button>
+                <button className="btn btn-ghost" onClick={() => setAddOpen(false)}>Cancel</button>
+              </div>
+              <div className="mt-2 text-xs text-inksoft">Give them this email + password to sign in. You can change their role any time below.</div>
+            </div>
+          )}
           <div className="card divide-y divide-rulesoft">
             {people.map((p) => (
               <div key={p.id} className="flex items-center justify-between gap-3 p-3">

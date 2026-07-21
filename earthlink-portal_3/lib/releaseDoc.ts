@@ -60,7 +60,7 @@ export function buildInvoiceXlsx(a: {
   const asNum = (s: string) => (/^\d+$/.test(s) ? Number(s) : s);
   const aoa: (string | number)[][] = [];
   aoa.push(["Standard Invoice"]);                                                               // r0
-  aoa.push(["Date:", prettyDate(a.date), "", "", "Invoice #", a.number]);                       // r1
+  aoa.push([`Date: ${prettyDate(a.date)}`, "", "", "", `Invoice # ${a.number}`]);               // r1
   aoa.push([]);                                                                                 // r2
   aoa.push(["Original To:", "", "", "", "From:"]);                                              // r3
   aoa.push(["NEW YORK CITY HOUSING AUTHORITY", "", "", "", `VENDOR NAME: ${(a.org.company || "").toUpperCase()}`]);
@@ -87,6 +87,8 @@ export function buildInvoiceXlsx(a: {
   ws["!cols"] = [{ wch: 12 }, { wch: 15 }, { wch: 38 }, { wch: 90 }, { wch: 18 }, { wch: 16 }, { wch: 14 }, { wch: 18 }];
   ws["!merges"] = [
     { s: { r: 0, c: 0 }, e: { r: 0, c: 7 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 2 } },                            // Date: … spans A:C
+    { s: { r: 1, c: 4 }, e: { r: 1, c: 7 } },                            // Invoice # … spans E:H
     ...[4, 5, 6, 7].map((r) => ({ s: { r, c: 4 }, e: { r, c: 7 } })),   // FROM block values span E:H
     { s: { r: 11, c: 5 }, e: { r: 11, c: 7 } },                          // development value
     { s: { r: 12, c: 5 }, e: { r: 12, c: 7 } },                          // work order value
@@ -98,8 +100,8 @@ export function buildInvoiceXlsx(a: {
   const cellAt = (r: number, c: number) => ws[XLSX.utils.encode_cell({ r, c })] || (ws[XLSX.utils.encode_cell({ r, c })] = { t: "s", v: "" });
   cellAt(0, 0).s = { font: { bold: true, sz: 14 }, alignment: { horizontal: "center", vertical: "center" }, fill: shade, border: { top: { style: "medium", color: { rgb: "000000" } }, bottom: thin, left: thin, right: thin } };
   // Date / Invoice # line
-  cellAt(1, 0).s = { font: { bold: true } }; cellAt(1, 4).s = { font: { bold: true } };
-  cellAt(1, 5).s = { font: { bold: true }, border: { bottom: thin } };
+  cellAt(1, 0).s = { font: { bold: true } };
+  cellAt(1, 4).s = { font: { bold: true }, alignment: { horizontal: "right" } };
   // section labels
   for (const [r, c] of [[3, 0], [3, 4], [10, 0], [14, 0]] as [number, number][]) cellAt(r, c).s = { font: { bold: true }, fill: shade, border: box };
   // contract / release / development / work order / period labels + boxed values

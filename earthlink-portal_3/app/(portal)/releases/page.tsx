@@ -117,6 +117,7 @@ export default function Releases() {
   const [attachRel, setAttachRel] = useState<Release | null>(null);
   const attachInputRef = useRef<HTMLInputElement>(null);
   const [sosView, setSosView] = useState<{ relNum: string; ticket: string; cNumber: string; dev: string; addr: string; stair: string; apt: string; rows: SosRow[]; total: number } | null>(null);
+  const [sosReady, setSosReady] = useState<Set<string>>(new Set());
 
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
 
@@ -147,6 +148,22 @@ export default function Releases() {
     all.sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
     setRows(all);
     setBusy(false);
+    // which releases can produce an SOS? those with imported line items,
+    // or a walk sheet (with quantities) whose Release # matches
+    const ready = new Set<string>();
+    const ids = all.map((r) => r.id);
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data: its } = await sb().from("release_items").select("release_id").in("release_id", ids.slice(i, i + 200));
+      ((its || []) as { release_id: string }[]).forEach((it) => ready.add(it.release_id));
+    }
+    const { data: props } = await sb().from("proposals").select("release_number,qty_map").eq("contract_id", cid);
+    const walkNums = new Set(
+      ((props || []) as { release_number?: string; qty_map?: Record<string, number> | null }[])
+        .filter((p) => p.release_number && p.qty_map && Object.keys(p.qty_map).length > 0)
+        .map((p) => String(p.release_number).trim())
+    );
+    all.forEach((r) => { if (walkNums.has(String(r.rel_number).trim())) ready.add(r.id); });
+    setSosReady(ready);
   };
   useEffect(() => { loadRows(active); }, [active]);
 
@@ -889,7 +906,7 @@ export default function Releases() {
                 </td>
                 <td className="p-2.5">
                   <div className="flex items-center justify-end gap-2 whitespace-nowrap">
-                    {!r.canceled && <button className="font-mono text-xs font-semibold text-carbon underline" title="Download Statement of Services" onClick={() => genSOS(r)}>SOS</button>}
+                    {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-carbon underline" title="Statement of Services" onClick={() => genSOS(r)}>SOS</button>}
                     <button className="text-inksoft" title="Documents" onClick={() => setAttachRel(r)}>📎{(r.attachments || []).length > 0 ? <span className="font-mono text-[10px]">{(r.attachments || []).length}</span> : null}</button>
                     <button className={r.canceled ? "text-ok" : "text-alert"} title={r.canceled ? "Restore" : "Mark canceled"} onClick={() => toggle(r, { canceled: !r.canceled })}>{r.canceled ? "↺" : "✕"}</button>
                   </div>

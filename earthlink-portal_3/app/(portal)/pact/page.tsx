@@ -30,6 +30,8 @@ const unitFor = (desc: string): string => {
 export default function Pact() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [org, setOrg] = useState<Org | null>(null);
+  // Admin 1 (admin) sees everything; Admin 2 (office) sees POs & photos but no invoices
+  const [canInvoice, setCanInvoice] = useState(false);
   const [q, setQ] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [draft, setDraft] = useState({ ...BLANK });
@@ -62,6 +64,12 @@ export default function Pact() {
   useEffect(() => {
     load();
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
+    (async () => {
+      const { data: { user } } = await sb().auth.getUser();
+      if (!user) return;
+      const { data: prof } = await sb().from("profiles").select("role").eq("id", user.id).single();
+      setCanInvoice((prof as { role?: string } | null)?.role === "admin");
+    })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // live: PACT jobs changing anywhere refresh the list without a reload
@@ -352,7 +360,7 @@ export default function Pact() {
         </div>
       )}
 
-      {jobs.length > 0 && (
+      {jobs.length > 0 && canInvoice && (
         <div className="mb-3 grid grid-cols-3 gap-2">
           {([["PACT total", fmt(tot), "text-ink"], ["Received", fmt(rec), "text-ok"], ["Outstanding", fmt(tot - rec), "text-work"]] as [string, string, string][]).map(([l, v, cls]) => (
             <div key={l} className="card p-3">
@@ -389,7 +397,7 @@ export default function Pact() {
                 })()}
               </button>
               <div className="flex shrink-0 items-center gap-2">
-                <span className="font-mono text-sm font-semibold">{fmt(Number(j.amount) || invTotal(j))}</span>
+                {canInvoice && <span className="font-mono text-sm font-semibold">{fmt(Number(j.amount) || invTotal(j))}</span>}
                 <button className="text-inksoft" title="Documents & photos" onClick={() => setAttachJob(j)}>📎{(j.attachments || []).length > 0 ? <span className="font-mono text-[10px]">{(j.attachments || []).length}</span> : null}</button>
                 <button className={j.canceled ? "text-ok" : "text-alert"} title={j.canceled ? "Restore" : "Cancel job"} onClick={() => patch(j, { canceled: !j.canceled })}>{j.canceled ? "↺" : "✕"}</button>
               </div>
@@ -397,8 +405,8 @@ export default function Pact() {
             {openId === j.id && !j.canceled && (
               <div className="mt-3 border-t border-rulesoft pt-3">
                 <div className="mb-3 flex flex-wrap gap-2">
-                  <button className="btn px-3 py-1.5 text-[13px]" onClick={() => setInvJob(j)}>Invoice</button>
-                  <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => buildPackage(j)} disabled={busy}>📦 Package</button>
+                  {canInvoice && <button className="btn px-3 py-1.5 text-[13px]" onClick={() => setInvJob(j)}>Invoice</button>}
+                  {canInvoice && <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => buildPackage(j)} disabled={busy}>📦 Package</button>}
                   <button onClick={() => patch(j, { approved: !j.approved })}><Stamp label={j.approved ? "APPROVED ✓" : "MARK APPROVED"} tone={j.approved ? "ok" : "mute"} /></button>
                   <button onClick={() => patch(j, { work_done: !j.work_done })}><Stamp label={j.work_done ? "WORK DONE ✓" : "MARK WORK DONE"} tone={j.work_done ? "ok" : "mute"} /></button>
                   <button onClick={() => patch(j, j.received ? { received: false, paid_date: null } : { received: true, paid_date: today() })}><Stamp label={j.received ? `PAID ${prettyDate(j.paid_date)}` : "MARK PAID"} tone={j.received ? "ok" : "work"} /></button>
@@ -418,7 +426,7 @@ export default function Pact() {
       </div>
 
       {/* ---------- invoice editor ---------- */}
-      {invJob && (() => {
+      {invJob && canInvoice && (() => {
         const j = jobs.find((x) => x.id === invJob.id) || invJob;
         const items = itemsOf(j);
         return (

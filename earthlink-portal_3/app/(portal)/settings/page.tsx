@@ -6,6 +6,13 @@ import { sb } from "@/lib/supabase";
 import type { Org } from "@/lib/docs";
 import type { Contract, Profile, Role } from "@/lib/types";
 
+// the two roles: Admin 1 sees everything; Admin 2 sees everything except
+// PACT invoices (internally these are the existing admin/office roles)
+const ROLE_OPTIONS: [Role, string][] = [
+  ["admin", "Admin 1 — full access"],
+  ["office", "Admin 2 — no PACT invoices"],
+];
+
 const FIELDS: [keyof Org, string][] = [
   ["company", "Company name"], ["address1", "Street address"], ["address2", "City, State ZIP"],
   ["phone", "Phone"], ["email", "Email"], ["license", "License # (shows on documents)"], ["terms", "Payment terms (e.g. Net 30)"],
@@ -60,7 +67,7 @@ export default function Settings() {
   };
 
   const [addOpen, setAddOpen] = useState(false);
-  const [newUser, setNewUser] = useState({ name: "", email: "", password: "", role: "foreman" as Role });
+  const [newUser, setNewUser] = useState({ name: "", email: "", password: "", role: "office" as Role });
   const [adding, setAdding] = useState(false);
   const addUser = async () => {
     if (!newUser.email || newUser.password.length < 6) { flash("Enter an email and a password of at least 6 characters"); return; }
@@ -78,11 +85,11 @@ export default function Settings() {
       // the profile row is created automatically; set the display name and role
       const patch: { name?: string; role?: Role } = {};
       if (newUser.name.trim()) patch.name = newUser.name.trim();
-      if (newUser.role !== "foreman") patch.role = newUser.role;
+      patch.role = newUser.role;
       if (Object.keys(patch).length > 0) await sb().from("profiles").update(patch).eq("id", newId);
     }
     setAdding(false); setAddOpen(false);
-    setNewUser({ name: "", email: "", password: "", role: "foreman" });
+    setNewUser({ name: "", email: "", password: "", role: "office" });
     flash(`Account created — they sign in with that email and password${data.session ? "" : " (if they can't log in yet, they may need to click the confirmation email, or turn off “Confirm email” in Supabase → Authentication → Providers)"}`);
     loadUsers();
   };
@@ -136,7 +143,7 @@ export default function Settings() {
                   <input className="field" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} /></div>
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Role</div>
                   <select className="field" value={newUser.role} onChange={(e) => setNewUser({ ...newUser, role: e.target.value as Role })}>
-                    {["foreman", "office", "accountant", "admin"].map((r) => <option key={r} value={r}>{r}</option>)}
+                    {ROLE_OPTIONS.map(([r, label]) => <option key={r} value={r}>{label}</option>)}
                   </select></div>
               </div>
               <div className="mt-3 flex gap-2">
@@ -150,8 +157,9 @@ export default function Settings() {
             {people.map((p) => (
               <div key={p.id} className="flex items-center justify-between gap-3 p-3">
                 <div className="text-sm font-medium">{p.name || p.id.slice(0, 8)}{p.id === me.id && <span className="ml-2 text-[11px] text-inksoft">(you)</span>}</div>
-                <select className="field max-w-[160px]" value={p.role} onChange={(e) => setRole(p.id, e.target.value as Role)}>
-                  {["admin", "office", "foreman", "accountant"].map((r) => <option key={r} value={r}>{r}</option>)}
+                <select className="field max-w-[220px]" value={p.role} onChange={(e) => setRole(p.id, e.target.value as Role)}>
+                  {ROLE_OPTIONS.map(([r, label]) => <option key={r} value={r}>{label}</option>)}
+                  {!ROLE_OPTIONS.some(([r]) => r === p.role) && <option value={p.role}>{p.role} (legacy)</option>}
                 </select>
               </div>
             ))}

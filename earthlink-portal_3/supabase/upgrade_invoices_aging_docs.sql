@@ -55,8 +55,10 @@ drop policy if exists "docs read" on storage.objects;
 create policy "docs read" on storage.objects for select
   using (bucket_id = 'docs' and auth.uid() is not null);
 drop policy if exists "docs write" on storage.objects;
+-- any signed-in user may upload (foremen add job photos); which releases a
+-- foreman can attach to is still limited by the releases-table policies
 create policy "docs write" on storage.objects for insert
-  with check (bucket_id = 'docs' and public.my_role() in ('admin','office'));
+  with check (bucket_id = 'docs' and auth.uid() is not null);
 drop policy if exists "docs delete" on storage.objects;
 create policy "docs delete" on storage.objects for delete
   using (bucket_id = 'docs' and public.my_role() in ('admin','office'));

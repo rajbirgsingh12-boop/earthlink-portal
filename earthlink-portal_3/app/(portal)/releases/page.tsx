@@ -118,6 +118,9 @@ export default function Releases() {
   const [priceBook, setPriceBook] = useState<PriceRow[] | null>(null);
   const [attachRel, setAttachRel] = useState<Release | null>(null);
   const attachInputRef = useRef<HTMLInputElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
+  const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
+  const isImg = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n);
   const [sosView, setSosView] = useState<{ relNum: string; ticket: string; cNumber: string; dev: string; addr: string; stair: string; apt: string; rows: SosRow[]; total: number } | null>(null);
   const [sosReady, setSosReady] = useState<Set<string>>(new Set());
   const [stageData, setStageData] = useState<{ items: Set<string>; walks: Set<string> }>({ items: new Set(), walks: new Set() });
@@ -452,6 +455,36 @@ export default function Releases() {
     if (error || !data) { flash(error?.message || "Couldn't open the file"); return; }
     window.open(data.signedUrl, "_blank");
   };
+
+  const removeAttachment = async (r: Release, path: string) => {
+    await sb().storage.from("docs").remove([path]);
+    const list = (r.attachments || []).filter((a) => a.path !== path);
+    const { error } = await sb().from("releases").update({ attachments: list }).eq("id", r.id);
+    if (error) { flash(error.message); return; }
+    setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, attachments: list } : x)));
+    setAttachRel((prev) => (prev && prev.id === r.id ? { ...prev, attachments: list } : prev));
+  };
+
+  // timestamped job photos straight from the phone camera
+  const addPhotos = async (r: Release, files: File[]) => {
+    for (const [i, f] of files.entries()) {
+      const stamp = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "");
+      const ext = (f.name.match(/\.\w+$/) || [".jpg"])[0];
+      const named = new File([f], `photo_${stamp}${files.length > 1 ? `_${i + 1}` : ""}${ext}`, { type: f.type });
+      await attachFile(r, named);
+    }
+  };
+
+  // thumbnails for the photos in the open panel
+  useEffect(() => {
+    const imgs = (attachRel?.attachments || []).filter((a) => isImg(a.name));
+    if (imgs.length === 0) { setPhotoUrls({}); return; }
+    sb().storage.from("docs").createSignedUrls(imgs.map((a) => a.path), 3600).then(({ data }) => {
+      const m: Record<string, string> = {};
+      (data || []).forEach((d) => { if (d.signedUrl && d.path) m[d.path] = d.signedUrl; });
+      setPhotoUrls(m);
+    });
+  }, [attachRel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------- import ----------
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -976,13 +1009,32 @@ export default function Releases() {
         <div className="fixed inset-0 z-40 overflow-y-auto bg-ink/50 px-2 py-10" onClick={() => setAttachRel(null)}>
           <div className="card mx-auto max-w-md bg-card p-4" onClick={(e) => e.stopPropagation()}>
             <div className="mb-3 font-display text-base font-bold uppercase">Documents · Release {attachRel.rel_number}</div>
-            {(attachRel.attachments || []).length === 0 && <div className="mb-3 text-sm text-inksoft">Nothing attached yet. Release PDFs and proposal sheets imported with “+ From PDF” attach themselves automatically.</div>}
-            {(attachRel.attachments || []).map((a) => (
-              <button key={a.path} className="mb-1.5 block w-full rounded-sm border border-rulesoft p-2.5 text-left text-sm hover:border-work" onClick={() => openAttachment(a.path)}>
-                📄 {a.name}
-              </button>
+            {(attachRel.attachments || []).length === 0 && <div className="mb-3 text-sm text-inksoft">Nothing attached yet. Release PDFs and proposal sheets imported with “+ From PDF” attach themselves automatically — and job photos land here too.</div>}
+            {(attachRel.attachments || []).filter((a) => isImg(a.name)).length > 0 && (
+              <div className="mb-3 grid grid-cols-3 gap-1.5">
+                {(attachRel.attachments || []).filter((a) => isImg(a.name)).map((a) => (
+                  <div key={a.path} className="relative">
+                    <button className="block w-full" onClick={() => openAttachment(a.path)} title={a.name}>
+                      {photoUrls[a.path]
+                        // eslint-disable-next-line @next/next/no-img-element
+                        ? <img src={photoUrls[a.path]} alt={a.name} className="h-24 w-full rounded-sm border border-rulesoft object-cover" />
+                        : <div className="grid h-24 w-full place-items-center rounded-sm border border-rulesoft text-xs text-inksoft">…</div>}
+                    </button>
+                    <button className="absolute right-1 top-1 rounded-sm bg-ink/70 px-1.5 text-xs text-paper" title="Delete photo" onClick={() => removeAttachment(attachRel, a.path)}>✕</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {(attachRel.attachments || []).filter((a) => !isImg(a.name)).map((a) => (
+              <div key={a.path} className="mb-1.5 flex items-center gap-1">
+                <button className="block w-full rounded-sm border border-rulesoft p-2.5 text-left text-sm hover:border-work" onClick={() => openAttachment(a.path)}>
+                  📄 {a.name}
+                </button>
+                <button className="shrink-0 px-1 text-xs text-alert" title="Delete file" onClick={() => removeAttachment(attachRel, a.path)}>✕</button>
+              </div>
             ))}
-            <div className="mt-3 flex gap-2">
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button className="btn btn-primary" onClick={() => photoInputRef.current?.click()} disabled={busy}>📷 Take photo</button>
               <button className="btn" onClick={() => attachInputRef.current?.click()} disabled={busy}>Upload file</button>
               <button className="btn btn-ghost" onClick={() => setAttachRel(null)}>Close</button>
             </div>
@@ -991,6 +1043,8 @@ export default function Releases() {
       )}
       <input ref={attachInputRef} type="file" className="hidden"
         onChange={(e) => { const f = e.target.files?.[0]; if (f && attachRel) attachFile(attachRel, f); e.target.value = ""; }} />
+      <input ref={photoInputRef} type="file" accept="image/*" capture="environment" multiple className="hidden"
+        onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length && attachRel) addPhotos(attachRel, fs); e.target.value = ""; }} />
 
       {invPreview && org && (
         <NychaInvoicePrint org={org} number={invPreview.number} date={invPreview.date}

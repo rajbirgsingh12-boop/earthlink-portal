@@ -14,7 +14,7 @@ import ContractPicker from "@/components/ContractPicker";
 import NychaInvoicePrint from "@/components/NychaInvoicePrint";
 import { gatherReleaseDoc, buildInvoiceXlsx, type DocRow } from "@/lib/releaseDoc";
 
-type Filter = "all" | "chase" | "payroll" | "canceled" | "hours";
+type Filter = "all" | "chase" | "payroll" | "received" | "canceled" | "hours";
 type PriceRow = { code: string; category: string; description: string; unit: string; unit_price: number };
 type SosRow = { line: number; code: string; category: string; description: string; uom: string; qty: number; unit_price: number };
 
@@ -208,9 +208,12 @@ export default function Releases() {
   const prPend = live.filter((r) => !r.payroll_done && !r.received && Number(r.amount) > 0);
   const tot = live.reduce((s, r) => s + Number(r.amount), 0);
 
-  let list = live;
+  const receivedRows = live.filter((r) => r.received);
+  // paid releases are done business — keep the working list clean
+  let list = live.filter((r) => !r.received);
   if (filter === "chase") list = notR;
   if (filter === "payroll") list = prPend;
+  if (filter === "received") list = receivedRows;
   if (filter === "canceled") list = canceledRows;
   if (q) list = list.filter((r) => `${r.rel_number} ${r.location} ${r.buildings} ${r.ticket}`.toLowerCase().includes(q.toLowerCase()));
   const shown = list.slice(0, limit);
@@ -913,7 +916,7 @@ export default function Releases() {
       })()}
 
       <div className="mb-3 flex flex-wrap gap-2">
-        {([["all", "All"], ["chase", `Chase list (${notR.length})`], ["payroll", `Payroll to submit (${prPend.length})`], ["canceled", `Canceled (${canceledRows.length})`], ["hours", "Payroll check"]] as [Filter, string][]).map(([f, l]) => (
+        {([["all", "Open"], ["chase", `Chase list (${notR.length})`], ["payroll", `Payroll to submit (${prPend.length})`], ["received", `Received (${receivedRows.length})`], ["canceled", `Canceled (${canceledRows.length})`], ["hours", "Payroll check"]] as [Filter, string][]).map(([f, l]) => (
           <button key={f} className={`btn ${filter === f ? "btn-primary" : "btn-ghost"} px-3 py-1.5 text-[13px]`} onClick={() => { setFilter(f); setLimit(100); if (f === "hours" && !logged) loadLogged(); }}>{l}</button>
         ))}
       </div>

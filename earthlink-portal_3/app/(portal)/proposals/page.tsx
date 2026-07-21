@@ -5,7 +5,6 @@ import * as XLSX from "xlsx-js-style";
 import { sb } from "@/lib/supabase";
 import { fmt, parseNum } from "@/lib/format";
 import Stamp from "@/components/Stamp";
-import DocPrint from "@/components/DocPrint";
 import { LineItem, Org, nextNumber, grandTotal } from "@/lib/docs";
 import type { Contract } from "@/lib/types";
 import ContractPicker from "@/components/ContractPicker";
@@ -482,9 +481,6 @@ export default function Proposals() {
             <span className="font-mono font-semibold">{doc.number}</span>
             <Stamp label={doc.status.toUpperCase()} tone={tone(doc.status) as "ok"} />
           </div>
-          <div className="flex flex-wrap gap-2">
-            <button className="btn" onClick={() => setPrintOpen(true)}>Print / PDF</button>
-          </div>
         </div>
         <div className="card mb-3 p-3.5 text-sm text-inksoft">
           {doc.client_name || "No client"}{doc.job ? ` · ${doc.job}` : ""} — this is an old-style proposal (read-only line list below). New work happens in NYCHA walk sheets.
@@ -508,7 +504,6 @@ export default function Proposals() {
           </table>
         </div>
         <div className="card flex justify-end p-3.5"><div className="font-mono text-xl font-semibold">Total {fmt(total)}</div></div>
-        {printOpen && org && <DocPrint org={org} title="Proposal" number={doc.number} date={doc.date} clientName={doc.client_name} job={doc.job} items={items} taxPct={doc.tax_pct} terms notes={doc.notes} close={() => setPrintOpen(false)} />}
         {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
       </div>
     );

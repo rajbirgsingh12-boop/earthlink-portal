@@ -189,19 +189,6 @@ export default function Payroll() {
     XLSX.writeFile(wb, `payroll_WE_${openWeek.week_ending}.xlsx`);
   };
 
-  const exportSummary = () => {
-    if (!openWeek) return;
-    const rows: Record<string, string | number>[] = summ.map((x) => ({
-      "Week Ending": openWeek.week_ending, Name: x.name, Trade: x.trade,
-      Sat: x.days[0], Sun: x.days[1], Mon: x.days[2], Tue: x.days[3], Wed: x.days[4], Thu: x.days[5], Fri: x.days[6],
-      "Total Hrs": x.hrs, "Reg Hrs": x.reg, "OT Hrs (Sat/Sun)": x.ot, "OT Premium": +x.premium.toFixed(2), "Gross Pay": +x.gross.toFixed(2),
-    }));
-    rows.push({ "Week Ending": "", Name: "TOTAL", Trade: "", Sat: "", Sun: "", Mon: "", Tue: "", Wed: "", Thu: "", Fri: "", "Total Hrs": totHrs, "Reg Hrs": "", "OT Hrs (Sat/Sun)": "", "OT Premium": "", "Gross Pay": +totGross.toFixed(2) });
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "Pay summary");
-    XLSX.writeFile(wb, `pay_summary_WE_${openWeek.week_ending}.xlsx`);
-  };
-
   const relLabel = (r: RelRow) => {
     const c = contracts.find((x) => x.id === r.contract_id);
     return `#${r.rel_number} — ${r.location}${c ? ` · ${contractLabel(c)}` : ""}`;
@@ -221,7 +208,6 @@ export default function Payroll() {
           </div>
           <div className="flex gap-2">
             <button className="btn btn-primary" onClick={exportTemplate}>Weekly sheet (xlsx)</button>
-            <button className="btn btn-ghost" onClick={exportSummary}>Pay summary</button>
           </div>
         </div>
 

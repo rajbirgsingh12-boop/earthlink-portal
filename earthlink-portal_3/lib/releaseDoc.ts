@@ -49,7 +49,9 @@ export async function gatherReleaseDoc(
   };
 }
 
-// NYCHA "Standard Invoice" as a styled xlsx.
+// NYCHA "Standard Invoice" — same layout as Earth Link's paper template
+// (Original To / copy to on the left, FROM on the right, contract-release-
+// development-period block, item table), styled like the SOS export.
 export function buildInvoiceXlsx(a: {
   org: Org; cNumber: string; relNum: string; workOrder: string; dev: string;
   number: string; date: string; rows: DocRow[];
@@ -57,24 +59,24 @@ export function buildInvoiceXlsx(a: {
   const total = a.rows.reduce((s, it) => s + it.qty * it.unit_price, 0);
   const asNum = (s: string) => (/^\d+$/.test(s) ? Number(s) : s);
   const aoa: (string | number)[][] = [];
-  aoa.push(["Standard Invoice"]);
-  aoa.push(["Date:", prettyDate(a.date), "", "", "", "Invoice #", a.number]);
-  aoa.push([]);
-  aoa.push(["Original To:", "", "", "", "From:"]);
-  aoa.push(["NEW YORK CITY HOUSING AUTHORITY", "", "", "", (a.org.company || "").toUpperCase()]);
-  aoa.push(["ACCOUNTS PAYABLE", "", "", "", [a.org.address1, a.org.address2].filter(Boolean).join(", ")]);
-  aoa.push(["P.O. BOX 3636, CHURCH STREET STATION", "", "", "", [a.org.phone && `Phone ${a.org.phone}`, a.org.email].filter(Boolean).join(" · ")]);
-  aoa.push(["NEW YORK, NY 10008-3636", "", "", "", a.org.license ? `License ${a.org.license}` : ""]);
-  aoa.push([]);
-  aoa.push(["Copy To:"]);
-  aoa.push(["NEW YORK CITY HOUSING AUTHORITY, 90 CHURCH STREET, 6TH FLOOR, NEW YORK, NY 10008"]);
-  aoa.push(["ATTENTION: BOROUGH PAYMENT UNIT"]);
-  aoa.push([]);
-  aoa.push(["Contract:", asNum(a.cNumber), "", "Release:", asNum(a.relNum), "", "Development:", a.dev]);
-  if (a.workOrder) aoa.push(["Work order:", a.workOrder]);
-  aoa.push([]);
+  aoa.push(["Standard Invoice"]);                                                               // r0
+  aoa.push(["Date:", prettyDate(a.date), "", "", "Invoice #", a.number]);                       // r1
+  aoa.push([]);                                                                                 // r2
+  aoa.push(["Original To:", "", "", "", "From:"]);                                              // r3
+  aoa.push(["NEW YORK CITY HOUSING AUTHORITY", "", "", "", `VENDOR NAME: ${(a.org.company || "").toUpperCase()}`]);
+  aoa.push(["ACCOUNTS PAYABLE", "", "", "", `ADDRESS: ${[a.org.address1, a.org.address2].filter(Boolean).join(", ")}`]);
+  aoa.push(["P.O. BOX 3636", "", "", "", `PHONE: ${a.org.phone || ""}${a.org.email ? ` · ${a.org.email}` : ""}`]);
+  aoa.push(["CHURCH STREET STATION", "", "", "", a.org.license ? `LICENSE: ${a.org.license}` : ""]);
+  aoa.push(["NEW YORK, NY 10008"]);                                                             // r8
+  aoa.push([]);                                                                                 // r9
+  aoa.push(["Copy To:", "", "", "", "Contract:", asNum(a.cNumber), "Release:", asNum(a.relNum)]);       // r10
+  aoa.push(["New York City Housing Authority", "", "", "", "Development:", a.dev]);             // r11
+  aoa.push(["90 CHURCH STREET", "", "", "", "Work order:", a.workOrder || ""]);                 // r12
+  aoa.push(["6TH FLOOR, NEW YORK, NY 10008", "", "", "", "Period from:", "", "Period to:", ""]); // r13
+  aoa.push(["ATTENTION: BOROUGH PAYMENT UNIT"]);                                                // r14
+  aoa.push([]);                                                                                 // r15
   const headerRow = aoa.length;
-  aoa.push(["Line", "Item", "Category", "Description", "UOM", "Quantity", "Price", "Total Cost"]);
+  aoa.push(["Line", "Item", "Category", "Description", "UOM", "Quantity Authorized", "Price", "Total Cost"]);
   a.rows.forEach((it) => aoa.push([it.line, asNum(it.code), it.category, it.description, it.uom, it.qty, it.unit_price, it.qty * it.unit_price]));
   const totalRow = aoa.length;
   aoa.push(["", "", "", "", "", "Total", "", total]);
@@ -82,18 +84,27 @@ export function buildInvoiceXlsx(a: {
   aoa.push(["Mail to: NYCHA Disbursements, P.O. Box 3636, New York, NY 10008-3636 · Questions: Disbursements 212-306-6500"]);
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws["!cols"] = [{ wch: 10 }, { wch: 15 }, { wch: 38 }, { wch: 90 }, { wch: 16 }, { wch: 14 }, { wch: 14 }, { wch: 18 }];
-  ws["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 7 } }, { s: { r: 10, c: 0 }, e: { r: 10, c: 7 } }, { s: { r: aoa.length - 1, c: 0 }, e: { r: aoa.length - 1, c: 7 } }];
+  ws["!cols"] = [{ wch: 12 }, { wch: 15 }, { wch: 38 }, { wch: 90 }, { wch: 18 }, { wch: 16 }, { wch: 14 }, { wch: 18 }];
+  ws["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 7 } },
+    ...[4, 5, 6, 7].map((r) => ({ s: { r, c: 4 }, e: { r, c: 7 } })),   // FROM block values span E:H
+    { s: { r: 11, c: 5 }, e: { r: 11, c: 7 } },                          // development value
+    { s: { r: 12, c: 5 }, e: { r: 12, c: 7 } },                          // work order value
+    { s: { r: aoa.length - 1, c: 0 }, e: { r: aoa.length - 1, c: 7 } },
+  ];
   const thin = { style: "thin", color: { rgb: "000000" } };
   const box = { top: thin, bottom: thin, left: thin, right: thin };
   const shade = { patternType: "solid", fgColor: { rgb: "E8E4DA" } };
   const cellAt = (r: number, c: number) => ws[XLSX.utils.encode_cell({ r, c })] || (ws[XLSX.utils.encode_cell({ r, c })] = { t: "s", v: "" });
-  cellAt(0, 0).s = { font: { bold: true, sz: 14 }, alignment: { horizontal: "center" }, fill: shade, border: { top: { style: "medium", color: { rgb: "000000" } }, bottom: thin, left: thin, right: thin } };
-  cellAt(1, 0).s = { font: { bold: true } }; cellAt(1, 5).s = { font: { bold: true } };
-  cellAt(3, 0).s = { font: { bold: true } }; cellAt(3, 4).s = { font: { bold: true } };
-  cellAt(9, 0).s = { font: { bold: true } };
-  cellAt(11, 0).s = { font: { bold: true } };
-  cellAt(13, 0).s = { font: { bold: true } }; cellAt(13, 3).s = { font: { bold: true } }; cellAt(13, 6).s = { font: { bold: true } };
+  cellAt(0, 0).s = { font: { bold: true, sz: 14 }, alignment: { horizontal: "center", vertical: "center" }, fill: shade, border: { top: { style: "medium", color: { rgb: "000000" } }, bottom: thin, left: thin, right: thin } };
+  // Date / Invoice # line
+  cellAt(1, 0).s = { font: { bold: true } }; cellAt(1, 4).s = { font: { bold: true } };
+  cellAt(1, 5).s = { font: { bold: true }, border: { bottom: thin } };
+  // section labels
+  for (const [r, c] of [[3, 0], [3, 4], [10, 0], [14, 0]] as [number, number][]) cellAt(r, c).s = { font: { bold: true }, fill: shade, border: box };
+  // contract / release / development / work order / period labels + boxed values
+  for (const [r, c] of [[10, 4], [10, 6], [11, 4], [12, 4], [13, 4], [13, 6]] as [number, number][]) cellAt(r, c).s = { font: { bold: true }, fill: shade, border: box };
+  for (const [r, c] of [[10, 5], [10, 7], [11, 5], [12, 5], [13, 5], [13, 7]] as [number, number][]) cellAt(r, c).s = { border: box, alignment: { horizontal: "left" } };
   for (let r = headerRow; r <= totalRow; r++) {
     for (let c = 0; c < 8; c++) {
       const cell = cellAt(r, c);

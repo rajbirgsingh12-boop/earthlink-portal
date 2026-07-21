@@ -120,6 +120,7 @@ export default function Releases() {
   const attachInputRef = useRef<HTMLInputElement>(null);
   const [sosView, setSosView] = useState<{ relNum: string; ticket: string; cNumber: string; dev: string; addr: string; stair: string; apt: string; rows: SosRow[]; total: number } | null>(null);
   const [sosReady, setSosReady] = useState<Set<string>>(new Set());
+  const [stageData, setStageData] = useState<{ items: Set<string>; walks: Set<string> }>({ items: new Set(), walks: new Set() });
   const [invPreview, setInvPreview] = useState<{ number: string; date: string; cNumber: string; relNum: string; dev: string; workOrder: string; rows: DocRow[] } | null>(null);
 
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
@@ -165,9 +166,21 @@ export default function Releases() {
         .filter((p) => p.release_number && p.qty_map && Object.keys(p.qty_map).length > 0)
         .map((p) => String(p.release_number).trim())
     );
+    const itemsSet = new Set(ready);
     all.forEach((r) => { if (walkNums.has(String(r.rel_number).trim())) ready.add(r.id); });
     setSosReady(ready);
+    setStageData({ items: itemsSet, walks: walkNums });
   };
+
+  // the release's life at a glance: each stage lights up from data already entered
+  const pipeline = (r: Release): [string, boolean][] => [
+    ["WALK", stageData.walks.has(String(r.rel_number).trim())],
+    ["REL", stageData.items.has(r.id)],
+    ["WORK", !!(r.date_completed && String(r.date_completed).trim())],
+    ["PAY", r.payroll_done],
+    ["INV", !!r.invoice_sent],
+    ["PAID", r.received],
+  ];
   useEffect(() => { loadRows(active); }, [active]);
 
   const loadLogged = async () => {
@@ -915,6 +928,19 @@ export default function Releases() {
                 <td className={`p-2.5 ${r.canceled ? "line-through" : ""}`}>
                   {r.location}
                   <div className="max-w-[240px] truncate text-[11px] text-inksoft">{r.buildings}{r.ticket ? ` · ${r.ticket}` : ""}</div>
+                  {!r.canceled && (() => {
+                    const stages = pipeline(r);
+                    const current = stages.findIndex(([, done]) => !done);
+                    return (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {stages.map(([l, done], i) => (
+                          <span key={l} title={l} className={`rounded-[2px] border px-1 py-px font-mono text-[9px] font-semibold tracking-wide ${
+                            done ? "border-ok bg-ok/10 text-ok" : i === current ? "border-work text-work" : "border-rulesoft text-rule"
+                          }`}>{l}</span>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </td>
                 <td className={`p-2.5 text-right font-mono ${r.canceled ? "line-through" : ""}`}>{fmt(Number(r.amount))}</td>
                 <td className="p-2.5 text-center">

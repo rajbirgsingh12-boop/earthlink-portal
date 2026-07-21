@@ -17,6 +17,7 @@ export default function Statements() {
   const [org, setOrg] = useState<Org | null>(null);
   const [printOpen, setPrintOpen] = useState(false);
   const [invPreview, setInvPreview] = useState<{ number: string; date: string; cNumber: string; relNum: string; dev: string; workOrder: string; rows: DocRow[] } | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
   const today = new Date().toISOString().slice(0, 10);
 
   const genInvoice = async (r: Release) => {
@@ -48,6 +49,19 @@ export default function Statements() {
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
   }, []);
 
+  // live: releases changing anywhere refresh the statement without a reload
+  useEffect(() => {
+    if (!sel) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const ch = sb().channel("statement-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "releases" }, () => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => setReloadTick((t) => t + 1), 400);
+      })
+      .subscribe();
+    return () => { if (timer) clearTimeout(timer); sb().removeChannel(ch); };
+  }, [sel]);
+
   useEffect(() => {
     if (!sel) { setRows([]); return; }
     (async () => {
@@ -71,7 +85,7 @@ export default function Statements() {
       connected.sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
       setRows(connected);
     })();
-  }, [sel]);
+  }, [sel, reloadTick]);
 
   const contract = contracts.find((c) => c.id === sel);
   const days = (r: Release) => (r.invoice_sent ? Math.max(0, Math.floor((new Date(today).getTime() - new Date(r.invoice_sent + "T00:00:00").getTime()) / 86400000)) : null);

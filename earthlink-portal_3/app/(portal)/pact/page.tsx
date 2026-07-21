@@ -63,6 +63,18 @@ export default function Pact() {
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // live: PACT jobs changing anywhere refresh the list without a reload
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const ch = sb().channel("pact-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "pact_jobs" }, () => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => load(), 400);
+      })
+      .subscribe();
+    return () => { if (timer) clearTimeout(timer); sb().removeChannel(ch); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const patch = async (j: Job, p: Partial<Job>) => {
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, ...p } : x)));
     setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, ...p } : prev));

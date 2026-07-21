@@ -139,9 +139,9 @@ export default function Releases() {
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
   }, []);
 
-  const loadRows = async (cid: string) => {
+  const loadRows = async (cid: string, silent = false) => {
     if (!cid) { setRows([]); return; }
-    setBusy(true);
+    if (!silent) setBusy(true);
     const all: Release[] = [];
     let from = 0;
     for (;;) {
@@ -154,7 +154,7 @@ export default function Releases() {
     // sort numerically by release number when possible
     all.sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
     setRows(all);
-    setBusy(false);
+    if (!silent) setBusy(false);
     // which releases can produce an SOS? those with imported line items,
     // or a walk sheet (with quantities) whose Release # matches
     const ready = new Set<string>();
@@ -184,7 +184,20 @@ export default function Releases() {
     ["INV", !!r.invoice_sent],
     ["PAID", r.received],
   ];
-  useEffect(() => { loadRows(active); }, [active]);
+  useEffect(() => { loadRows(active); }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // live: any change to releases (from any device or user) refreshes this list
+  useEffect(() => {
+    if (!active) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const ch = sb().channel("releases-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "releases" }, () => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => loadRows(active, true), 400);
+      })
+      .subscribe();
+    return () => { if (timer) clearTimeout(timer); sb().removeChannel(ch); };
+  }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadLogged = async () => {
     const { data } = await sb().from("timesheet_entries").select("release_id,hours");

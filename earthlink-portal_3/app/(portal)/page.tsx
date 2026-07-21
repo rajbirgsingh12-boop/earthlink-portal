@@ -22,6 +22,19 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const today = new Date();
 
+  const [reloadTick, setReloadTick] = useState(0);
+  // live: releases / walk sheets / payroll changing anywhere refresh the board
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const bump = () => { if (timer) clearTimeout(timer); timer = setTimeout(() => setReloadTick((t) => t + 1), 500); };
+    const ch = sb().channel("board-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "releases" }, bump)
+      .on("postgres_changes", { event: "*", schema: "public", table: "proposals" }, bump)
+      .on("postgres_changes", { event: "*", schema: "public", table: "timesheet_entries" }, bump)
+      .subscribe();
+    return () => { if (timer) clearTimeout(timer); sb().removeChannel(ch); };
+  }, []);
+
   useEffect(() => {
     (async () => {
       const { data: c } = await sb().from("contracts").select("id,number,name").order("number");
@@ -61,7 +74,7 @@ export default function Home() {
       }
       setLoading(false);
     })();
-  }, []);
+  }, [reloadTick]);
 
   const cNum = (id: string) => contracts.find((x) => x.id === id)?.number || "";
   const live = rows.filter((r) => !r.canceled);

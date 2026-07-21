@@ -376,3 +376,10 @@ create policy "pact_jobs upd" on pact_jobs for update
 drop policy if exists "pact_jobs del" on pact_jobs;
 create policy "pact_jobs del" on pact_jobs for delete
   using (my_role() in ('admin','office'));
+
+-- ===== Phase 4e: live updates =====
+do $$ begin alter publication supabase_realtime add table releases; exception when duplicate_object then null; end $$;
+do $$ begin alter publication supabase_realtime add table proposals; exception when duplicate_object then null; end $$;
+do $$ begin alter publication supabase_realtime add table timesheet_entries; exception when duplicate_object then null; end $$;
+do $$ begin alter publication supabase_realtime add table timesheet_weeks; exception when duplicate_object then null; end $$;
+do $$ begin alter publication supabase_realtime add table pact_jobs; exception when duplicate_object then null; end $$;

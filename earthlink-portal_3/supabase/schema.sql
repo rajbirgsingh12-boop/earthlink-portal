@@ -354,6 +354,14 @@ alter table timesheet_weeks add column if not exists paid_map jsonb default '{}'
   notes text default '',
   created_at timestamptz default now()
 );
+alter table pact_jobs add column if not exists po_number text default '';
+alter table pact_jobs add column if not exists po_date text default '';
+alter table pact_jobs add column if not exists address text default '';
+alter table pact_jobs add column if not exists property_unit text default '';
+alter table pact_jobs add column if not exists contact text default '';
+alter table pact_jobs add column if not exists bill_to text default '';
+alter table pact_jobs add column if not exists items jsonb default '[]'::jsonb;
+alter table pact_jobs add column if not exists invoice_number text default '';
 alter table pact_jobs enable row level security;
 drop policy if exists "pact_jobs read" on pact_jobs;
 create policy "pact_jobs read" on pact_jobs for select

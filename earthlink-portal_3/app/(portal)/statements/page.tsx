@@ -36,11 +36,27 @@ export default function Statements() {
 
   useEffect(() => {
     if (!sel) { setRows([]); return; }
-    sb().from("releases").select("*").eq("contract_id", sel).then(({ data }) => {
+    (async () => {
+      const { data } = await sb().from("releases").select("*").eq("contract_id", sel);
       const all = ((data || []) as Release[]).filter((r) => !r.canceled && Number(r.amount) > 0 && !r.received);
-      all.sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
-      setRows(all);
-    });
+      // only releases with real release data connected — imported line items
+      // or a walk sheet with quantities on the same release number
+      const ready = new Set<string>();
+      const ids = all.map((r) => r.id);
+      for (let i = 0; i < ids.length; i += 200) {
+        const { data: its } = await sb().from("release_items").select("release_id").in("release_id", ids.slice(i, i + 200));
+        ((its || []) as { release_id: string }[]).forEach((it) => ready.add(it.release_id));
+      }
+      const { data: props } = await sb().from("proposals").select("release_number,qty_map").eq("contract_id", sel);
+      const walkNums = new Set(
+        ((props || []) as { release_number?: string; qty_map?: Record<string, number> | null }[])
+          .filter((p) => p.release_number && p.qty_map && Object.keys(p.qty_map).length > 0)
+          .map((p) => String(p.release_number).trim())
+      );
+      const connected = all.filter((r) => ready.has(r.id) || walkNums.has(String(r.rel_number).trim()));
+      connected.sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
+      setRows(connected);
+    })();
   }, [sel]);
 
   const contract = contracts.find((c) => c.id === sel);

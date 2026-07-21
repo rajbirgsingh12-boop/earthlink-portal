@@ -11,7 +11,7 @@ import ContractPicker, { contractLabel } from "@/components/ContractPicker";
 import type { Contract } from "@/lib/types";
 
 interface Emp { id: string; name: string; trade: string; base_rate: number; active: boolean; }
-interface Week { id: string; week_ending: string; }
+interface Week { id: string; week_ending: string; paid_map?: Record<string, string> | null; }
 interface Entry { id?: string; week_id: string; employee_id: string; job_label: string; rate: number; hours: number[]; release_id: string | null; }
 interface RelRow { id: string; rel_number: string; location: string; contract_id: string; labor_hours: number; labor_breakdown: { cls: string; hours: number }[] | null; }
 // the week runs Saturday → Friday, like the paper sheet; Sat & Sun are overtime days
@@ -120,6 +120,16 @@ export default function Payroll() {
     await sb().from("timesheet_entries").update({ job_label: en.job_label, rate: Number(en.rate) || 0, hours: en.hours.map((h) => Number(h) || 0), release_id: en.release_id || null }).eq("id", en.id!);
   };
   const delEntry = async (id: string) => { await sb().from("timesheet_entries").delete().eq("id", id); setEntries(entries.filter((e) => e.id !== id)); };
+
+  // one PAID mark per worker per week — no more side spreadsheet
+  const togglePaid = async (eid: string) => {
+    if (!openWeek) return;
+    const map = { ...(openWeek.paid_map || {}) };
+    if (map[eid]) delete map[eid]; else map[eid] = new Date().toISOString().slice(0, 10);
+    const { error } = await sb().from("timesheet_weeks").update({ paid_map: map }).eq("id", openWeek.id);
+    if (error) { flash(/column/i.test(error.message) ? "Run supabase/upgrade_payroll_paid.sql first" : error.message); return; }
+    setOpenWeek({ ...openWeek, paid_map: map });
+  };
 
   const summ = summarize(entries, emps);
   const totGross = summ.reduce((s, x) => s + x.gross, 0);
@@ -306,16 +316,25 @@ export default function Payroll() {
           <div className="card mt-2 overflow-x-auto">
             <table className="w-full border-collapse text-sm" style={{ minWidth: 460 }}>
               <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
-                <th className="p-2.5">Worker</th><th className="p-2.5 text-right">Reg</th><th className="p-2.5 text-right">OT (Sat/Sun)</th><th className="p-2.5 text-right">Gross</th></tr></thead>
+                <th className="p-2.5">Worker</th><th className="p-2.5 text-right">Reg</th><th className="p-2.5 text-right">OT (Sat/Sun)</th><th className="p-2.5 text-right">Gross</th><th className="p-2.5 text-center">Paid</th></tr></thead>
               <tbody>
-                {summ.map((x) => (
-                  <tr key={x.eid} className="border-b border-rulesoft">
-                    <td className="p-2.5">{x.name}</td><td className="p-2.5 text-right font-mono">{x.reg}</td>
-                    <td className={`p-2.5 text-right font-mono ${x.ot > 0 ? "text-work" : ""}`}>{x.ot}</td>
-                    <td className="p-2.5 text-right font-mono font-semibold">{fmt(x.gross)}</td>
-                  </tr>
-                ))}
-                <tr><td className="p-2.5 font-display font-bold uppercase">Week total · {totHrs} hrs</td><td></td><td></td><td className="p-2.5 text-right font-mono text-[15px] font-bold">{fmt(totGross)}</td></tr>
+                {summ.map((x) => {
+                  const paidOn = openWeek.paid_map?.[x.eid];
+                  return (
+                    <tr key={x.eid} className="border-b border-rulesoft">
+                      <td className="p-2.5">{x.name}</td><td className="p-2.5 text-right font-mono">{x.reg}</td>
+                      <td className={`p-2.5 text-right font-mono ${x.ot > 0 ? "text-work" : ""}`}>{x.ot}</td>
+                      <td className="p-2.5 text-right font-mono font-semibold">{fmt(x.gross)}</td>
+                      <td className="p-2.5 text-center">
+                        <button onClick={() => togglePaid(x.eid)} title={paidOn ? `Paid ${prettyDate(paidOn)}` : "Mark paid"}>
+                          <Stamp label={paidOn ? "PAID" : "NOT PAID"} tone={paidOn ? "ok" : "work"} />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+                <tr><td className="p-2.5 font-display font-bold uppercase">Week total · {totHrs} hrs</td><td></td><td></td><td className="p-2.5 text-right font-mono text-[15px] font-bold">{fmt(totGross)}</td>
+                  <td className="p-2.5 text-center font-mono text-xs text-inksoft">{Object.keys(openWeek.paid_map || {}).length}/{summ.length}</td></tr>
               </tbody>
             </table>
           </div>

@@ -2,41 +2,80 @@
 import { useEffect, useState } from "react";
 import { sb } from "@/lib/supabase";
 import { fmt } from "@/lib/format";
+import { prettyDate } from "@/lib/docs";
+import { canonTrade, checkLabor, aggregateLogged } from "@/lib/labor";
+import Stamp from "@/components/Stamp";
+import type { Contract } from "@/lib/types";
 
-interface Row { amount: number; received: boolean; payroll_done: boolean; canceled: boolean; contract_id: string; }
+interface Row {
+  id: string; contract_id: string; rel_number: string; location: string; amount: number;
+  received: boolean; payroll_done: boolean; canceled: boolean; invoice_sent: string | null;
+  labor_hours: number; labor_breakdown: { cls: string; hours: number }[] | null;
+}
+interface Prop { id: string; number: string; job: string; development?: string; release_number?: string; status: string; total?: number; contract_id?: string | null; created_at: string; qty_map?: Record<string, number> | null; }
 
 export default function Home() {
   const [rows, setRows] = useState<Row[]>([]);
-  const [contracts, setContracts] = useState(0);
+  const [contracts, setContracts] = useState<Contract[]>([]);
+  const [walks, setWalks] = useState<Prop[]>([]);
+  const [shorts, setShorts] = useState<{ r: Row; missing: number }[]>([]);
   const [loading, setLoading] = useState(true);
+  const today = new Date();
 
   useEffect(() => {
     (async () => {
-      const { data: c } = await sb().from("contracts").select("id");
-      setContracts(c?.length || 0);
+      const { data: c } = await sb().from("contracts").select("id,number,name").order("number");
+      setContracts((c || []) as Contract[]);
       const all: Row[] = [];
       let from = 0;
       for (;;) {
-        const { data } = await sb().from("releases").select("amount,received,payroll_done,canceled,contract_id").range(from, from + 999);
+        const { data } = await sb().from("releases")
+          .select("id,contract_id,rel_number,location,amount,received,payroll_done,canceled,invoice_sent,labor_hours,labor_breakdown")
+          .range(from, from + 999);
         if (!data || data.length === 0) break;
         all.push(...(data as Row[]));
         if (data.length < 1000) break;
         from += 1000;
       }
       setRows(all);
+      // walk sheets with quantities that never became a release / got delivered
+      const { data: props } = await sb().from("proposals").select("*").eq("status", "draft").order("created_at");
+      setWalks(((props || []) as Prop[]).filter((p) => p.contract_id && p.qty_map && Object.keys(p.qty_map).length > 0));
+      // payroll shortfalls against release minimums
+      const need = all.filter((r) => !r.canceled && !r.received && !r.payroll_done && (Number(r.labor_hours) > 0 || (r.labor_breakdown || []).length > 0));
+      if (need.length > 0) {
+        const { data: ents } = await sb().from("timesheet_entries").select("release_id,employee_id,hours");
+        const { data: allEmps } = await sb().from("employees").select("id,trade");
+        const tradeById = new Map(((allEmps || []) as { id: string; trade: string }[]).map((e) => [e.id, canonTrade(e.trade)]));
+        const byRel = aggregateLogged((ents || []) as { release_id: string | null; employee_id: string; hours: number[] }[], tradeById);
+        setShorts(need
+          .map((r) => {
+            const res = checkLabor(r.labor_breakdown || [], Number(r.labor_hours) || 0, byRel[r.id] || {});
+            const missing = Math.max(res.totalRequired - res.totalLogged, res.shorts.reduce((s, x) => s + (x.required - x.logged), 0));
+            return { r, missing, ok: res.ok };
+          })
+          .filter((x) => !x.ok && x.missing > 0)
+          .sort((a, b) => b.missing - a.missing)
+          .slice(0, 5)
+          .map(({ r, missing }) => ({ r, missing })));
+      }
       setLoading(false);
     })();
   }, []);
 
+  const cNum = (id: string) => contracts.find((x) => x.id === id)?.number || "";
   const live = rows.filter((r) => !r.canceled);
   const tot = live.reduce((s, r) => s + Number(r.amount), 0);
-  const notR = live.filter((r) => !r.received && r.amount > 0);
-  const prPend = live.filter((r) => !r.payroll_done && !r.received && r.amount > 0);
+  const open = live.filter((r) => !r.received && Number(r.amount) > 0);
+  const prPend = live.filter((r) => !r.payroll_done && !r.received && Number(r.amount) > 0);
+  const days = (iso: string) => Math.max(0, Math.floor((today.getTime() - new Date(iso + "T00:00:00").getTime()) / 86400000));
+  const oldest = open.filter((r) => r.invoice_sent).sort((a, b) => days(b.invoice_sent!) - days(a.invoice_sent!)).slice(0, 5);
+  const notInvoiced = open.filter((r) => !r.invoice_sent);
 
   const cards: [string, string, string][] = [
-    ["Contracts", String(contracts), "text-ink"],
+    ["Contracts", String(contracts.length), "text-ink"],
     ["Released (live)", fmt(tot), "text-ink"],
-    ["Not received", fmt(notR.reduce((s, r) => s + Number(r.amount), 0)), "text-work"],
+    ["Not received", fmt(open.reduce((s, r) => s + Number(r.amount), 0)), "text-work"],
     ["Payroll pending", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"],
   ];
 
@@ -53,6 +92,56 @@ export default function Home() {
               </div>
             ))}
           </div>
+
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
+            <div className="card p-3.5">
+              <div className="mb-2 flex items-baseline justify-between">
+                <div className="font-display text-sm font-bold uppercase">Chase these first</div>
+                <a href="/statements" className="text-xs text-inksoft underline">Statements →</a>
+              </div>
+              {oldest.map((r) => (
+                <div key={r.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
+                  <span className="min-w-0 truncate"><span className="font-mono font-semibold">#{r.rel_number}</span> <span className="text-inksoft">{r.location || cNum(r.contract_id)}</span></span>
+                  <span className="flex shrink-0 items-center gap-1.5">
+                    <span className="font-mono">{fmt(Number(r.amount))}</span>
+                    <Stamp label={`${days(r.invoice_sent!)}D`} tone={days(r.invoice_sent!) > 60 ? "alert" : "work"} />
+                  </span>
+                </div>
+              ))}
+              {oldest.length === 0 && <div className="py-2 text-[13px] text-inksoft">No invoiced money outstanding.</div>}
+              {notInvoiced.length > 0 && <div className="mt-1 border-t border-rulesoft pt-2 text-xs text-inksoft">{notInvoiced.length} unpaid release{notInvoiced.length === 1 ? "" : "s"} not invoiced yet — {fmt(notInvoiced.reduce((s, r) => s + Number(r.amount), 0))}</div>}
+            </div>
+
+            <div className="card p-3.5">
+              <div className="mb-2 flex items-baseline justify-between">
+                <div className="font-display text-sm font-bold uppercase">Walk sheets undelivered</div>
+                <a href="/proposals" className="text-xs text-inksoft underline">Proposals →</a>
+              </div>
+              {walks.slice(0, 5).map((p) => (
+                <div key={p.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
+                  <span className="min-w-0 truncate">{p.job || p.development || p.number}<span className="text-inksoft"> · {prettyDate(p.created_at.slice(0, 10))}</span></span>
+                  <span className="shrink-0 font-mono">{fmt(Number(p.total) || 0)}</span>
+                </div>
+              ))}
+              {walks.length === 0 && <div className="py-2 text-[13px] text-inksoft">Every walk sheet has been delivered. 🎉</div>}
+              {walks.length > 5 && <div className="mt-1 border-t border-rulesoft pt-2 text-xs text-inksoft">+{walks.length - 5} more drafts</div>}
+            </div>
+
+            <div className="card p-3.5">
+              <div className="mb-2 flex items-baseline justify-between">
+                <div className="font-display text-sm font-bold uppercase">Payroll short</div>
+                <a href="/payroll" className="text-xs text-inksoft underline">Payroll →</a>
+              </div>
+              {shorts.map(({ r, missing }) => (
+                <div key={r.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
+                  <span className="min-w-0 truncate"><span className="font-mono font-semibold">#{r.rel_number}</span> <span className="text-inksoft">{r.location || cNum(r.contract_id)}</span></span>
+                  <Stamp label={`NEED ${missing}H`} tone="alert" />
+                </div>
+              ))}
+              {shorts.length === 0 && <div className="py-2 text-[13px] text-inksoft">Every open release meets its labor minimum.</div>}
+            </div>
+          </div>
+
           <a href="/releases" className="btn btn-primary mt-5 inline-block">Open releases →</a>
         </>
       )}

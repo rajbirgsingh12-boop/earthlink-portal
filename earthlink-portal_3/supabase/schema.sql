@@ -332,3 +332,6 @@ alter table proposals add column if not exists qty_map jsonb default '{}'::jsonb
 alter table price_items add column if not exists line int default 0;
 alter table proposal_items add column if not exists category text default '';
 alter table proposal_items add column if not exists line int default 0;
+
+-- ===== Phase 4c: worker payment tracking =====
+alter table timesheet_weeks add column if not exists paid_map jsonb default '{}'::jsonb;

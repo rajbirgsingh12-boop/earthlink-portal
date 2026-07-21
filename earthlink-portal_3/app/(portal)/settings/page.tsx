@@ -94,6 +94,31 @@ export default function Settings() {
     loadUsers();
   };
 
+  // ---------- system check: is every upgrade in place? ----------
+  type CheckResult = { label: string; fix: string; ok: boolean };
+  const [checks, setChecks] = useState<CheckResult[] | null>(null);
+  const [checking, setChecking] = useState(false);
+  const runSystemCheck = async () => {
+    setChecking(true); setChecks(null);
+    const probes: { label: string; fix: string; probe: () => Promise<boolean> }[] = [
+      { label: "Release line items", fix: "upgrade_invoices_aging_docs.sql", probe: async () => !(await sb().from("release_items").select("id").limit(1)).error },
+      { label: "Release aging & attachments", fix: "upgrade_invoices_aging_docs.sql", probe: async () => !(await sb().from("releases").select("invoice_sent,paid_date,attachments,address").limit(1)).error },
+      { label: "Document & photo storage", fix: "upgrade_invoices_aging_docs.sql", probe: async () => !(await sb().storage.from("docs").list("", { limit: 1 })).error },
+      { label: "Contract price books", fix: "upgrade_proposal_creator.sql", probe: async () => !(await sb().from("contract_items").select("id").limit(1)).error },
+      { label: "Walk sheet fields & autosave", fix: "upgrade_proposal_creator.sql", probe: async () => !(await sb().from("proposals").select("qty_map,nycha_staff,start_date,release_number,total").limit(1)).error },
+      { label: "Price book line numbers", fix: "upgrade_proposal_creator.sql", probe: async () => !(await sb().from("price_items").select("line").limit(1)).error },
+      { label: "Payroll paid marks", fix: "upgrade_payroll_paid.sql", probe: async () => !(await sb().from("timesheet_weeks").select("paid_map").limit(1)).error },
+      { label: "PACT jobs & invoicing", fix: "upgrade_pact.sql", probe: async () => !(await sb().from("pact_jobs").select("id,po_number,items,tax_pct,invoice_number").limit(1)).error },
+    ];
+    const results: CheckResult[] = [];
+    for (const p of probes) {
+      let ok = false;
+      try { ok = await p.probe(); } catch { ok = false; }
+      results.push({ label: p.label, fix: p.fix, ok });
+    }
+    setChecks(results); setChecking(false);
+  };
+
   if (!org) return <div className="text-sm text-inksoft">Loading…</div>;
   return (
     <div>
@@ -169,6 +194,31 @@ export default function Settings() {
           </div>
         </>
       )}
+
+      <div className="mb-2 mt-6 flex items-baseline justify-between">
+        <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">System check</div>
+        <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={runSystemCheck} disabled={checking}>{checking ? "Checking…" : "Run system check"}</button>
+      </div>
+      <div className="card p-3.5">
+        {checks === null && !checking && <div className="text-sm text-inksoft">Verifies the database has every upgrade. If something&apos;s missing it names the exact SQL file to paste into Supabase — or just run <span className="font-mono">supabase/RUN_ME.sql</span> to apply everything at once.</div>}
+        {checking && <div className="text-sm text-inksoft">Checking…</div>}
+        {checks !== null && (
+          <>
+            {checks.map((c) => (
+              <div key={c.label} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-sm first:border-t-0">
+                <span>{c.ok ? "✅" : "❌"} {c.label}</span>
+                {!c.ok && <span className="font-mono text-xs text-alert">run {c.fix}</span>}
+              </div>
+            ))}
+            <div className="mt-2 border-t border-rulesoft pt-2 text-sm font-semibold">
+              {checks.every((c) => c.ok)
+                ? <span className="text-ok">Everything is set up — all upgrades are in place. ✓</span>
+                : <span className="text-alert">{checks.filter((c) => !c.ok).length} item(s) missing — easiest fix: paste supabase/RUN_ME.sql into the Supabase SQL Editor and Run.</span>}
+            </div>
+            <div className="mt-1 text-xs text-inksoft">Live updates can&apos;t be auto-verified from here — if screens don&apos;t refresh on their own after everything above is green, run upgrade_realtime.sql (it&apos;s included in RUN_ME.sql).</div>
+          </>
+        )}
+      </div>
 
       {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
     </div>

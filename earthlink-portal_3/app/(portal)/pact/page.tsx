@@ -5,6 +5,7 @@ import { sb } from "@/lib/supabase";
 import { fmt, parseNum } from "@/lib/format";
 import { prettyDate, type Org } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
+import { useLive } from "@/lib/useLive";
 
 interface Item { description: string; qty: number; unit: string; unit_price: number; }
 interface Job {
@@ -64,16 +65,7 @@ export default function Pact() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // live: PACT jobs changing anywhere refresh the list without a reload
-  useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const ch = sb().channel("pact-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "pact_jobs" }, () => {
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(() => load(), 400);
-      })
-      .subscribe();
-    return () => { if (timer) clearTimeout(timer); sb().removeChannel(ch); };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useLive(["pact_jobs"], () => load(), { skipWhileTyping: true });
 
   const patch = async (j: Job, p: Partial<Job>) => {
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, ...p } : x)));

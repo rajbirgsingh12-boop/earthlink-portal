@@ -5,6 +5,7 @@ import { sb } from "@/lib/supabase";
 import { fmt, parseNum } from "@/lib/format";
 import type { Contract } from "@/lib/types";
 import ContractPicker from "@/components/ContractPicker";
+import { useLive } from "@/lib/useLive";
 
 interface Item { id: string; code: string; description: string; unit: string; unit_price: number; category: string; line?: number; }
 
@@ -43,6 +44,12 @@ export default function Items() {
     }
   };
   useEffect(() => { load(sel); setConfirmWipe(false); }, [sel]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // live: price book edits from anywhere show up without a reload
+  useLive(["contract_items", "price_items", "contracts"], () => {
+    load(sel);
+    sb().from("contracts").select("id,number,name").order("number").then(({ data }) => setContracts((data || []) as Contract[]));
+  }, { skipWhileTyping: true });
 
   const add = async () => {
     if (!draft.description) return;

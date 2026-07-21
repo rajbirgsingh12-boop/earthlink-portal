@@ -8,6 +8,7 @@ import { prettyDate, addDays } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged, type LaborResult } from "@/lib/labor";
 import Stamp from "@/components/Stamp";
 import ContractPicker, { contractLabel } from "@/components/ContractPicker";
+import { useLive } from "@/lib/useLive";
 import type { Contract } from "@/lib/types";
 
 interface Emp { id: string; name: string; trade: string; base_rate: number; active: boolean; }
@@ -65,12 +66,22 @@ export default function Payroll() {
     setEmps((e || []) as Emp[]);
     const { data: w } = await sb().from("timesheet_weeks").select("*").order("week_ending", { ascending: false });
     setWeeks((w || []) as Week[]);
+    setOpenWeek((prev) => (prev ? { ...prev, ...(((w || []) as Week[]).find((x) => x.id === prev.id) || {}) } : prev));
     const { data: r } = await sb().from("releases").select("id,rel_number,location,contract_id,labor_hours,labor_breakdown").eq("canceled", false);
     setRels(((r || []) as RelRow[]).sort((x, y) => (parseFloat(x.rel_number) || 0) - (parseFloat(y.rel_number) || 0)));
     const { data: c } = await sb().from("contracts").select("id,number,name").order("number");
     setContracts((c || []) as Contract[]);
   };
   useEffect(() => { load(); }, []);
+
+  // live: crew, weeks (incl. paid marks), releases and contracts stay current
+  useLive(["timesheet_weeks", "employees", "releases", "contracts"], () => load(), { skipWhileTyping: true });
+  // live: hours entered on another device appear in the open week
+  useLive(["timesheet_entries"], async () => {
+    if (!openWeek) return;
+    const { data } = await sb().from("timesheet_entries").select("*").eq("week_id", openWeek.id);
+    setEntries(((data || []) as Entry[]).map((en) => ({ ...en, hours: (en.hours || []).map(Number) })));
+  }, { enabled: !!openWeek, skipWhileTyping: true });
 
   // live check: for each release linked this week, are the classification
   // hours at the release's minimum yet? (counts hours from ALL weeks)

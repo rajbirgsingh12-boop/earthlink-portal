@@ -8,6 +8,7 @@ import Stamp from "@/components/Stamp";
 import { LineItem, Org, nextNumber, grandTotal } from "@/lib/docs";
 import type { Contract } from "@/lib/types";
 import ContractPicker from "@/components/ContractPicker";
+import { useLive } from "@/lib/useLive";
 
 interface Proposal {
   id: string; number: string; client_name: string; job: string; date: string; tax_pct: number; status: string; notes: string;
@@ -60,6 +61,16 @@ export default function Proposals() {
       setContracts(cs); if (cs[0]) setPickId(cs[0].id);
     });
   }, []);
+
+  // live: walk sheets, contracts and price books refresh without a reload
+  useLive(["proposals", "contracts", "contract_items"], () => {
+    load();
+    sb().from("contracts").select("id,number,name").order("number").then(({ data }) => setContracts((data || []) as Contract[]));
+    if (doc?.contract_id) {
+      sb().from("contract_items").select("*").eq("contract_id", doc.contract_id).order("line")
+        .then(({ data }) => setCatalog((data || []) as ContractItem[]));
+    }
+  }, { skipWhileTyping: true });
 
   // load the contract's catalog whenever the open walk sheet's contract changes
   useEffect(() => {

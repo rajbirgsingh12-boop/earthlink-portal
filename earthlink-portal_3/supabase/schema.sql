@@ -383,3 +383,11 @@ do $$ begin alter publication supabase_realtime add table proposals; exception w
 do $$ begin alter publication supabase_realtime add table timesheet_entries; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table timesheet_weeks; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table pact_jobs; exception when duplicate_object then null; end $$;
+
+-- ===== Phase 4e (addendum): live updates for all tables =====
+do $$ begin alter publication supabase_realtime add table release_items; exception when duplicate_object then null; end $$;
+do $$ begin alter publication supabase_realtime add table contracts; exception when duplicate_object then null; end $$;
+do $$ begin alter publication supabase_realtime add table contract_items; exception when duplicate_object then null; end $$;
+do $$ begin alter publication supabase_realtime add table price_items; exception when duplicate_object then null; end $$;
+do $$ begin alter publication supabase_realtime add table employees; exception when duplicate_object then null; end $$;
+do $$ begin alter publication supabase_realtime add table profiles; exception when duplicate_object then null; end $$;

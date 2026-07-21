@@ -4,6 +4,7 @@ import { sb } from "@/lib/supabase";
 import { fmt } from "@/lib/format";
 import { prettyDate } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged } from "@/lib/labor";
+import { useLive } from "@/lib/useLive";
 import Stamp from "@/components/Stamp";
 import type { Contract } from "@/lib/types";
 
@@ -23,17 +24,8 @@ export default function Home() {
   const today = new Date();
 
   const [reloadTick, setReloadTick] = useState(0);
-  // live: releases / walk sheets / payroll changing anywhere refresh the board
-  useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const bump = () => { if (timer) clearTimeout(timer); timer = setTimeout(() => setReloadTick((t) => t + 1), 500); };
-    const ch = sb().channel("board-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "releases" }, bump)
-      .on("postgres_changes", { event: "*", schema: "public", table: "proposals" }, bump)
-      .on("postgres_changes", { event: "*", schema: "public", table: "timesheet_entries" }, bump)
-      .subscribe();
-    return () => { if (timer) clearTimeout(timer); sb().removeChannel(ch); };
-  }, []);
+  // live: releases / walk sheets / payroll / contracts refresh the board
+  useLive(["releases", "proposals", "timesheet_entries", "contracts", "employees"], () => setReloadTick((t) => t + 1), { delay: 500 });
 
   useEffect(() => {
     (async () => {

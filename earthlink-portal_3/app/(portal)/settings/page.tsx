@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
+import { useLive } from "@/lib/useLive";
 import { sb } from "@/lib/supabase";
 import type { Org } from "@/lib/docs";
 import type { Contract, Profile, Role } from "@/lib/types";
@@ -33,6 +34,12 @@ export default function Settings() {
     sb().from("contracts").select("id,number,name").order("number").then(({ data }) => setContracts((data || []) as Contract[]));
     loadUsers();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // live: user list and contract names stay current across devices
+  useLive(["profiles", "contracts"], () => {
+    loadUsers();
+    sb().from("contracts").select("id,number,name").order("number").then(({ data }) => setContracts((data || []) as Contract[]));
+  }, { skipWhileTyping: true });
 
   const renameContract = async (c: Contract, name: string) => {
     const clean = name.trim() || c.number; // blank = back to the number

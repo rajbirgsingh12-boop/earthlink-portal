@@ -7,6 +7,7 @@ import { fmt } from "@/lib/format";
 import { Org, prettyDate } from "@/lib/docs";
 import type { Contract, Release } from "@/lib/types";
 import ContractPicker from "@/components/ContractPicker";
+import { useLive } from "@/lib/useLive";
 import NychaInvoicePrint from "@/components/NychaInvoicePrint";
 import { gatherReleaseDoc, buildInvoiceXlsx, type DocRow } from "@/lib/releaseDoc";
 
@@ -49,18 +50,8 @@ export default function Statements() {
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
   }, []);
 
-  // live: releases changing anywhere refresh the statement without a reload
-  useEffect(() => {
-    if (!sel) return;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const ch = sb().channel("statement-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "releases" }, () => {
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(() => setReloadTick((t) => t + 1), 400);
-      })
-      .subscribe();
-    return () => { if (timer) clearTimeout(timer); sb().removeChannel(ch); };
-  }, [sel]);
+  // live: releases, their items and walk sheets refresh the statement
+  useLive(["releases", "release_items", "proposals", "contracts"], () => setReloadTick((t) => t + 1), { enabled: !!sel });
 
   useEffect(() => {
     if (!sel) { setRows([]); return; }

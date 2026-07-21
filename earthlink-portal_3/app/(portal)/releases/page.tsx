@@ -9,6 +9,7 @@ import type { Contract, Release } from "@/lib/types";
 import { parseReleasePdfText, type ReleaseItem } from "@/lib/parseRelease";
 import { prettyDate, type Org } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged } from "@/lib/labor";
+import { useLive } from "@/lib/useLive";
 import ContractPicker from "@/components/ContractPicker";
 import NychaInvoicePrint from "@/components/NychaInvoicePrint";
 import { gatherReleaseDoc, buildInvoiceXlsx, type DocRow } from "@/lib/releaseDoc";
@@ -186,18 +187,8 @@ export default function Releases() {
   ];
   useEffect(() => { loadRows(active); }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // live: any change to releases (from any device or user) refreshes this list
-  useEffect(() => {
-    if (!active) return;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const ch = sb().channel("releases-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "releases" }, () => {
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(() => loadRows(active, true), 400);
-      })
-      .subscribe();
-    return () => { if (timer) clearTimeout(timer); sb().removeChannel(ch); };
-  }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
+  // live: releases, their items, walk sheets and contracts refresh this page
+  useLive(["releases", "release_items", "proposals", "contracts"], () => { loadRows(active, true); loadContracts(); }, { enabled: !!active, skipWhileTyping: true });
 
   const loadLogged = async () => {
     const { data } = await sb().from("timesheet_entries").select("release_id,hours");

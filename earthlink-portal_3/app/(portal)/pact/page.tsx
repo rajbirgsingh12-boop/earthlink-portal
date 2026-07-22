@@ -7,6 +7,7 @@ import { prettyDate, type Org } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
 import { useLive } from "@/lib/useLive";
 import { useNumBuffer } from "@/lib/numBuffer";
+import { shrinkImage } from "@/lib/shrinkImage";
 
 interface Item { description: string; qty: number; unit: string; unit_price: number; }
 interface Job {
@@ -205,7 +206,9 @@ export default function Pact() {
   const attachFile = (j: Job, file: File) => attachFiles(j, [file]);
   const addPhotos = async (j: Job, files: File[], kind: "before" | "after") => {
     const stamp = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "");
-    await attachFiles(j, files.map((f, i) => {
+    setBusy(true);
+    const shrunk = await Promise.all(files.map((f) => shrinkImage(f)));
+    await attachFiles(j, shrunk.map((f, i) => {
       const ext = (f.name.match(/\.\w+$/) || [".jpg"])[0];
       return new File([f], `${kind}_${stamp}${files.length > 1 ? `_${i + 1}` : ""}${ext}`, { type: f.type });
     }));

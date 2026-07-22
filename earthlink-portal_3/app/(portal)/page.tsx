@@ -12,6 +12,7 @@ interface Row {
   id: string; contract_id: string; rel_number: string; location: string; amount: number;
   received: boolean; payroll_done: boolean; canceled: boolean; invoice_sent: string | null;
   labor_hours: number; labor_breakdown: { cls: string; hours: number }[] | null;
+  amount_received?: number | null;
 }
 interface Prop { id: string; number: string; job: string; development?: string; release_number?: string; status: string; total?: number; contract_id?: string | null; created_at: string; qty_map?: Record<string, number> | null; }
 
@@ -20,6 +21,7 @@ export default function Home() {
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [walks, setWalks] = useState<Prop[]>([]);
   const [shorts, setShorts] = useState<{ r: Row; missing: number }[]>([]);
+  const [weekHours, setWeekHours] = useState<number | null>(null); // null = no week made yet
   const [loading, setLoading] = useState(true);
   const today = new Date();
 
@@ -34,9 +36,7 @@ export default function Home() {
       const all: Row[] = [];
       let from = 0;
       for (;;) {
-        const { data } = await sb().from("releases")
-          .select("id,contract_id,rel_number,location,amount,received,payroll_done,canceled,invoice_sent,labor_hours,labor_breakdown")
-          .range(from, from + 999);
+        const { data } = await sb().from("releases").select("*").range(from, from + 999);
         if (!data || data.length === 0) break;
         all.push(...(data as Row[]));
         if (data.length < 1000) break;
@@ -64,6 +64,14 @@ export default function Home() {
           .slice(0, 5)
           .map(({ r, missing }) => ({ r, missing })));
       }
+      // has anyone entered hours for the current payroll week?
+      const fri = new Date();
+      fri.setDate(fri.getDate() + ((5 - fri.getDay() + 7) % 7));
+      const { data: wk } = await sb().from("timesheet_weeks").select("id").eq("week_ending", fri.toISOString().slice(0, 10)).limit(1);
+      if (wk && wk[0]) {
+        const { data: es } = await sb().from("timesheet_entries").select("hours").eq("week_id", (wk[0] as { id: string }).id);
+        setWeekHours(((es || []) as { hours: number[] }[]).reduce((s, e) => s + (e.hours || []).reduce((a, h) => a + (Number(h) || 0), 0), 0));
+      } else setWeekHours(null);
       setLoading(false);
     })();
   }, [reloadTick]);
@@ -77,12 +85,18 @@ export default function Home() {
   const oldest = open.filter((r) => r.invoice_sent).sort((a, b) => days(b.invoice_sent!) - days(a.invoice_sent!)).slice(0, 5);
   const notInvoiced = open.filter((r) => !r.invoice_sent);
 
+  const balOf = (r: Row) => Math.max(0, Number(r.amount) - (Number(r.amount_received) || 0));
   const cards: [string, string, string][] = [
     ["Contracts", String(contracts.length), "text-ink"],
     ["Released (live)", fmt(tot), "text-ink"],
-    ["Not received", fmt(open.reduce((s, r) => s + Number(r.amount), 0)), "text-work"],
+    ["Not received", fmt(open.reduce((s, r) => s + balOf(r), 0)), "text-work"],
     ["Payroll pending", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"],
   ];
+
+  // gentle nudges so nothing slips just because nobody looked
+  const dow = today.getDay(); // Wed=3 Thu=4 Fri=5
+  const payrollNudge = (dow >= 3 && dow <= 5) && (weekHours === null || weekHours === 0);
+  const stale = open.filter((r) => r.invoice_sent && days(r.invoice_sent!) > 45);
 
   return (
     <div>
@@ -99,6 +113,16 @@ export default function Home() {
       </div>
       {loading ? <div className="text-sm text-inksoft">Opening the books…</div> : (
         <>
+          {payrollNudge && (
+            <a href="/payroll" className="card mb-2.5 block border-alert p-3 text-[14px]">
+              ⏱ <b>No hours entered for this week yet.</b> Tap here, hit Make payroll, and punch them in before Friday.
+            </a>
+          )}
+          {stale.length > 0 && (
+            <a href="/statements" className="card mb-2.5 block border-work p-3 text-[14px]">
+              🧾 <b>{stale.length} invoice{stale.length === 1 ? "" : "s"} out over 45 days</b> — worth a call. Tap to see who owes what.
+            </a>
+          )}
           <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
             {cards.map(([l, v, cls]) => (
               <div key={l} className="card p-3.5">
@@ -118,7 +142,7 @@ export default function Home() {
                 <div key={r.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
                   <span className="min-w-0 truncate"><span className="font-mono font-semibold">#{r.rel_number}</span> <span className="text-inksoft">{r.location || cNum(r.contract_id)}</span></span>
                   <span className="flex shrink-0 items-center gap-1.5">
-                    <span className="font-mono">{fmt(Number(r.amount))}</span>
+                    <span className="font-mono">{fmt(balOf(r))}</span>
                     <Stamp label={`${days(r.invoice_sent!)}D`} tone={days(r.invoice_sent!) > 60 ? "alert" : "work"} />
                   </span>
                 </div>

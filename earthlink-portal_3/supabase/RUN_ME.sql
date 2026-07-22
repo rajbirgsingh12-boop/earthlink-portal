@@ -167,6 +167,9 @@ alter table releases add column if not exists finish_date text default '';
 alter table pact_jobs add column if not exists start_date text default '';
 alter table pact_jobs add column if not exists finish_date text default '';
 
+-- ---------- from upgrade_payments.sql ----------
+alter table releases add column if not exists amount_received numeric default 0;
+
 -- ---------- from upgrade_realtime.sql ----------
 do $$ begin alter publication supabase_realtime add table releases; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table release_items; exception when duplicate_object then null; end $$;

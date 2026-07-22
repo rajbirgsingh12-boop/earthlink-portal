@@ -14,6 +14,7 @@ import ContractPicker from "@/components/ContractPicker";
 import NychaInvoicePrint from "@/components/NychaInvoicePrint";
 import { gatherReleaseDoc, buildInvoiceXlsx, type DocRow } from "@/lib/releaseDoc";
 import PrintShell from "@/components/PrintShell";
+import { shrinkImage } from "@/lib/shrinkImage";
 
 type Filter = "all" | "chase" | "payroll" | "received" | "canceled" | "hours";
 type PriceRow = { code: string; category: string; description: string; unit: string; unit_price: number };
@@ -483,9 +484,10 @@ export default function Releases() {
     setAttachRel((prev) => (prev && prev.id === r.id ? { ...prev, attachments: list } : prev));
   };
 
-  // timestamped job photos straight from the phone camera
+  // timestamped job photos straight from the phone camera — shrunk before upload
   const addPhotos = async (r: Release, files: File[]) => {
-    for (const [i, f] of files.entries()) {
+    const shrunk = await Promise.all(files.map((f) => shrinkImage(f)));
+    for (const [i, f] of shrunk.entries()) {
       const stamp = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "");
       const ext = (f.name.match(/\.\w+$/) || [".jpg"])[0];
       const named = new File([f], `photo_${stamp}${files.length > 1 ? `_${i + 1}` : ""}${ext}`, { type: f.type });
@@ -904,13 +906,15 @@ export default function Releases() {
       )}
 
       {rows.length > 0 && (() => {
-        const rec = live.filter((r) => r.received).reduce((s, r) => s + Number(r.amount), 0);
-        const outst = live.filter((r) => !r.received).reduce((s, r) => s + Number(r.amount), 0);
+        const partOf = (r: Release) => Math.min(Number(r.amount_received) || 0, Number(r.amount));
+        const rec = live.filter((r) => r.received).reduce((s, r) => s + Number(r.amount), 0)
+          + live.filter((r) => !r.received).reduce((s, r) => s + partOf(r), 0); // partial payments count
+        const outst = tot - rec;
         const pct = tot > 0 ? Math.round((rec / tot) * 100) : 0;
         return (
           <div className="card mb-3 p-3">
             <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-mono text-[13px]">
-              {([["Released", fmt(tot), "text-ink"], [`Received ${pct}%`, fmt(rec), "text-ok"], ["Waiting", fmt(outst), "text-work"], ["Chase", fmt(notR.reduce((s, r) => s + Number(r.amount), 0)), "text-work"], ["Payroll left", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
+              {([["Released", fmt(tot), "text-ink"], [`Received ${pct}%`, fmt(rec), "text-ok"], ["Waiting", fmt(outst), "text-work"], ["Chase", fmt(notR.reduce((s, r) => s + Number(r.amount) - partOf(r), 0)), "text-work"], ["Payroll left", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
                 <span key={l} className={cls}><span className="mr-1 text-[10px] uppercase tracking-[.12em] text-inksoft">{l}</span><b>{v}</b></span>
               ))}
             </div>

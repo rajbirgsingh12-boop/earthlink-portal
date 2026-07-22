@@ -1,8 +1,10 @@
 "use client";
 import { useEffect, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
+import * as XLSX from "xlsx-js-style";
 import { useLive } from "@/lib/useLive";
 import { sb } from "@/lib/supabase";
+import { askFileName } from "@/lib/format";
 import type { Org } from "@/lib/docs";
 import type { Contract, Profile, Role } from "@/lib/types";
 
@@ -95,6 +97,70 @@ export default function Settings() {
   };
 
   // ---------- system check: is every upgrade in place? ----------
+  // ---------- full backup: the whole business in one workbook ----------
+  const [backingUp, setBackingUp] = useState(false);
+  const allOf = async (table: string): Promise<Record<string, unknown>[]> => {
+    const out: Record<string, unknown>[] = [];
+    let from = 0;
+    for (;;) {
+      const { data } = await sb().from(table).select("*").range(from, from + 999);
+      if (!data || data.length === 0) break;
+      out.push(...(data as Record<string, unknown>[]));
+      if (data.length < 1000) break;
+      from += 1000;
+    }
+    return out;
+  };
+  const downloadBackup = async () => {
+    setBackingUp(true);
+    try {
+      const [cs, rels, emps, wks, ents, pact, props] = await Promise.all([
+        allOf("contracts"), allOf("releases"), allOf("employees"),
+        allOf("timesheet_weeks"), allOf("timesheet_entries"), allOf("pact_jobs"), allOf("proposals"),
+      ]);
+      const cNum = new Map(cs.map((c) => [c.id, `${c.number}`]));
+      const eName = new Map(emps.map((e) => [e.id, `${e.name}`]));
+      const wEnd = new Map(wks.map((w) => [w.id, `${w.week_ending}`]));
+      const wb = XLSX.utils.book_new();
+      const add = (name: string, rows: Record<string, unknown>[]) =>
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{ note: "nothing here yet" }]), name);
+      add("Contracts", cs.map((c) => ({ Contract: c.number, Name: c.name })));
+      add("Releases", rels.map((r) => ({
+        Contract: cNum.get(r.contract_id as string) || "", Release: r.rel_number, Development: r.location,
+        Address: r.buildings || r.address || "", Ticket: r.ticket, Amount: Number(r.amount) || 0,
+        "Paid so far": Number(r.amount_received) || 0, Received: r.received ? "yes" : "", "Paid date": r.paid_date || "",
+        Invoiced: r.invoice_sent || "", "Payroll done": r.payroll_done ? "yes" : "", "Labor hrs": Number(r.labor_hours) || 0,
+        Start: r.start_date || "", Finish: r.finish_date || "", Canceled: r.canceled ? "yes" : "",
+      })));
+      add("Payroll", ents.map((en) => {
+        const hours = ((en.hours as number[]) || []).map((h) => Number(h) || 0);
+        return {
+          "Week ending": wEnd.get(en.week_id as string) || "", Worker: eName.get(en.employee_id as string) || "?",
+          Classification: (en.trade as string) || "", Job: en.job_label || "",
+          Sat: hours[0] || 0, Sun: hours[1] || 0, Mon: hours[2] || 0, Tue: hours[3] || 0,
+          Wed: hours[4] || 0, Thu: hours[5] || 0, Fri: hours[6] || 0,
+          Total: hours.reduce((s, h) => s + h, 0),
+        };
+      }).sort((a, b) => `${a["Week ending"]}${a.Worker}`.localeCompare(`${b["Week ending"]}${b.Worker}`)));
+      add("Crew", emps.filter((e) => e.active !== false).map((e) => ({ Name: e.name, Classification: e.trade || "" })));
+      add("PACT", pact.map((j) => ({
+        Partner: j.partner, PO: j.po_number || j.job_number || "", Address: j.address || "",
+        Description: j.description || "", Amount: Number(j.amount) || 0, Approved: j.approved ? "yes" : "",
+        "Work done": j.work_done ? "yes" : "", Invoiced: j.invoice_sent || "", Paid: j.received ? "yes" : "",
+        Start: j.start_date || "", Finish: j.finish_date || "", Canceled: j.canceled ? "yes" : "",
+      })));
+      add("Walk sheets", props.map((p) => ({
+        Number: p.number, Name: p.job || "", Contract: cNum.get(p.contract_id as string) || "",
+        Development: p.development || "", "Release #": p.release_number || "", Status: p.status, Total: Number(p.total) || 0,
+      })));
+      const fname = askFileName(`earthlink_backup_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      if (fname) XLSX.writeFile(wb, fname);
+    } catch (e) {
+      flash(e instanceof Error ? e.message : "Backup failed");
+    }
+    setBackingUp(false);
+  };
+
   type CheckResult = { label: string; fix: string; ok: boolean };
   const [checks, setChecks] = useState<CheckResult[] | null>(null);
   const [checking, setChecking] = useState(false);
@@ -110,6 +176,7 @@ export default function Settings() {
       { label: "Payroll paid marks", fix: "upgrade_payroll_paid.sql", probe: async () => !(await sb().from("timesheet_weeks").select("paid_map").limit(1)).error },
       { label: "Payroll entry classifications", fix: "upgrade_payroll_class.sql", probe: async () => !(await sb().from("timesheet_entries").select("trade").limit(1)).error },
       { label: "Schedule (crew & start/finish dates)", fix: "upgrade_schedule.sql", probe: async () => !(await sb().from("releases").select("crew,start_date,finish_date").limit(1)).error && !(await sb().from("pact_jobs").select("start_date,finish_date").limit(1)).error },
+      { label: "Partial payments", fix: "upgrade_payments.sql", probe: async () => !(await sb().from("releases").select("amount_received").limit(1)).error },
       { label: "PACT jobs & invoicing", fix: "upgrade_pact.sql", probe: async () => !(await sb().from("pact_jobs").select("id,po_number,items,tax_pct,invoice_number").limit(1)).error },
     ];
     const results: CheckResult[] = [];
@@ -196,6 +263,14 @@ export default function Settings() {
           </div>
         </>
       )}
+
+      <div className="mb-2 mt-6 flex items-baseline justify-between">
+        <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Backup</div>
+        <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={downloadBackup} disabled={backingUp}>{backingUp ? "Building…" : "Download full backup (xlsx)"}</button>
+      </div>
+      <div className="card p-3.5 text-sm text-inksoft">
+        One Excel workbook with everything — contracts, releases (with payments), every payroll week, the crew, PACT jobs, and walk sheets. Worth downloading every Friday and keeping somewhere safe.
+      </div>
 
       <div className="mb-2 mt-6 flex items-baseline justify-between">
         <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">System check</div>

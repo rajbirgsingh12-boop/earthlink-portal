@@ -25,6 +25,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
   } else if (role === "accountant") {
     tabs.push(["/pact", "PACT"], ["/payroll", "Payroll"], ["/statements", "Invoices & Statements"]);
   }
+  tabs.push(["/help", "Help"]);
 
   return (
     <div className="min-h-screen">

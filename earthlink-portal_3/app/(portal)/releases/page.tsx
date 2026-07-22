@@ -184,11 +184,11 @@ export default function Releases() {
 
   // the release's life at a glance: each stage lights up from data already entered
   const pipeline = (r: Release): [string, boolean][] => [
-    ["WALK", stageData.walks.has(String(r.rel_number).trim())],
-    ["REL", stageData.items.has(r.id)],
-    ["WORK", !!(r.date_completed && String(r.date_completed).trim())],
-    ["PAY", r.payroll_done || hoursMet(r)],
-    ["INV", !!r.invoice_sent],
+    ["WALK SHEET", stageData.walks.has(String(r.rel_number).trim())],
+    ["RELEASE", stageData.items.has(r.id)],
+    ["WORK DONE", !!(r.date_completed && String(r.date_completed).trim())],
+    ["PAYROLL", r.payroll_done || hoursMet(r)],
+    ["INVOICED", !!r.invoice_sent],
     ["PAID", r.received],
   ];
   useEffect(() => { loadRows(active); }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1007,8 +1007,8 @@ export default function Releases() {
                 </td>
                 <td className="p-2.5">
                   <div className="flex items-center justify-end gap-2 whitespace-nowrap">
-                    {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-work underline" title="NYCHA invoice" onClick={() => genInvoice(r)}>INV</button>}
-                    {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-carbon underline" title="Statement of Services" onClick={() => genSOS(r)}>SOS</button>}
+                    {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-work underline" title="Make the NYCHA invoice" onClick={() => genInvoice(r)}>Invoice</button>}
+                    {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-carbon underline" title="Make the Statement of Services form" onClick={() => genSOS(r)}>SOS form</button>}
                     <button className="text-inksoft" title="Documents" onClick={() => setAttachRel(r)}>📎{(r.attachments || []).length > 0 ? <span className="font-mono text-[10px]">{(r.attachments || []).length}</span> : null}</button>
                     <button className={r.canceled ? "text-ok" : "text-alert"} title={r.canceled ? "Restore" : "Mark canceled"} onClick={() => toggle(r, { canceled: !r.canceled })}>{r.canceled ? "↺" : "✕"}</button>
                   </div>

@@ -410,7 +410,7 @@ export default function Payroll() {
                         (n) => { const hours = [...en.hours]; hours[view as number] = n; set({ hours }); },
                         (n) => { const hours = [...en.hours]; hours[view as number] = n; saveEntry({ ...en, hours }); })} />
                   )}
-                  <span className="font-mono text-xs text-inksoft">{hrs}h wk</span>
+                  <span className="whitespace-nowrap font-mono text-xs text-inksoft">{hrs}h this week</span>
                   {showDetail && <button className="text-xs text-alert" onClick={() => delEntry(en.id!)}>✕</button>}
                 </div>
               </div>

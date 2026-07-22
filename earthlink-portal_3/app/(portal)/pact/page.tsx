@@ -387,7 +387,7 @@ export default function Pact() {
   const partners = [...new Set(jobs.map((j) => j.partner).filter(Boolean))];
   const list = jobs.filter((j) => !q || `${j.partner} ${j.development} ${j.job_number} ${j.po_number || ""} ${j.address || ""} ${j.description}`.toLowerCase().includes(q.toLowerCase()));
   const pipeline = (j: Job): [string, boolean][] => [
-    ["APPROVED", j.approved], ["WORK", j.work_done], ["INV", !!j.invoice_sent], ["PAID", j.received],
+    ["APPROVED", j.approved], ["WORK DONE", j.work_done], ["INVOICED", !!j.invoice_sent], ["PAID", j.received],
   ];
 
   return (

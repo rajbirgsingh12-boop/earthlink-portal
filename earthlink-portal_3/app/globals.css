@@ -3,11 +3,11 @@
 @tailwind components;
 @tailwind utilities;
 body { @apply bg-paper text-ink font-body antialiased; }
-.stamp { @apply inline-block border-2 rounded-sm px-2 py-px font-display uppercase tracking-widest text-[11px] font-semibold; }
-.btn { @apply cursor-pointer select-none rounded-sm border-[1.5px] border-ink bg-white px-4 py-2 font-display uppercase tracking-wider text-[14px] font-semibold shadow-sm transition-all duration-150 hover:shadow active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50; }
+.stamp { @apply inline-block border-2 rounded-sm px-2.5 py-0.5 font-display uppercase tracking-widest text-[12px] font-semibold; }
+.btn { @apply cursor-pointer select-none rounded-sm border-[1.5px] border-ink bg-white px-4 py-2.5 font-display uppercase tracking-wider text-[15px] font-semibold shadow-sm transition-all duration-150 hover:shadow active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50; }
 .btn-primary { @apply bg-work border-work text-white hover:brightness-105; }
 .btn-ghost { @apply border-rule text-inksoft shadow-none hover:border-ink hover:text-ink; }
-.field { @apply w-full rounded-sm border border-rule bg-white px-3 py-2.5 text-base outline-none transition-colors duration-150 focus:border-ink focus:ring-2 focus:ring-ink/10; }
+.field { @apply w-full rounded-sm border border-rule bg-white px-3 py-3 text-base outline-none transition-colors duration-150 focus:border-ink focus:ring-2 focus:ring-ink/10; }
 .card { @apply rounded-sm border border-rule bg-card shadow-sm; }
 @media print {
   @page { size: letter portrait; margin: 0.45in; }

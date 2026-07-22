@@ -13,6 +13,7 @@ import { useLive } from "@/lib/useLive";
 import ContractPicker from "@/components/ContractPicker";
 import NychaInvoicePrint from "@/components/NychaInvoicePrint";
 import { gatherReleaseDoc, buildInvoiceXlsx, type DocRow } from "@/lib/releaseDoc";
+import PrintShell from "@/components/PrintShell";
 
 type Filter = "all" | "chase" | "payroll" | "received" | "canceled" | "hours";
 type PriceRow = { code: string; category: string; description: string; unit: string; unit_price: number };
@@ -283,6 +284,7 @@ export default function Releases() {
       await sb().from("releases").update({ invoice_sent: today }).eq("id", r.id);
       setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: today } : x)));
     }
+    setSosView(null); // one preview at a time — two would print as one concatenated PDF
     setInvPreview({ number: `${c?.number || ""}-${r.rel_number}`, date: today, cNumber: c?.number || "", relNum: r.rel_number, dev: d.dev, workOrder: r.ticket || "", rows: d.rows });
   };
 
@@ -318,6 +320,7 @@ export default function Releases() {
     }
     setBusy(false);
     if (rows.length === 0) { flash("No line items for this release — make a walk sheet with quantities for it, or import the release PDF"); return; }
+    setInvPreview(null); // one preview at a time
     setSosView({
       relNum: r.rel_number, ticket: r.ticket || "", cNumber: c?.number || "",
       dev: r.location || prop?.development || "", addr: r.address || r.buildings || prop?.address || "",
@@ -1065,6 +1068,7 @@ export default function Releases() {
       )}
 
       {sosView && (
+        <PrintShell>
         <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
           <div className="printable mx-auto max-w-4xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
             <div className="border-2 border-ink bg-paper p-2 text-center font-display text-xl font-bold uppercase">NYCHA Statement of Service</div>
@@ -1124,9 +1128,10 @@ export default function Releases() {
             <button className="btn btn-ghost bg-white" onClick={() => setSosView(null)}>Close</button>
           </div>
         </div>
+        </PrintShell>
       )}
 
-      {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
+      {msg && <div className="fixed bottom-5 left-1/2 z-[60] -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
     </div>
   );
 }

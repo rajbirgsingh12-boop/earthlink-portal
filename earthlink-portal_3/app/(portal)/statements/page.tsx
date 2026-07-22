@@ -10,6 +10,7 @@ import ContractPicker from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
 import NychaInvoicePrint from "@/components/NychaInvoicePrint";
 import { gatherReleaseDoc, buildInvoiceXlsx, type DocRow } from "@/lib/releaseDoc";
+import PrintShell from "@/components/PrintShell";
 
 export default function Statements() {
   const [contracts, setContracts] = useState<Contract[]>([]);
@@ -29,6 +30,7 @@ export default function Statements() {
       await sb().from("releases").update({ invoice_sent: today }).eq("id", r.id);
       setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: today } : x)));
     }
+    setPrintOpen(false); // one preview at a time — two would print as one concatenated PDF
     setInvPreview({ number: `${c?.number || ""}-${r.rel_number}`, date: today, cNumber: c?.number || "", relNum: r.rel_number, dev: r.location || d.dev, workOrder: r.ticket || "", rows: d.rows });
   };
 
@@ -181,12 +183,13 @@ export default function Statements() {
                 ))}
               </div>
               <div className="mt-3.5 flex gap-2">
-                <button className="btn btn-primary" onClick={() => setPrintOpen(true)}>Preview</button>
+                <button className="btn btn-primary" onClick={() => { setInvPreview(null); setPrintOpen(true); }}>Preview</button>
                 <button className="btn" onClick={downloadExcel}>Excel</button>
               </div>
             </>
           )}
           {printOpen && org && (
+            <PrintShell>
             <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
               <div className="printable mx-auto max-w-3xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
                 <div className="border-2 border-ink bg-paper p-2 text-center font-display text-xl font-bold uppercase">Statement of Account</div>
@@ -234,6 +237,7 @@ export default function Statements() {
                 <button className="btn btn-ghost bg-white" onClick={() => setPrintOpen(false)}>Close</button>
               </div>
             </div>
+            </PrintShell>
           )}
         </>
       )}

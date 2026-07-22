@@ -9,6 +9,7 @@ import { LineItem, Org, nextNumber, grandTotal } from "@/lib/docs";
 import type { Contract } from "@/lib/types";
 import ContractPicker from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
+import PrintShell from "@/components/PrintShell";
 
 interface Proposal {
   id: string; number: string; client_name: string; job: string; date: string; tax_pct: number; status: string; notes: string;
@@ -437,6 +438,7 @@ export default function Proposals() {
         </div>
 
         {printOpen && (
+          <PrintShell>
           <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
             <div className="printable mx-auto max-w-4xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
               <div className="border-2 border-ink bg-paper p-2 text-center font-display text-xl font-bold uppercase">Proposal — NYCHA Walk Sheet</div>
@@ -477,8 +479,9 @@ export default function Proposals() {
               <button className="btn btn-ghost bg-white" onClick={() => setPrintOpen(false)}>Close</button>
             </div>
           </div>
+          </PrintShell>
         )}
-        {msg && <div className="fixed bottom-16 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
+        {msg && <div className="fixed bottom-16 left-1/2 z-[60] -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
       </div>
     );
   }
@@ -517,7 +520,7 @@ export default function Proposals() {
           </table>
         </div>
         <div className="card flex justify-end p-3.5"><div className="font-mono text-xl font-semibold">Total {fmt(total)}</div></div>
-        {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
+        {msg && <div className="fixed bottom-5 left-1/2 z-[60] -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
       </div>
     );
   }
@@ -603,7 +606,7 @@ export default function Proposals() {
         </div>
       )}
 
-      {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
+      {msg && <div className="fixed bottom-5 left-1/2 z-[60] -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
     </div>
   );
 }

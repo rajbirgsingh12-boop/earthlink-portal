@@ -1,6 +1,7 @@
 "use client";
 import { fmt } from "@/lib/format";
 import { Org, prettyDate } from "@/lib/docs";
+import PrintShell from "@/components/PrintShell";
 
 // Matches Earth Link's NYCHA "Standard Invoice" xlsx layout: Original To /
 // copy to / FROM blocks, contract-release-development header, and the
@@ -22,6 +23,7 @@ export default function NychaInvoicePrint(p: Props) {
     <span className="text-[10px] uppercase tracking-[.12em] text-inksoft">{children}</span>
   );
   return (
+    <PrintShell>
     <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
       <div className="printable mx-auto max-w-4xl rounded-sm bg-white p-8 text-ink">
         <div className="flex items-baseline justify-between border-b-2 border-ink pb-2">
@@ -112,5 +114,6 @@ export default function NychaInvoicePrint(p: Props) {
         <button className="btn btn-ghost bg-white" onClick={p.close}>Close</button>
       </div>
     </div>
+    </PrintShell>
   );
 }

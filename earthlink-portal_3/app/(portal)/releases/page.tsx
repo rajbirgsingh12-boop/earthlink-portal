@@ -906,15 +906,13 @@ export default function Releases() {
       )}
 
       {rows.length > 0 && (() => {
-        const partOf = (r: Release) => Math.min(Number(r.amount_received) || 0, Number(r.amount));
-        const rec = live.filter((r) => r.received).reduce((s, r) => s + Number(r.amount), 0)
-          + live.filter((r) => !r.received).reduce((s, r) => s + partOf(r), 0); // partial payments count
-        const outst = tot - rec;
+        const rec = live.filter((r) => r.received).reduce((s, r) => s + Number(r.amount), 0);
+        const outst = live.filter((r) => !r.received).reduce((s, r) => s + Number(r.amount), 0);
         const pct = tot > 0 ? Math.round((rec / tot) * 100) : 0;
         return (
           <div className="card mb-3 p-3">
             <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-mono text-[13px]">
-              {([["Released", fmt(tot), "text-ink"], [`Received ${pct}%`, fmt(rec), "text-ok"], ["Waiting", fmt(outst), "text-work"], ["Chase", fmt(notR.reduce((s, r) => s + Number(r.amount) - partOf(r), 0)), "text-work"], ["Payroll left", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
+              {([["Released", fmt(tot), "text-ink"], [`Received ${pct}%`, fmt(rec), "text-ok"], ["Waiting", fmt(outst), "text-work"], ["Chase", fmt(notR.reduce((s, r) => s + Number(r.amount), 0)), "text-work"], ["Payroll left", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
                 <span key={l} className={cls}><span className="mr-1 text-[10px] uppercase tracking-[.12em] text-inksoft">{l}</span><b>{v}</b></span>
               ))}
             </div>

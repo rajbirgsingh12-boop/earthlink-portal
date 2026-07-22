@@ -128,7 +128,7 @@ export default function Settings() {
       add("Releases", rels.map((r) => ({
         Contract: cNum.get(r.contract_id as string) || "", Release: r.rel_number, Development: r.location,
         Address: r.buildings || r.address || "", Ticket: r.ticket, Amount: Number(r.amount) || 0,
-        "Paid so far": Number(r.amount_received) || 0, Received: r.received ? "yes" : "", "Paid date": r.paid_date || "",
+        Received: r.received ? "yes" : "", "Paid date": r.paid_date || "",
         Invoiced: r.invoice_sent || "", "Payroll done": r.payroll_done ? "yes" : "", "Labor hrs": Number(r.labor_hours) || 0,
         Start: r.start_date || "", Finish: r.finish_date || "", Canceled: r.canceled ? "yes" : "",
       })));
@@ -176,7 +176,6 @@ export default function Settings() {
       { label: "Payroll paid marks", fix: "upgrade_payroll_paid.sql", probe: async () => !(await sb().from("timesheet_weeks").select("paid_map").limit(1)).error },
       { label: "Payroll entry classifications", fix: "upgrade_payroll_class.sql", probe: async () => !(await sb().from("timesheet_entries").select("trade").limit(1)).error },
       { label: "Schedule (crew & start/finish dates)", fix: "upgrade_schedule.sql", probe: async () => !(await sb().from("releases").select("crew,start_date,finish_date").limit(1)).error && !(await sb().from("pact_jobs").select("start_date,finish_date").limit(1)).error },
-      { label: "Partial payments", fix: "upgrade_payments.sql", probe: async () => !(await sb().from("releases").select("amount_received").limit(1)).error },
       { label: "PACT jobs & invoicing", fix: "upgrade_pact.sql", probe: async () => !(await sb().from("pact_jobs").select("id,po_number,items,tax_pct,invoice_number").limit(1)).error },
     ];
     const results: CheckResult[] = [];

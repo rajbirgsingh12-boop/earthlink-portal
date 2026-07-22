@@ -11,7 +11,6 @@ import { useLive } from "@/lib/useLive";
 import NychaInvoicePrint from "@/components/NychaInvoicePrint";
 import { gatherReleaseDoc, buildInvoiceXlsx, type DocRow } from "@/lib/releaseDoc";
 import PrintShell from "@/components/PrintShell";
-import { useNumBuffer } from "@/lib/numBuffer";
 
 export default function Statements() {
   const [contracts, setContracts] = useState<Contract[]>([]);
@@ -22,8 +21,6 @@ export default function Statements() {
   const [printOpen, setPrintOpen] = useState(false);
   const [invPreview, setInvPreview] = useState<{ number: string; date: string; cNumber: string; relNum: string; dev: string; workOrder: string; rows: DocRow[] } | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
-  const [msg, setMsg] = useState("");
-  const num = useNumBuffer();
   const today = new Date().toISOString().slice(0, 10);
 
   const genInvoice = async (r: Release) => {
@@ -86,29 +83,15 @@ export default function Statements() {
 
   const contract = contracts.find((c) => c.id === sel);
   const days = (r: Release) => (r.invoice_sent ? Math.max(0, Math.floor((new Date(today).getTime() - new Date(r.invoice_sent + "T00:00:00").getTime()) / 86400000)) : null);
-  // true remaining balance — partial payments come off the top
-  const bal = (r: Release) => Math.max(0, Number(r.amount) - (Number(r.amount_received) || 0));
   const buckets: [string, number][] = [["0–30", 0], ["31–60", 0], ["61–90", 0], ["90+", 0]];
   let notInvoiced = 0;
   rows.forEach((r) => {
-    const d = days(r); const v = bal(r);
+    const d = days(r); const v = Number(r.amount);
     if (d === null) notInvoiced += v;
     else if (d <= 30) buckets[0][1] += v; else if (d <= 60) buckets[1][1] += v; else if (d <= 90) buckets[2][1] += v; else buckets[3][1] += v;
   });
-  const total = rows.reduce((s, r) => s + bal(r), 0);
+  const total = rows.reduce((s, r) => s + Number(r.amount), 0);
   const sorted = [...rows].sort((a, b) => (days(b) ?? -1) - (days(a) ?? -1));
-
-  // record a partial payment; paying in full marks the release received
-  const savePaid = async (r: Release, n: number) => {
-    const patch: Partial<Release> = { amount_received: n };
-    if (Number(r.amount) > 0 && n >= Number(r.amount)) { patch.received = true; patch.paid_date = today; }
-    setRows((prev) => (patch.received ? prev.filter((x) => x.id !== r.id) : prev.map((x) => (x.id === r.id ? { ...x, ...patch } : x))));
-    const { error } = await sb().from("releases").update(patch).eq("id", r.id);
-    if (error) setMsg(/column|schema cache/i.test(error.message) ? "Run supabase/upgrade_payments.sql first" : error.message);
-    else if (patch.received) setMsg(`#${r.rel_number} paid in full — moved to received`);
-    if (!error && !patch.received) return;
-    setTimeout(() => setMsg(""), 3000);
-  };
 
   const downloadExcel = () => {
     if (!contract) return;
@@ -124,7 +107,7 @@ export default function Statements() {
     aoa.push(["Release", "Development", "Location", "Invoiced", "Days out", "Balance"]);
     sorted.forEach((r) => {
       const d = days(r);
-      aoa.push([/^\d+$/.test(r.rel_number) ? Number(r.rel_number) : r.rel_number, r.location || "", r.buildings || "", r.invoice_sent ? prettyDate(r.invoice_sent) : "not invoiced", d === null ? "" : d, bal(r)]);
+      aoa.push([/^\d+$/.test(r.rel_number) ? Number(r.rel_number) : r.rel_number, r.location || "", r.buildings || "", r.invoice_sent ? prettyDate(r.invoice_sent) : "not invoiced", d === null ? "" : d, Number(r.amount)]);
     });
     const totalRow = aoa.length;
     aoa.push(["", "", "", "", "Total due", total]);
@@ -164,7 +147,7 @@ export default function Statements() {
           <div className="card overflow-x-auto">
             <table className="w-full border-collapse text-sm" style={{ minWidth: 560 }}>
               <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
-                <th className="p-2.5">Release</th><th className="p-2.5">Location</th><th className="p-2.5">Invoiced</th><th className="p-2.5 text-right">Days out</th><th className="p-2.5 text-right">Paid so far</th><th className="p-2.5 text-right">Balance</th><th className="p-2.5"></th></tr></thead>
+                <th className="p-2.5">Release</th><th className="p-2.5">Location</th><th className="p-2.5">Invoiced</th><th className="p-2.5 text-right">Days out</th><th className="p-2.5 text-right">Balance</th><th className="p-2.5"></th></tr></thead>
               <tbody>
                 {sorted.filter((r) => !tq.trim() || `${r.rel_number} ${r.location} ${r.buildings}`.toLowerCase().includes(tq.trim().toLowerCase())).map((r) => {
                   const d = days(r);
@@ -181,20 +164,13 @@ export default function Statements() {
                           }} />
                       </td>
                       <td className={`p-2.5 text-right font-mono ${d !== null && d > 60 ? "text-alert" : ""}`}>{d === null ? "—" : d}</td>
-                      <td className="p-2.5 text-right">
-                        <input className="w-24 rounded-sm border border-rulesoft p-1.5 text-right font-mono text-[13px]" inputMode="decimal" placeholder="0"
-                          title={`NYCHA has paid this much of ${fmt(Number(r.amount))} so far`}
-                          {...num(`${r.id}:paid`, Number(r.amount_received) || 0,
-                            () => {},
-                            (n) => savePaid(r, n))} />
-                      </td>
-                      <td className="p-2.5 text-right font-mono font-semibold">{fmt(bal(r))}</td>
+                      <td className="p-2.5 text-right font-mono font-semibold">{fmt(Number(r.amount))}</td>
                       <td className="p-2.5 text-right"><button className="font-mono text-xs font-semibold text-work underline" title="Make the NYCHA invoice" onClick={() => genInvoice(r)}>Invoice</button></td>
                     </tr>
                   );
                 })}
-                {sorted.length === 0 && <tr><td colSpan={7} className="p-4 text-inksoft">Nothing outstanding on contract {contract.number}. All square. 🎉</td></tr>}
-                {sorted.length > 0 && <tr><td colSpan={5} className="p-2.5 font-display font-bold uppercase">Total due</td><td className="p-2.5 text-right font-mono text-base font-bold">{fmt(total)}</td><td></td></tr>}
+                {sorted.length === 0 && <tr><td colSpan={6} className="p-4 text-inksoft">Nothing outstanding on contract {contract.number}. All square. 🎉</td></tr>}
+                {sorted.length > 0 && <tr><td colSpan={5} className="p-2.5 font-display font-bold uppercase">Total due</td><td className="p-2.5 text-right font-mono text-base font-bold">{fmt(total)}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -245,7 +221,7 @@ export default function Statements() {
                           <td className="border border-rulesoft p-1.5">{r.location}{r.buildings ? <span className="text-[11px] text-inksoft"> · {r.buildings}</span> : ""}</td>
                           <td className="border border-rulesoft p-1.5 font-mono text-[11px]">{r.invoice_sent ? prettyDate(r.invoice_sent) : "not invoiced"}</td>
                           <td className="border border-rulesoft p-1.5 text-right font-mono">{d === null ? "—" : d}</td>
-                          <td className="border border-rulesoft p-1.5 text-right font-mono font-semibold">{fmt(bal(r))}</td>
+                          <td className="border border-rulesoft p-1.5 text-right font-mono font-semibold">{fmt(Number(r.amount))}</td>
                         </tr>
                       );
                     })}
@@ -276,7 +252,6 @@ export default function Statements() {
           close={() => setInvPreview(null)} />
       )}
       {contracts.length === 0 && <div className="text-sm text-inksoft">No active statements — nothing is currently owed on any contract. Releases you haven&apos;t been paid for show up here automatically.</div>}
-      {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
     </div>
   );
 }

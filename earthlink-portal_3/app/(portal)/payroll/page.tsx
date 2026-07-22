@@ -53,7 +53,6 @@ export default function Payroll() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [showCrew, setShowCrew] = useState(false);
   const [draft, setDraft] = useState({ name: "", trade: "", base_rate: "" });
-  const [newDate, setNewDate] = useState(fridayOf(new Date().toISOString().slice(0, 10)));
   const [rels, setRels] = useState<RelRow[]>([]);
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [linkContract, setLinkContract] = useState("");
@@ -125,11 +124,15 @@ export default function Payroll() {
     setEntries(ents);
     loadWeekCheck(ents);
   };
-  const createWeek = async (copyLast: boolean) => {
-    const we = fridayOf(newDate);
+  // the one button: opens this week's payroll, creating it first if needed —
+  // last week's crew comes over automatically with hours reset to zero
+  const makePayroll = async () => {
+    const we = fridayOf(new Date().toISOString().slice(0, 10));
+    const existing = weeks.find((w) => w.week_ending === we);
+    if (existing) { openW(existing); return; }
     const { data, error } = await sb().from("timesheet_weeks").insert({ week_ending: we }).select().single();
     if (error || !data) { flash(error?.message || "Failed"); return; }
-    if (copyLast && weeks[0]) {
+    if (weeks[0]) {
       const { data: prev } = await sb().from("timesheet_entries").select("*").eq("week_id", weeks[0].id);
       // trade rides along so per-job classifications survive the weekly copy
       if (prev?.length) await sb().from("timesheet_entries").insert(prev.map((p: Entry) => ({ week_id: data.id, employee_id: p.employee_id, job_label: p.job_label, rate: p.rate, release_id: p.release_id, trade: p.trade, hours: [0, 0, 0, 0, 0, 0, 0] })));
@@ -299,9 +302,9 @@ export default function Payroll() {
           <div className="flex gap-2">
             <button className="btn" onClick={exportTemplate}>Weekly sheet (xlsx)</button>
             <button className="btn btn-primary" onClick={() => {
-              // blur whatever's focused so its pending save fires, then close
+              // blur fires the focused field's save synchronously, then close right away
               (document.activeElement as HTMLElement | null)?.blur?.();
-              setTimeout(() => { setOpenWeek(null); load(); }, 120);
+              setOpenWeek(null); load();
             }}>Save & close</button>
           </div>
         </div>
@@ -535,20 +538,14 @@ export default function Payroll() {
         </div>
       )}
 
-      <div className="card mb-3 p-3.5">
-        <div className="mb-2 text-[11px] uppercase tracking-widest text-inksoft">Start a payroll week — weeks run Saturday to Friday</div>
-        <div className="flex flex-wrap items-end gap-2">
-          <div>
-            <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Any day in that week</div>
-            <input className="field w-44" type="date" value={newDate} onChange={(e) => setNewDate(fridayOf(e.target.value))} />
-          </div>
-          <button className="btn btn-ghost" onClick={() => setNewDate(fridayOf(new Date().toISOString().slice(0, 10)))}>This week</button>
-          <button className="btn btn-ghost" onClick={() => setNewDate(fridayOf(addDays(new Date().toISOString().slice(0, 10), -7)))}>Last week</button>
-          <button className="btn btn-primary" onClick={() => createWeek(false)}>New week</button>
-          {weeks.length > 0 && <button className="btn" onClick={() => createWeek(true)}>Copy last week&apos;s crew</button>}
-        </div>
-        <div className="mt-2 font-mono text-xs text-inksoft">Covers {prettyDate(addDays(newDate, -6))} – {prettyDate(newDate)}</div>
-      </div>
+      {(() => {
+        const we = fridayOf(new Date().toISOString().slice(0, 10));
+        return (
+          <button className="btn btn-primary mb-3 w-full py-3.5 text-base" onClick={makePayroll}>
+            Make payroll · {prettyDate(addDays(we, -6))} – {prettyDate(we)}
+          </button>
+        );
+      })()}
 
       <div className="card divide-y divide-rulesoft">
         {weeks.map((w) => (

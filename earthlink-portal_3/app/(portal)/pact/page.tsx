@@ -559,7 +559,7 @@ export default function Pact() {
                 <div className="mt-3 flex justify-end">
                   <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => {
                     (document.activeElement as HTMLElement | null)?.blur?.();
-                    setTimeout(() => { setOpenId(null); setShowDetails(false); }, 120);
+                    setOpenId(null); setShowDetails(false);
                   }}>Save & close</button>
                 </div>
               </div>
@@ -631,7 +631,7 @@ export default function Pact() {
                 <button className="btn" onClick={() => { setInvJob(null); buildPackage(j); }} disabled={busy}>📦 Download package</button>
                 <button className="btn btn-primary" onClick={() => {
                   (document.activeElement as HTMLElement | null)?.blur?.();
-                  setTimeout(() => setInvJob(null), 120);
+                  setInvJob(null);
                 }}>Save & close</button>
               </div>
             </div>

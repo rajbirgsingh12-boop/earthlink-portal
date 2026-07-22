@@ -64,9 +64,12 @@ export default function PactSchedule() {
 
   return (
     <div>
-      <div className="mb-3 flex items-baseline justify-between">
-        <div className="font-display text-2xl font-bold uppercase">PACT Schedule</div>
-        <span className="text-xs text-inksoft">{scheduled.length} scheduled · {needsDates.length} need dates · {done.length} complete</span>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="font-display text-2xl font-bold uppercase">PACT Schedule</div>
+          <span className="text-xs text-inksoft">{scheduled.length} scheduled · {needsDates.length} need dates · {done.length} complete</span>
+        </div>
+        <a className="btn btn-ghost" href="/pact">📋 Jobs</a>
       </div>
       <input className="field mb-3" placeholder="Search PO #, partner, address…" value={q} onChange={(e) => setQ(e.target.value)} />
 

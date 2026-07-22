@@ -62,6 +62,7 @@ export default function Payroll() {
   // one box searches the week's workers AND adds new ones by name
   const [workerQ, setWorkerQ] = useState("");
   const [workerFocus, setWorkerFocus] = useState(false);
+  const [pickDate, setPickDate] = useState(""); // calendar for opening any week
   // day-at-a-time entry: which day of the open week is being punched (0=Sat), or the full grid
   const [view, setView] = useState<number | "week">("week");
   const [openDetail, setOpenDetail] = useState<string | null>(null);
@@ -124,10 +125,11 @@ export default function Payroll() {
     setEntries(ents);
     loadWeekCheck(ents);
   };
-  // the one button: opens this week's payroll, creating it first if needed —
-  // last week's crew comes over automatically with hours reset to zero
-  const makePayroll = async () => {
-    const we = fridayOf(new Date().toISOString().slice(0, 10));
+  // the one button: opens the payroll for the week containing forDate (today by
+  // default), creating it first if needed — the latest week's crew comes over
+  // automatically with hours reset to zero
+  const makePayroll = async (forDate?: string) => {
+    const we = fridayOf(forDate || new Date().toISOString().slice(0, 10));
     const existing = weeks.find((w) => w.week_ending === we);
     if (existing) { openW(existing); return; }
     const { data, error } = await sb().from("timesheet_weeks").insert({ week_ending: we }).select().single();
@@ -151,7 +153,19 @@ export default function Payroll() {
       if (data) flash("Run supabase/upgrade_payroll_class.sql so classifications save");
     }
     if (error) { flash(error.message); return; }
-    if (data) setEntries((prev) => (prev.some((x) => x.id === (data as Entry).id) ? prev : [...prev, { ...(data as Entry), hours: ((data as Entry).hours || []).map(Number) }]));
+    if (data) {
+      setEntries((prev) => (prev.some((x) => x.id === (data as Entry).id) ? prev : [...prev, { ...(data as Entry), hours: ((data as Entry).hours || []).map(Number) }]));
+      setOpenDetail((data as Entry).id || null); // open the new worker's menu right away
+    }
+  };
+  // make sure everyone from the payroll template shows in the crew list
+  const seedCrew = async () => {
+    const { data: allEmps } = await sb().from("employees").select("id,name");
+    const have = new Set(((allEmps || []) as { name: string }[]).map((e) => e.name.trim().toLowerCase()));
+    const missing = TEMPLATE_CREW.filter((t) => !have.has(t.name.toLowerCase()));
+    if (missing.length === 0) return;
+    const { error } = await sb().from("employees").insert(missing.map((t) => ({ name: t.name, trade: t.trade, base_rate: 0 })));
+    if (!error) load();
   };
   // picking a template name adds that worker to the crew on the spot, then to the week
   const addFromTemplate = async (idx: number) => {
@@ -352,14 +366,14 @@ export default function Payroll() {
               <div className="card absolute inset-x-0 top-full z-10 max-h-64 overflow-y-auto shadow-lg">
                 {crewMatch.map((e) => (
                   <button key={e.id} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
-                    onMouseDown={() => { addEntry(e.id); setWorkerQ(""); }}>
+                    onMouseDown={(ev) => { ev.preventDefault(); addEntry(e.id); setWorkerQ(""); }}>
                     <span>{e.name}</span>
                     <span className="text-[11px] text-inksoft">{inWeek.has(e.id) ? "+ add again" : "+ add to week"}</span>
                   </button>
                 ))}
                 {tplMatch.map((t) => (
                   <button key={t.name} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
-                    onMouseDown={() => { addFromTemplate(t.idx); setWorkerQ(""); }}>
+                    onMouseDown={(ev) => { ev.preventDefault(); addFromTemplate(t.idx); setWorkerQ(""); }}>
                     <span>{t.name}</span>
                     <span className="text-[11px] text-inksoft">+ from template</span>
                   </button>
@@ -473,6 +487,14 @@ export default function Payroll() {
                   </div>
                 ))}
               </div>
+              {dayMode && (
+                <div className="mt-2.5 flex justify-end">
+                  <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => {
+                    (document.activeElement as HTMLElement | null)?.blur?.();
+                    setOpenDetail(null);
+                  }}>Save & close</button>
+                </div>
+              )}
               </div>)}
             </div>
           );
@@ -514,7 +536,7 @@ export default function Payroll() {
     <div>
       <div className="mb-3 flex items-baseline justify-between">
         <div className="font-display text-2xl font-bold uppercase">Payroll</div>
-        <button className="btn btn-ghost" onClick={() => setShowCrew(!showCrew)}>Crew ({emps.length})</button>
+        <button className="btn btn-ghost" onClick={() => { const n = !showCrew; setShowCrew(n); if (n) seedCrew(); }}>Crew ({emps.length})</button>
       </div>
       {showCrew && (
         <div className="card mb-3 p-3.5">
@@ -541,9 +563,16 @@ export default function Payroll() {
       {(() => {
         const we = fridayOf(new Date().toISOString().slice(0, 10));
         return (
-          <button className="btn btn-primary mb-3 w-full py-3.5 text-base" onClick={makePayroll}>
-            Make payroll · {prettyDate(addDays(we, -6))} – {prettyDate(we)}
-          </button>
+          <div className="card mb-3 p-3.5">
+            <button className="btn btn-primary w-full py-3.5 text-base" onClick={() => makePayroll()}>
+              Make payroll · {prettyDate(addDays(we, -6))} – {prettyDate(we)}
+            </button>
+            <div className="mt-2.5 flex flex-wrap items-center gap-2">
+              <span className="text-[11px] uppercase tracking-widest text-inksoft">Different week? Pick any day in it</span>
+              <input type="date" className="field w-44" value={pickDate} onChange={(e) => setPickDate(e.target.value)} />
+              <button className="btn" disabled={!pickDate} onClick={() => makePayroll(pickDate)}>Open that week</button>
+            </div>
+          </div>
         );
       })()}
 

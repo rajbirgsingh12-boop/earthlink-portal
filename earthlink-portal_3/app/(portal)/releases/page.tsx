@@ -183,11 +183,11 @@ export default function Releases() {
   // required hours met lights the PAY stage even before payroll is marked done
   const hoursMet = (r: Release) => { const need = Number(r.labor_hours) || 0; return need > 0 && (logged?.[r.id] || 0) >= need; };
 
-  // the release's life at a glance: each stage lights up from data already entered
+  // the release's life at a glance: each stage lights up from data already
+  // entered (payroll complete implies the work is done, so no separate stage)
   const pipeline = (r: Release): [string, boolean][] => [
     ["WALK SHEET", stageData.walks.has(String(r.rel_number).trim())],
     ["RELEASE", stageData.items.has(r.id)],
-    ["WORK DONE", !!(r.date_completed && String(r.date_completed).trim())],
     ["PAYROLL", r.payroll_done || hoursMet(r)],
     ["INVOICED", !!r.invoice_sent],
     ["PAID", r.received],

@@ -397,12 +397,11 @@ export default function Pact() {
     <div>
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div className="font-display text-2xl font-bold uppercase">PACT</div>
-        {canEdit && (
-        <div className="flex gap-2">
-          <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy}>+ Upload PO (PDF)</button>
-          <button className="btn btn-ghost" onClick={() => setAddOpen(!addOpen)}>+ Manual job</button>
+        <div className="flex flex-wrap gap-2">
+          <a className="btn btn-ghost" href="/pact/schedule">📅 Schedule</a>
+          {canEdit && <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy}>+ Upload PO (PDF)</button>}
+          {canEdit && <button className="btn btn-ghost" onClick={() => setAddOpen(!addOpen)}>+ Manual job</button>}
         </div>
-        )}
       </div>
       <input ref={poRef} type="file" accept="application/pdf" className="hidden" onChange={handlePo} />
 

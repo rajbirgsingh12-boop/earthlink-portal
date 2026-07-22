@@ -46,19 +46,19 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
           <div className="mx-auto flex max-w-5xl">
             {tabs.map(([href, label]) => {
               const cls = `whitespace-nowrap px-4 py-3 font-display text-[15px] font-semibold uppercase tracking-wider transition-colors duration-150 ${(href === "/pact" ? path.startsWith("/pact") : path === href) ? "border-b-[3px] border-work text-work" : "text-inksoft hover:text-ink"}`;
-              // hovering PACT reveals the Jobs/Schedule row; clicking goes to Jobs,
-              // where the row stays pinned — so it works with or without a mouse
+              // the sub-row shows only while the mouse is over PACT (or the row
+              // itself); hovering any other tab closes it, clicking navigates
               return (
                 <a key={href} href={href} className={cls}
-                  onMouseEnter={href === "/pact" ? () => setPactOpen(true) : undefined}>
+                  onMouseEnter={() => setPactOpen(href === "/pact")}>
                   {label}{href === "/pact" ? " ▾" : ""}
                 </a>
               );
             })}
           </div>
         </div>
-        {(pactOpen || path.startsWith("/pact")) && (
-          <div className="border-t border-rulesoft bg-paper">
+        {pactOpen && (
+          <div className="border-t border-rulesoft bg-paper" onMouseLeave={() => setPactOpen(false)}>
             <div className="mx-auto flex max-w-5xl gap-1 px-2">
               {([["/pact", "Jobs"], ["/pact/schedule", "Schedule"]] as [string, string][]).map(([h, l]) => (
                 <a key={h} href={h}

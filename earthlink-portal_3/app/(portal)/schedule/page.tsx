@@ -4,7 +4,7 @@ import { sb } from "@/lib/supabase";
 import type { Contract, Release } from "@/lib/types";
 import { useLive } from "@/lib/useLive";
 import { TEMPLATE_CREW } from "@/lib/crew";
-import { contractLabel } from "@/components/ContractPicker";
+import ContractPicker, { contractLabel } from "@/components/ContractPicker";
 import Stamp from "@/components/Stamp";
 
 interface Emp { id: string; name: string; trade: string; base_rate: number; active: boolean; }
@@ -16,6 +16,7 @@ export default function Schedule() {
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [emps, setEmps] = useState<Emp[]>([]);
   const [q, setQ] = useState("");
+  const [contractSel, setContractSel] = useState(""); // "" = all contracts
   const [pickFor, setPickFor] = useState<string | null>(null); // release id whose worker search is open
   const [pickQ, setPickQ] = useState("");
   const [msg, setMsg] = useState("");
@@ -74,11 +75,16 @@ export default function Schedule() {
   const contractOf = (r: Release) => { const c = contracts.find((x) => x.id === r.contract_id); return c ? contractLabel(c) : ""; };
 
   // search matches release info AND assigned worker names
-  const list = rels.filter((r) => {
-    if (!q.trim()) return true;
-    const crewNames = (r.crew || []).map(nameOf).join(" ");
-    return `${r.rel_number} ${r.location} ${r.buildings} ${r.address || ""} ${contractOf(r)} ${crewNames}`.toLowerCase().includes(q.toLowerCase());
-  });
+  const filtered = rels
+    .filter((r) => !contractSel || r.contract_id === contractSel)
+    .filter((r) => {
+      if (!q.trim()) return true;
+      const crewNames = (r.crew || []).map(nameOf).join(" ");
+      return `${r.rel_number} ${r.location} ${r.buildings} ${r.address || ""} ${contractOf(r)} ${crewNames}`.toLowerCase().includes(q.toLowerCase());
+    });
+  // showing all contracts → keep each contract's releases together
+  const list = contractSel ? filtered : [...filtered].sort((a, b) =>
+    (contractOf(a) || "").localeCompare(contractOf(b) || "") || ((parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0)));
   const assigned = list.filter((r) => (r.crew || []).length > 0);
   const unassigned = list.filter((r) => (r.crew || []).length === 0);
 
@@ -158,7 +164,11 @@ export default function Schedule() {
         <div className="font-display text-2xl font-bold uppercase">Schedule</div>
         <span className="text-xs text-inksoft">{assigned.length} staffed · {unassigned.length} open</span>
       </div>
-      <input className="field mb-3" placeholder="Search release #, development, address, or worker name…" value={q} onChange={(e) => setQ(e.target.value)} />
+      <div className="mb-3 grid gap-2 md:grid-cols-2">
+        <ContractPicker contracts={contracts} value={contractSel} onChange={setContractSel}
+          extra={[{ id: "", label: "All contracts" }]} placeholder="Sort by contract…" />
+        <input className="field" placeholder="Search release #, development, address, or worker name…" value={q} onChange={(e) => setQ(e.target.value)} />
+      </div>
 
       {assigned.length > 0 && (
         <>

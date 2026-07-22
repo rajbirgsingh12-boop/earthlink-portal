@@ -9,4 +9,5 @@ export interface Release {
   invoice_sent?: string | null; paid_date?: string | null;
   attachments?: { name: string; path: string }[] | null;
   crew?: string[] | null; // employee ids assigned on the Schedule tab
+  start_date?: string; finish_date?: string; // schedule dates
 }

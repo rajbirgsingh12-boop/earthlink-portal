@@ -6,6 +6,7 @@ import type { Profile } from "@/lib/types";
 
 export default function PortalLayout({ children }: { children: React.ReactNode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [pactOpen, setPactOpen] = useState(false); // PACT sub-menu (Jobs / Schedule)
   const path = usePathname();
 
   useEffect(() => {
@@ -39,15 +40,29 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
           </div>
         </div>
       </div>
-      <div className="sticky top-[57px] z-10 overflow-x-auto border-b-[1.5px] border-ink bg-card">
-        <div className="mx-auto flex max-w-5xl">
-          {tabs.map(([href, label]) => (
-            <a key={href} href={href}
-              className={`whitespace-nowrap px-4 py-3 font-display text-[15px] font-semibold uppercase tracking-wider transition-colors duration-150 ${path === href ? "border-b-[3px] border-work text-work" : "text-inksoft hover:text-ink"}`}>
-              {label}
-            </a>
-          ))}
+      <div className="sticky top-[57px] z-10 border-b-[1.5px] border-ink bg-card" onMouseLeave={() => setPactOpen(false)}>
+        <div className="overflow-x-auto">
+          <div className="mx-auto flex max-w-5xl">
+            {tabs.map(([href, label]) => (
+              <a key={href} href={href} onMouseEnter={href === "/pact" ? () => setPactOpen(true) : undefined}
+                className={`whitespace-nowrap px-4 py-3 font-display text-[15px] font-semibold uppercase tracking-wider transition-colors duration-150 ${(href === "/pact" ? path.startsWith("/pact") : path === href) ? "border-b-[3px] border-work text-work" : "text-inksoft hover:text-ink"}`}>
+                {label}{href === "/pact" ? " ▾" : ""}
+              </a>
+            ))}
+          </div>
         </div>
+        {tabs.some(([h]) => h === "/pact") && (pactOpen || path.startsWith("/pact")) && (
+          <div className="border-t border-rulesoft bg-paper">
+            <div className="mx-auto flex max-w-5xl gap-1 px-2">
+              {([["/pact", "Jobs"], ["/pact/schedule", "Schedule"]] as [string, string][]).map(([h, l]) => (
+                <a key={h} href={h}
+                  className={`whitespace-nowrap px-3 py-2 font-display text-[13px] font-semibold uppercase tracking-wider ${path === h ? "text-work" : "text-inksoft hover:text-ink"}`}>
+                  {l}
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
       <div className="mx-auto max-w-5xl px-4 pb-24 pt-5">{children}</div>
     </div>

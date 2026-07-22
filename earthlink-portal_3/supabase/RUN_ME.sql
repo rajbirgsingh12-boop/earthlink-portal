@@ -162,6 +162,10 @@ alter table timesheet_entries add column if not exists trade text;
 
 -- ---------- from upgrade_schedule.sql ----------
 alter table releases add column if not exists crew jsonb default '[]'::jsonb;
+alter table releases add column if not exists start_date text default '';
+alter table releases add column if not exists finish_date text default '';
+alter table pact_jobs add column if not exists start_date text default '';
+alter table pact_jobs add column if not exists finish_date text default '';
 
 -- ---------- from upgrade_realtime.sql ----------
 do $$ begin alter publication supabase_realtime add table releases; exception when duplicate_object then null; end $$;

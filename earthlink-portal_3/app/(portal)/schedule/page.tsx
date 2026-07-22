@@ -5,6 +5,7 @@ import type { Contract, Release } from "@/lib/types";
 import { useLive } from "@/lib/useLive";
 import { TEMPLATE_CREW } from "@/lib/crew";
 import { contractLabel } from "@/components/ContractPicker";
+import Stamp from "@/components/Stamp";
 
 interface Emp { id: string; name: string; trade: string; base_rate: number; active: boolean; }
 
@@ -40,11 +41,12 @@ export default function Schedule() {
   useEffect(() => { load(); }, []);
   useLive(["releases", "employees", "contracts"], () => load(), { skipWhileTyping: true });
 
-  const saveCrew = async (r: Release, crew: string[]) => {
-    setRels((prev) => prev.map((x) => (x.id === r.id ? { ...x, crew } : x)));
-    const { error } = await sb().from("releases").update({ crew }).eq("id", r.id);
+  const save = async (r: Release, patch: Partial<Release>) => {
+    setRels((prev) => prev.map((x) => (x.id === r.id ? { ...x, ...patch } : x)));
+    const { error } = await sb().from("releases").update(patch).eq("id", r.id);
     if (error) flash(/column|schema cache/i.test(error.message) ? "Run supabase/upgrade_schedule.sql first" : error.message);
   };
+  const saveCrew = (r: Release, crew: string[]) => save(r, { crew });
 
   const addWorker = async (r: Release, empId: string) => {
     const crew = [...new Set([...(r.crew || []), empId])];
@@ -98,9 +100,25 @@ export default function Schedule() {
           <span className="ml-2 text-[14px]">{r.location}</span>
           <div className="max-w-[420px] truncate text-[11px] text-inksoft">{r.buildings || r.address || ""}{contractOf(r) ? ` · ${contractOf(r)}` : ""}</div>
         </div>
-        <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => { setPickFor(pickFor === r.id ? null : r.id); setPickQ(""); }}>
-          {pickFor === r.id ? "Done" : "+ Assign worker"}
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <button onClick={() => save(r, { date_completed: (r.date_completed || "").trim() ? "" : new Date().toISOString().slice(0, 10) })}
+            title="Marks the work complete — lights the WORK stage on the Releases tab too">
+            <Stamp label={(r.date_completed || "").trim() ? "COMPLETE ✓" : "MARK COMPLETE"} tone={(r.date_completed || "").trim() ? "ok" : "mute"} />
+          </button>
+          <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => { setPickFor(pickFor === r.id ? null : r.id); setPickQ(""); }}>
+            {pickFor === r.id ? "Done" : "+ Assign worker"}
+          </button>
+        </div>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2">
+        <label className="flex items-center gap-1.5 text-[10px] uppercase tracking-widest text-inksoft">Start
+          <input type="date" className="rounded-sm border border-rulesoft bg-white p-1.5 font-mono text-xs" value={r.start_date || ""}
+            onChange={(e) => save(r, { start_date: e.target.value })} />
+        </label>
+        <label className="flex items-center gap-1.5 text-[10px] uppercase tracking-widest text-inksoft">Finish
+          <input type="date" className="rounded-sm border border-rulesoft bg-white p-1.5 font-mono text-xs" value={r.finish_date || ""}
+            onChange={(e) => save(r, { finish_date: e.target.value })} />
+        </label>
       </div>
       {(r.crew || []).length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1.5">

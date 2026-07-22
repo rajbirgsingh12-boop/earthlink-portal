@@ -109,7 +109,7 @@ export default function Settings() {
       { label: "Price book line numbers", fix: "upgrade_proposal_creator.sql", probe: async () => !(await sb().from("price_items").select("line").limit(1)).error },
       { label: "Payroll paid marks", fix: "upgrade_payroll_paid.sql", probe: async () => !(await sb().from("timesheet_weeks").select("paid_map").limit(1)).error },
       { label: "Payroll entry classifications", fix: "upgrade_payroll_class.sql", probe: async () => !(await sb().from("timesheet_entries").select("trade").limit(1)).error },
-      { label: "Schedule crew assignments", fix: "upgrade_schedule.sql", probe: async () => !(await sb().from("releases").select("crew").limit(1)).error },
+      { label: "Schedule (crew & start/finish dates)", fix: "upgrade_schedule.sql", probe: async () => !(await sb().from("releases").select("crew,start_date,finish_date").limit(1)).error && !(await sb().from("pact_jobs").select("start_date,finish_date").limit(1)).error },
       { label: "PACT jobs & invoicing", fix: "upgrade_pact.sql", probe: async () => !(await sb().from("pact_jobs").select("id,po_number,items,tax_pct,invoice_number").limit(1)).error },
     ];
     const results: CheckResult[] = [];

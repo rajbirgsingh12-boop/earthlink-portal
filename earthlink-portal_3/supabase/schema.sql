@@ -383,6 +383,10 @@ alter table timesheet_entries add column if not exists trade text;
 
 -- ===== Phase 4g: schedule — crew assigned to each release =====
 alter table releases add column if not exists crew jsonb default '[]'::jsonb;
+alter table releases add column if not exists start_date text default '';
+alter table releases add column if not exists finish_date text default '';
+alter table pact_jobs add column if not exists start_date text default '';
+alter table pact_jobs add column if not exists finish_date text default '';
 
 -- ===== Phase 4e: live updates =====
 do $$ begin alter publication supabase_realtime add table releases; exception when duplicate_object then null; end $$;

@@ -131,8 +131,10 @@ export default function Pact() {
         if (!ue) await sb().from("pact_jobs").update({ attachments: [{ name: file.name, path }] }).eq("id", (job as Job).id);
         setBusy(false);
         await load();
+        // open the fresh job with its details showing so what was read is on screen
         setOpenId((job as Job).id);
-        flash(`PO ${po} — ${partner} · ${address || "no address found"}`);
+        setShowDetails(true);
+        flash(`PO ${po || "imported"} — check the details and work lines below`);
       } catch { setBusy(false); flash("Couldn't read that PDF"); }
     };
     reader.readAsArrayBuffer(file);
@@ -456,9 +458,9 @@ export default function Pact() {
                   ))}
                 </div>
                 )}
-                {/* the PO seeds one line — add more here when the job runs past what's listed (excess materials etc.) */}
+                {/* the PO seeds one line — add more when the job runs past what's listed (excess materials etc.) */}
                 <div className="mt-3">
-                  <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Work lines</div>
+                  <div className="mb-1.5 text-[11px] uppercase tracking-widest text-inksoft">Work lines — what gets billed for this job</div>
                   {!canEdit && itemsOf(j).map((it, i) => (
                     <div key={i} className="mb-1 flex flex-wrap items-center gap-2 text-[13px]">
                       <span className="flex-1">{it.description || "—"}</span>
@@ -466,33 +468,50 @@ export default function Pact() {
                     </div>
                   ))}
                   {!canEdit && itemsOf(j).length === 0 && <div className="text-xs text-inksoft">No lines yet.</div>}
-                  {canEdit && itemsOf(j).map((it, i) => (
-                    <div key={i} className="mb-1.5 flex flex-wrap items-center gap-1.5">
-                      <input className="field min-w-[160px] flex-1" placeholder="Line description (unit picks itself — door, plaster, paint…)" value={it.description}
-                        onChange={(e) => {
-                          const next = [...itemsOf(j)];
-                          const auto = unitFor(e.target.value);
-                          next[i] = { ...it, description: e.target.value, unit: it.unit === unitFor(it.description) || !it.unit ? auto : it.unit };
-                          setItems(j, next);
-                        }}
-                        onBlur={() => setItems(j, itemsOf(j), true)} />
-                      <input className="field w-16 px-2 py-1.5 text-right font-mono" inputMode="decimal" title="Qty"
-                        {...num(`${j.id}:wl${i}:q`, Number(it.qty) || 0,
-                          (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next); },
-                          (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next, true); })} />
-                      <input className="field w-16 px-2 py-1.5 text-center font-mono" title="Unit" value={it.unit}
-                        onChange={(e) => { const next = [...itemsOf(j)]; next[i] = { ...it, unit: e.target.value }; setItems(j, next); }}
-                        onBlur={() => setItems(j, itemsOf(j), true)} />
-                      {canInvoice && (
-                        <input className="field w-20 px-2 py-1.5 text-right font-mono" inputMode="decimal" title="Unit price"
-                          {...num(`${j.id}:wl${i}:p`, Number(it.unit_price) || 0,
-                            (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next); },
-                            (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next, true); })} />
-                      )}
-                      {canInvoice && <span className="w-20 text-right font-mono text-[12px]">{fmt((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</span>}
-                      <button className="text-alert" title="Remove line" onClick={() => setItems(j, itemsOf(j).filter((_, x) => x !== i), true)}>✕</button>
-                    </div>
-                  ))}
+                  {canEdit && (() => {
+                    const cols = canInvoice ? "minmax(150px,1fr) 52px 52px 72px 72px 18px" : "minmax(150px,1fr) 52px 52px 18px";
+                    return (
+                      <div className="overflow-x-auto">
+                        <div className={canInvoice ? "min-w-[460px]" : ""}>
+                          {itemsOf(j).length > 0 && (
+                            <div className="mb-1 grid gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-inksoft" style={{ gridTemplateColumns: cols }}>
+                              <span>Description of work</span><span className="text-right">Qty</span><span className="text-center">Unit</span>
+                              {canInvoice && <span className="text-right">Price</span>}
+                              {canInvoice && <span className="text-right">Total</span>}
+                              <span />
+                            </div>
+                          )}
+                          {itemsOf(j).map((it, i) => (
+                            <div key={i} className="mb-1.5 grid items-center gap-1.5" style={{ gridTemplateColumns: cols }}>
+                              <input className="field" placeholder="What was done — door, plaster, paint…" value={it.description}
+                                onChange={(e) => {
+                                  const next = [...itemsOf(j)];
+                                  const auto = unitFor(e.target.value);
+                                  next[i] = { ...it, description: e.target.value, unit: it.unit === unitFor(it.description) || !it.unit ? auto : it.unit };
+                                  setItems(j, next);
+                                }}
+                                onBlur={() => setItems(j, itemsOf(j), true)} />
+                              <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="decimal" title="Quantity"
+                                {...num(`${j.id}:wl${i}:q`, Number(it.qty) || 0,
+                                  (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next); },
+                                  (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next, true); })} />
+                              <input className="field px-1 py-1.5 text-center font-mono" title="Unit of measure" value={it.unit}
+                                onChange={(e) => { const next = [...itemsOf(j)]; next[i] = { ...it, unit: e.target.value }; setItems(j, next); }}
+                                onBlur={() => setItems(j, itemsOf(j), true)} />
+                              {canInvoice && (
+                                <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="decimal" title="Price per unit"
+                                  {...num(`${j.id}:wl${i}:p`, Number(it.unit_price) || 0,
+                                    (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next); },
+                                    (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next, true); })} />
+                              )}
+                              {canInvoice && <span className="text-right font-mono text-[12px]">{fmt((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</span>}
+                              <button className="text-alert" title="Remove line" onClick={() => setItems(j, itemsOf(j).filter((_, x) => x !== i), true)}>✕</button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {canEdit && <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => setItems(j, [...itemsOf(j), { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>}
                 </div>
               </div>

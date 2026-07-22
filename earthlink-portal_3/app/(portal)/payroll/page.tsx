@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the export
 import * as XLSX from "xlsx-js-style";
 import { sb } from "@/lib/supabase";
-import { fmt, parseNum, askFileName } from "@/lib/format";
+import { askFileName } from "@/lib/format";
 import { prettyDate, addDays } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged, type LaborResult } from "@/lib/labor";
 import Stamp from "@/components/Stamp";
@@ -60,6 +60,9 @@ export default function Payroll() {
   const [relQ, setRelQ] = useState<Record<string, string>>({});
   const [weekCheck, setWeekCheck] = useState<{ rel: RelRow; result: LaborResult }[]>([]);
   const [msg, setMsg] = useState("");
+  // day-at-a-time entry: which day of the open week is being punched (0=Sat), or the full grid
+  const [view, setView] = useState<number | "week">("week");
+  const [openDetail, setOpenDetail] = useState<string | null>(null);
   const checkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
   const num = useNumBuffer();
@@ -110,6 +113,10 @@ export default function Payroll() {
 
   const openW = async (w: Week) => {
     setOpenWeek(w);
+    // land on today when it falls inside this week, otherwise the full grid
+    const diff = Math.round((Date.parse(new Date().toISOString().slice(0, 10)) - Date.parse(addDays(w.week_ending, -6))) / 86400000);
+    setView(diff >= 0 && diff <= 6 ? diff : "week");
+    setOpenDetail(null);
     const { data } = await sb().from("timesheet_entries").select("*").eq("week_id", w.id);
     const ents = ((data || []) as Entry[]).map((en) => ({ ...en, hours: (en.hours || []).map(Number) }));
     setEntries(ents);
@@ -187,7 +194,6 @@ export default function Payroll() {
   };
 
   const summ = summarize(entries, emps);
-  const totGross = summ.reduce((s, x) => s + x.gross, 0);
   const totHrs = summ.reduce((s, x) => s + x.hrs, 0);
 
   // ---------- weekly sheet in the paper-template layout, one tab per contract ----------
@@ -321,18 +327,27 @@ export default function Payroll() {
           <option value="">+ Add worker to this week…</option>
           {emps.length > 0 && (
             <optgroup label="Crew">
-              {emps.map((e) => <option key={e.id} value={e.id}>{e.name} — {e.trade || "no classification yet"}</option>)}
+              {emps.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
             </optgroup>
           )}
           {TEMPLATE_CREW.some((t) => !emps.some((e) => e.name.trim().toLowerCase() === t.name.toLowerCase())) && (
             <optgroup label="From the payroll template">
               {TEMPLATE_CREW.map((t, i) =>
                 emps.some((e) => e.name.trim().toLowerCase() === t.name.toLowerCase()) ? null :
-                <option key={t.name} value={`tpl:${i}`}>{t.name} — {t.trade}</option>
+                <option key={t.name} value={`tpl:${i}`}>{t.name}</option>
               )}
             </optgroup>
           )}
         </select>
+
+        <div className="mb-3 flex flex-wrap gap-1.5">
+          {DAYS.map((d, i) => (
+            <button key={d} className={`btn ${view === i ? "btn-primary" : "btn-ghost"} px-2.5 py-1.5 text-[12px]`} onClick={() => setView(i)}>
+              {d} {Number(addDays(openWeek.week_ending, i - 6).slice(8, 10))}
+            </button>
+          ))}
+          <button className={`btn ${view === "week" ? "btn-primary" : "btn-ghost"} px-2.5 py-1.5 text-[12px]`} onClick={() => setView("week")}>Full week</button>
+        </div>
         {entries.map((en) => {
           const emp = emps.find((e) => e.id === en.employee_id);
           const hrs = en.hours.reduce((s, d) => s + (Number(d) || 0), 0);
@@ -344,17 +359,29 @@ export default function Payroll() {
           const linkedRel = en.release_id ? rels.find((r) => r.id === en.release_id) : null;
           const reqClasses = (linkedRel?.labor_breakdown || []).map((b) => canonTrade(b.cls));
           const fits = reqClasses.includes(canon);
+          const dayMode = view !== "week";
+          const showDetail = !dayMode || openDetail === en.id;
           return (
-            <div key={en.id} className="card mb-2.5 p-3">
-              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                <b className="text-[15px]">{emp?.name}</b>
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-xs text-inksoft">{hrs} hrs</span>
-                  <input className="field w-20 text-right font-mono" inputMode="decimal" title="Rate for this job" placeholder="$/hr"
-                    {...num(`${en.id}:rate`, Number(en.rate) || 0, (n) => set({ rate: n }), (n) => saveEntry({ ...en, rate: n }))} />
-                  <button className="text-xs text-alert" onClick={() => delEntry(en.id!)}>✕</button>
+            <div key={en.id} className="card mb-2 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <button className="min-w-0 flex-1 text-left" onClick={() => dayMode && setOpenDetail(openDetail === en.id ? null : en.id!)}>
+                  <b className="text-[15px]">{emp?.name}</b>
+                  <div className="truncate text-[11px] text-inksoft">
+                    {en.release_id ? en.job_label : "no release linked"}{clsText ? ` · ${clsText}` : ""}{dayMode ? " · tap for details" : ""}
+                  </div>
+                </button>
+                <div className="flex shrink-0 items-center gap-2">
+                  {dayMode && (
+                    <input className={`field w-20 px-1 py-2 text-center font-mono ${(view as number) < 2 ? "bg-work/5" : ""}`} inputMode="decimal" placeholder="0"
+                      {...num(`${en.id}:h${view}`, Number(en.hours[view as number]) || 0,
+                        (n) => { const hours = [...en.hours]; hours[view as number] = n; set({ hours }); },
+                        (n) => { const hours = [...en.hours]; hours[view as number] = n; saveEntry({ ...en, hours }); })} />
+                  )}
+                  <span className="font-mono text-xs text-inksoft">{hrs}h wk</span>
+                  {showDetail && <button className="text-xs text-alert" onClick={() => delEntry(en.id!)}>✕</button>}
                 </div>
               </div>
+              {showDetail && (<div className="mt-2.5 border-t border-rulesoft pt-2.5">
               <div className="mb-2 flex flex-wrap items-center gap-2">
                 <input className="field w-48" placeholder="Classification (laborer, plasterer…)"
                   value={en.trade ?? emp?.trade ?? ""}
@@ -413,15 +440,16 @@ export default function Payroll() {
                   </div>
                 ))}
               </div>
+              </div>)}
             </div>
           );
         })}
         {entries.length === 0 && <div className="card p-5 text-sm text-inksoft">Pick a worker above. Add the same worker twice if they split the week across releases — overtime still calculates per person.</div>}
         {summ.length > 0 && (
           <div className="card mt-2 overflow-x-auto">
-            <table className="w-full border-collapse text-sm" style={{ minWidth: 460 }}>
+            <table className="w-full border-collapse text-sm" style={{ minWidth: 400 }}>
               <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
-                <th className="p-2.5">Worker</th><th className="p-2.5 text-right">Reg</th><th className="p-2.5 text-right">OT (Sat/Sun)</th><th className="p-2.5 text-right">Gross</th><th className="p-2.5 text-center">Paid</th></tr></thead>
+                <th className="p-2.5">Worker</th><th className="p-2.5 text-right">Reg</th><th className="p-2.5 text-right">OT (Sat/Sun)</th><th className="p-2.5 text-right">Total</th><th className="p-2.5 text-center">Paid</th></tr></thead>
               <tbody>
                 {summ.map((x) => {
                   const paidOn = openWeek.paid_map?.[x.eid];
@@ -429,7 +457,7 @@ export default function Payroll() {
                     <tr key={x.eid} className="border-b border-rulesoft">
                       <td className="p-2.5">{x.name}</td><td className="p-2.5 text-right font-mono">{x.reg}</td>
                       <td className={`p-2.5 text-right font-mono ${x.ot > 0 ? "text-work" : ""}`}>{x.ot}</td>
-                      <td className="p-2.5 text-right font-mono font-semibold">{fmt(x.gross)}</td>
+                      <td className="p-2.5 text-right font-mono font-semibold">{x.hrs}h</td>
                       <td className="p-2.5 text-center">
                         <button onClick={() => togglePaid(x.eid)} title={paidOn ? `Paid ${prettyDate(paidOn)}` : "Mark paid"}>
                           <Stamp label={paidOn ? "PAID" : "NOT PAID"} tone={paidOn ? "ok" : "work"} />
@@ -438,7 +466,7 @@ export default function Payroll() {
                     </tr>
                   );
                 })}
-                <tr><td className="p-2.5 font-display font-bold uppercase">Week total · {totHrs} hrs</td><td></td><td></td><td className="p-2.5 text-right font-mono text-[15px] font-bold">{fmt(totGross)}</td>
+                <tr><td className="p-2.5 font-display font-bold uppercase">Week total</td><td></td><td></td><td className="p-2.5 text-right font-mono text-[15px] font-bold">{totHrs}h</td>
                   <td className="p-2.5 text-center font-mono text-xs text-inksoft">{Object.keys(openWeek.paid_map || {}).length}/{summ.length}</td></tr>
               </tbody>
             </table>
@@ -457,24 +485,20 @@ export default function Payroll() {
       </div>
       {showCrew && (
         <div className="card mb-3 p-3.5">
-          <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
             <input className="field" placeholder="Name" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
-            <input className="field" placeholder="Trade (laborer, carpenter…)" value={draft.trade} onChange={(e) => setDraft({ ...draft, trade: e.target.value })} />
-            <input className="field" placeholder="$/hr" inputMode="decimal" value={draft.base_rate} onChange={(e) => setDraft({ ...draft, base_rate: e.target.value })} />
+            <input className="field" placeholder="Usual classification (laborer…)" value={draft.trade} onChange={(e) => setDraft({ ...draft, trade: e.target.value })} />
             <button className="btn btn-primary" onClick={async () => {
               if (!draft.name) return;
-              await sb().from("employees").insert({ name: draft.name, trade: draft.trade, base_rate: parseNum(draft.base_rate) });
+              await sb().from("employees").insert({ name: draft.name, trade: draft.trade, base_rate: 0 });
               setDraft({ name: "", trade: "", base_rate: "" }); load();
             }}>Add</button>
           </div>
           <div className="mt-2 divide-y divide-rulesoft">
             {emps.map((e) => (
               <div key={e.id} className="flex items-center justify-between py-2 text-sm">
-                <span><b>{e.name}</b><span className="text-inksoft"> · {e.trade || "—"}</span></span>
-                <span className="flex items-center gap-3">
-                  <span className="font-mono">{fmt(Number(e.base_rate))}/hr</span>
-                  <button className="text-xs text-alert" onClick={async () => { await sb().from("employees").update({ active: false }).eq("id", e.id); load(); }}>✕</button>
-                </span>
+                <span><b>{e.name}</b></span>
+                <button className="text-xs text-alert" onClick={async () => { await sb().from("employees").update({ active: false }).eq("id", e.id); load(); }}>✕</button>
               </div>
             ))}
           </div>

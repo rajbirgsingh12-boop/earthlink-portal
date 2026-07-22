@@ -138,8 +138,9 @@ export default function Releases() {
   };
   useEffect(() => {
     loadContracts();
+    loadLogged();
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadRows = async (cid: string, silent = false) => {
     if (!cid) { setRows([]); return; }
@@ -177,19 +178,23 @@ export default function Releases() {
     setStageData({ items: itemsSet, walks: walkNums });
   };
 
+  // hours punched on the Payroll tab flow straight here: a release with its
+  // required hours met lights the PAY stage even before payroll is marked done
+  const hoursMet = (r: Release) => { const need = Number(r.labor_hours) || 0; return need > 0 && (logged?.[r.id] || 0) >= need; };
+
   // the release's life at a glance: each stage lights up from data already entered
   const pipeline = (r: Release): [string, boolean][] => [
     ["WALK", stageData.walks.has(String(r.rel_number).trim())],
     ["REL", stageData.items.has(r.id)],
     ["WORK", !!(r.date_completed && String(r.date_completed).trim())],
-    ["PAY", r.payroll_done],
+    ["PAY", r.payroll_done || hoursMet(r)],
     ["INV", !!r.invoice_sent],
     ["PAID", r.received],
   ];
   useEffect(() => { loadRows(active); }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // live: releases, their items, walk sheets and contracts refresh this page
-  useLive(["releases", "release_items", "proposals", "contracts"], () => { loadRows(active, true); loadContracts(); }, { enabled: !!active, skipWhileTyping: true });
+  // live: releases, their items, walk sheets, contracts AND payroll hours refresh this page
+  useLive(["releases", "release_items", "proposals", "contracts", "timesheet_entries"], () => { loadRows(active, true); loadContracts(); loadLogged(); }, { enabled: !!active, skipWhileTyping: true });
 
   const loadLogged = async () => {
     const { data } = await sb().from("timesheet_entries").select("release_id,hours");
@@ -903,13 +908,10 @@ export default function Releases() {
         const outst = live.filter((r) => !r.received).reduce((s, r) => s + Number(r.amount), 0);
         const pct = tot > 0 ? Math.round((rec / tot) * 100) : 0;
         return (
-          <div className="mb-3">
-            <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
-              {([["Released", fmt(tot), "text-ink"], [`Received · ${pct}%`, fmt(rec), "text-ok"], ["Not received", fmt(outst), "text-work"], ["To chase", fmt(notR.reduce((s, r) => s + Number(r.amount), 0)), "text-work"], ["Payroll pending", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
-                <div key={l} className="card p-3">
-                  <div className="text-[10px] uppercase tracking-[.12em] text-inksoft">{l}</div>
-                  <div className={`font-mono text-base font-semibold ${cls}`}>{v}</div>
-                </div>
+          <div className="card mb-3 p-3">
+            <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-mono text-[13px]">
+              {([["Released", fmt(tot), "text-ink"], [`Received ${pct}%`, fmt(rec), "text-ok"], ["Waiting", fmt(outst), "text-work"], ["Chase", fmt(notR.reduce((s, r) => s + Number(r.amount), 0)), "text-work"], ["Payroll left", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
+                <span key={l} className={cls}><span className="mr-1 text-[10px] uppercase tracking-[.12em] text-inksoft">{l}</span><b>{v}</b></span>
               ))}
             </div>
             <div className="mt-2 h-1.5 overflow-hidden rounded-sm bg-rulesoft">
@@ -920,7 +922,7 @@ export default function Releases() {
       })()}
 
       <div className="mb-3 flex flex-wrap gap-2">
-        {([["all", "Open"], ["chase", `Chase list (${notR.length})`], ["payroll", `Payroll to submit (${prPend.length})`], ["received", `Received (${receivedRows.length})`], ["canceled", `Canceled (${canceledRows.length})`], ["hours", "Payroll check"]] as [Filter, string][]).map(([f, l]) => (
+        {([["all", "Open"], ["chase", `Chase (${notR.length})`], ["payroll", `Payroll (${prPend.length})`], ["received", `Received (${receivedRows.length})`], ["canceled", `Canceled (${canceledRows.length})`], ["hours", "Hours"]] as [Filter, string][]).map(([f, l]) => (
           <button key={f} className={`btn ${filter === f ? "btn-primary" : "btn-ghost"} px-3 py-1.5 text-[13px]`} onClick={() => { setFilter(f); setLimit(100); if (f === "hours" && !logged) loadLogged(); }}>{l}</button>
         ))}
       </div>
@@ -977,13 +979,21 @@ export default function Releases() {
                   {!r.canceled && (() => {
                     const stages = pipeline(r);
                     const current = stages.findIndex(([, done]) => !done);
+                    const got = logged?.[r.id] || 0;
+                    const need = Number(r.labor_hours) || 0;
                     return (
-                      <div className="mt-1 flex flex-wrap gap-1">
+                      <div className="mt-1 flex flex-wrap items-center gap-1">
                         {stages.map(([l, done], i) => (
                           <span key={l} title={l} className={`rounded-[2px] border px-1 py-px font-mono text-[9px] font-semibold tracking-wide ${
                             done ? "border-ok bg-ok/10 text-ok" : i === current ? "border-work text-work" : "border-rulesoft text-rule"
                           }`}>{l}</span>
                         ))}
+                        {(need > 0 || got > 0) && (
+                          <span className={`ml-1 font-mono text-[10px] ${need > 0 && got >= need ? "text-ok" : "text-work"}`}
+                            title="Payroll hours logged vs the release minimum — live from the Payroll tab">
+                            ⏱ {got}{need > 0 ? `/${need}` : ""}h{need > 0 && got >= need ? " ✓" : ""}
+                          </span>
+                        )}
                       </div>
                     );
                   })()}

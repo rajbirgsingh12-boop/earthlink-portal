@@ -44,6 +44,7 @@ export default function Proposals() {
   const [listQ, setListQ] = useState("");
   const [listFilter, setListFilter] = useState<"all" | "draft" | "approved">("all");
   const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
+  const [showHead, setShowHead] = useState(false); // walk-sheet header fields tucked away until needed
   const [msg, setMsg] = useState("");
   const sheetRef = useRef<HTMLInputElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -373,18 +374,26 @@ export default function Proposals() {
         </div>
         <input ref={sheetRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleContractSheet} />
 
-        <div className="card mb-3 grid grid-cols-2 gap-2.5 p-3.5 md:grid-cols-4">
-          <div className="col-span-2"><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Name</div>
-            <input className="field" placeholder="e.g. Queensbridge 41st Ave Apt 3F move-out" value={doc.job || ""}
-              onChange={(e) => setDoc({ ...doc, job: e.target.value })} onBlur={(e) => saveDoc({ job: e.target.value }, true)} /></div>
-          <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Contract / PO</div>
-            <ContractPicker contracts={contracts} value={doc.contract_id || ""} onChange={(id) => saveDoc({ contract_id: id }, true)} /></div>
-          {HEAD_FIELDS.map(([k, label]) => (
-            <div key={k}><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
-              <input className="field" type={/date/.test(k) ? "date" : "text"} value={doc[k] || ""}
-                onChange={(e) => setDoc({ ...doc, [k]: e.target.value })}
-                onBlur={(e) => saveDoc({ [k]: e.target.value } as Partial<Proposal>, true)} /></div>
-          ))}
+        <div className="card mb-3 p-3.5">
+          <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
+            <div className="col-span-2"><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Name</div>
+              <input className="field" placeholder="e.g. Queensbridge 41st Ave Apt 3F move-out" value={doc.job || ""}
+                onChange={(e) => setDoc({ ...doc, job: e.target.value })} onBlur={(e) => saveDoc({ job: e.target.value }, true)} /></div>
+            <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Contract / PO</div>
+              <ContractPicker contracts={contracts} value={doc.contract_id || ""} onChange={(id) => saveDoc({ contract_id: id }, true)} /></div>
+            <button className="self-end pb-2 text-left text-[11px] font-semibold uppercase tracking-widest text-inksoft hover:text-ink"
+              onClick={() => setShowHead(!showHead)}>{showHead ? "▴ Hide sheet header" : "▾ Sheet header (dates, staff, apt…)"}</button>
+          </div>
+          {showHead && (
+            <div className="mt-2.5 grid grid-cols-2 gap-2.5 border-t border-rulesoft pt-2.5 md:grid-cols-4">
+              {HEAD_FIELDS.map(([k, label]) => (
+                <div key={k}><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
+                  <input className="field" type={/date/.test(k) ? "date" : "text"} value={doc[k] || ""}
+                    onChange={(e) => setDoc({ ...doc, [k]: e.target.value })}
+                    onBlur={(e) => saveDoc({ [k]: e.target.value } as Partial<Proposal>, true)} /></div>
+              ))}
+            </div>
+          )}
         </div>
 
         {(catalog || []).length === 0 ? (

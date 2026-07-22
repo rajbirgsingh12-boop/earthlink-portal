@@ -45,18 +45,18 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
           <div className="mx-auto flex max-w-5xl">
             {tabs.map(([href, label]) => {
               const cls = `whitespace-nowrap px-4 py-3 font-display text-[15px] font-semibold uppercase tracking-wider transition-colors duration-150 ${(href === "/pact" ? path.startsWith("/pact") : path === href) ? "border-b-[3px] border-work text-work" : "text-inksoft hover:text-ink"}`;
-              // PACT opens its sub-menu — tap or hover both work; Jobs/Schedule below navigate
-              return href === "/pact" ? (
-                <button key={href} className={cls} onMouseEnter={() => setPactOpen(true)} onClick={() => setPactOpen(!pactOpen)}>
-                  {label} ▾
-                </button>
-              ) : (
-                <a key={href} href={href} className={cls}>{label}</a>
+              // hovering PACT reveals the Jobs/Schedule row; clicking goes to Jobs,
+              // where the row stays pinned — so it works with or without a mouse
+              return (
+                <a key={href} href={href} className={cls}
+                  onMouseEnter={href === "/pact" ? () => setPactOpen(true) : undefined}>
+                  {label}{href === "/pact" ? " ▾" : ""}
+                </a>
               );
             })}
           </div>
         </div>
-        {tabs.some(([h]) => h === "/pact") && (pactOpen || path.startsWith("/pact")) && (
+        {(pactOpen || path.startsWith("/pact")) && (
           <div className="border-t border-rulesoft bg-paper">
             <div className="mx-auto flex max-w-5xl gap-1 px-2">
               {([["/pact", "Jobs"], ["/pact/schedule", "Schedule"]] as [string, string][]).map(([h, l]) => (

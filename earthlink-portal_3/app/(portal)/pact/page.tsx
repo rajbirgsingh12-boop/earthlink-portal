@@ -556,6 +556,12 @@ export default function Pact() {
                   })()}
                   {canEdit && <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => setItems(j, [...itemsOf(j), { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>}
                 </div>
+                <div className="mt-3 flex justify-end">
+                  <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => {
+                    (document.activeElement as HTMLElement | null)?.blur?.();
+                    setTimeout(() => { setOpenId(null); setShowDetails(false); }, 120);
+                  }}>Save & close</button>
+                </div>
               </div>
               );
             })()}
@@ -622,8 +628,11 @@ export default function Pact() {
               ))}
               <button className="btn btn-ghost mb-3" onClick={() => setItems(j, [...items, { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>
               <div className="flex justify-end gap-2">
-                <button className="btn btn-primary" onClick={() => { setInvJob(null); buildPackage(j); }} disabled={busy}>📦 Download package</button>
-                <button className="btn btn-ghost" onClick={() => setInvJob(null)}>Done</button>
+                <button className="btn" onClick={() => { setInvJob(null); buildPackage(j); }} disabled={busy}>📦 Download package</button>
+                <button className="btn btn-primary" onClick={() => {
+                  (document.activeElement as HTMLElement | null)?.blur?.();
+                  setTimeout(() => setInvJob(null), 120);
+                }}>Save & close</button>
               </div>
             </div>
           </div>

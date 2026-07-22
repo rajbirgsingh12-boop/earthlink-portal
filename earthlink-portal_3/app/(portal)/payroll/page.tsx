@@ -294,7 +294,12 @@ export default function Payroll() {
             </div>
           </div>
           <div className="flex gap-2">
-            <button className="btn btn-primary" onClick={exportTemplate}>Weekly sheet (xlsx)</button>
+            <button className="btn" onClick={exportTemplate}>Weekly sheet (xlsx)</button>
+            <button className="btn btn-primary" onClick={() => {
+              // blur whatever's focused so its pending save fires, then close
+              (document.activeElement as HTMLElement | null)?.blur?.();
+              setTimeout(() => { setOpenWeek(null); load(); }, 120);
+            }}>Save & close</button>
           </div>
         </div>
 

@@ -376,7 +376,8 @@ export default function Proposals() {
             {saveState && <span className="text-xs text-inksoft">{saveState === "saving" ? "Saving…" : "Saved ✓"}</span>}
           </div>
           <div className="flex flex-wrap gap-2">
-            <button className="btn btn-primary" onClick={saveNow}>Save</button>
+            <button className="btn btn-primary" onClick={async () => { await saveNow(); setDoc(null); setItems([]); }}>Save & close</button>
+            <button className="btn" onClick={saveNow}>Save</button>
             <button className="btn" onClick={() => setPrintOpen(true)}>Preview</button>
             {(catalog || []).length === 0 && <button className="btn btn-ghost" onClick={() => sheetRef.current?.click()}>Upload price book</button>}
           </div>

@@ -182,6 +182,14 @@ export default function Payroll() {
     } else flash(error.message);
   };
   const delEntry = async (id: string) => { await sb().from("timesheet_entries").delete().eq("id", id); setEntries(entries.filter((e) => e.id !== id)); };
+  const deleteWeek = async (w: Week) => {
+    if (!window.confirm(`Delete the payroll week ending ${prettyDate(w.week_ending)} and all its hours? This can't be undone.`)) return;
+    await sb().from("timesheet_entries").delete().eq("week_id", w.id);
+    const { error } = await sb().from("timesheet_weeks").delete().eq("id", w.id);
+    if (error) { flash(error.message); return; }
+    if (openWeek?.id === w.id) setOpenWeek(null);
+    load(); flash("Week deleted");
+  };
 
   // one PAID mark per worker per week — no more side spreadsheet
   const togglePaid = async (eid: string) => {
@@ -522,10 +530,13 @@ export default function Payroll() {
 
       <div className="card divide-y divide-rulesoft">
         {weeks.map((w) => (
-          <button key={w.id} className="flex w-full items-center justify-between p-3.5 text-left" onClick={() => openW(w)}>
-            <span className="font-mono text-[13px] font-semibold">{prettyDate(addDays(w.week_ending, -6))} – {prettyDate(w.week_ending)}</span>
-            <span className="text-xs text-inksoft">open →</span>
-          </button>
+          <div key={w.id} className="flex items-center justify-between gap-3 p-3.5">
+            <button className="flex-1 text-left" onClick={() => openW(w)}>
+              <span className="font-mono text-[13px] font-semibold">{prettyDate(addDays(w.week_ending, -6))} – {prettyDate(w.week_ending)}</span>
+              <span className="ml-2 text-xs text-inksoft">open →</span>
+            </button>
+            <button className="text-xs text-alert" title="Delete this week" onClick={() => deleteWeek(w)}>✕</button>
+          </div>
         ))}
         {weeks.length === 0 && <div className="p-5 text-sm text-inksoft">No payroll weeks yet. Add the crew, start a week, punch hours, download the weekly sheet.</div>}
       </div>

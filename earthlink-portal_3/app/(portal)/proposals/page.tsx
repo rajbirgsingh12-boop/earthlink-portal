@@ -332,6 +332,15 @@ export default function Proposals() {
   // ---------- delete (works from the dashboard) ----------
   const deleteProposal = async (p: Proposal) => {
     if (!window.confirm(`Delete walk sheet ${p.number}? This can't be undone.`)) return;
+    // old-style invoices generated from this proposal block the delete (foreign
+    // key) — clear them and their line items first, then the proposal's lines
+    const { data: invs } = await sb().from("invoices").select("id").eq("proposal_id", p.id);
+    const invIds = ((invs || []) as { id: string }[]).map((i) => i.id);
+    if (invIds.length > 0) {
+      await sb().from("invoice_items").delete().in("invoice_id", invIds);
+      await sb().from("invoices").delete().in("id", invIds);
+    }
+    await sb().from("proposal_items").delete().eq("proposal_id", p.id);
     const { error } = await sb().from("proposals").delete().eq("id", p.id);
     if (error) { flash(error.message); return; }
     if (doc && doc.id === p.id) setDoc(null);

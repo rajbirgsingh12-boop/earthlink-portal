@@ -228,41 +228,57 @@ export default function Pact() {
       const pkg = await PDFDocument.create();
       const helv = await pkg.embedFont(StandardFonts.Helvetica);
       const bold = await pkg.embedFont(StandardFonts.HelveticaBold);
-      // --- invoice page (the 540 letterhead layout) ---
+      // --- invoice page: clean letterhead layout ---
       const page = pkg.addPage([612, 792]);
-      const W = 612; let y = 750;
-      const center = (txt: string, size: number, font = helv, color = rgb(0, 0, 0)) => {
-        page.drawText(txt, { x: (W - font.widthOfTextAtSize(txt, size)) / 2, y, size, font, color }); y -= size + 4;
-      };
-      const line = (x1: number, x2: number, yy: number) => page.drawLine({ start: { x: x1, y: yy }, end: { x: x2, y: yy }, thickness: 0.8 });
-      center(org.company || "Earth Link General Construction, Inc.", 15, bold);
-      center([org.address1, org.address2].filter(Boolean).join(", "), 9);
-      center([org.phone && `Phone: ${org.phone}`, org.email].filter(Boolean).join(" | "), 9);
-      y -= 8; center("INVOICE", 17, bold); y -= 4;
-      const L = 48, R = 564;
-      line(L, R, y + 8); y -= 8;
-      const kv = (k: string, v: string) => { page.drawText(k, { x: L, y, size: 10, font: bold }); page.drawText(v, { x: L + 110, y, size: 10, font: helv }); y -= 15; };
-      kv("Invoice #:", j.invoice_number || j.po_number || "");
-      kv("Date:", prettyDate(today()));
-      kv("Contract/Order #:", j.po_number || j.job_number || "");
-      y -= 4;
-      page.drawText("Bill To:", { x: L, y, size: 10, font: bold });
-      page.drawText("Job Site:", { x: 330, y, size: 10, font: bold }); y -= 14;
-      const billLines = [j.partner, ...(j.bill_to || "").slice(j.partner.length).trim().split(/(?<=\d{5})\s|,\s*/).filter(Boolean)].slice(0, 4);
-      const siteLines = [j.address || "", j.property_unit && `Unit ${j.property_unit}`, j.description].filter(Boolean) as string[];
+      const L = 54, R = 558;
+      let y = 736;
+      const ink = rgb(0.09, 0.09, 0.08), soft = rgb(0.45, 0.44, 0.42);
+      const ruleC = rgb(0.82, 0.8, 0.75), fillC = rgb(0.94, 0.93, 0.9);
+      const put = (t: string, x: number, yy: number, size = 9.5, font = helv, color = ink) =>
+        page.drawText(t, { x, y: yy, size, font, color });
+      const putR = (t: string, xr: number, yy: number, size = 9.5, font = helv, color = ink) =>
+        put(t, xr - font.widthOfTextAtSize(t, size), yy, size, font, color);
+      const hr = (yy: number, w = 0.6, color = ruleC) =>
+        page.drawLine({ start: { x: L, y: yy }, end: { x: R, y: yy }, thickness: w, color });
+
+      // letterhead
+      put((org.company || "Earth Link General Construction, Inc.").toUpperCase(), L, y, 15, bold);
+      putR("INVOICE", R, y - 3, 21, bold);
+      y -= 15;
+      put([org.address1, org.address2].filter(Boolean).join(" · "), L, y, 8.5, helv, soft);
+      y -= 11;
+      put([org.phone && `Phone ${org.phone}`, org.email, org.license && `License ${org.license}`].filter(Boolean).join(" · "), L, y, 8.5, helv, soft);
+      y -= 12;
+      hr(y, 1.6, ink);
+      y -= 24;
+
+      // invoice meta
+      ([["INVOICE #", j.invoice_number || j.po_number || "—"], ["DATE", prettyDate(today())], ["PURCHASE ORDER", j.po_number || j.job_number || "—"]] as [string, string][]).forEach(([k, v], i) => {
+        const x = L + i * 172;
+        put(k, x, y, 7, bold, soft);
+        put(v, x, y - 14, 10.5, bold);
+      });
+      y -= 40;
+
+      // bill to / job site
+      put("BILL TO", L, y, 7, bold, soft);
+      put("JOB SITE", 330, y, 7, bold, soft);
+      y -= 14;
+      const billLines = [j.partner, ...(j.bill_to || "").slice((j.partner || "").length).trim().split(/(?<=\d{5})\s|,\s*/).filter(Boolean)].filter(Boolean).slice(0, 4) as string[];
+      const siteLines = [j.address || "", j.property_unit && `Unit ${j.property_unit}`].filter(Boolean) as string[];
       const startY = y;
-      billLines.forEach((s) => { page.drawText(String(s).slice(0, 48), { x: L, y, size: 9.5, font: helv }); y -= 12; });
-      let y2 = startY;
-      siteLines.forEach((s) => { page.drawText(String(s).slice(0, 46), { x: 330, y: y2, size: 9.5, font: helv }); y2 -= 12; });
-      y = Math.min(y, y2) - 10;
-      // table
-      line(L, R, y + 6);
-      page.drawText("Description", { x: L, y: y - 6, size: 10, font: bold });
-      page.drawText("Qty", { x: 350, y: y - 6, size: 10, font: bold });
-      page.drawText("Unit", { x: 395, y: y - 6, size: 10, font: bold });
-      page.drawText("Unit Price ($)", { x: 440, y: y - 6, size: 10, font: bold });
-      page.drawText("Amount ($)", { x: 515, y: y - 6, size: 10, font: bold });
-      y -= 20; line(L, R, y + 6);
+      billLines.forEach((s, i) => put(String(s).slice(0, 48), L, startY - i * 12, 9.5, i === 0 ? bold : helv));
+      siteLines.forEach((s, i) => put(String(s).slice(0, 46), 330, startY - i * 12, 9.5, i === 0 ? bold : helv));
+      y = startY - Math.max(billLines.length, siteLines.length, 1) * 12 - 16;
+
+      // work table
+      page.drawRectangle({ x: L, y: y - 5, width: R - L, height: 18, color: fillC });
+      put("DESCRIPTION OF WORK", L + 6, y, 8, bold, soft);
+      putR("QTY", 388, y, 8, bold, soft);
+      put("UNIT", 400, y, 8, bold, soft);
+      putR("UNIT PRICE", 500, y, 8, bold, soft);
+      putR("AMOUNT", R - 6, y, 8, bold, soft);
+      y -= 20;
       let subtotal = 0;
       items.forEach((it) => {
         const amount = (Number(it.qty) || 0) * (Number(it.unit_price) || 0);
@@ -270,30 +286,40 @@ export default function Pact() {
         const words = it.description.split(" ");
         let cur = "";
         const rowsTxt: string[] = [];
-        words.forEach((w) => { if ((cur + " " + w).trim().length > 55) { rowsTxt.push(cur.trim()); cur = w; } else cur += " " + w; });
+        words.forEach((w) => { if ((cur + " " + w).trim().length > 52) { rowsTxt.push(cur.trim()); cur = w; } else cur += " " + w; });
         if (cur.trim()) rowsTxt.push(cur.trim());
         rowsTxt.forEach((rt, i2) => {
-          page.drawText(rt, { x: L, y, size: 9.5, font: helv });
+          put(rt, L + 6, y);
           if (i2 === 0) {
-            page.drawText(String(it.qty), { x: 350, y, size: 9.5, font: helv });
-            page.drawText(it.unit, { x: 395, y, size: 9.5, font: helv });
-            page.drawText(Number(it.unit_price).toFixed(2), { x: 440, y, size: 9.5, font: helv });
-            page.drawText(amount.toFixed(2), { x: 515, y, size: 9.5, font: helv });
+            putR(String(it.qty), 388, y);
+            put(it.unit, 400, y);
+            putR(Number(it.unit_price).toFixed(2), 500, y);
+            putR(amount.toFixed(2), R - 6, y);
           }
           y -= 13;
         });
-        y -= 2;
+        y -= 3;
+        hr(y + 9, 0.5);
       });
-      y -= 4; line(L, R, y + 8);
+
+      // totals
+      y -= 8;
       const taxAmt = subtotal * taxRate(j) / 100;
-      page.drawText("Subtotal:", { x: 440, y: y - 6, size: 10, font: bold });
-      page.drawText(subtotal.toFixed(2), { x: 515, y: y - 6, size: 10, font: helv }); y -= 15;
-      page.drawText(`Tax (${taxRate(j)}%):`, { x: 440, y: y - 6, size: 10, font: bold });
-      page.drawText(taxAmt.toFixed(2), { x: 515, y: y - 6, size: 10, font: helv }); y -= 16;
-      page.drawText("Total Due:", { x: 440, y: y - 6, size: 11, font: bold });
-      page.drawText(`$${(subtotal + taxAmt).toFixed(2)}`, { x: 515, y: y - 6, size: 11, font: bold }); y -= 30;
-      page.drawText("Please make all checks payable to " + (org.company || "").toUpperCase() + ".", { x: L, y, size: 9, font: helv }); y -= 12;
-      page.drawText("Thank you for your business!", { x: L, y, size: 9, font: helv });
+      putR("Subtotal", 470, y, 9.5, helv, soft);
+      putR(`$${subtotal.toFixed(2)}`, R - 6, y);
+      y -= 15;
+      putR(`Sales tax ${taxRate(j)}%`, 470, y, 9.5, helv, soft);
+      putR(`$${taxAmt.toFixed(2)}`, R - 6, y);
+      y -= 10;
+      page.drawLine({ start: { x: 380, y }, end: { x: R, y }, thickness: 1.2, color: ink });
+      y -= 17;
+      putR("TOTAL DUE", 470, y, 10.5, bold);
+      putR(`$${(subtotal + taxAmt).toFixed(2)}`, R - 6, y, 12.5, bold);
+
+      // footer
+      hr(72, 0.6);
+      const foot = `Make all checks payable to ${(org.company || "").toUpperCase()} · Thank you for your business`;
+      put(foot, (612 - helv.widthOfTextAtSize(foot, 8.5)) / 2, 58, 8.5, helv, soft);
       // --- the PO pdf(s) ---
       const atts = j.attachments || [];
       for (const a of atts.filter((x) => /\.pdf$/i.test(x.name))) {

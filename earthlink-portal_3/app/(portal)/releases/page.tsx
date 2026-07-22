@@ -255,10 +255,11 @@ export default function Releases() {
       const breakdown = r.labor_breakdown || [];
       const reqTotal = Number(r.labor_hours) || 0;
       if (reqTotal > 0 || breakdown.length > 0) {
-        const { data: ents } = await sb().from("timesheet_entries").select("release_id,employee_id,hours").eq("release_id", r.id);
+        // select * so the per-entry classification comes along once the column exists
+        const { data: ents } = await sb().from("timesheet_entries").select("*").eq("release_id", r.id);
         const { data: allEmps } = await sb().from("employees").select("id,trade");
         const tradeById = new Map(((allEmps || []) as { id: string; trade: string }[]).map((e) => [e.id, canonTrade(e.trade)]));
-        const logged = aggregateLogged((ents || []) as { release_id: string | null; employee_id: string; hours: number[] }[], tradeById)[r.id] || {};
+        const logged = aggregateLogged((ents || []) as { release_id: string | null; employee_id: string; hours: number[]; trade?: string | null }[], tradeById)[r.id] || {};
         const res = checkLabor(breakdown, reqTotal, logged);
         if (!res.ok) {
           const parts = res.shorts.map((s) => `${s.cls} ${s.logged}/${s.required}h`);

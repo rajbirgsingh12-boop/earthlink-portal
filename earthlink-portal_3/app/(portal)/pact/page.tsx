@@ -6,6 +6,7 @@ import { fmt, parseNum, askFileName } from "@/lib/format";
 import { prettyDate, type Org } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
 import { useLive } from "@/lib/useLive";
+import { useNumBuffer } from "@/lib/numBuffer";
 
 interface Item { description: string; qty: number; unit: string; unit_price: number; }
 interface Job {
@@ -30,8 +31,11 @@ const unitFor = (desc: string): string => {
 export default function Pact() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [org, setOrg] = useState<Org | null>(null);
-  // Admin 1 (admin) sees everything; Admin 2 (office) sees POs & photos but no invoices
-  const [canInvoice, setCanInvoice] = useState(false);
+  // Admin 1 (admin) sees everything; Admin 2 (office) sees POs & photos but no
+  // invoices; accountants can look but not edit (matches the pact_jobs policies)
+  const [role, setRole] = useState("");
+  const canInvoice = role === "admin";
+  const canEdit = role === "admin" || role === "office";
   const [q, setQ] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [draft, setDraft] = useState({ ...BLANK });
@@ -39,13 +43,17 @@ export default function Pact() {
   const [attachJob, setAttachJob] = useState<Job | null>(null);
   const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
   const [invJob, setInvJob] = useState<Job | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
-  const beforeRef = useRef<HTMLInputElement>(null);
-  const afterRef = useRef<HTMLInputElement>(null);
+  // one camera input serves every job card — snapPhotos aims it first
+  const photoRef = useRef<HTMLInputElement>(null);
+  const [photoTarget, setPhotoTarget] = useState<{ id: string; kind: "before" | "after" } | null>(null);
+  const snapPhotos = (j: Job, kind: "before" | "after") => { setPhotoTarget({ id: j.id, kind }); photoRef.current?.click(); };
   const poRef = useRef<HTMLInputElement>(null);
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3500); };
+  const num = useNumBuffer();
   const upgradeHint = (m: string) => (/relation|column|schema/i.test(m) ? "Database needs the upgrade — re-run supabase/upgrade_pact.sql" : m);
   const today = () => new Date().toISOString().slice(0, 10);
   const isImg = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n);
@@ -68,7 +76,7 @@ export default function Pact() {
       const { data: { user } } = await sb().auth.getUser();
       if (!user) return;
       const { data: prof } = await sb().from("profiles").select("role").eq("id", user.id).single();
-      setCanInvoice((prof as { role?: string } | null)?.role === "admin");
+      setRole((prof as { role?: string } | null)?.role || "");
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -148,18 +156,27 @@ export default function Pact() {
     if (persist) {
       const sub = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
       const amount = sub * (1 + taxRate(j) / 100); // billed total includes tax
-      patch({ ...j, items }, { items, amount });
+      // unpriced lines must not wipe a hand-typed job amount
+      patch({ ...j, items }, sub > 0 ? { items, amount } : { items });
     }
   };
 
   // ---------- attachments & photos ----------
-  const attachFile = async (j: Job, file: File): Promise<void> => {
+  const attachFiles = async (j: Job, files: File[]): Promise<void> => {
+    if (files.length === 0) return;
     setBusy(true);
-    const path = `pact/${j.id}/${file.name}`;
-    const { error } = await sb().storage.from("docs").upload(path, file, { upsert: true });
-    if (error) { setBusy(false); flash(/bucket/i.test(error.message) ? "Storage not set up — run supabase/upgrade_invoices_aging_docs.sql" : error.message); return; }
-    const cur = jobs.find((x) => x.id === j.id) || j;
-    const list = [...(cur.attachments || []).filter((a) => a.path !== path), { name: file.name, path }];
+    const added: { name: string; path: string }[] = [];
+    for (const file of files) {
+      const path = `pact/${j.id}/${file.name}`;
+      const { error } = await sb().storage.from("docs").upload(path, file, { upsert: true });
+      if (error) { setBusy(false); flash(/bucket/i.test(error.message) ? "Storage not set up — run supabase/upgrade_invoices_aging_docs.sql" : error.message); return; }
+      added.push({ name: file.name, path });
+    }
+    // merge against the freshest row so multi-photo batches and other devices never lose files
+    const { data: cur } = await sb().from("pact_jobs").select("attachments").eq("id", j.id).single();
+    const existing = (cur as { attachments?: { name: string; path: string }[] } | null)?.attachments
+      || jobs.find((x) => x.id === j.id)?.attachments || [];
+    const list = [...existing.filter((a) => !added.some((b) => b.path === a.path)), ...added];
     const { error: e2 } = await sb().from("pact_jobs").update({ attachments: list }).eq("id", j.id);
     if (e2) flash(e2.message);
     else {
@@ -168,12 +185,13 @@ export default function Pact() {
     }
     setBusy(false);
   };
+  const attachFile = (j: Job, file: File) => attachFiles(j, [file]);
   const addPhotos = async (j: Job, files: File[], kind: "before" | "after") => {
-    for (const [i, f] of files.entries()) {
-      const stamp = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "");
+    const stamp = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "");
+    await attachFiles(j, files.map((f, i) => {
       const ext = (f.name.match(/\.\w+$/) || [".jpg"])[0];
-      await attachFile(j, new File([f], `${kind}_${stamp}${files.length > 1 ? `_${i + 1}` : ""}${ext}`, { type: f.type }));
-    }
+      return new File([f], `${kind}_${stamp}${files.length > 1 ? `_${i + 1}` : ""}${ext}`, { type: f.type });
+    }));
   };
   const openAttachment = async (path: string) => {
     const { data, error } = await sb().storage.from("docs").createSignedUrl(path, 3600);
@@ -333,10 +351,12 @@ export default function Pact() {
     <div>
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div className="font-display text-2xl font-bold uppercase">PACT</div>
+        {canEdit && (
         <div className="flex gap-2">
           <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy}>+ Upload PO (PDF)</button>
           <button className="btn btn-ghost" onClick={() => setAddOpen(!addOpen)}>+ Manual job</button>
         </div>
+        )}
       </div>
       <input ref={poRef} type="file" accept="application/pdf" className="hidden" onChange={handlePo} />
 
@@ -379,7 +399,7 @@ export default function Pact() {
         {list.map((j) => (
           <div key={j.id} className={`p-3.5 ${j.canceled ? "opacity-50" : ""}`}>
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <button className="min-w-0 text-left" onClick={() => setOpenId(openId === j.id ? null : j.id)}>
+              <button className="min-w-0 text-left" onClick={() => { setOpenId(openId === j.id ? null : j.id); setShowDetails(false); }}>
                 <div className={`text-[14px] font-semibold ${j.canceled ? "line-through" : ""}`}>
                   {j.address || j.development || j.partner}
                   {(j.po_number || j.job_number) ? <span className="ml-1.5 font-mono text-xs text-inksoft">PO {j.po_number || j.job_number}</span> : null}
@@ -401,27 +421,83 @@ export default function Pact() {
               <div className="flex shrink-0 items-center gap-2">
                 {canInvoice && <span className="font-mono text-sm font-semibold">{fmt(Number(j.amount) || invTotal(j))}</span>}
                 <button className="text-inksoft" title="Documents & photos" onClick={() => setAttachJob(j)}>📎{(j.attachments || []).length > 0 ? <span className="font-mono text-[10px]">{(j.attachments || []).length}</span> : null}</button>
-                <button className={j.canceled ? "text-ok" : "text-alert"} title={j.canceled ? "Restore" : "Cancel job"} onClick={() => patch(j, { canceled: !j.canceled })}>{j.canceled ? "↺" : "✕"}</button>
+                {canEdit && <button className={j.canceled ? "text-ok" : "text-alert"} title={j.canceled ? "Restore" : "Cancel job"} onClick={() => patch(j, { canceled: !j.canceled })}>{j.canceled ? "↺" : "✕"}</button>}
               </div>
             </div>
-            {openId === j.id && !j.canceled && (
+            {openId === j.id && !j.canceled && (() => {
+              const beforeN = (j.attachments || []).filter((a) => isImg(a.name) && a.name.toLowerCase().startsWith("before")).length;
+              const afterN = (j.attachments || []).filter((a) => isImg(a.name) && a.name.toLowerCase().startsWith("after")).length;
+              return (
               <div className="mt-3 border-t border-rulesoft pt-3">
-                <div className="mb-3 flex flex-wrap gap-2">
+                <div className="mb-2.5 flex flex-wrap gap-2">
+                  {canEdit && <button className="btn px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "before")} disabled={busy}>📷 Before{beforeN > 0 ? ` · ${beforeN}` : ""}</button>}
+                  {canEdit && <button className="btn px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "after")} disabled={busy}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}
+                  {(beforeN > 0 || afterN > 0 || (j.attachments || []).length > 0) && (
+                    <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => setAttachJob(j)}>View photos & files</button>
+                  )}
                   {canInvoice && <button className="btn px-3 py-1.5 text-[13px]" onClick={() => setInvJob(j)}>Invoice</button>}
                   {canInvoice && <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => buildPackage(j)} disabled={busy}>📦 Package</button>}
+                </div>
+                {canEdit && (
+                <div className="mb-2.5 flex flex-wrap gap-2">
                   <button onClick={() => patch(j, { approved: !j.approved })}><Stamp label={j.approved ? "APPROVED ✓" : "MARK APPROVED"} tone={j.approved ? "ok" : "mute"} /></button>
                   <button onClick={() => patch(j, { work_done: !j.work_done })}><Stamp label={j.work_done ? "WORK DONE ✓" : "MARK WORK DONE"} tone={j.work_done ? "ok" : "mute"} /></button>
                   <button onClick={() => patch(j, j.received ? { received: false, paid_date: null } : { received: true, paid_date: today() })}><Stamp label={j.received ? `PAID ${prettyDate(j.paid_date)}` : "MARK PAID"} tone={j.received ? "ok" : "work"} /></button>
                 </div>
+                )}
+                <button className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-inksoft hover:text-ink"
+                  onClick={() => setShowDetails(!showDetails)}>{showDetails ? "▴ Hide details" : "▾ Details (partner, PO #, contact…)"}</button>
+                {showDetails && (
                 <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
                   {([["partner", "Partner"], ["address", "Work address (ship to)"], ["po_number", "PO #"], ...(canInvoice ? [["invoice_number", "Invoice #"]] : []), ["property_unit", "Property unit"], ["contact", "Contact"], ["description", "Work description"]] as ["partner" | "address" | "po_number" | "invoice_number" | "property_unit" | "contact" | "description", string][]).map(([k, label]) => (
                     <div key={k} className={k === "description" || k === "address" ? "col-span-2" : ""}><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
-                      <input className="field" value={j[k] || ""} onChange={(e) => setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, [k]: e.target.value } : x)))}
-                        onBlur={(e) => patch(j, { [k]: e.target.value } as Partial<Job>)} /></div>
+                      <input className="field" value={j[k] || ""} readOnly={!canEdit} onChange={(e) => canEdit && setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, [k]: e.target.value } : x)))}
+                        onBlur={(e) => canEdit && patch(j, { [k]: e.target.value } as Partial<Job>)} /></div>
                   ))}
                 </div>
+                )}
+                {/* the PO seeds one line — add more here when the job runs past what's listed (excess materials etc.) */}
+                <div className="mt-3">
+                  <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Work lines</div>
+                  {!canEdit && itemsOf(j).map((it, i) => (
+                    <div key={i} className="mb-1 flex flex-wrap items-center gap-2 text-[13px]">
+                      <span className="flex-1">{it.description || "—"}</span>
+                      <span className="font-mono text-inksoft">{it.qty} {it.unit}</span>
+                    </div>
+                  ))}
+                  {!canEdit && itemsOf(j).length === 0 && <div className="text-xs text-inksoft">No lines yet.</div>}
+                  {canEdit && itemsOf(j).map((it, i) => (
+                    <div key={i} className="mb-1.5 flex flex-wrap items-center gap-1.5">
+                      <input className="field min-w-[160px] flex-1" placeholder="Line description (unit picks itself — door, plaster, paint…)" value={it.description}
+                        onChange={(e) => {
+                          const next = [...itemsOf(j)];
+                          const auto = unitFor(e.target.value);
+                          next[i] = { ...it, description: e.target.value, unit: it.unit === unitFor(it.description) || !it.unit ? auto : it.unit };
+                          setItems(j, next);
+                        }}
+                        onBlur={() => setItems(j, itemsOf(j), true)} />
+                      <input className="field w-16 px-2 py-1.5 text-right font-mono" inputMode="decimal" title="Qty"
+                        {...num(`${j.id}:wl${i}:q`, Number(it.qty) || 0,
+                          (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next); },
+                          (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next, true); })} />
+                      <input className="field w-16 px-2 py-1.5 text-center font-mono" title="Unit" value={it.unit}
+                        onChange={(e) => { const next = [...itemsOf(j)]; next[i] = { ...it, unit: e.target.value }; setItems(j, next); }}
+                        onBlur={() => setItems(j, itemsOf(j), true)} />
+                      {canInvoice && (
+                        <input className="field w-20 px-2 py-1.5 text-right font-mono" inputMode="decimal" title="Unit price"
+                          {...num(`${j.id}:wl${i}:p`, Number(it.unit_price) || 0,
+                            (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next); },
+                            (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next, true); })} />
+                      )}
+                      {canInvoice && <span className="w-20 text-right font-mono text-[12px]">{fmt((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</span>}
+                      <button className="text-alert" title="Remove line" onClick={() => setItems(j, itemsOf(j).filter((_, x) => x !== i), true)}>✕</button>
+                    </div>
+                  ))}
+                  {canEdit && <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => setItems(j, [...itemsOf(j), { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>}
+                </div>
               </div>
-            )}
+              );
+            })()}
           </div>
         ))}
         {list.length === 0 && <div className="p-5 text-sm text-inksoft">{jobs.length === 0 ? "No PACT jobs yet. Upload a partner PO — the job builds itself from it." : "Nothing matches."}</div>}
@@ -442,9 +518,11 @@ export default function Pact() {
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Subtotal</div>
                   <div className="field bg-paper font-mono">{fmt(invSubtotal(j))}</div></div>
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Tax %</div>
-                  <input className="field text-right font-mono" inputMode="decimal" value={String(taxRate(j))}
-                    onChange={(e) => patch(j, { tax_pct: parseNum(e.target.value) })}
-                    onBlur={() => setItems(j, itemsOf(j), true)} /></div>
+                  <input className="field text-right font-mono" inputMode="decimal"
+                    {...num(`${j.id}:tax`, taxRate(j),
+                      (n) => setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, tax_pct: n } : x))),
+                      (n) => { const j2 = { ...j, tax_pct: n }; const sub = invSubtotal(j2); patch(j2, sub > 0 ? { tax_pct: n, amount: sub * (1 + n / 100) } : { tax_pct: n }); },
+                      { showZero: true })} /></div>
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Total (with tax)</div>
                   <div className="field bg-paper font-mono font-semibold">{fmt(invTotal(j))}</div></div>
               </div>
@@ -463,17 +541,19 @@ export default function Pact() {
                   </div>
                   <div className="mt-2 grid grid-cols-4 gap-2">
                     <div><div className="text-[10px] uppercase text-inksoft">Qty</div>
-                      <input className="field px-2 py-1.5 text-right font-mono" inputMode="decimal" value={it.qty || ""}
-                        onChange={(e) => { const next = [...items]; next[i] = { ...it, qty: parseNum(e.target.value) }; setItems(j, next); }}
-                        onBlur={() => setItems(j, items, true)} /></div>
+                      <input className="field px-2 py-1.5 text-right font-mono" inputMode="decimal"
+                        {...num(`${j.id}:inv${i}:q`, Number(it.qty) || 0,
+                          (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next); },
+                          (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next, true); })} /></div>
                     <div><div className="text-[10px] uppercase text-inksoft">Unit</div>
                       <input className="field px-2 py-1.5 text-center font-mono" value={it.unit}
                         onChange={(e) => { const next = [...items]; next[i] = { ...it, unit: e.target.value }; setItems(j, next); }}
                         onBlur={() => setItems(j, items, true)} /></div>
                     <div><div className="text-[10px] uppercase text-inksoft">Unit price</div>
-                      <input className="field px-2 py-1.5 text-right font-mono" inputMode="decimal" value={it.unit_price || ""}
-                        onChange={(e) => { const next = [...items]; next[i] = { ...it, unit_price: parseNum(e.target.value) }; setItems(j, next); }}
-                        onBlur={() => setItems(j, items, true)} /></div>
+                      <input className="field px-2 py-1.5 text-right font-mono" inputMode="decimal"
+                        {...num(`${j.id}:inv${i}:p`, Number(it.unit_price) || 0,
+                          (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next); },
+                          (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next, true); })} /></div>
                     <div><div className="text-[10px] uppercase text-inksoft">Amount</div>
                       <div className="field bg-paper px-2 py-1.5 text-right font-mono">{fmt((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</div></div>
                   </div>
@@ -509,7 +589,7 @@ export default function Pact() {
                               ? <img src={photoUrls[a.path]} alt={a.name} className="h-24 w-full rounded-sm border border-rulesoft object-cover" />
                               : <div className="grid h-24 w-full place-items-center rounded-sm border border-rulesoft text-xs text-inksoft">…</div>}
                           </button>
-                          <button className="absolute right-1 top-1 rounded-sm bg-ink/70 px-1.5 text-xs text-paper" onClick={() => removeAttachment(attachJob, a.path)}>✕</button>
+                          {canEdit && <button className="absolute right-1 top-1 rounded-sm bg-ink/70 px-1.5 text-xs text-paper" onClick={() => removeAttachment(attachJob, a.path)}>✕</button>}
                         </div>
                       ))}
                     </div>
@@ -520,21 +600,21 @@ export default function Pact() {
             {(attachJob.attachments || []).filter((a) => !isImg(a.name)).map((a) => (
               <div key={a.path} className="mb-1.5 flex items-center gap-1">
                 <button className="block w-full rounded-sm border border-rulesoft p-2.5 text-left text-sm hover:border-work" onClick={() => openAttachment(a.path)}>📄 {a.name}</button>
-                <button className="shrink-0 px-1 text-xs text-alert" onClick={() => removeAttachment(attachJob, a.path)}>✕</button>
+                {canEdit && <button className="shrink-0 px-1 text-xs text-alert" onClick={() => removeAttachment(attachJob, a.path)}>✕</button>}
               </div>
             ))}
             <div className="mt-3 flex flex-wrap gap-2">
-              <button className="btn btn-primary" onClick={() => beforeRef.current?.click()} disabled={busy}>📷 Before</button>
-              <button className="btn btn-primary" onClick={() => afterRef.current?.click()} disabled={busy}>📷 After</button>
-              <button className="btn" onClick={() => fileRef.current?.click()} disabled={busy}>Upload file</button>
+              {canEdit && <button className="btn btn-primary" onClick={() => snapPhotos(attachJob, "before")} disabled={busy}>📷 Before</button>}
+              {canEdit && <button className="btn btn-primary" onClick={() => snapPhotos(attachJob, "after")} disabled={busy}>📷 After</button>}
+              {canEdit && <button className="btn" onClick={() => fileRef.current?.click()} disabled={busy}>Upload file</button>}
               <button className="btn btn-ghost" onClick={() => setAttachJob(null)}>Close</button>
             </div>
           </div>
         </div>
       )}
       <input ref={fileRef} type="file" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f && attachJob) attachFile(attachJob, f); e.target.value = ""; }} />
-      <input ref={beforeRef} type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length && attachJob) addPhotos(attachJob, fs, "before"); e.target.value = ""; }} />
-      <input ref={afterRef} type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length && attachJob) addPhotos(attachJob, fs, "after"); e.target.value = ""; }} />
+      <input ref={photoRef} type="file" accept="image/*" capture="environment" multiple className="hidden"
+        onChange={(e) => { const fs = Array.from(e.target.files || []); const t = photoTarget; const j = t ? jobs.find((x) => x.id === t.id) : null; if (fs.length && t && j) addPhotos(j, fs, t.kind); e.target.value = ""; }} />
 
       {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
       {busy && <div className="fixed bottom-14 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink/80 px-4 py-2 text-sm text-paper">Working…</div>}

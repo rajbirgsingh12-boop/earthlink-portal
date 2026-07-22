@@ -30,14 +30,16 @@ export function checkLabor(
 }
 
 // Aggregates timesheet hours for one or all releases into {releaseId: {class: hours}}.
+// A classification typed on the entry itself wins over the worker's default trade —
+// the same person can count as a laborer on one job and a plasterer on another.
 export function aggregateLogged(
-  entries: { release_id: string | null; employee_id: string; hours: number[] }[],
+  entries: { release_id: string | null; employee_id: string; hours: number[]; trade?: string | null }[],
   tradeById: Map<string, string>
 ): Record<string, Record<string, number>> {
   const byRel: Record<string, Record<string, number>> = {};
   entries.forEach((en) => {
     if (!en.release_id) return;
-    const cls = tradeById.get(en.employee_id) || "other";
+    const cls = (en.trade ?? "").trim() ? canonTrade(en.trade!) : tradeById.get(en.employee_id) || "other";
     const h = (en.hours || []).reduce((s, d) => s + (Number(d) || 0), 0);
     if (h <= 0) return;
     (byRel[en.release_id] ||= {})[cls] = (byRel[en.release_id][cls] || 0) + h;

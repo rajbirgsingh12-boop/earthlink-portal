@@ -114,8 +114,10 @@ alter table proposal_items add column if not exists category text default '';
 alter table proposal_items add column if not exists line int default 0;
 
 -- ---------- from upgrade_payroll_paid.sql ----------
+alter table timesheet_weeks add column if not exists paid_map jsonb default '{}'::jsonb;
 
 -- ---------- from upgrade_pact.sql ----------
+create table if not exists pact_jobs (
   id uuid primary key default gen_random_uuid(),
   partner text default '',
   development text default '',
@@ -155,7 +157,11 @@ drop policy if exists "pact_jobs del" on pact_jobs;
 create policy "pact_jobs del" on pact_jobs for delete
   using (my_role() in ('admin','office'));
 
+-- ---------- from upgrade_payroll_class.sql ----------
+alter table timesheet_entries add column if not exists trade text;
+
 -- ---------- from upgrade_realtime.sql ----------
+do $$ begin alter publication supabase_realtime add table releases; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table release_items; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table proposals; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table contracts; exception when duplicate_object then null; end $$;

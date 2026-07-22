@@ -10,10 +10,12 @@ import Stamp from "@/components/Stamp";
 import ContractPicker, { contractLabel } from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
 import type { Contract } from "@/lib/types";
+import { TEMPLATE_CREW } from "@/lib/crew";
+import { useNumBuffer } from "@/lib/numBuffer";
 
 interface Emp { id: string; name: string; trade: string; base_rate: number; active: boolean; }
 interface Week { id: string; week_ending: string; paid_map?: Record<string, string> | null; }
-interface Entry { id?: string; week_id: string; employee_id: string; job_label: string; rate: number; hours: number[]; release_id: string | null; }
+interface Entry { id?: string; week_id: string; employee_id: string; job_label: string; rate: number; hours: number[]; release_id: string | null; trade?: string | null; }
 interface RelRow { id: string; rel_number: string; location: string; contract_id: string; labor_hours: number; labor_breakdown: { cls: string; hours: number }[] | null; }
 // the week runs Saturday → Friday, like the paper sheet; Sat & Sun are overtime days
 const DAYS = ["Sat", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri"];
@@ -60,6 +62,7 @@ export default function Payroll() {
   const [msg, setMsg] = useState("");
   const checkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
+  const num = useNumBuffer();
 
   const load = async () => {
     const { data: e } = await sb().from("employees").select("*").eq("active", true).order("name");
@@ -88,10 +91,11 @@ export default function Payroll() {
   const loadWeekCheck = async (ents: Entry[]) => {
     const ids = [...new Set(ents.map((e) => e.release_id).filter(Boolean))] as string[];
     if (ids.length === 0) { setWeekCheck([]); return; }
-    const { data: allEnts } = await sb().from("timesheet_entries").select("release_id,employee_id,hours").in("release_id", ids);
+    // select * so the per-entry classification comes along once the column exists
+    const { data: allEnts } = await sb().from("timesheet_entries").select("*").in("release_id", ids);
     const { data: allEmps } = await sb().from("employees").select("id,trade");
     const tradeById = new Map(((allEmps || []) as { id: string; trade: string }[]).map((e) => [e.id, canonTrade(e.trade)]));
-    const byRel = aggregateLogged((allEnts || []) as { release_id: string | null; employee_id: string; hours: number[] }[], tradeById);
+    const byRel = aggregateLogged((allEnts || []) as { release_id: string | null; employee_id: string; hours: number[]; trade?: string | null }[], tradeById);
     setWeekCheck(ids
       .map((id) => rels.find((r) => r.id === id))
       .filter((r): r is RelRow => !!r)
@@ -117,18 +121,58 @@ export default function Payroll() {
     if (error || !data) { flash(error?.message || "Failed"); return; }
     if (copyLast && weeks[0]) {
       const { data: prev } = await sb().from("timesheet_entries").select("*").eq("week_id", weeks[0].id);
-      if (prev?.length) await sb().from("timesheet_entries").insert(prev.map((p: Entry) => ({ week_id: data.id, employee_id: p.employee_id, job_label: p.job_label, rate: p.rate, release_id: p.release_id, hours: [0, 0, 0, 0, 0, 0, 0] })));
+      // trade rides along so per-job classifications survive the weekly copy
+      if (prev?.length) await sb().from("timesheet_entries").insert(prev.map((p: Entry) => ({ week_id: data.id, employee_id: p.employee_id, job_label: p.job_label, rate: p.rate, release_id: p.release_id, trade: p.trade, hours: [0, 0, 0, 0, 0, 0, 0] })));
     }
     await load(); openW(data as Week);
   };
-  const addEntry = async (empId: string) => {
+  const missingTradeCol = /column|schema cache/i;
+  const addEntry = async (empId: string, empObj?: Emp) => {
     if (!openWeek) return;
-    const emp = emps.find((e) => e.id === empId);
-    const { data } = await sb().from("timesheet_entries").insert({ week_id: openWeek.id, employee_id: empId, rate: emp?.base_rate || 0, hours: [0, 0, 0, 0, 0, 0, 0] }).select().single();
-    if (data) setEntries([...entries, { ...(data as Entry), hours: (data as Entry).hours.map(Number) }]);
+    const emp = empObj || emps.find((e) => e.id === empId);
+    const base = { week_id: openWeek.id, employee_id: empId, rate: emp?.base_rate || 0, hours: [0, 0, 0, 0, 0, 0, 0] };
+    // classification starts from the worker's default and can be rewritten per entry
+    let { data, error } = await sb().from("timesheet_entries").insert({ ...base, trade: emp?.trade?.trim() || null }).select().single();
+    if (error && missingTradeCol.test(error.message)) {
+      ({ data, error } = await sb().from("timesheet_entries").insert(base).select().single());
+      if (data) flash("Run supabase/upgrade_payroll_class.sql so classifications save");
+    }
+    if (error) { flash(error.message); return; }
+    if (data) setEntries((prev) => (prev.some((x) => x.id === (data as Entry).id) ? prev : [...prev, { ...(data as Entry), hours: ((data as Entry).hours || []).map(Number) }]));
+  };
+  // picking a template name adds that worker to the crew on the spot, then to the week
+  const addFromTemplate = async (idx: number) => {
+    const t = TEMPLATE_CREW[idx];
+    if (!t) return;
+    const inCrew = emps.find((e) => e.name.trim().toLowerCase() === t.name.toLowerCase());
+    if (inCrew) { addEntry(inCrew.id, inCrew); return; }
+    // the worker may exist deactivated — bring them back instead of duplicating
+    const { data: prior } = await sb().from("employees").select("*").ilike("name", t.name).limit(1);
+    const found = (prior || [])[0] as Emp | undefined;
+    if (found) {
+      await sb().from("employees").update({ active: true }).eq("id", found.id);
+      const emp = { ...found, active: true };
+      setEmps((prev) => (prev.some((e) => e.id === emp.id) ? prev : [...prev, emp].sort((a, b) => a.name.localeCompare(b.name))));
+      addEntry(emp.id, emp);
+      return;
+    }
+    const { data, error } = await sb().from("employees").insert({ name: t.name, trade: t.trade, base_rate: 0 }).select().single();
+    if (error || !data) { flash(error?.message || "Couldn't add worker"); return; }
+    const emp = data as Emp;
+    setEmps((prev) => (prev.some((e) => e.id === emp.id) ? prev : [...prev, emp].sort((a, b) => a.name.localeCompare(b.name))));
+    addEntry(emp.id, emp);
   };
   const saveEntry = async (en: Entry) => {
-    await sb().from("timesheet_entries").update({ job_label: en.job_label, rate: Number(en.rate) || 0, hours: en.hours.map((h) => Number(h) || 0), release_id: en.release_id || null }).eq("id", en.id!);
+    const base = { job_label: en.job_label, rate: Number(en.rate) || 0, hours: en.hours.map((h) => Number(h) || 0), release_id: en.release_id || null };
+    // only send trade when the entry actually carries one — a blank saves as null
+    // so it falls back to the worker's default everywhere, matching the display
+    const payload = typeof en.trade === "string" ? { ...base, trade: en.trade.trim() || null } : base;
+    const { error } = await sb().from("timesheet_entries").update(payload).eq("id", en.id!);
+    if (!error) return;
+    if ("trade" in payload && missingTradeCol.test(error.message)) {
+      const { error: e2 } = await sb().from("timesheet_entries").update(base).eq("id", en.id!);
+      flash(e2 ? e2.message : "Run supabase/upgrade_payroll_class.sql so classifications save");
+    } else flash(error.message);
   };
   const delEntry = async (id: string) => { await sb().from("timesheet_entries").delete().eq("id", id); setEntries(entries.filter((e) => e.id !== id)); };
 
@@ -165,9 +209,15 @@ export default function Payroll() {
     for (const [cid, ents] of groups) {
       const c = contracts.find((x) => x.id === cid);
       const by: Record<string, number[]> = {};
-      ents.forEach((en) => { by[en.employee_id] ||= [0, 0, 0, 0, 0, 0, 0]; en.hours.forEach((h, i) => (by[en.employee_id][i] += Number(h) || 0)); });
+      const tradesBy: Record<string, Map<string, string>> = {}; // per worker: lowercased → as typed
+      ents.forEach((en) => {
+        by[en.employee_id] ||= [0, 0, 0, 0, 0, 0, 0];
+        en.hours.forEach((h, i) => (by[en.employee_id][i] += Number(h) || 0));
+        const t = (en.trade ?? "").trim() || (emps.find((e) => e.id === en.employee_id)?.trade || "").trim();
+        if (t) (tradesBy[en.employee_id] ||= new Map()).set(t.toLowerCase(), t);
+      });
       const workers = Object.entries(by)
-        .map(([eid, days]) => ({ emp: emps.find((e) => e.id === eid), days }))
+        .map(([eid, days]) => ({ emp: emps.find((e) => e.id === eid), days, cat: [...(tradesBy[eid]?.values() || [])].join(" / ") }))
         .sort((a, b) => (a.emp?.name || "").localeCompare(b.emp?.name || ""));
       const aoa: (string | number)[][] = [];
       aoa.push([`Earth Link General Construction`]);
@@ -176,7 +226,7 @@ export default function Payroll() {
       aoa.push([]);
       aoa.push(["", "", "", "Overtime", "Overtime", "", "", "", "", "", ""]);
       aoa.push(["Worker", "", "", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Category"]);
-      workers.forEach(({ emp, days }) => aoa.push([emp?.name || "?", "", "", ...days.map((d) => d || ""), (emp?.trade || "").trim()]));
+      workers.forEach(({ emp, days, cat }) => aoa.push([emp?.name || "?", "", "", ...days.map((d) => d || ""), cat || (emp?.trade || "").trim()]));
       const totals = [0, 0, 0, 0, 0, 0, 0];
       workers.forEach(({ days }) => days.forEach((d, i) => (totals[i] += d)));
       aoa.push(["Total", "", "", ...totals, ""]);
@@ -261,23 +311,64 @@ export default function Payroll() {
           </div>
         )}
 
-        <select className="field mb-3" value="" onChange={(e) => e.target.value && addEntry(e.target.value)}>
+        <select className="field mb-3" value=""
+          onChange={(e) => {
+            const v = e.target.value;
+            if (!v) return;
+            if (v.startsWith("tpl:")) addFromTemplate(Number(v.slice(4)));
+            else addEntry(v);
+          }}>
           <option value="">+ Add worker to this week…</option>
-          {emps.map((e) => <option key={e.id} value={e.id}>{e.name} — {e.trade}</option>)}
+          {emps.length > 0 && (
+            <optgroup label="Crew">
+              {emps.map((e) => <option key={e.id} value={e.id}>{e.name} — {e.trade || "no classification yet"}</option>)}
+            </optgroup>
+          )}
+          {TEMPLATE_CREW.some((t) => !emps.some((e) => e.name.trim().toLowerCase() === t.name.toLowerCase())) && (
+            <optgroup label="From the payroll template">
+              {TEMPLATE_CREW.map((t, i) =>
+                emps.some((e) => e.name.trim().toLowerCase() === t.name.toLowerCase()) ? null :
+                <option key={t.name} value={`tpl:${i}`}>{t.name} — {t.trade}</option>
+              )}
+            </optgroup>
+          )}
         </select>
         {entries.map((en) => {
           const emp = emps.find((e) => e.id === en.employee_id);
           const hrs = en.hours.reduce((s, d) => s + (Number(d) || 0), 0);
           const set = (patch: Partial<Entry>) => setEntries(entries.map((x) => (x.id === en.id ? { ...x, ...patch } : x)));
+          // classification typed here is detected live against the linked release's required
+          // classes; blank falls back to the worker's default — same rule the hours check uses
+          const clsText = (en.trade ?? "").trim() || (emp?.trade ?? "").trim();
+          const canon = canonTrade(clsText);
+          const linkedRel = en.release_id ? rels.find((r) => r.id === en.release_id) : null;
+          const reqClasses = (linkedRel?.labor_breakdown || []).map((b) => canonTrade(b.cls));
+          const fits = reqClasses.includes(canon);
           return (
             <div key={en.id} className="card mb-2.5 p-3">
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                <b className="text-[15px]">{emp?.name}<span className="ml-2 text-xs font-normal text-inksoft">{emp?.trade}</span></b>
+                <b className="text-[15px]">{emp?.name}</b>
                 <div className="flex items-center gap-2">
                   <span className="font-mono text-xs text-inksoft">{hrs} hrs</span>
-                  <input className="field w-20 text-right font-mono" inputMode="decimal" value={en.rate} onChange={(e) => set({ rate: parseNum(e.target.value) })} onBlur={() => saveEntry(en)} title="Rate for this job" />
+                  <input className="field w-20 text-right font-mono" inputMode="decimal" title="Rate for this job" placeholder="$/hr"
+                    {...num(`${en.id}:rate`, Number(en.rate) || 0, (n) => set({ rate: n }), (n) => saveEntry({ ...en, rate: n }))} />
                   <button className="text-xs text-alert" onClick={() => delEntry(en.id!)}>✕</button>
                 </div>
+              </div>
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <input className="field w-48" placeholder="Classification (laborer, plasterer…)"
+                  value={en.trade ?? emp?.trade ?? ""}
+                  onChange={(e) => set({ trade: e.target.value })}
+                  onBlur={() => saveEntry(en)} />
+                {clsText === "" ? (
+                  <span className="text-[11px] text-inksoft">write the classification for this job</span>
+                ) : reqClasses.length > 0 ? (
+                  fits
+                    ? <Stamp label={`✓ counts as ${canon}`} tone="ok" />
+                    : <Stamp label={`no ${canon} required — total hours only`} tone="work" />
+                ) : (
+                  <span className="font-mono text-[11px] text-inksoft">detected: {canon}</span>
+                )}
               </div>
               {en.release_id ? (
                 <div className="mb-2 flex items-center gap-2 text-sm">
@@ -315,9 +406,10 @@ export default function Payroll() {
                 {DAYS.map((d, i) => (
                   <div key={d}>
                     <div className={`text-center text-[10px] uppercase tracking-wide ${i < 2 ? "font-semibold text-work" : "text-inksoft"}`}>{d}{i < 2 ? " · OT" : ""}</div>
-                    <input className={`field px-1 py-2 text-center font-mono ${i < 2 ? "bg-work/5" : ""}`} inputMode="decimal" value={en.hours[i] || ""} placeholder="0"
-                      onChange={(e) => { const hours = [...en.hours]; hours[i] = parseNum(e.target.value); set({ hours }); }}
-                      onBlur={() => saveEntry(en)} />
+                    <input className={`field px-1 py-2 text-center font-mono ${i < 2 ? "bg-work/5" : ""}`} inputMode="decimal" placeholder="0"
+                      {...num(`${en.id}:h${i}`, Number(en.hours[i]) || 0,
+                        (n) => { const hours = [...en.hours]; hours[i] = n; set({ hours }); },
+                        (n) => { const hours = [...en.hours]; hours[i] = n; saveEntry({ ...en, hours }); })} />
                   </div>
                 ))}
               </div>

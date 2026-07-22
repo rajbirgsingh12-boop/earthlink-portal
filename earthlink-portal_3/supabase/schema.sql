@@ -338,6 +338,7 @@ alter table timesheet_weeks add column if not exists paid_map jsonb default '{}'
 
 -- ===== Phase 4d: PACT job tracking =====
 -- (same statements as upgrade_pact.sql — idempotent)
+create table if not exists pact_jobs (
   id uuid primary key default gen_random_uuid(),
   partner text default '',
   development text default '',
@@ -376,6 +377,9 @@ create policy "pact_jobs upd" on pact_jobs for update
 drop policy if exists "pact_jobs del" on pact_jobs;
 create policy "pact_jobs del" on pact_jobs for delete
   using (my_role() in ('admin','office'));
+
+-- ===== Phase 4f: per-entry payroll classification =====
+alter table timesheet_entries add column if not exists trade text;
 
 -- ===== Phase 4e: live updates =====
 do $$ begin alter publication supabase_realtime add table releases; exception when duplicate_object then null; end $$;

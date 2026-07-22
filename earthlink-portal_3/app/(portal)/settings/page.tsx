@@ -108,6 +108,7 @@ export default function Settings() {
       { label: "Walk sheet fields & autosave", fix: "upgrade_proposal_creator.sql", probe: async () => !(await sb().from("proposals").select("qty_map,nycha_staff,start_date,release_number,total").limit(1)).error },
       { label: "Price book line numbers", fix: "upgrade_proposal_creator.sql", probe: async () => !(await sb().from("price_items").select("line").limit(1)).error },
       { label: "Payroll paid marks", fix: "upgrade_payroll_paid.sql", probe: async () => !(await sb().from("timesheet_weeks").select("paid_map").limit(1)).error },
+      { label: "Payroll entry classifications", fix: "upgrade_payroll_class.sql", probe: async () => !(await sb().from("timesheet_entries").select("trade").limit(1)).error },
       { label: "PACT jobs & invoicing", fix: "upgrade_pact.sql", probe: async () => !(await sb().from("pact_jobs").select("id,po_number,items,tax_pct,invoice_number").limit(1)).error },
     ];
     const results: CheckResult[] = [];

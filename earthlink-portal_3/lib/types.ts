@@ -8,4 +8,5 @@ export interface Release {
   labor_breakdown?: { cls: string; hours: number }[] | null; address?: string;
   invoice_sent?: string | null; paid_date?: string | null;
   attachments?: { name: string; path: string }[] | null;
+  crew?: string[] | null; // employee ids assigned on the Schedule tab
 }

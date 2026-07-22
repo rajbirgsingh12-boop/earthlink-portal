@@ -15,6 +15,7 @@ import PrintShell from "@/components/PrintShell";
 export default function Statements() {
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [sel, setSel] = useState("");
+  const [tq, setTq] = useState(""); // filter the outstanding list on screen
   const [rows, setRows] = useState<Release[]>([]);
   const [org, setOrg] = useState<Org | null>(null);
   const [printOpen, setPrintOpen] = useState(false);
@@ -142,12 +143,13 @@ export default function Statements() {
       <div className="mb-3"><ContractPicker contracts={contracts} value={sel} onChange={setSel} /></div>
       {contract && (
         <>
+          <input className="field mb-3" placeholder="Search release #, development…" value={tq} onChange={(e) => setTq(e.target.value)} />
           <div className="card overflow-x-auto">
             <table className="w-full border-collapse text-sm" style={{ minWidth: 560 }}>
               <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
                 <th className="p-2.5">Release</th><th className="p-2.5">Location</th><th className="p-2.5">Invoiced</th><th className="p-2.5 text-right">Days out</th><th className="p-2.5 text-right">Balance</th><th className="p-2.5"></th></tr></thead>
               <tbody>
-                {sorted.map((r) => {
+                {sorted.filter((r) => !tq.trim() || `${r.rel_number} ${r.location} ${r.buildings}`.toLowerCase().includes(tq.trim().toLowerCase())).map((r) => {
                   const d = days(r);
                   return (
                     <tr key={r.id} className="border-b border-rulesoft">

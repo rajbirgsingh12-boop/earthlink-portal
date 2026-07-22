@@ -60,6 +60,9 @@ export default function Payroll() {
   const [relQ, setRelQ] = useState<Record<string, string>>({});
   const [weekCheck, setWeekCheck] = useState<{ rel: RelRow; result: LaborResult }[]>([]);
   const [msg, setMsg] = useState("");
+  // one box searches the week's workers AND adds new ones by name
+  const [workerQ, setWorkerQ] = useState("");
+  const [workerFocus, setWorkerFocus] = useState(false);
   // day-at-a-time entry: which day of the open week is being punched (0=Sat), or the full grid
   const [view, setView] = useState<number | "week">("week");
   const [openDetail, setOpenDetail] = useState<string | null>(null);
@@ -330,28 +333,39 @@ export default function Payroll() {
           </div>
         )}
 
-        <select className="field mb-3" value=""
-          onChange={(e) => {
-            const v = e.target.value;
-            if (!v) return;
-            if (v.startsWith("tpl:")) addFromTemplate(Number(v.slice(4)));
-            else addEntry(v);
-          }}>
-          <option value="">+ Add worker to this week…</option>
-          {emps.length > 0 && (
-            <optgroup label="Crew">
-              {emps.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
-            </optgroup>
-          )}
-          {TEMPLATE_CREW.some((t) => !emps.some((e) => e.name.trim().toLowerCase() === t.name.toLowerCase())) && (
-            <optgroup label="From the payroll template">
-              {TEMPLATE_CREW.map((t, i) =>
-                emps.some((e) => e.name.trim().toLowerCase() === t.name.toLowerCase()) ? null :
-                <option key={t.name} value={`tpl:${i}`}>{t.name}</option>
-              )}
-            </optgroup>
-          )}
-        </select>
+        <div className="relative mb-3">
+          <input className="field" placeholder="Search or add a worker — type a name…" value={workerQ}
+            onChange={(e) => setWorkerQ(e.target.value)}
+            onFocus={() => setWorkerFocus(true)}
+            onBlur={() => setTimeout(() => setWorkerFocus(false), 150)} />
+          {workerFocus && (() => {
+            const query = workerQ.trim().toLowerCase();
+            const inWeek = new Set(entries.map((x) => x.employee_id));
+            const crewMatch = emps.filter((e) => !query || e.name.toLowerCase().includes(query)).slice(0, 8);
+            const tplMatch = TEMPLATE_CREW.map((t, i) => ({ ...t, idx: i }))
+              .filter((t) => !emps.some((e) => e.name.trim().toLowerCase() === t.name.toLowerCase()))
+              .filter((t) => !query || t.name.toLowerCase().includes(query)).slice(0, 8);
+            return (
+              <div className="card absolute inset-x-0 top-full z-10 max-h-64 overflow-y-auto shadow-lg">
+                {crewMatch.map((e) => (
+                  <button key={e.id} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
+                    onMouseDown={() => { addEntry(e.id); setWorkerQ(""); }}>
+                    <span>{e.name}</span>
+                    <span className="text-[11px] text-inksoft">{inWeek.has(e.id) ? "+ add again" : "+ add to week"}</span>
+                  </button>
+                ))}
+                {tplMatch.map((t) => (
+                  <button key={t.name} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
+                    onMouseDown={() => { addFromTemplate(t.idx); setWorkerQ(""); }}>
+                    <span>{t.name}</span>
+                    <span className="text-[11px] text-inksoft">+ from template</span>
+                  </button>
+                ))}
+                {crewMatch.length === 0 && tplMatch.length === 0 && <div className="p-2.5 text-sm text-inksoft">No one matches “{workerQ}”.</div>}
+              </div>
+            );
+          })()}
+        </div>
 
         <div className="mb-3 flex flex-wrap gap-1.5">
           {DAYS.map((d, i) => (
@@ -361,7 +375,10 @@ export default function Payroll() {
           ))}
           <button className={`btn ${view === "week" ? "btn-primary" : "btn-ghost"} px-2.5 py-1.5 text-[12px]`} onClick={() => setView("week")}>Full week</button>
         </div>
-        {entries.map((en) => {
+        {entries.filter((en) => {
+          const query = workerQ.trim().toLowerCase();
+          return !query || (emps.find((e) => e.id === en.employee_id)?.name || "").toLowerCase().includes(query);
+        }).map((en) => {
           const emp = emps.find((e) => e.id === en.employee_id);
           const hrs = en.hours.reduce((s, d) => s + (Number(d) || 0), 0);
           const set = (patch: Partial<Entry>) => setEntries(entries.map((x) => (x.id === en.id ? { ...x, ...patch } : x)));

@@ -381,6 +381,9 @@ create policy "pact_jobs del" on pact_jobs for delete
 -- ===== Phase 4f: per-entry payroll classification =====
 alter table timesheet_entries add column if not exists trade text;
 
+-- ===== Phase 4g: schedule — crew assigned to each release =====
+alter table releases add column if not exists crew jsonb default '[]'::jsonb;
+
 -- ===== Phase 4e: live updates =====
 do $$ begin alter publication supabase_realtime add table releases; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table proposals; exception when duplicate_object then null; end $$;

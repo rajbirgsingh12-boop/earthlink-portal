@@ -160,6 +160,9 @@ create policy "pact_jobs del" on pact_jobs for delete
 -- ---------- from upgrade_payroll_class.sql ----------
 alter table timesheet_entries add column if not exists trade text;
 
+-- ---------- from upgrade_schedule.sql ----------
+alter table releases add column if not exists crew jsonb default '[]'::jsonb;
+
 -- ---------- from upgrade_realtime.sql ----------
 do $$ begin alter publication supabase_realtime add table releases; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table release_items; exception when duplicate_object then null; end $$;

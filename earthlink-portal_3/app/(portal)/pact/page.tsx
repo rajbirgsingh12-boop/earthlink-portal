@@ -90,6 +90,21 @@ export default function Pact() {
     if (error) { flash(upgradeHint(error.message)); load(); }
   };
 
+  // delete = gone for good (after a confirm) — the job, its photos and documents
+  const deleteJob = async (j: Job) => {
+    const label = [j.po_number || j.job_number, j.partner].filter(Boolean).join(" — ");
+    if (!window.confirm(`Delete PO ${label}? The job and its photos/documents disappear for good. This can't be undone.`)) return;
+    const paths = (j.attachments || []).map((a) => a.path);
+    if (paths.length > 0) await sb().storage.from("docs").remove(paths);
+    const { error } = await sb().from("pact_jobs").delete().eq("id", j.id);
+    if (error) { flash(upgradeHint(error.message)); return; }
+    if (openId === j.id) setOpenId(null);
+    if (attachJob?.id === j.id) setAttachJob(null);
+    if (invJob?.id === j.id) setInvJob(null);
+    setJobs((prev) => prev.filter((x) => x.id !== j.id));
+    flash("Job deleted");
+  };
+
   // ---------- PO upload: the job builds itself from the partner's PO ----------
   const handlePo = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -449,7 +464,8 @@ export default function Pact() {
               <div className="flex shrink-0 items-center gap-2">
                 {canInvoice && <span className="font-mono text-sm font-semibold">{fmt(Number(j.amount) || invTotal(j))}</span>}
                 <button className="text-inksoft" title="Documents & photos" onClick={() => setAttachJob(j)}>📎{(j.attachments || []).length > 0 ? <span className="font-mono text-[10px]">{(j.attachments || []).length}</span> : null}</button>
-                {canEdit && <button className={j.canceled ? "text-ok" : "text-alert"} title={j.canceled ? "Restore" : "Cancel job"} onClick={() => patch(j, { canceled: !j.canceled })}>{j.canceled ? "↺" : "✕"}</button>}
+                {canEdit && j.canceled && <button className="text-ok" title="Restore" onClick={() => patch(j, { canceled: false })}>↺</button>}
+                {canEdit && <button className="text-alert" title="Delete job" onClick={() => deleteJob(j)}>✕</button>}
               </div>
             </div>
             {openId === j.id && !j.canceled && (() => {

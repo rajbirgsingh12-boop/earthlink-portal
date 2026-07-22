@@ -5,7 +5,7 @@ const SECTIONS: { icon: string; title: string; lines: string[] }[] = [
   {
     icon: "🏠", title: "Home",
     lines: [
-      "The big buttons at the top jump you straight to everyday jobs — hours, walk sheets, invoices, the schedule.",
+      "The big buttons at the top jump you straight to everyday jobs — hours, walk sheets, invoices, releases.",
       "Below them, the Board shows what needs attention: money to chase, walk sheets not delivered, and payroll that's short.",
     ],
   },
@@ -16,13 +16,6 @@ const SECTIONS: { icon: string; title: string; lines: string[] }[] = [
       "The little green chips on each row show how far along it is: walk sheet → release → work done → payroll → invoiced → paid.",
       "The ⏱ number is payroll hours worked vs. required — it updates by itself as hours are entered on the Payroll tab.",
       "When NYCHA pays, tap the Received stamp. Paid releases move to the Received list to keep the screen clean.",
-    ],
-  },
-  {
-    icon: "📅", title: "Schedule",
-    lines: [
-      "Who's working where. Find a release, tap “+ Assign worker”, and type a name.",
-      "Set the start and finish dates, and tap MARK COMPLETE when the job's done — the Releases tab updates on its own.",
     ],
   },
   {

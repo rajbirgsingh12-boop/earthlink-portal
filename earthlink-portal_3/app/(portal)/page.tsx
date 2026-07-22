@@ -107,7 +107,7 @@ export default function Home() {
       {/* plain-language launcher — jump straight to the everyday jobs */}
       <div className="mb-4 grid grid-cols-2 gap-2.5 md:grid-cols-4">
         {([["⏱", "Enter today's hours", "/payroll"], ["📋", "Fill out a walk sheet", "/proposals"],
-           ["🧾", "Make an invoice", "/statements"], ["📅", "See the schedule", "/schedule"]] as [string, string, string][]).map(([icon, label, href]) => (
+           ["🧾", "Make an invoice", "/statements"], ["📄", "See the releases", "/releases"]] as [string, string, string][]).map(([icon, label, href]) => (
           <a key={href} href={href} className="card flex items-center gap-2.5 p-3.5 transition-shadow hover:shadow">
             <span className="text-xl">{icon}</span>
             <span className="font-display text-[14px] font-semibold uppercase leading-tight tracking-wide">{label}</span>

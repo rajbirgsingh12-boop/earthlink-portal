@@ -36,6 +36,8 @@ create policy "release_items del" on release_items for delete
 
 -- ---- releases: aging dates, address, attached documents ----
 alter table releases add column if not exists address text default '';
+alter table releases add column if not exists labor_breakdown jsonb default '[]'::jsonb;
+alter table releases add column if not exists labor_hours numeric default 0;
 alter table releases add column if not exists invoice_sent date;
 alter table releases add column if not exists paid_date date;
 alter table releases add column if not exists attachments jsonb default '[]'::jsonb;

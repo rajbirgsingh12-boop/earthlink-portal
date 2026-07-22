@@ -82,17 +82,21 @@ export default function Proposals() {
   }, [doc?.contract_id]);
 
   // ---------- open / create ----------
+  const openDocId = useRef<string | null>(null); // guards the async fallback fetch below
   const openEditor = async (p: Proposal) => {
+    openDocId.current = p.id;
     setDoc(p); setSearch(""); setCollapsed(new Set());
+    setQty({}); // never show the previous sheet's quantities while this one loads
     const m: Record<string, string> = {};
     Object.entries(p.qty_map || {}).forEach(([k, v]) => { if (Number(v) > 0) m[k] = String(v); });
     if (Object.keys(m).length === 0) {
       // resume older drafts saved before qty_map existed
       const { data } = await sb().from("proposal_items").select("*").eq("proposal_id", p.id).order("sort");
+      if (openDocId.current !== p.id) return; // user already opened a different sheet
       ((data || []) as NychaLineItem[]).forEach((it) => { if (Number(it.qty) > 0 && it.code) m[it.code] = String(it.qty); });
       if (!p.contract_id) setItems((data || []) as NychaLineItem[]);
     }
-    setQty(m);
+    if (openDocId.current === p.id) setQty(m);
   };
   const newWalkSheet = async () => {
     if (contracts.length === 0) { flash("No contracts yet — upload a release sheet or release PDF first"); return; }
@@ -124,12 +128,14 @@ export default function Proposals() {
   const grand = billed.reduce((s, it) => s + it.qty * it.unit_price, 0);
 
   // autosave quantities (debounced) so a walkthrough can't be lost
+  const pendingSave = useRef<(() => Promise<void>) | null>(null);
   const scheduleAutosave = (nextQty: Record<string, string>) => {
     if (!doc) return;
     setSaveState("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
     const docId = doc.id;
-    saveTimer.current = setTimeout(async () => {
+    const run = async () => {
+      pendingSave.current = null;
       const map: Record<string, number> = {};
       Object.entries(nextQty).forEach(([k, v]) => { const n = parseNum(v); if (n > 0) map[k] = n; });
       const total = (catalog || []).reduce((s, ci) => s + (map[ci.code] || 0) * Number(ci.unit_price), 0);
@@ -137,8 +143,22 @@ export default function Proposals() {
       if (error) { setSaveState(""); flash(upgradeHint(error.message)); return; }
       setSaveState("saved");
       setTimeout(() => setSaveState(""), 1500);
-    }, 700);
+    };
+    pendingSave.current = run;
+    saveTimer.current = setTimeout(run, 700);
   };
+  // leaving the page (tab nav is a full reload) fires any pending autosave immediately
+  useEffect(() => {
+    const flushNow = () => {
+      if (pendingSave.current) {
+        if (saveTimer.current) clearTimeout(saveTimer.current);
+        pendingSave.current();
+      }
+    };
+    window.addEventListener("pagehide", flushNow);
+    document.addEventListener("visibilitychange", flushNow);
+    return () => { window.removeEventListener("pagehide", flushNow); document.removeEventListener("visibilitychange", flushNow); };
+  }, []);
   const setLineQty = (code: string, v: string) => {
     const next = { ...qty, [code]: v };
     if (!v) delete next[code];
@@ -148,6 +168,7 @@ export default function Proposals() {
   // explicit save: flush quantities + line items right now
   const saveNow = async () => {
     if (!doc) return;
+    if (doc.contract_id && !catalog) { flash("Price book is still loading — one second"); return; }
     if (saveTimer.current) clearTimeout(saveTimer.current);
     setSaveState("saving");
     const map: Record<string, number> = {};
@@ -164,6 +185,8 @@ export default function Proposals() {
   // write the billed lines to proposal_items (used by print, invoices, statements)
   const materialize = async (): Promise<NychaLineItem[]> => {
     if (!doc) return [];
+    // never wipe saved lines while the price book is still loading (billed would be [])
+    if (doc.contract_id && !catalog) return [];
     const rows = doc.contract_id ? billed : items;
     await sb().from("proposal_items").delete().eq("proposal_id", doc.id);
     if (rows.length) {
@@ -174,7 +197,7 @@ export default function Proposals() {
     }
     return rows;
   };
-  const closeEditor = async () => { if (doc?.contract_id) await materialize(); setDoc(null); setItems([]); };
+  const closeEditor = async () => { if (doc?.contract_id && catalog) await materialize(); setDoc(null); setItems([]); };
 
   // ---------- catalog upload (per contract, header-name matched) ----------
   const handleContractSheet = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -247,24 +270,28 @@ export default function Proposals() {
     const thin = { style: "thin", color: { rgb: "000000" } };
     const box = { top: thin, bottom: thin, left: thin, right: thin };
     const shade = { patternType: "solid", fgColor: { rgb: "E8E4DA" } };
-    const cellAt = (r: number, col: number) => ws[XLSX.utils.encode_cell({ r, c: col })];
+    // create missing cells so the grid never has border holes
+    const cellAt = (r: number, col: number) => ws[XLSX.utils.encode_cell({ r, c: col })] || (ws[XLSX.utils.encode_cell({ r, c: col })] = { t: "s", v: "" });
     // header block: shaded bold labels in bordered boxes, bordered value cells
     for (let r = 0; r < 6; r++) {
-      for (const col of [0, 1, 4]) { const cell = cellAt(r, col); if (cell) cell.s = { font: { bold: true }, fill: shade, border: box }; }
-      for (const col of [2, 5, 6]) { const cell = cellAt(r, col); if (cell) cell.s = { border: box, alignment: { horizontal: col === 2 ? "left" : "center" } }; }
+      for (const col of [0, 1, 4]) cellAt(r, col).s = { font: { bold: true }, fill: shade, border: box, alignment: { vertical: "center" } };
+      for (const col of [2, 5, 6]) cellAt(r, col).s = { border: box, alignment: { horizontal: col === 2 ? "left" : "center", vertical: "center" } };
     }
     const headerRow = 7, firstItem = 8, totalRow = firstItem + used.length;
     for (let r = headerRow; r <= totalRow; r++) {
       for (let col = 0; col < 8; col++) {
         const cell = cellAt(r, col);
-        if (!cell) continue;
-        const s: Record<string, unknown> = { border: box, alignment: { vertical: "top", wrapText: col === 3 } };
+        const s: Record<string, unknown> = { border: box, alignment: { vertical: "center", wrapText: col === 3, horizontal: r === headerRow ? "center" : col >= 4 ? "right" : "left" } };
         if (r === headerRow || r === totalRow) s.font = { bold: true };
         if (r === headerRow) s.fill = { patternType: "solid", fgColor: { rgb: "E8E4DA" } };
         cell.s = s;
         if (r > headerRow && (col === 6 || col === 7) && typeof cell.v === "number") cell.z = "#,##0.00";
       }
     }
+    ws["!rows"] = [];
+    for (let r = 0; r < 6; r++) ws["!rows"][r] = { hpt: 20 };
+    ws["!rows"][headerRow] = { hpt: 24 };
+    ws["!rows"][totalRow] = { hpt: 22 };
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
     const fname = askFileName(`proposal_sheet_${c?.number || ""}${doc.release_number ? `_rel${doc.release_number}` : ""}.xlsx`);

@@ -7,7 +7,7 @@ import { fmt, parseNum, askFileName } from "@/lib/format";
 import Stamp from "@/components/Stamp";
 import type { Contract, Release } from "@/lib/types";
 import { parseReleasePdfText, type ReleaseItem } from "@/lib/parseRelease";
-import { prettyDate, type Org } from "@/lib/docs";
+import { prettyDate, localISO, type Org } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged } from "@/lib/labor";
 import { useLive } from "@/lib/useLive";
 import ContractPicker from "@/components/ContractPicker";
@@ -15,6 +15,7 @@ import NychaInvoicePrint from "@/components/NychaInvoicePrint";
 import { gatherReleaseDoc, buildInvoiceXlsx, type DocRow } from "@/lib/releaseDoc";
 import PrintShell from "@/components/PrintShell";
 import { shrinkImage } from "@/lib/shrinkImage";
+import { useNumBuffer } from "@/lib/numBuffer";
 
 type Filter = "all" | "chase" | "payroll" | "received" | "canceled" | "hours";
 type PriceRow = { code: string; category: string; description: string; unit: string; unit_price: number };
@@ -130,6 +131,11 @@ export default function Releases() {
   const [invPreview, setInvPreview] = useState<{ number: string; date: string; cNumber: string; relNum: string; dev: string; workOrder: string; rows: DocRow[] } | null>(null);
 
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
+  const numBuf = useNumBuffer();
+  // accountants can look but not touch — their writes would be silent no-ops under RLS
+  const [role, setRole] = useState("");
+  const readOnly = role === "accountant";
+  const loadSeq = useRef(0); // drops stale loadRows responses after fast contract switches
 
   const loadContracts = async () => {
     const { data } = await sb().from("contracts").select("id,number,name").order("number");
@@ -141,10 +147,17 @@ export default function Releases() {
     loadContracts();
     loadLogged();
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
+    (async () => {
+      const { data: { user } } = await sb().auth.getUser();
+      if (!user) return;
+      const { data: prof } = await sb().from("profiles").select("role").eq("id", user.id).single();
+      setRole((prof as { role?: string } | null)?.role || "");
+    })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadRows = async (cid: string, silent = false) => {
     if (!cid) { setRows([]); return; }
+    const token = ++loadSeq.current; // a newer load makes this one throw its results away
     if (!silent) setBusy(true);
     const all: Release[] = [];
     let from = 0;
@@ -155,6 +168,7 @@ export default function Releases() {
       if (data.length < 1000) break;
       from += 1000;
     }
+    if (token !== loadSeq.current) return;
     // sort numerically by release number when possible
     all.sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
     setRows(all);
@@ -164,10 +178,15 @@ export default function Releases() {
     const ready = new Set<string>();
     const ids = all.map((r) => r.id);
     for (let i = 0; i < ids.length; i += 200) {
-      const { data: its } = await sb().from("release_items").select("release_id").in("release_id", ids.slice(i, i + 200));
-      ((its || []) as { release_id: string }[]).forEach((it) => ready.add(it.release_id));
+      // page inside each chunk too — 200 releases can hold >1000 line items
+      for (let f = 0; ; f += 1000) {
+        const { data: its } = await sb().from("release_items").select("release_id").in("release_id", ids.slice(i, i + 200)).range(f, f + 999);
+        ((its || []) as { release_id: string }[]).forEach((it) => ready.add(it.release_id));
+        if (!its || its.length < 1000) break;
+      }
     }
     const { data: props } = await sb().from("proposals").select("release_number,qty_map").eq("contract_id", cid);
+    if (token !== loadSeq.current) return;
     const walkNums = new Set(
       ((props || []) as { release_number?: string; qty_map?: Record<string, number> | null }[])
         .filter((p) => p.release_number && p.qty_map && Object.keys(p.qty_map).length > 0)
@@ -226,7 +245,7 @@ export default function Releases() {
   const shown = list.slice(0, limit);
 
   const toggle = async (r: Release, patch: Partial<Release>) => {
-    setRows(rows.map((x) => (x.id === r.id ? { ...x, ...patch } : x)));
+    setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, ...patch } : x)));
     let { error } = await sb().from("releases").update(patch).eq("id", r.id);
     if (error && /column/i.test(error.message)) {
       // database not upgraded yet — retry without the new aging columns
@@ -285,8 +304,8 @@ export default function Releases() {
     const d = await gatherReleaseDoc(active, r);
     setBusy(false);
     if (d.rows.length === 0) { flash("No line items for this release — make a walk sheet for it, or import the release PDF"); return; }
-    const today = new Date().toISOString().slice(0, 10);
-    if (!r.invoice_sent) {
+    const today = localISO();
+    if (!r.invoice_sent && !readOnly) {
       // generating the invoice records the sent date (feeds the statement aging)
       await sb().from("releases").update({ invoice_sent: today }).eq("id", r.id);
       setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: today } : x)));
@@ -339,7 +358,7 @@ export default function Releases() {
   const downloadSOS = () => {
     if (!sosView) return;
     const { relNum, ticket, cNumber, dev, addr, stair, apt, rows, total } = sosView;
-    const today = prettyDate(new Date().toISOString().slice(0, 10));
+    const today = prettyDate(localISO());
 
     const aoa: (string | number)[][] = [];
     const merges: { s: { r: number; c: number }; e: { r: number; c: number } }[] = [];
@@ -350,9 +369,9 @@ export default function Releases() {
     aoa.push(["Telephone:", "", org?.phone || ""]);
     aoa.push(["Email:", "", org?.email || ""]);
     aoa.push([]);
-    aoa.push(["PO:", "", /^\d+$/.test(cNumber) ? Number(cNumber) : cNumber]);
+    aoa.push(["PO:", "", /^[1-9]\d*$/.test(cNumber) ? Number(cNumber) : cNumber]);
     aoa.push(["Work order:", "", ticket]);
-    aoa.push(["Release:", "", /^\d+$/.test(relNum) ? Number(relNum) : relNum]);
+    aoa.push(["Release:", "", /^[1-9]\d*$/.test(relNum) ? Number(relNum) : relNum]);
     aoa.push(["Development:", "", dev]);
     aoa.push(["Stairhall:", "", stair]);
     aoa.push(["Apt:", "", apt]);
@@ -360,7 +379,8 @@ export default function Releases() {
     aoa.push([]);
     const headerRow = aoa.length;
     aoa.push(["Line", "Item", "Category", "Description", "UOM", "Quantity Authorized", "Price", "Total Cost"]);
-    rows.forEach((it) => aoa.push([it.line, /^\d+$/.test(it.code) ? Number(it.code) : it.code, it.category, it.description, it.uom, it.qty, it.unit_price, it.qty * it.unit_price]));
+    // keep item codes as text — NYCHA codes carry a leading zero (062001351)
+    rows.forEach((it) => aoa.push([it.line, /^[1-9]\d*$/.test(it.code) ? Number(it.code) : it.code, it.category, it.description, it.uom, it.qty, it.unit_price, it.qty * it.unit_price]));
     const totalRow = aoa.length;
     aoa.push(["", "", "", "", "", "Total", "", total]);
     aoa.push([]);
@@ -405,15 +425,14 @@ export default function Releases() {
     style(0, 0, { font: { bold: true, sz: 14 }, alignment: { horizontal: "center", vertical: "center" }, fill: shade, border: { top: { style: "medium", color: { rgb: "000000" } }, bottom: thin, left: thin, right: thin } });
     // bordered vendor + job header blocks (labels shaded bold, values boxed)
     for (const row of [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12]) {
-      for (const col of [0, 1]) { ensure(row, col); style(row, col, { font: { bold: true }, fill: shade, border: box }); }
-      ensure(row, 2); style(row, 2, { border: box });
-      if (row === 2) { style(row, 5, { font: { bold: true }, fill: shade, border: box }); ensure(row, 6); style(row, 6, { border: box, alignment: { horizontal: "center" } }); }
+      for (const col of [0, 1]) { ensure(row, col); style(row, col, { font: { bold: true }, fill: shade, border: box, alignment: { vertical: "center" } }); }
+      ensure(row, 2); style(row, 2, { border: box, alignment: { vertical: "center" } });
+      if (row === 2) { style(row, 5, { font: { bold: true }, fill: shade, border: box, alignment: { vertical: "center" } }); ensure(row, 6); style(row, 6, { border: box, alignment: { horizontal: "center", vertical: "center" } }); }
     }
     for (let row = headerRow; row <= totalRow; row++) {
       for (let col = 0; col < 8; col++) {
-        const cell = cellAt(row, col);
-        if (!cell) continue;
-        const s: Record<string, unknown> = { border: box, alignment: { vertical: "top", wrapText: col === 3 } };
+        const cell = ensure(row, col);
+        const s: Record<string, unknown> = { border: box, alignment: { vertical: "center", wrapText: col === 3, horizontal: row === headerRow ? "center" : col >= 4 ? "right" : "left" } };
         if (row === headerRow || row === totalRow) s.font = { bold: true };
         if (row === headerRow) s.fill = shade;
         cell.s = s;
@@ -435,6 +454,8 @@ export default function Releases() {
     for (const row of [vendorSig, inspSig, cmSig, internal]) style(row, 0, { font: { bold: true } });
     for (const row of [ack1, cert, ack2]) style(row, 0, { font: { italic: true }, alignment: { wrapText: true, vertical: "top" } });
     ws["!rows"] = []; ws["!rows"][ack1] = { hpt: 26 }; ws["!rows"][cert] = { hpt: 26 }; ws["!rows"][ack2] = { hpt: 26 };
+    ws["!rows"][0] = { hpt: 26 }; ws["!rows"][headerRow] = { hpt: 24 }; ws["!rows"][totalRow] = { hpt: 22 }; ws["!rows"][matHeader] = { hpt: 22 };
+    for (const row of [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12]) ws["!rows"][row] = { hpt: 19 };
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
     const fname = askFileName(`SOS_${cNumber}_rel${relNum}.xlsx`);
@@ -453,21 +474,32 @@ export default function Releases() {
     return { name: file.name, path };
   };
 
-  const attachFile = async (r: Release, file: File) => {
+  // uploads the files, then writes the attachment list ONCE against the freshest
+  // row — the old one-at-a-time loop overwrote itself and kept only the last photo
+  const attachFileList = async (r: Release, files: File[]) => {
+    if (files.length === 0) return;
     setBusy(true);
-    const up = await uploadAttachment(r, file);
-    if (up) {
-      const list = [...(r.attachments || []).filter((a) => a.path !== up.path), up];
+    const added: { name: string; path: string }[] = [];
+    for (const file of files) {
+      const up = await uploadAttachment(r, file);
+      if (up) added.push(up);
+    }
+    if (added.length > 0) {
+      const { data: cur } = await sb().from("releases").select("attachments").eq("id", r.id).single();
+      const existing = ((cur as { attachments?: { name: string; path: string }[] } | null)?.attachments)
+        || r.attachments || [];
+      const list = [...existing.filter((a) => !added.some((b) => b.path === a.path)), ...added];
       const { error } = await sb().from("releases").update({ attachments: list }).eq("id", r.id);
       if (error) flash(error.message);
       else {
         setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, attachments: list } : x)));
         setAttachRel((prev) => (prev && prev.id === r.id ? { ...prev, attachments: list } : prev));
-        flash(`Attached ${file.name}`);
+        flash(added.length === 1 ? `Attached ${added[0].name}` : `Attached ${added.length} files`);
       }
     }
     setBusy(false);
   };
+  const attachFile = (r: Release, file: File) => attachFileList(r, [file]);
 
   const openAttachment = async (path: string) => {
     const { data, error } = await sb().storage.from("docs").createSignedUrl(path, 3600);
@@ -484,15 +516,15 @@ export default function Releases() {
     setAttachRel((prev) => (prev && prev.id === r.id ? { ...prev, attachments: list } : prev));
   };
 
-  // timestamped job photos straight from the phone camera — shrunk before upload
+  // timestamped job photos straight from the phone camera — shrunk before upload;
+  // second-resolution stamp so retakes moments apart never overwrite each other
   const addPhotos = async (r: Release, files: File[]) => {
     const shrunk = await Promise.all(files.map((f) => shrinkImage(f)));
-    for (const [i, f] of shrunk.entries()) {
-      const stamp = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "");
+    const stamp = new Date().toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "");
+    await attachFileList(r, shrunk.map((f, i) => {
       const ext = (f.name.match(/\.\w+$/) || [".jpg"])[0];
-      const named = new File([f], `photo_${stamp}${files.length > 1 ? `_${i + 1}` : ""}${ext}`, { type: f.type });
-      await attachFile(r, named);
-    }
+      return new File([f], `photo_${stamp}${files.length > 1 ? `_${i + 1}` : ""}${ext}`, { type: f.type });
+    }));
   };
 
   // thumbnails for the photos in the open panel
@@ -521,13 +553,15 @@ export default function Releases() {
         const raw: string[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false, blankrows: true });
         const hIdx = raw.findIndex((r) => r.some((c) => /release/i.test(c)) && r.some((c) => /amount/i.test(c)));
         if (hIdx < 0) { flash("No header row with Release + Amount found"); return; }
+        // red-row numbers from the XML are absolute — offset by where the sheet's used range starts
+        const rangeBase = XLSX.utils.decode_range(String(sheet["!ref"] || "A1")).s.r;
         const headers = raw[hIdx].map((h) => String(h).toLowerCase());
         const col = (re: RegExp) => headers.findIndex((h) => re.test(h));
         const m = { rel: col(/^release/), location: col(/location/), buildings: col(/building/), ticket: col(/ticket/), amount: col(/amount/), pre: col(/pre/), date: col(/date|complet/), payroll: col(/payroll/), received: col(/receiv/), status: col(/status/), hours: col(/hour|labor/) };
         const pre = raw.slice(0, hIdx).flat().join(" ");
         const gm = pre.match(/contract\s*#?\s*([A-Za-z0-9-]+)/i) || fname.match(/(\d{5,})/);
         const items = raw.slice(hIdx + 1)
-          .map((r, k) => ({ r, sheetRow: hIdx + 2 + k }))
+          .map((r, k) => ({ r, sheetRow: rangeBase + hIdx + 2 + k }))
           .filter(({ r }) => r.some((c) => String(c).trim() !== ""))
           .map(({ r, sheetRow }) => {
             const g = (i: number) => (i >= 0 ? String(r[i] ?? "").trim() : "");
@@ -557,7 +591,11 @@ export default function Releases() {
       if (error) { flash(error.message); setBusy(false); return; }
       contract = data as Contract;
     }
-    if (mode === "replace") await sb().from("releases").delete().eq("contract_id", contract.id);
+    if (mode === "replace") {
+      // payroll entries linked to these releases block the delete — surface it
+      const { error: de } = await sb().from("releases").delete().eq("contract_id", contract.id);
+      if (de) { flash(/foreign key|violates/i.test(de.message) ? "Can't replace — payroll hours are linked to releases on this contract. Use Append, or unlink the payroll entries first." : de.message); setBusy(false); return; }
+    }
     for (let i = 0; i < pending.items.length; i += 500) {
       const chunk = pending.items.slice(i, i + 500).map((it) => ({ ...it, contract_id: contract!.id }));
       const { error } = await sb().from("releases").insert(chunk);
@@ -602,21 +640,26 @@ export default function Releases() {
             .map((it) => ({ cls: it.description.replace(/,?\s*Regular Hours/i, "").trim(), hours: it.qty }));
           const { data: existing } = await sb().from("releases").select("id").eq("contract_id", contract.id).eq("rel_number", parsed.rel).limit(1);
           let relId: string;
+          const stripNew = (o: Record<string, unknown>) => { const { labor_breakdown: _b, labor_hours: _h, ...rest } = o; return rest; };
           if (existing && existing[0]) {
             relId = (existing[0] as { id: string }).id;
-            const { error } = await sb().from("releases").update({
+            const patch: Record<string, unknown> = {
               amount: parsed.total, labor_hours: parsed.laborHours, labor_breakdown: breakdown,
               ticket: parsed.workOrders[0] || "", location: parsed.development,
-            }).eq("id", relId);
+            };
+            let { error } = await sb().from("releases").update(patch).eq("id", relId);
+            if (error && /column|schema cache/i.test(error.message)) ({ error } = await sb().from("releases").update(stripNew(patch)).eq("id", relId));
             if (error) { failed.push(file.name); continue; }
             await sb().from("release_items").delete().eq("release_id", relId);
           } else {
-            const { data: rel, error } = await sb().from("releases").insert({
+            const payload: Record<string, unknown> = {
               contract_id: contract.id, rel_number: parsed.rel, location: parsed.development,
               buildings: "", ticket: parsed.workOrders[0] || "", amount: parsed.total,
               labor_hours: parsed.laborHours, labor_breakdown: breakdown,
               date_completed: "", pre_check: "", payroll_done: false, received: false, canceled: false, assigned_to: null,
-            }).select().single();
+            };
+            let { data: rel, error } = await sb().from("releases").insert(payload).select().single();
+            if (error && /column|schema cache/i.test(error.message)) ({ data: rel, error } = await sb().from("releases").insert(stripNew(payload)).select().single());
             if (error || !rel) { failed.push(file.name); continue; }
             relId = (rel as Release).id;
           }
@@ -742,23 +785,34 @@ export default function Releases() {
       .eq("contract_id", contract.id).eq("rel_number", pdfPending.rel).limit(1);
     const prior = (existing || [])[0] as (Release & { address?: string }) | undefined;
     let relId: string;
+    // works even before RUN_ME.sql adds the labor/address columns
+    const stripNew = (o: Record<string, unknown>) => { const { labor_breakdown: _b, labor_hours: _h, address: _a, ...rest } = o; return rest; };
     if (prior) {
       const patch: Record<string, unknown> = {
         amount: pdfPending.amount, labor_hours: pdfPending.hours,
         labor_breakdown: pdfPending.breakdown, ticket: pdfPending.ticket, location: pdfPending.location,
       };
       if (pdfPending.address) { patch.address = pdfPending.address; patch.buildings = pdfPending.address; }
-      const { error } = await sb().from("releases").update(patch).eq("id", prior.id);
+      let { error } = await sb().from("releases").update(patch).eq("id", prior.id);
+      if (error && /column|schema cache/i.test(error.message)) {
+        ({ error } = await sb().from("releases").update(stripNew(patch)).eq("id", prior.id));
+        if (!error) flash("Saved — run supabase/RUN_ME.sql so labor hours & address save too");
+      }
       if (error) { flash(error.message); setBusy(false); return; }
       relId = prior.id;
       await sb().from("release_items").delete().eq("release_id", relId);
     } else {
-      const { data: rel, error } = await sb().from("releases").insert({
+      const payload: Record<string, unknown> = {
         contract_id: contract.id, rel_number: pdfPending.rel, location: pdfPending.location,
         buildings: pdfPending.address, address: pdfPending.address, ticket: pdfPending.ticket,
         amount: pdfPending.amount, labor_hours: pdfPending.hours, labor_breakdown: pdfPending.breakdown,
         date_completed: "", pre_check: "", payroll_done: false, received: false, canceled: false, assigned_to: null,
-      }).select().single();
+      };
+      let { data: rel, error } = await sb().from("releases").insert(payload).select().single();
+      if (error && /column|schema cache/i.test(error.message)) {
+        ({ data: rel, error } = await sb().from("releases").insert(stripNew(payload)).select().single());
+        if (!error) flash("Saved — run supabase/RUN_ME.sql so labor hours & address save too");
+      }
       if (error || !rel) { flash(error?.message || "Save failed"); setBusy(false); return; }
       relId = (rel as Release).id;
     }
@@ -804,8 +858,8 @@ export default function Releases() {
       <div className="mb-3 flex items-baseline justify-between gap-2">
         <div className="font-display text-2xl font-bold uppercase">Releases</div>
         <div className="flex gap-2">
-          <button className="btn btn-ghost" onClick={() => pdfRef.current?.click()}>+ From PDF(s)</button>
-          <button className="btn btn-ghost" onClick={() => fileRef.current?.click()}>Upload sheet</button>
+          {!readOnly && <button className="btn btn-ghost" onClick={() => pdfRef.current?.click()}>+ From PDF(s)</button>}
+          {!readOnly && <button className="btn btn-ghost" onClick={() => fileRef.current?.click()}>Upload sheet</button>}
           {rows.length > 0 && <button className="btn btn-ghost" onClick={exportSheet}>Download</button>}
         </div>
       </div>
@@ -842,10 +896,16 @@ export default function Releases() {
             ] as ["contract" | "rel" | "location" | "address" | "ticket" | "amount" | "hours", string][]).map(([k, label]) => (
               <div key={k} className={k === "address" ? "col-span-2 md:col-span-1" : ""}>
                 <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
-                <input className="field" inputMode={k === "amount" || k === "hours" ? "decimal" : "text"}
-                  placeholder={k === "address" ? "e.g. Stairhall 15, Apt 526" : ""}
-                  value={String(pdfPending[k])}
-                  onChange={(e) => setPdfPending({ ...pdfPending, [k]: k === "amount" || k === "hours" ? parseNum(e.target.value) : e.target.value })} />
+                {k === "amount" || k === "hours" ? (
+                  <input className="field" inputMode="decimal"
+                    {...numBuf(`pdf:${k}`, Number(pdfPending[k]) || 0,
+                      (n) => setPdfPending((prev) => (prev ? { ...prev, [k]: n } : prev)))} />
+                ) : (
+                  <input className="field"
+                    placeholder={k === "address" ? "e.g. Stairhall 15, Apt 526" : ""}
+                    value={String(pdfPending[k])}
+                    onChange={(e) => setPdfPending({ ...pdfPending, [k]: e.target.value })} />
+                )}
               </div>
             ))}
           </div>
@@ -945,8 +1005,8 @@ export default function Releases() {
                     <td className="p-2.5 font-mono text-xs">{r.rel_number}</td>
                     <td className="p-2.5">{r.location}<div className="max-w-[220px] truncate text-[11px] text-inksoft">{r.buildings}</div>{(r.labor_breakdown || []).length > 0 && <div className="max-w-[220px] truncate text-[11px] text-inksoft">{(r.labor_breakdown || []).map((b) => `${b.cls} ${b.hours}h`).join(" · ")}</div>}</td>
                     <td className="p-2.5 text-right">
-                      <input className="w-20 rounded-sm border border-rulesoft p-1.5 text-right font-mono" inputMode="decimal" defaultValue={need || ""} placeholder="0"
-                        onBlur={(e) => toggle(r, { labor_hours: parseNum(e.target.value) })} />
+                      <input className="w-20 rounded-sm border border-rulesoft p-1.5 text-right font-mono" inputMode="decimal" defaultValue={need || ""} placeholder="0" readOnly={readOnly}
+                        onBlur={(e) => !readOnly && toggle(r, { labor_hours: parseNum(e.target.value) })} />
                     </td>
                     <td className="p-2.5 text-right font-mono">{got}</td>
                     <td className="p-2.5 text-center">
@@ -1002,17 +1062,19 @@ export default function Releases() {
                 </td>
                 <td className={`p-2.5 text-right font-mono ${r.canceled ? "line-through" : ""}`}>{fmt(Number(r.amount))}</td>
                 <td className="p-2.5 text-center">
-                  {!r.canceled && <button onClick={() => togglePayroll(r)}><Stamp label={r.payroll_done ? "DONE" : "TO DO"} tone={r.payroll_done ? "ok" : "alert"} /></button>}
+                  {!r.canceled && (readOnly ? <Stamp label={r.payroll_done ? "DONE" : "TO DO"} tone={r.payroll_done ? "ok" : "alert"} /> :
+                    <button onClick={() => togglePayroll(r)}><Stamp label={r.payroll_done ? "DONE" : "TO DO"} tone={r.payroll_done ? "ok" : "alert"} /></button>)}
                 </td>
                 <td className="p-2.5 text-center">
-                  {!r.canceled ? <button onClick={() => toggle(r, { received: !r.received, paid_date: !r.received ? new Date().toISOString().slice(0, 10) : null })}><Stamp label={r.received ? "YES" : "NO"} tone={r.received ? "ok" : "work"} /></button> : <Stamp label="CANCELED" tone="mute" />}
+                  {r.canceled ? <Stamp label="CANCELED" tone="mute" /> : readOnly ? <Stamp label={r.received ? "YES" : "NO"} tone={r.received ? "ok" : "work"} /> :
+                    <button onClick={() => toggle(r, { received: !r.received, paid_date: !r.received ? localISO() : null })}><Stamp label={r.received ? "YES" : "NO"} tone={r.received ? "ok" : "work"} /></button>}
                 </td>
                 <td className="p-2.5">
                   <div className="flex items-center justify-end gap-2 whitespace-nowrap">
                     {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-work underline" title="Make the NYCHA invoice" onClick={() => genInvoice(r)}>Invoice</button>}
                     {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-carbon underline" title="Make the Statement of Services form" onClick={() => genSOS(r)}>SOS form</button>}
                     <button className="text-inksoft" title="Documents" onClick={() => setAttachRel(r)}>📎{(r.attachments || []).length > 0 ? <span className="font-mono text-[10px]">{(r.attachments || []).length}</span> : null}</button>
-                    <button className={r.canceled ? "text-ok" : "text-alert"} title={r.canceled ? "Restore" : "Mark canceled"} onClick={() => toggle(r, { canceled: !r.canceled })}>{r.canceled ? "↺" : "✕"}</button>
+                    {!readOnly && <button className={r.canceled ? "text-ok" : "text-alert"} title={r.canceled ? "Restore" : "Mark canceled"} onClick={() => toggle(r, { canceled: !r.canceled })}>{r.canceled ? "↺" : "✕"}</button>}
                   </div>
                 </td>
               </tr>
@@ -1045,7 +1107,7 @@ export default function Releases() {
                         ? <img src={photoUrls[a.path]} alt={a.name} className="h-24 w-full rounded-sm border border-rulesoft object-cover" />
                         : <div className="grid h-24 w-full place-items-center rounded-sm border border-rulesoft text-xs text-inksoft">…</div>}
                     </button>
-                    <button className="absolute right-1 top-1 rounded-sm bg-ink/70 px-1.5 text-xs text-paper" title="Delete photo" onClick={() => removeAttachment(attachRel, a.path)}>✕</button>
+                    {!readOnly && <button className="absolute right-1 top-1 rounded-sm bg-ink/70 px-1.5 text-xs text-paper" title="Delete photo" onClick={() => removeAttachment(attachRel, a.path)}>✕</button>}
                   </div>
                 ))}
               </div>
@@ -1055,12 +1117,12 @@ export default function Releases() {
                 <button className="block w-full rounded-sm border border-rulesoft p-2.5 text-left text-sm hover:border-work" onClick={() => openAttachment(a.path)}>
                   📄 {a.name}
                 </button>
-                <button className="shrink-0 px-1 text-xs text-alert" title="Delete file" onClick={() => removeAttachment(attachRel, a.path)}>✕</button>
+                {!readOnly && <button className="shrink-0 px-1 text-xs text-alert" title="Delete file" onClick={() => removeAttachment(attachRel, a.path)}>✕</button>}
               </div>
             ))}
             <div className="mt-3 flex flex-wrap gap-2">
-              <button className="btn btn-primary" onClick={() => photoInputRef.current?.click()} disabled={busy}>📷 Take photo</button>
-              <button className="btn" onClick={() => attachInputRef.current?.click()} disabled={busy}>Upload file</button>
+              {!readOnly && <button className="btn btn-primary" onClick={() => photoInputRef.current?.click()} disabled={busy}>📷 Take photo</button>}
+              {!readOnly && <button className="btn" onClick={() => attachInputRef.current?.click()} disabled={busy}>Upload file</button>}
               <button className="btn btn-ghost" onClick={() => setAttachRel(null)}>Close</button>
             </div>
           </div>
@@ -1086,7 +1148,7 @@ export default function Releases() {
           <div className="printable mx-auto max-w-4xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
             <div className="border-2 border-ink bg-paper p-2 text-center font-display text-xl font-bold uppercase">NYCHA Statement of Service</div>
             <div className="my-4 grid grid-cols-2 gap-x-8 gap-y-1.5 border border-rulesoft p-3 text-[13px]">
-              {([["Vendor", (org?.company || "").toUpperCase()], ["Date", prettyDate(new Date().toISOString().slice(0, 10))],
+              {([["Vendor", (org?.company || "").toUpperCase()], ["Date", prettyDate(localISO())],
                 ["Address", [org?.address1, org?.address2].filter(Boolean).join(", ")], ["PO", sosView.cNumber],
                 ["Telephone", org?.phone || ""], ["Work order", sosView.ticket], ["Email", org?.email || ""], ["Release", sosView.relNum],
                 ["Development", sosView.dev], ["Stairhall", sosView.stair], ["Apt", sosView.apt], ["Job address", sosView.addr]] as [string, string][]).map(([l, v]) => (

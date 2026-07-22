@@ -57,7 +57,9 @@ export function buildInvoiceXlsx(a: {
   number: string; date: string; rows: DocRow[]; filename?: string;
 }) {
   const total = a.rows.reduce((s, it) => s + it.qty * it.unit_price, 0);
-  const asNum = (s: string) => (/^\d+$/.test(s) ? Number(s) : s);
+  // never numify values with leading zeros — NYCHA item codes like 062001351
+  // must keep their zero on the form
+  const asNum = (s: string) => (/^[1-9]\d*$/.test(s) ? Number(s) : s);
   const aoa: (string | number)[][] = [];
   aoa.push(["Standard Invoice"]);                                                               // r0
   aoa.push([`Date: ${prettyDate(a.date)}`, "", "", "", `Invoice # ${a.number}`]);               // r1
@@ -110,12 +112,20 @@ export function buildInvoiceXlsx(a: {
   for (let r = headerRow; r <= totalRow; r++) {
     for (let c = 0; c < 8; c++) {
       const cell = cellAt(r, c);
-      const s: Record<string, unknown> = { border: box, alignment: { vertical: "top", wrapText: c === 3 } };
+      const s: Record<string, unknown> = { border: box, alignment: { vertical: "center", wrapText: c === 3, horizontal: r === headerRow ? "center" : c >= 4 ? "right" : "left" } };
       if (r === headerRow || r === totalRow) s.font = { bold: true };
       if (r === headerRow) s.fill = shade;
       cell.s = s;
       if (r > headerRow && (c === 6 || c === 7) && typeof cell.v === "number") cell.z = "#,##0.00";
     }
+  }
+  ws["!rows"] = [];
+  ws["!rows"][0] = { hpt: 26 };
+  ws["!rows"][headerRow] = { hpt: 24 };
+  ws["!rows"][totalRow] = { hpt: 22 };
+  for (const [r, c] of [[10, 4], [10, 5], [10, 6], [10, 7], [11, 4], [11, 5], [12, 4], [12, 5], [13, 4], [13, 5], [13, 6], [13, 7]] as [number, number][]) {
+    const cell = cellAt(r, c);
+    cell.s = { ...(cell.s as Record<string, unknown> || {}), alignment: { ...((cell.s as { alignment?: object })?.alignment || {}), vertical: "center" } };
   }
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Invoice");

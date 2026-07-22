@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { sb } from "@/lib/supabase";
 import type { Contract, Release } from "@/lib/types";
+import { localISO } from "@/lib/docs";
 import { useLive } from "@/lib/useLive";
 import { TEMPLATE_CREW } from "@/lib/crew";
 import ContractPicker, { contractLabel } from "@/components/ContractPicker";
@@ -107,7 +108,7 @@ export default function Schedule() {
           <div className="max-w-[420px] truncate text-[11px] text-inksoft">{r.buildings || r.address || ""}{contractOf(r) ? ` · ${contractOf(r)}` : ""}</div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <button onClick={() => save(r, { date_completed: (r.date_completed || "").trim() ? "" : new Date().toISOString().slice(0, 10) })}
+          <button onClick={() => save(r, { date_completed: (r.date_completed || "").trim() ? "" : localISO() })}
             title="Marks the work complete — lights the WORK stage on the Releases tab too">
             <Stamp label={(r.date_completed || "").trim() ? "COMPLETE ✓" : "MARK COMPLETE"} tone={(r.date_completed || "").trim() ? "ok" : "mute"} />
           </button>

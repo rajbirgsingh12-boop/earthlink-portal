@@ -82,6 +82,10 @@ export default function Settings() {
     );
     const { data, error } = await temp.auth.signUp({ email: newUser.email.trim(), password: newUser.password });
     if (error) { setAdding(false); flash(error.message); return; }
+    // Supabase hides duplicate emails behind a fake user with no identities
+    if (data.user && (data.user.identities?.length ?? 0) === 0) {
+      setAdding(false); flash("That email already has an account — change their role in the list below instead."); return;
+    }
     const newId = data.user?.id;
     if (newId) {
       // the profile row is created automatically; set the display name and role

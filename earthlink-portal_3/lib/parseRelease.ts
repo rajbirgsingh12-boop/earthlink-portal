@@ -105,7 +105,8 @@ export function parseReleasePdfText(rawText: string): ParsedRelease | null {
     const [, ln, code, qty, uom, desc] = m;
     if (items[ln]) continue;
     const subRe = new RegExp(
-      `${ln}-\\d{1,2} Ship To: Use the ship-to address at the top of page ?1 (${NUM}) ${UOM} (${NUM}) ([\\d,]+\\.\\d{2})`,
+      // (?<![\d-]) so split line "2" never swallows sub-blocks of line "12"
+      `(?<![\\d-])${ln}-\\d{1,2} Ship To: Use the ship-to address at the top of page ?1 (${NUM}) ${UOM} (${NUM}) ([\\d,]+\\.\\d{2})`,
       "g"
     );
     let amount = 0;

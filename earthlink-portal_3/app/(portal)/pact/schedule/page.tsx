@@ -14,6 +14,9 @@ interface Job {
 export default function PactSchedule() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [q, setQ] = useState("");
+  // accountants can look but not touch (their writes are silent no-ops under RLS)
+  const [role, setRole] = useState("");
+  const canEdit = role === "admin" || role === "office";
   const [msg, setMsg] = useState("");
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
 
@@ -22,7 +25,15 @@ export default function PactSchedule() {
     if (error) { flash(/relation|column|schema/i.test(error.message) ? "Run supabase/upgrade_pact.sql first" : error.message); return; }
     setJobs(((data || []) as Job[]).filter((j) => !j.canceled));
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    (async () => {
+      const { data: { user } } = await sb().auth.getUser();
+      if (!user) return;
+      const { data: prof } = await sb().from("profiles").select("role").eq("id", user.id).single();
+      setRole((prof as { role?: string } | null)?.role || "");
+    })();
+  }, []);
   useLive(["pact_jobs"], () => load(), { skipWhileTyping: true });
 
   const save = async (j: Job, patch: Partial<Job>) => {
@@ -45,18 +56,22 @@ export default function PactSchedule() {
           {(j.po_number || j.job_number) && <span className="ml-1.5 font-mono text-xs text-inksoft">PO {j.po_number || j.job_number}</span>}
           <div className="max-w-[420px] truncate text-[11px] text-inksoft">{j.partner}{j.description ? ` · ${j.description}` : ""}</div>
         </div>
-        <button onClick={() => save(j, { work_done: !j.work_done })}>
-          <Stamp label={j.work_done ? "COMPLETE ✓" : "MARK COMPLETE"} tone={j.work_done ? "ok" : "mute"} />
-        </button>
+        {canEdit ? (
+          <button onClick={() => save(j, { work_done: !j.work_done })}>
+            <Stamp label={j.work_done ? "COMPLETE ✓" : "MARK COMPLETE"} tone={j.work_done ? "ok" : "mute"} />
+          </button>
+        ) : (
+          <Stamp label={j.work_done ? "COMPLETE ✓" : "NOT COMPLETE"} tone={j.work_done ? "ok" : "mute"} />
+        )}
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2">
         <label className="flex items-center gap-1.5 text-[10px] uppercase tracking-widest text-inksoft">Start
-          <input type="date" className="rounded-sm border border-rulesoft bg-white p-1.5 font-mono text-xs" value={j.start_date || ""}
-            onChange={(e) => save(j, { start_date: e.target.value })} />
+          <input type="date" className="rounded-sm border border-rulesoft bg-white p-1.5 font-mono text-xs" value={j.start_date || ""} readOnly={!canEdit}
+            onChange={(e) => canEdit && save(j, { start_date: e.target.value })} />
         </label>
         <label className="flex items-center gap-1.5 text-[10px] uppercase tracking-widest text-inksoft">Finish
-          <input type="date" className="rounded-sm border border-rulesoft bg-white p-1.5 font-mono text-xs" value={j.finish_date || ""}
-            onChange={(e) => save(j, { finish_date: e.target.value })} />
+          <input type="date" className="rounded-sm border border-rulesoft bg-white p-1.5 font-mono text-xs" value={j.finish_date || ""} readOnly={!canEdit}
+            onChange={(e) => canEdit && save(j, { finish_date: e.target.value })} />
         </label>
       </div>
     </div>

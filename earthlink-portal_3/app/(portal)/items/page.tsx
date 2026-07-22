@@ -94,7 +94,7 @@ export default function Items() {
           code: col(/^item$|code|sku|item ?#/),
           description: col(/^desc|item name|scope|work/),
           unit: col(/^uom|unit/),
-          price: col(/^price|rate|cost|amount|\$/),
+          price: col(/unit ?price/) >= 0 ? col(/unit ?price/) : col(/^price|rate|cost|\$/) >= 0 ? col(/^price|rate|cost|\$/) : col(/amount/),
           category: col(/^categ|trade|type|division/),
         };
         if (m.description < 0) { m.description = m.code; m.code = -1; } // sheets where "Item" IS the description
@@ -125,7 +125,7 @@ export default function Items() {
             if (error && /column/i.test(error.message)) {
               ({ error } = await sb().from("price_items").insert(rows.slice(i, i + 500).map(({ line: _l, ...rest }) => rest)));
             }
-            if (error) { flash(error.message); break; }
+            if (error) { flash(error.message); return; }
           }
           flash(`${rows.length} items added to the general book`);
         }

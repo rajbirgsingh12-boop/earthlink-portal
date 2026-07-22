@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { sb } from "@/lib/supabase";
 import { fmt, parseNum, askFileName } from "@/lib/format";
-import { prettyDate, type Org } from "@/lib/docs";
+import { prettyDate, localISO, type Org } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
 import { useLive } from "@/lib/useLive";
 import { useNumBuffer } from "@/lib/numBuffer";
@@ -56,7 +56,7 @@ export default function Pact() {
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3500); };
   const num = useNumBuffer();
   const upgradeHint = (m: string) => (/relation|column|schema/i.test(m) ? "Database needs the upgrade — re-run supabase/upgrade_pact.sql" : m);
-  const today = () => new Date().toISOString().slice(0, 10);
+  const today = () => localISO();
   const isImg = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n);
   const itemsOf = (j: Job): Item[] => (Array.isArray(j.items) ? j.items : []);
   // private work is taxable — NYC sales tax by default, editable per job
@@ -205,7 +205,7 @@ export default function Pact() {
   };
   const attachFile = (j: Job, file: File) => attachFiles(j, [file]);
   const addPhotos = async (j: Job, files: File[], kind: "before" | "after") => {
-    const stamp = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "");
+    const stamp = new Date().toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "");
     setBusy(true);
     const shrunk = await Promise.all(files.map((f) => shrinkImage(f)));
     await attachFiles(j, shrunk.map((f, i) => {
@@ -583,7 +583,9 @@ export default function Pact() {
               <div className="mb-3 text-[13px] text-inksoft">{j.partner} · {j.address}{j.property_unit ? ` · Unit ${j.property_unit}` : ""}</div>
               <div className="mb-3 grid grid-cols-2 gap-2.5 md:grid-cols-4">
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Invoice #</div>
-                  <input className="field" value={j.invoice_number || ""} onChange={(e) => patch(j, { invoice_number: e.target.value })} /></div>
+                  <input className="field" value={j.invoice_number || ""}
+                    onChange={(e) => { setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, invoice_number: e.target.value } : x))); setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, invoice_number: e.target.value } : prev)); }}
+                    onBlur={(e) => patch(j, { invoice_number: e.target.value })} /></div>
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Subtotal</div>
                   <div className="field bg-paper font-mono">{fmt(invSubtotal(j))}</div></div>
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Tax %</div>

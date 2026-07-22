@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import * as XLSX from "xlsx-js-style";
 import { sb } from "@/lib/supabase";
 import { fmt, askFileName } from "@/lib/format";
-import { Org, prettyDate } from "@/lib/docs";
+import { Org, prettyDate, localISO } from "@/lib/docs";
 import type { Contract, Release } from "@/lib/types";
 import ContractPicker from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
@@ -21,7 +21,7 @@ export default function Statements() {
   const [printOpen, setPrintOpen] = useState(false);
   const [invPreview, setInvPreview] = useState<{ number: string; date: string; cNumber: string; relNum: string; dev: string; workOrder: string; rows: DocRow[] } | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localISO();
 
   const genInvoice = async (r: Release) => {
     const c = contracts.find((x) => x.id === sel);
@@ -40,9 +40,14 @@ export default function Statements() {
       const { data } = await sb().from("contracts").select("id,number,name").order("number");
       const cs = (data || []) as Contract[];
       // only contracts with an active statement (something still owed)
-      const { data: rel } = await sb().from("releases").select("contract_id,amount,received,canceled");
+      const rel: { contract_id: string; amount: number; received: boolean; canceled: boolean }[] = [];
+      for (let from = 0; ; from += 1000) {
+        const { data: page } = await sb().from("releases").select("contract_id,amount,received,canceled").range(from, from + 999);
+        rel.push(...((page || []) as typeof rel));
+        if (!page || page.length < 1000) break;
+      }
       const open = new Set(
-        ((rel || []) as { contract_id: string; amount: number; received: boolean; canceled: boolean }[])
+        rel
           .filter((r) => !r.canceled && !r.received && Number(r.amount) > 0)
           .map((r) => r.contract_id)
       );
@@ -66,8 +71,11 @@ export default function Statements() {
       const ready = new Set<string>();
       const ids = all.map((r) => r.id);
       for (let i = 0; i < ids.length; i += 200) {
-        const { data: its } = await sb().from("release_items").select("release_id").in("release_id", ids.slice(i, i + 200));
-        ((its || []) as { release_id: string }[]).forEach((it) => ready.add(it.release_id));
+        for (let f = 0; ; f += 1000) {
+          const { data: its } = await sb().from("release_items").select("release_id").in("release_id", ids.slice(i, i + 200)).range(f, f + 999);
+          ((its || []) as { release_id: string }[]).forEach((it) => ready.add(it.release_id));
+          if (!its || its.length < 1000) break;
+        }
       }
       const { data: props } = await sb().from("proposals").select("release_number,qty_map").eq("contract_id", sel);
       const walkNums = new Set(
@@ -82,7 +90,7 @@ export default function Statements() {
   }, [sel, reloadTick]);
 
   const contract = contracts.find((c) => c.id === sel);
-  const days = (r: Release) => (r.invoice_sent ? Math.max(0, Math.floor((new Date(today).getTime() - new Date(r.invoice_sent + "T00:00:00").getTime()) / 86400000)) : null);
+  const days = (r: Release) => (r.invoice_sent ? Math.max(0, Math.floor((new Date(today + "T00:00:00").getTime() - new Date(r.invoice_sent + "T00:00:00").getTime()) / 86400000)) : null);
   const buckets: [string, number][] = [["0–30", 0], ["31–60", 0], ["61–90", 0], ["90+", 0]];
   let notInvoiced = 0;
   rows.forEach((r) => {
@@ -126,10 +134,19 @@ export default function Statements() {
     for (let row = headerRow; row <= totalRow; row++) {
       for (let col = 0; col < 6; col++) {
         const cell = cellAt(row, col) || (ws[XLSX.utils.encode_cell({ r: row, c: col })] = { t: "s", v: "" });
-        cell.s = { border: box, ...(row === headerRow ? { font: { bold: true }, fill: shade } : {}), ...(row === totalRow ? { font: { bold: true } } : {}) };
+        cell.s = {
+          border: box,
+          alignment: { vertical: "center", horizontal: row === headerRow ? "center" : col >= 4 ? "right" : "left" },
+          ...(row === headerRow ? { font: { bold: true }, fill: shade } : {}),
+          ...(row === totalRow ? { font: { bold: true } } : {}),
+        };
         if (col === 5 && typeof cell.v === "number") cell.z = "#,##0.00";
       }
     }
+    ws["!rows"] = [];
+    ws["!rows"][0] = { hpt: 26 };
+    ws["!rows"][headerRow] = { hpt: 22 };
+    for (let row = headerRow + 1; row <= totalRow; row++) ws["!rows"][row] = { hpt: 19 };
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
     const fname = askFileName(`statement_${contract.number}.xlsx`);

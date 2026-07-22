@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { sb } from "@/lib/supabase";
 import { fmt } from "@/lib/format";
-import { prettyDate } from "@/lib/docs";
+import { prettyDate, localISO } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged } from "@/lib/labor";
 import { useLive } from "@/lib/useLive";
 import Stamp from "@/components/Stamp";
@@ -48,10 +48,15 @@ export default function Home() {
       // payroll shortfalls against release minimums
       const need = all.filter((r) => !r.canceled && !r.received && !r.payroll_done && (Number(r.labor_hours) > 0 || (r.labor_breakdown || []).length > 0));
       if (need.length > 0) {
-        const { data: ents } = await sb().from("timesheet_entries").select("release_id,employee_id,hours");
+        const needIds = need.map((r) => r.id);
+        const ents: { release_id: string | null; employee_id: string; hours: number[]; trade?: string | null }[] = [];
+        for (let i = 0; i < needIds.length; i += 200) {
+          const { data: chunk } = await sb().from("timesheet_entries").select("*").in("release_id", needIds.slice(i, i + 200));
+          ents.push(...((chunk || []) as typeof ents));
+        }
         const { data: allEmps } = await sb().from("employees").select("id,trade");
         const tradeById = new Map(((allEmps || []) as { id: string; trade: string }[]).map((e) => [e.id, canonTrade(e.trade)]));
-        const byRel = aggregateLogged((ents || []) as { release_id: string | null; employee_id: string; hours: number[] }[], tradeById);
+        const byRel = aggregateLogged(ents, tradeById);
         setShorts(need
           .map((r) => {
             const res = checkLabor(r.labor_breakdown || [], Number(r.labor_hours) || 0, byRel[r.id] || {});
@@ -63,10 +68,10 @@ export default function Home() {
           .slice(0, 5)
           .map(({ r, missing }) => ({ r, missing })));
       }
-      // has anyone entered hours for the current payroll week?
-      const fri = new Date();
+      // has anyone entered hours for the current payroll week? (local Friday, not UTC)
+      const fri = new Date(localISO() + "T00:00:00");
       fri.setDate(fri.getDate() + ((5 - fri.getDay() + 7) % 7));
-      const { data: wk } = await sb().from("timesheet_weeks").select("id").eq("week_ending", fri.toISOString().slice(0, 10)).limit(1);
+      const { data: wk } = await sb().from("timesheet_weeks").select("id").eq("week_ending", localISO(fri)).limit(1);
       if (wk && wk[0]) {
         const { data: es } = await sb().from("timesheet_entries").select("hours").eq("week_id", (wk[0] as { id: string }).id);
         setWeekHours(((es || []) as { hours: number[] }[]).reduce((s, e) => s + (e.hours || []).reduce((a, h) => a + (Number(h) || 0), 0), 0));
@@ -156,7 +161,7 @@ export default function Home() {
               </div>
               {walks.slice(0, 5).map((p) => (
                 <div key={p.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
-                  <span className="min-w-0 truncate">{p.job || p.development || p.number}<span className="text-inksoft"> · {prettyDate(p.created_at.slice(0, 10))}</span></span>
+                  <span className="min-w-0 truncate">{p.job || p.development || p.number}<span className="text-inksoft"> · {prettyDate(localISO(new Date(p.created_at)))}</span></span>
                   <span className="shrink-0 font-mono">{fmt(Number(p.total) || 0)}</span>
                 </div>
               ))}

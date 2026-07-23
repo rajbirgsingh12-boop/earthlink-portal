@@ -251,20 +251,19 @@ export default function Payroll() {
     const box = { top: thin, bottom: thin, left: thin, right: thin };
     const shade = { patternType: "solid", fgColor: { rgb: "E8E4DA" } };
     const otShade = { patternType: "solid", fgColor: { rgb: "FBE9DC" } };
+    const bandShade = { patternType: "solid", fgColor: { rgb: "F3F0E8" } };
     const usedNames = new Set<string>();
     for (const [cid, ents] of groups) {
       const c = contracts.find((x) => x.id === cid);
-      const by: Record<string, number[]> = {};
-      const tradesBy: Record<string, Map<string, string>> = {}; // per worker: lowercased → as typed
+      // inside a contract sheet, hours are grouped under a labeled band per release
+      const byRel = new Map<string, Entry[]>();
       ents.forEach((en) => {
-        by[en.employee_id] ||= [0, 0, 0, 0, 0, 0, 0];
-        en.hours.forEach((h, i) => (by[en.employee_id][i] += Number(h) || 0));
-        const t = (en.trade ?? "").trim() || (emps.find((e) => e.id === en.employee_id)?.trade || "").trim();
-        if (t) (tradesBy[en.employee_id] ||= new Map()).set(t.toLowerCase(), t);
+        const k = en.release_id || "";
+        if (!byRel.has(k)) byRel.set(k, []);
+        byRel.get(k)!.push(en);
       });
-      const workers = Object.entries(by)
-        .map(([eid, days]) => ({ emp: emps.find((e) => e.id === eid), days, cat: [...(tradesBy[eid]?.values() || [])].join(" / ") }))
-        .sort((a, b) => (a.emp?.name || "").localeCompare(b.emp?.name || ""));
+      const relOrder = [...byRel.keys()].sort((a, b) =>
+        String(relById.get(a)?.rel_number ?? "").localeCompare(String(relById.get(b)?.rel_number ?? ""), undefined, { numeric: true }));
       const aoa: (string | number)[][] = [];
       aoa.push([`Earth Link General Construction`]);
       aoa.push([]);
@@ -274,18 +273,41 @@ export default function Payroll() {
       aoa.push([]);
       aoa.push(["", "", "", "Overtime", "Overtime", "", "", "", "", "", ""]);
       aoa.push(["Worker", "", "", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Category"]);
-      workers.forEach(({ emp, days, cat }) => aoa.push([emp?.name || "?", "", "", ...days.map((d) => d || ""), cat || (emp?.trade || "").trim()]));
+      const bandRows: number[] = [];
+      const nameRows: number[] = [];
       const totals = [0, 0, 0, 0, 0, 0, 0];
-      workers.forEach(({ days }) => days.forEach((d, i) => (totals[i] += d)));
+      for (const rid of relOrder) {
+        const rel = relById.get(rid);
+        bandRows.push(aoa.length);
+        aoa.push([rel ? `Release #${rel.rel_number} — ${rel.location}` : "No release (shop, misc…)"]);
+        const by: Record<string, number[]> = {};
+        const tradesBy: Record<string, Map<string, string>> = {}; // per worker: lowercased → as typed
+        byRel.get(rid)!.forEach((en) => {
+          by[en.employee_id] ||= [0, 0, 0, 0, 0, 0, 0];
+          en.hours.forEach((h, i) => (by[en.employee_id][i] += Number(h) || 0));
+          const t = (en.trade ?? "").trim() || (emps.find((e) => e.id === en.employee_id)?.trade || "").trim();
+          if (t) (tradesBy[en.employee_id] ||= new Map()).set(t.toLowerCase(), t);
+        });
+        const workers = Object.entries(by)
+          .map(([eid, days]) => ({ emp: emps.find((e) => e.id === eid), days, cat: [...(tradesBy[eid]?.values() || [])].join(" / ") }))
+          .sort((a, b) => (a.emp?.name || "").localeCompare(b.emp?.name || ""));
+        workers.forEach(({ emp, days, cat }) => {
+          nameRows.push(aoa.length);
+          aoa.push([emp?.name || "?", "", "", ...days.map((d) => d || ""), cat || (emp?.trade || "").trim()]);
+          days.forEach((d, i) => (totals[i] += d));
+        });
+      }
       aoa.push(["Total", "", "", ...totals, ""]);
       const ws = XLSX.utils.aoa_to_sheet(aoa);
       ws["!cols"] = [{ wch: 24 }, { wch: 5 }, { wch: 5 }, { wch: 11 }, { wch: 11 }, { wch: 11 }, { wch: 11 }, { wch: 12 }, { wch: 11 }, { wch: 11 }, { wch: 16 }];
-      const headerRow = 5, firstData = 6, totalRow = firstData + workers.length;
+      const headerRow = 5, firstData = 6, totalRow = aoa.length - 1;
       ws["!merges"] = [
         { s: { r: 0, c: 0 }, e: { r: 0, c: 10 } },
         { s: { r: 2, c: 1 }, e: { r: 2, c: 3 } },  // contract number spans B–D so it never gets cut off
         { s: { r: 2, c: 5 }, e: { r: 2, c: 6 } },  // week-ending date spans F–G
-        ...Array.from({ length: workers.length + 1 }, (_, i) => ({ s: { r: firstData + i, c: 0 }, e: { r: firstData + i, c: 2 } })),
+        ...bandRows.map((row) => ({ s: { r: row, c: 0 }, e: { r: row, c: 10 } })),
+        ...nameRows.map((row) => ({ s: { r: row, c: 0 }, e: { r: row, c: 2 } })),
+        { s: { r: totalRow, c: 0 }, e: { r: totalRow, c: 2 } },
       ];
       const cellAt = (row: number, col: number) => ws[XLSX.utils.encode_cell({ r: row, c: col })] || (ws[XLSX.utils.encode_cell({ r: row, c: col })] = { t: "s", v: "" });
       cellAt(0, 0).s = { font: { bold: true, sz: 14 }, alignment: { vertical: "center" } };
@@ -294,12 +316,15 @@ export default function Payroll() {
       cellAt(2, 1).t = "s"; // force text so Excel never re-reads the number as scientific notation
       cellAt(2, 5).s = { font: { bold: true } };
       for (const col of [3, 4]) cellAt(4, col).s = { font: { bold: true, color: { rgb: "B3510F" } }, alignment: { horizontal: "center" } };
+      const bandSet = new Set(bandRows);
       for (let row = headerRow; row <= totalRow; row++) {
+        const isBand = bandSet.has(row);
         for (let col = 0; col < 11; col++) {
           const cell = cellAt(row, col);
-          const s: Record<string, unknown> = { border: box, alignment: { vertical: "center", horizontal: col >= 3 && col <= 9 ? "center" : "left" } };
-          if (row === headerRow || row === totalRow) s.font = { bold: true };
+          const s: Record<string, unknown> = { border: box, alignment: { vertical: "center", horizontal: !isBand && col >= 3 && col <= 9 ? "center" : "left" } };
+          if (row === headerRow || row === totalRow || isBand) s.font = { bold: true };
           if (row === headerRow) s.fill = shade;
+          else if (isBand) s.fill = bandShade;
           else if (col === 3 || col === 4) s.fill = otShade; // Sat/Sun = overtime columns
           cell.s = s;
         }
@@ -380,12 +405,30 @@ export default function Payroll() {
             if (!groups.has(key)) groups.set(key, { release_id: en.release_id || null, label: en.release_id ? en.job_label || "release" : "" });
           });
           extraSections.forEach((x) => { const key = x.release_id || "none"; if (!groups.has(key)) groups.set(key, x); });
-          const sections = [...groups.entries()].map(([key, v]) => ({ key, ...v }))
+          const allSections = [...groups.entries()].map(([key, v]) => ({ key, ...v }))
             .sort((a, b) => (a.release_id === null ? 1 : b.release_id === null ? -1 : a.label.localeCompare(b.label, undefined, { numeric: true })));
+          // when a contract is picked up top, only its releases show — the rest stay saved, just hidden
+          const sections = linkContract
+            ? allSections.filter((s) => s.release_id !== null && rels.find((r) => r.id === s.release_id)?.contract_id === linkContract)
+            : allSections;
+          const hiddenCount = allSections.length - sections.length;
           if (sections.length === 0) {
-            return <div className="card p-5 text-sm text-inksoft">Pick a release above — then add its workers and type their hours for each day.</div>;
+            return (
+              <div className="card p-5 text-sm text-inksoft">
+                {hiddenCount > 0
+                  ? `No hours for this contract yet — ${hiddenCount} release${hiddenCount === 1 ? "" : "s"} from other contracts ${hiddenCount === 1 ? "is" : "are"} hidden. Switch the filter back to "All contracts" to see everything.`
+                  : "Pick a release above — then add its workers and type their hours for each day."}
+              </div>
+            );
           }
-          return sections.map((sec) => {
+          return (<>
+          {hiddenCount > 0 && (
+            <div className="mb-2 text-[12px] text-inksoft">
+              Showing this contract only — {hiddenCount} release{hiddenCount === 1 ? "" : "s"} from other contracts hidden.{" "}
+              <button className="underline" onClick={() => setLinkContract("")}>Show all</button>
+            </div>
+          )}
+          {sections.map((sec) => {
             const ents = entries.filter((en) => (en.release_id || "none") === sec.key);
             const rel = sec.release_id ? rels.find((r) => r.id === sec.release_id) : null;
             const check = sec.release_id ? weekCheck.find((wc) => wc.rel.id === sec.release_id) : null;
@@ -485,7 +528,8 @@ export default function Payroll() {
                 )}
               </div>
             );
-          });
+          })}
+          </>);
         })()}
         {summ.length > 0 && (
           <div className="card mt-2 overflow-x-auto">

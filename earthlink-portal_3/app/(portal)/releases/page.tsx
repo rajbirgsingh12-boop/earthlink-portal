@@ -557,7 +557,7 @@ export default function Releases() {
         const rangeBase = XLSX.utils.decode_range(String(sheet["!ref"] || "A1")).s.r;
         const headers = raw[hIdx].map((h) => String(h).toLowerCase());
         const col = (re: RegExp) => headers.findIndex((h) => re.test(h));
-        const m = { rel: col(/^release/), location: col(/location/), buildings: col(/building/), ticket: col(/ticket/), amount: col(/amount/), pre: col(/pre/), date: col(/date|complet/), payroll: col(/payroll/), received: col(/receiv/), status: col(/status/), hours: col(/hour|labor/) };
+        const m = { rel: col(/^release/), location: col(/location/), buildings: col(/building/), ticket: col(/ticket/), amount: col(/amount/), adjusted: col(/adjust/), pre: col(/pre/), date: col(/date|complet/), payroll: col(/payroll/), received: col(/receiv/), status: col(/status/), hours: col(/hour|labor/) };
         const pre = raw.slice(0, hIdx).flat().join(" ");
         const gm = pre.match(/contract\s*#?\s*([A-Za-z0-9-]+)/i) || fname.match(/(\d{5,})/);
         const items = raw.slice(hIdx + 1)
@@ -566,9 +566,11 @@ export default function Releases() {
           .map(({ r, sheetRow }) => {
             const g = (i: number) => (i >= 0 ? String(r[i] ?? "").trim() : "");
             const rowText = r.join(" ");
+            // an Adjusted value is NYCHA's corrected amount — it wins over Amount
+            const adjV = m.adjusted >= 0 ? parseNum(r[m.adjusted]) : 0;
             return {
               rel_number: g(m.rel), location: g(m.location), buildings: g(m.buildings), ticket: g(m.ticket),
-              amount: m.amount >= 0 ? parseNum(r[m.amount]) : 0, pre_check: g(m.pre), date_completed: g(m.date),
+              amount: adjV > 0 ? adjV : m.amount >= 0 ? parseNum(r[m.amount]) : 0, pre_check: g(m.pre), date_completed: g(m.date),
               payroll_done: /^d/i.test(g(m.payroll)), received: /^y/i.test(g(m.received)),
               canceled: redRows.has(sheetRow) || /cancel|void/i.test(g(m.status) || rowText), labor_hours: m.hours >= 0 ? parseNum(r[m.hours]) : 0, assigned_to: null,
             };
@@ -592,9 +594,56 @@ export default function Releases() {
       contract = data as Contract;
     }
     if (mode === "replace") {
-      // payroll entries linked to these releases block the delete — surface it
-      const { error: de } = await sb().from("releases").delete().eq("contract_id", contract.id);
-      if (de) { flash(/foreign key|violates/i.test(de.message) ? "Can't replace — payroll hours are linked to releases on this contract. Use Append, or unlink the payroll entries first." : de.message); setBusy(false); return; }
+      // merge-style replace: releases already here are UPDATED in place (payroll
+      // links, photos and invoice dates survive), new ones are added, leftovers
+      // are deleted where nothing depends on them — payroll-linked ones are kept
+      const existing: { id: string; rel_number: string }[] = [];
+      for (let from = 0; ; from += 1000) {
+        const { data: page } = await sb().from("releases").select("id,rel_number").eq("contract_id", contract.id).range(from, from + 999);
+        existing.push(...((page || []) as typeof existing));
+        if (!page || page.length < 1000) break;
+      }
+      const byNum = new Map<string, string[]>();
+      existing.forEach((r) => { const k = String(r.rel_number).trim(); byNum.set(k, [...(byNum.get(k) || []), r.id]); });
+      let updated = 0, added = 0;
+      const toInsert: typeof pending.items = [];
+      const matched = new Set<string>();
+      for (const it of pending.items) {
+        const k = String(it.rel_number).trim();
+        const ids = k ? byNum.get(k) : undefined;
+        if (ids && ids.length > 0 && !matched.has(k)) {
+          matched.add(k);
+          const { assigned_to: _a, ...patch } = it;
+          const { error } = await sb().from("releases").update(patch).eq("id", ids[0]);
+          if (error) { flash(error.message); setBusy(false); return; }
+          updated++;
+        } else toInsert.push(it);
+      }
+      // remove rows the sheet no longer has, plus duplicate copies of matched ones
+      const keepIds = new Set<string>();
+      matched.forEach((k) => { const ids = byNum.get(k); if (ids) keepIds.add(ids[0]); });
+      const removeIds = existing.filter((r) => !keepIds.has(r.id)).map((r) => r.id);
+      let removed = 0, kept = 0;
+      for (let i = 0; i < removeIds.length; i += 100) {
+        const slice = removeIds.slice(i, i + 100);
+        const { error } = await sb().from("releases").delete().in("id", slice);
+        if (!error) { removed += slice.length; continue; }
+        // some are blocked (payroll hours linked) — try one by one, keep those
+        for (const id of slice) {
+          const { error: e1 } = await sb().from("releases").delete().eq("id", id);
+          if (e1) kept++; else removed++;
+        }
+      }
+      for (let i = 0; i < toInsert.length; i += 500) {
+        const chunk = toInsert.slice(i, i + 500).map((it) => ({ ...it, contract_id: contract!.id }));
+        const { error } = await sb().from("releases").insert(chunk);
+        if (error) { flash(error.message); break; }
+        added += chunk.length;
+      }
+      setPending(null); setBusy(false);
+      await loadContracts(); setActive(contract.id); await loadRows(contract.id);
+      flash(`Loaded into ${num} — ${updated} updated, ${added} added${removed ? `, ${removed} removed` : ""}${kept ? `, ${kept} kept (payroll hours linked)` : ""}`);
+      return;
     }
     for (let i = 0; i < pending.items.length; i += 500) {
       const chunk = pending.items.slice(i, i + 500).map((it) => ({ ...it, contract_id: contract!.id }));

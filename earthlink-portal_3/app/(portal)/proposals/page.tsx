@@ -404,8 +404,8 @@ export default function Proposals() {
           </div>
           <div className="flex flex-wrap gap-2">
             <button className="btn btn-primary" onClick={async () => { await saveNow(); setDoc(null); setItems([]); }}>Save & close</button>
-            <button className="btn" onClick={saveNow}>Save</button>
-            <button className="btn" onClick={() => setPrintOpen(true)}>Preview</button>
+            <button className="btn" onClick={() => { setPrintOpen(true); setTimeout(() => window.print(), 400); }}>View PDF</button>
+            <button className="btn" onClick={exportWalkSheet}>Excel</button>
             {(catalog || []).length === 0 && <button className="btn btn-ghost" onClick={() => sheetRef.current?.click()}>Upload price book</button>}
           </div>
         </div>

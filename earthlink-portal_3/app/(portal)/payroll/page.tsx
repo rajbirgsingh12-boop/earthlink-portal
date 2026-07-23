@@ -59,15 +59,12 @@ export default function Payroll() {
   const [relQ, setRelQ] = useState<Record<string, string>>({});
   const [weekCheck, setWeekCheck] = useState<{ rel: RelRow; result: LaborResult }[]>([]);
   const [msg, setMsg] = useState("");
-  // one box searches the week's workers AND adds new ones by name
-  const [workerQ, setWorkerQ] = useState("");
-  const [workerFocus, setWorkerFocus] = useState(false);
   const [pickDate, setPickDate] = useState(""); // calendar for opening any week
-  // day-at-a-time entry: which day of the open week is being punched (0=Sat), or the full grid
-  const [view, setView] = useState<number | "week">("week");
-  const [openDetail, setOpenDetail] = useState<string | null>(null); // worker whose details are open (day mode)
-  const [dayPick, setDayPick] = useState<Record<string, string>>({}); // worker -> entry chosen for the current day
-  const [dayRelSearch, setDayRelSearch] = useState<string | null>(null); // worker whose day-release search is open
+  // release-first entry: the week is organized as one card per release
+  const [extraSections, setExtraSections] = useState<{ release_id: string | null; label: string }[]>([]);
+  const [relPickQ, setRelPickQ] = useState(""); // the "+ Add a release" search
+  const [addFor, setAddFor] = useState<string | null>(null); // section currently adding a worker
+  const [addQ, setAddQ] = useState("");
   const checkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
   const num = useNumBuffer();
@@ -119,10 +116,7 @@ export default function Payroll() {
 
   const openW = async (w: Week) => {
     setOpenWeek(w);
-    // land on today when it falls inside this week, otherwise the full grid
-    const diff = Math.round((Date.parse(localISO()) - Date.parse(addDays(w.week_ending, -6))) / 86400000);
-    setView(diff >= 0 && diff <= 6 ? diff : "week");
-    setOpenDetail(null);
+    setExtraSections([]); setRelPickQ(""); setAddFor(null); setAddQ("");
     const { data } = await sb().from("timesheet_entries").select("*").eq("week_id", w.id);
     const ents = ((data || []) as Entry[]).map((en) => ({ ...en, hours: (en.hours || []).map(Number) }));
     setEntries(ents);
@@ -145,10 +139,13 @@ export default function Payroll() {
     await load(); openW(data as Week);
   };
   const missingTradeCol = /column|schema cache/i;
-  const addEntry = async (empId: string, empObj?: Emp) => {
+  const addEntry = async (empId: string, empObj?: Emp, rel?: { id: string | null; label: string }) => {
     if (!openWeek) return;
     const emp = empObj || emps.find((e) => e.id === empId);
-    const base = { week_id: openWeek.id, employee_id: empId, rate: emp?.base_rate || 0, hours: [0, 0, 0, 0, 0, 0, 0] };
+    const base = {
+      week_id: openWeek.id, employee_id: empId, rate: emp?.base_rate || 0,
+      release_id: rel?.id ?? null, job_label: rel?.label ?? "", hours: [0, 0, 0, 0, 0, 0, 0],
+    };
     // classification starts from the worker's default and can be rewritten per entry
     let { data, error } = await sb().from("timesheet_entries").insert({ ...base, trade: emp?.trade?.trim() || null }).select().single();
     if (error && missingTradeCol.test(error.message)) {
@@ -156,10 +153,7 @@ export default function Payroll() {
       if (data) flash("Run supabase/upgrade_payroll_class.sql so classifications save");
     }
     if (error) { flash(error.message); return; }
-    if (data) {
-      setEntries((prev) => (prev.some((x) => x.id === (data as Entry).id) ? prev : [...prev, { ...(data as Entry), hours: ((data as Entry).hours || []).map(Number) }]));
-      setOpenDetail((data as Entry).employee_id); // open the new worker's menu right away
-    }
+    if (data) setEntries((prev) => (prev.some((x) => x.id === (data as Entry).id) ? prev : [...prev, { ...(data as Entry), hours: ((data as Entry).hours || []).map(Number) }]));
   };
   // make sure everyone from the payroll template shows in the crew list
   const seedCrew = async () => {
@@ -171,7 +165,7 @@ export default function Payroll() {
     if (!error) load();
   };
   // picking a template name adds that worker to the crew on the spot, then to the week
-  const addFromTemplate = async (idx: number) => {
+  const addFromTemplate = async (idx: number, rel?: { id: string | null; label: string }) => {
     const t = TEMPLATE_CREW[idx];
     if (!t) return;
     const inCrew = emps.find((e) => e.name.trim().toLowerCase() === t.name.toLowerCase());
@@ -180,7 +174,7 @@ export default function Payroll() {
         await sb().from("employees").update({ active: true }).eq("id", inCrew.id);
         setEmps((prev) => prev.map((e) => (e.id === inCrew.id ? { ...e, active: true } : e)));
       }
-      addEntry(inCrew.id, inCrew); return;
+      addEntry(inCrew.id, inCrew, rel); return;
     }
     // the worker may exist deactivated — bring them back instead of duplicating
     const { data: prior } = await sb().from("employees").select("*").ilike("name", t.name).limit(1);
@@ -189,53 +183,14 @@ export default function Payroll() {
       await sb().from("employees").update({ active: true }).eq("id", found.id);
       const emp = { ...found, active: true };
       setEmps((prev) => (prev.some((e) => e.id === emp.id) ? prev : [...prev, emp].sort((a, b) => a.name.localeCompare(b.name))));
-      addEntry(emp.id, emp);
+      addEntry(emp.id, emp, rel);
       return;
     }
     const { data, error } = await sb().from("employees").insert({ name: t.name, trade: t.trade, base_rate: 0 }).select().single();
     if (error || !data) { flash(error?.message || "Couldn't add worker"); return; }
     const emp = data as Emp;
     setEmps((prev) => (prev.some((e) => e.id === emp.id) ? prev : [...prev, emp].sort((a, b) => a.name.localeCompare(b.name))));
-    addEntry(emp.id, emp);
-  };
-  // insert a timesheet entry with the trade-column fallback
-  const insertEntry = async (payload: Omit<Entry, "id"> & { trade?: string | null }): Promise<Entry | null> => {
-    const { trade, ...base } = payload;
-    let { data, error } = await sb().from("timesheet_entries").insert({ ...base, trade: trade ?? null }).select().single();
-    if (error && missingTradeCol.test(error.message)) {
-      ({ data, error } = await sb().from("timesheet_entries").insert(base).select().single());
-      if (data) flash("Run supabase/upgrade_payroll_class.sql so classifications save");
-    }
-    if (error) { flash(error.message); return null; }
-    return data ? { ...(data as Entry), hours: ((data as Entry).hours || []).map(Number) } : null;
-  };
-  // a worker can be on a different release each day: move that day's hours onto
-  // the worker's entry for the chosen release, creating that entry if needed
-  const switchDay = async (empId: string, day: number, releaseId: string | null, label: string) => {
-    if (!openWeek) return;
-    const ents = entries.filter((e) => e.employee_id === empId);
-    const src = ents.find((e) => Number(e.hours[day]) > 0);
-    let dst = ents.find((e) => (e.release_id || null) === (releaseId || null));
-    if (src && dst && src.id === dst.id) { setDayPick((p) => ({ ...p, [empId]: dst!.id! })); return; }
-    if (!dst) {
-      const emp = emps.find((e) => e.id === empId);
-      const made = await insertEntry({
-        week_id: openWeek.id, employee_id: empId, job_label: label, rate: src?.rate ?? emp?.base_rate ?? 0,
-        release_id: releaseId, hours: [0, 0, 0, 0, 0, 0, 0], trade: (src?.trade ?? emp?.trade?.trim()) || null,
-      });
-      if (!made) return;
-      dst = made;
-      setEntries((prev) => (prev.some((x) => x.id === made.id) ? prev : [...prev, made]));
-    }
-    if (src && Number(src.hours[day]) > 0) {
-      const moved = Number(src.hours[day]) || 0;
-      const sh = [...src.hours]; sh[day] = 0;
-      const dh = [...dst.hours]; dh[day] = moved;
-      setEntries((prev) => prev.map((x) => (x.id === src.id ? { ...x, hours: sh } : x.id === dst!.id ? { ...x, hours: dh } : x)));
-      saveEntry({ ...src, hours: sh });
-      saveEntry({ ...dst, hours: dh });
-    }
-    setDayPick((p) => ({ ...p, [empId]: dst!.id! }));
+    addEntry(emp.id, emp, rel);
   };
   const saveEntry = async (en: Entry) => {
     const base = { job_label: en.job_label, rate: Number(en.rate) || 0, hours: en.hours.map((h) => Number(h) || 0), release_id: en.release_id || null };
@@ -249,14 +204,22 @@ export default function Payroll() {
       flash(e2 ? e2.message : "Run supabase/upgrade_payroll_class.sql so classifications save");
     } else flash(error.message);
   };
-  const delEntry = async (id: string) => { await sb().from("timesheet_entries").delete().eq("id", id); setEntries(entries.filter((e) => e.id !== id)); };
-  const deleteWeek = async (w: Week) => {
-    if (!window.confirm(`Delete the payroll week ending ${prettyDate(w.week_ending)} and all its hours? This can't be undone.`)) return;
-    await sb().from("timesheet_entries").delete().eq("week_id", w.id);
-    const { error } = await sb().from("timesheet_weeks").delete().eq("id", w.id);
+  const delEntry = async (id: string) => {
+    const { error } = await sb().from("timesheet_entries").delete().eq("id", id);
     if (error) { flash(error.message); return; }
+    setEntries((prev) => prev.filter((e) => e.id !== id));
+  };
+  const deleteWeek = async (w: Week) => {
+    if (!window.confirm(`Delete the payroll week ending ${prettyDate(w.week_ending)} and ALL its hours? This can't be undone.`)) return;
+    const { error: e1 } = await sb().from("timesheet_entries").delete().eq("week_id", w.id);
+    if (e1) { flash(e1.message); return; }
+    const { error: e2 } = await sb().from("timesheet_weeks").delete().eq("id", w.id);
+    if (e2) { flash(e2.message); return; }
+    // make sure it's really gone — a silently-blocked delete would leave ghost hours
+    const { data: still } = await sb().from("timesheet_weeks").select("id").eq("id", w.id).limit(1);
+    if (still && still.length > 0) { flash("That week wouldn't delete — check your account's role"); load(); return; }
     if (openWeek?.id === w.id) setOpenWeek(null);
-    load(); flash("Week deleted");
+    load(); flash("Week and its hours deleted");
   };
 
   // one PAID mark per worker per week — no more side spreadsheet
@@ -375,264 +338,147 @@ export default function Payroll() {
           </div>
         </div>
 
-        {weekCheck.length > 0 && (
-          <div className="card mb-3 p-3.5">
-            <div className="mb-1 flex items-baseline justify-between">
-              <div className="font-display text-sm font-semibold uppercase">Release hours check</div>
-              <span className="text-[11px] text-inksoft">all weeks counted · must reach the release minimum</span>
-            </div>
-            {weekCheck.map(({ rel, result }) => (
-              <div key={rel.id} className="border-t border-rulesoft py-2 first:border-t-0">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-[13px]"><span className="font-mono font-semibold">#{rel.rel_number}</span> <span className="text-inksoft">{rel.location}</span></span>
-                  <span className="flex items-center gap-2">
-                    <span className="font-mono text-xs">{result.totalLogged} / {result.totalRequired}h</span>
-                    {result.ok ? <Stamp label="MEETS MIN" tone="ok" /> : <Stamp label="NEEDS MORE" tone="alert" />}
-                  </span>
-                </div>
-                <div className="mt-1 flex flex-wrap gap-1.5">
-                  {result.rows.map((row) => (
-                    <span key={row.cls} className={`rounded-sm border px-2 py-0.5 font-mono text-[11px] ${row.logged < row.required ? "border-alert text-alert" : "border-rulesoft text-inksoft"}`}>
-                      {row.cls} {row.logged}/{row.required}h{row.logged < row.required ? ` · need ${row.required - row.logged} more` : ""}
-                    </span>
+        {/* one card per release: pick the release, add its workers, punch their days */}
+        <div className="mb-3 grid gap-2 md:grid-cols-2">
+          <ContractPicker contracts={contracts} value={linkContract} onChange={setLinkContract}
+            extra={[{ id: "", label: "All contracts" }]} placeholder="Filter releases by contract…" />
+          <div className="relative">
+            <input className="field" placeholder="+ Add a release to this week — type release # or development…"
+              value={relPickQ} onChange={(e) => setRelPickQ(e.target.value)} />
+            {relPickQ.trim() && (
+              <div className="card absolute inset-x-0 top-full z-10 max-h-56 overflow-y-auto shadow-lg">
+                {rels
+                  .filter((r) => !linkContract || r.contract_id === linkContract)
+                  .filter((r) => relLabel(r).toLowerCase().includes(relPickQ.trim().toLowerCase()))
+                  .slice(0, 8).map((r) => (
+                    <button key={r.id} className="block w-full border-b border-rulesoft p-2.5 text-left text-sm"
+                      onMouseDown={(ev) => { ev.preventDefault(); setExtraSections((prev) => (prev.some((x) => x.release_id === r.id) ? prev : [...prev, { release_id: r.id, label: `#${r.rel_number} — ${r.location}` }])); setRelPickQ(""); setAddFor(r.id); setAddQ(""); }}>
+                      {relLabel(r)}
+                      {Number(r.labor_hours) > 0 && <span className="ml-1 font-mono text-[11px] text-inksoft">· needs {r.labor_hours}h</span>}
+                    </button>
                   ))}
-                </div>
+                <button className="block w-full p-2.5 text-left text-sm text-inksoft"
+                  onMouseDown={(ev) => { ev.preventDefault(); setExtraSections((prev) => (prev.some((x) => x.release_id === null) ? prev : [...prev, { release_id: null, label: "" }])); setRelPickQ(""); setAddFor("none"); setAddQ(""); }}>
+                  ＋ Hours without a release (shop, misc…)
+                </button>
               </div>
-            ))}
+            )}
           </div>
-        )}
+        </div>
 
-        <div className="relative mb-3">
-          <input className="field" placeholder="Search or add a worker — type a name…" value={workerQ}
-            onChange={(e) => setWorkerQ(e.target.value)}
-            onFocus={() => setWorkerFocus(true)}
-            onBlur={() => setTimeout(() => setWorkerFocus(false), 150)} />
-          {workerFocus && (() => {
-            const query = workerQ.trim().toLowerCase();
-            const inWeek = new Set(entries.map((x) => x.employee_id));
+        {(() => {
+          const groups = new Map<string, { release_id: string | null; label: string }>();
+          entries.forEach((en) => {
+            const key = en.release_id || "none";
+            if (!groups.has(key)) groups.set(key, { release_id: en.release_id || null, label: en.release_id ? en.job_label || "release" : "" });
+          });
+          extraSections.forEach((x) => { const key = x.release_id || "none"; if (!groups.has(key)) groups.set(key, x); });
+          const sections = [...groups.entries()].map(([key, v]) => ({ key, ...v }))
+            .sort((a, b) => (a.release_id === null ? 1 : b.release_id === null ? -1 : a.label.localeCompare(b.label, undefined, { numeric: true })));
+          if (sections.length === 0) {
+            return <div className="card p-5 text-sm text-inksoft">Pick a release above — then add its workers and type their hours for each day.</div>;
+          }
+          return sections.map((sec) => {
+            const ents = entries.filter((en) => (en.release_id || "none") === sec.key);
+            const rel = sec.release_id ? rels.find((r) => r.id === sec.release_id) : null;
+            const check = sec.release_id ? weekCheck.find((wc) => wc.rel.id === sec.release_id) : null;
+            const relInfo = rel ? { id: rel.id as string | null, label: `#${rel.rel_number} — ${rel.location}` } : { id: null as string | null, label: "" };
+            const inSection = new Set(ents.map((e) => e.employee_id));
+            const query = addQ.trim().toLowerCase();
             const crewMatch = emps.filter((e) => e.active !== false).filter((e) => !query || e.name.toLowerCase().includes(query)).slice(0, 8);
             const tplMatch = TEMPLATE_CREW.map((t, i) => ({ ...t, idx: i }))
               .filter((t) => !emps.some((e) => e.name.trim().toLowerCase() === t.name.toLowerCase()))
               .filter((t) => !query || t.name.toLowerCase().includes(query)).slice(0, 8);
+            const contract = rel ? contracts.find((x) => x.id === rel.contract_id) : null;
             return (
-              <div className="card absolute inset-x-0 top-full z-10 max-h-64 overflow-y-auto shadow-lg">
-                {crewMatch.map((e) => (
-                  <button key={e.id} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
-                    onMouseDown={(ev) => { ev.preventDefault(); addEntry(e.id); setWorkerQ(""); }}>
-                    <span>{e.name}</span>
-                    <span className="text-[11px] text-inksoft">{inWeek.has(e.id) ? "+ add again" : "+ add to week"}</span>
-                  </button>
-                ))}
-                {tplMatch.map((t) => (
-                  <button key={t.name} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
-                    onMouseDown={(ev) => { ev.preventDefault(); addFromTemplate(t.idx); setWorkerQ(""); }}>
-                    <span>{t.name}</span>
-                    <span className="text-[11px] text-inksoft">+ from template</span>
-                  </button>
-                ))}
-                {crewMatch.length === 0 && tplMatch.length === 0 && <div className="p-2.5 text-sm text-inksoft">No one matches “{workerQ}”.</div>}
-              </div>
-            );
-          })()}
-        </div>
-
-        <div className="mb-3 flex flex-wrap gap-1.5">
-          {DAYS.map((d, i) => (
-            <button key={d} className={`btn ${view === i ? "btn-primary" : "btn-ghost"} px-2.5 py-1.5 text-[12px]`} onClick={() => { setView(i); setDayPick({}); setDayRelSearch(null); }}>
-              {d} {Number(addDays(openWeek.week_ending, i - 6).slice(8, 10))}
-            </button>
-          ))}
-          <button className={`btn ${view === "week" ? "btn-primary" : "btn-ghost"} px-2.5 py-1.5 text-[12px]`} onClick={() => { setView("week"); setDayPick({}); setDayRelSearch(null); }}>Full week</button>
-        </div>
-        {(() => {
-          const dayMode = view !== "week";
-          const query = workerQ.trim().toLowerCase();
-          const nameMatch = (empId: string) => !query || (emps.find((e) => e.id === empId)?.name || "").toLowerCase().includes(query);
-
-          // one editor per entry — classification, release link, the full week grid
-          const entryDetail = (en: Entry) => {
-            const emp = emps.find((e) => e.id === en.employee_id);
-            const set = (patch: Partial<Entry>) => setEntries((prev) => prev.map((x) => (x.id === en.id ? { ...x, ...patch } : x)));
-            const clsText = (en.trade ?? "").trim() || (emp?.trade ?? "").trim();
-            const canon = canonTrade(clsText);
-            const linkedRel = en.release_id ? rels.find((r) => r.id === en.release_id) : null;
-            const reqClasses = (linkedRel?.labor_breakdown || []).map((b) => canonTrade(b.cls));
-            const fits = reqClasses.includes(canon);
-            return (
-              <div key={en.id} className="mt-2.5 border-t border-rulesoft pt-2.5 first:mt-0 first:border-t-0 first:pt-0">
-                {dayMode && (
-                  <div className="mb-1.5 flex items-center justify-between gap-2">
-                    <span className="font-mono text-[12px] font-semibold">{en.release_id ? en.job_label : "No release linked"}</span>
-                    <button className="text-xs text-alert" onClick={() => delEntry(en.id!)}>✕ remove</button>
+              <div key={sec.key} className="card mb-3 p-3.5">
+                <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <b className="font-mono text-[14px]">{rel ? `#${rel.rel_number}` : "No release"}</b>
+                    {rel && <span className="ml-2 text-[14px]">{rel.location}</span>}
+                    {contract && <span className="ml-1.5 text-[11px] text-inksoft">· {contractLabel(contract)}</span>}
                   </div>
-                )}
-                <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <input className="field w-48" placeholder="Classification (laborer, plasterer…)"
-                    value={en.trade ?? emp?.trade ?? ""}
-                    onChange={(e) => set({ trade: e.target.value })}
-                    onBlur={() => saveEntry(en)} />
-                  {clsText === "" ? (
-                    <span className="text-[11px] text-inksoft">write the classification for this job</span>
-                  ) : reqClasses.length > 0 ? (
-                    fits
-                      ? <Stamp label={`✓ counts as ${canon}`} tone="ok" />
-                      : <Stamp label={`no ${canon} required — total hours only`} tone="work" />
-                  ) : (
-                    <span className="font-mono text-[11px] text-inksoft">detected: {canon}</span>
+                  {check && (
+                    <span className="flex items-center gap-2">
+                      <span className="font-mono text-xs">{check.result.totalLogged}/{check.result.totalRequired}h</span>
+                      {check.result.ok ? <Stamp label="MEETS MIN" tone="ok" /> : <Stamp label="NEEDS MORE" tone="alert" />}
+                    </span>
                   )}
                 </div>
-                {en.release_id ? (
-                  <div className="mb-2 flex items-center gap-2 text-sm">
-                    <span className="stamp border-carbon text-carbon">RELEASE</span>
-                    <span className="font-mono text-[13px]">{en.job_label}</span>
-                    <button className="text-xs text-alert" onClick={() => { const upd = { ...en, release_id: null }; set({ release_id: null }); saveEntry(upd); }}>unlink</button>
+                {check && check.result.rows.length > 0 && (
+                  <div className="mb-2 flex flex-wrap gap-1.5">
+                    {check.result.rows.map((row) => (
+                      <span key={row.cls} className={`rounded-sm border px-2 py-0.5 font-mono text-[11px] ${row.logged < row.required ? "border-alert text-alert" : "border-rulesoft text-inksoft"}`}>
+                        {row.cls} {row.logged}/{row.required}h{row.logged < row.required ? ` · need ${row.required - row.logged} more` : ""}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {ents.map((en) => {
+                  const emp = emps.find((e) => e.id === en.employee_id);
+                  const set = (patch: Partial<Entry>) => setEntries((prev) => prev.map((x) => (x.id === en.id ? { ...x, ...patch } : x)));
+                  const hrs = en.hours.reduce((sum, d) => sum + (Number(d) || 0), 0);
+                  const clsText = (en.trade ?? "").trim() || (emp?.trade ?? "").trim();
+                  const canon = canonTrade(clsText);
+                  const reqClasses = (rel?.labor_breakdown || []).map((b) => canonTrade(b.cls));
+                  const fits = reqClasses.includes(canon);
+                  return (
+                    <div key={en.id} className="border-t border-rulesoft py-2.5 first:border-t-0">
+                      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                        <b className="text-[14px]">{emp?.name || "?"}</b>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <input className="field w-40 px-2 py-1.5 text-[13px]" placeholder="Classification"
+                            value={en.trade ?? emp?.trade ?? ""} onChange={(e) => set({ trade: e.target.value })} onBlur={() => saveEntry(en)} />
+                          {clsText !== "" && reqClasses.length > 0 && (fits ? <Stamp label={`✓ ${canon}`} tone="ok" /> : <Stamp label={`no ${canon} req`} tone="work" />)}
+                          <span className="font-mono text-xs text-inksoft">{hrs}h</span>
+                          <button className="text-xs text-alert" title="Remove from this release" onClick={() => delEntry(en.id!)}>✕</button>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-7 gap-1.5">
+                        {DAYS.map((d, i) => (
+                          <div key={d}>
+                            <div className={`text-center text-[10px] uppercase tracking-wide ${i < 2 ? "font-semibold text-work" : "text-inksoft"}`}>{d}{i < 2 ? "·OT" : ""}</div>
+                            <input className={`field px-1 py-2 text-center font-mono ${i < 2 ? "bg-work/5" : ""}`} inputMode="decimal" placeholder="0"
+                              {...num(`${en.id}:h${i}`, Number(en.hours[i]) || 0,
+                                (n) => { const hours = [...en.hours]; hours[i] = n; set({ hours }); },
+                                (n) => { const hours = [...en.hours]; hours[i] = n; saveEntry({ ...en, hours }); })} />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+                {ents.length === 0 && <div className="py-2 text-[13px] text-inksoft">No workers yet — add the first one below.</div>}
+                {addFor === sec.key ? (
+                  <div className="relative mt-2">
+                    <input className="field" autoFocus placeholder="Type a worker's name…" value={addQ}
+                      onChange={(e) => setAddQ(e.target.value)}
+                      onBlur={() => setTimeout(() => setAddFor((cur) => (cur === sec.key ? null : cur)), 150)} />
+                    <div className="card absolute inset-x-0 top-full z-10 max-h-56 overflow-y-auto shadow-lg">
+                      {crewMatch.map((e) => (
+                        <button key={e.id} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
+                          onMouseDown={(ev) => { ev.preventDefault(); addEntry(e.id, e, relInfo); setAddQ(""); }}>
+                          <span>{e.name}</span>
+                          <span className="text-[11px] text-inksoft">{inSection.has(e.id) ? "+ add again" : "+ add"}</span>
+                        </button>
+                      ))}
+                      {tplMatch.map((t) => (
+                        <button key={t.name} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
+                          onMouseDown={(ev) => { ev.preventDefault(); addFromTemplate(t.idx, relInfo); setAddQ(""); }}>
+                          <span>{t.name}</span>
+                          <span className="text-[11px] text-inksoft">+ from template</span>
+                        </button>
+                      ))}
+                      {crewMatch.length === 0 && tplMatch.length === 0 && <div className="p-2.5 text-sm text-inksoft">No one matches “{addQ}”.</div>}
+                    </div>
                   </div>
                 ) : (
-                  <div className="mb-2 grid gap-2 md:grid-cols-2">
-                    <ContractPicker contracts={contracts} value={linkContract} onChange={setLinkContract}
-                      extra={[{ id: "", label: "All contracts" }]} placeholder="Filter by contract…" />
-                    <div className="relative">
-                      <input className="field" placeholder="Type release # or development to link…"
-                        value={relQ[en.id!] ?? en.job_label}
-                        onChange={(e) => { setRelQ({ ...relQ, [en.id!]: e.target.value }); set({ job_label: e.target.value }); }}
-                        onBlur={() => setTimeout(() => { saveEntry({ ...en, job_label: relQ[en.id!] ?? en.job_label }); }, 200)} />
-                      {(relQ[en.id!] || "").length > 0 && (
-                        <div className="card absolute inset-x-0 top-full z-10 max-h-52 overflow-y-auto shadow-lg">
-                          {rels
-                            .filter((r) => !linkContract || r.contract_id === linkContract)
-                            .filter((r) => relLabel(r).toLowerCase().includes((relQ[en.id!] || "").toLowerCase()))
-                            .slice(0, 6).map((r) => (
-                            <button key={r.id} className="block w-full border-b border-rulesoft p-2.5 text-left text-sm"
-                              onMouseDown={() => { const label = `#${r.rel_number} — ${r.location}`; const upd = { ...en, release_id: r.id, job_label: label }; set({ release_id: r.id, job_label: label }); setRelQ({ ...relQ, [en.id!]: "" }); saveEntry(upd); }}>
-                              {relLabel(r)}
-                              {Number(r.labor_hours) > 0 && <span className="ml-1 font-mono text-[11px] text-inksoft">· needs {r.labor_hours}h</span>}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-                <div className="grid grid-cols-7 gap-1.5">
-                  {DAYS.map((d, i) => (
-                    <div key={d}>
-                      <div className={`text-center text-[10px] uppercase tracking-wide ${i < 2 ? "font-semibold text-work" : "text-inksoft"}`}>{d}{i < 2 ? " · OT" : ""}</div>
-                      <input className={`field px-1 py-2 text-center font-mono ${i < 2 ? "bg-work/5" : ""}`} inputMode="decimal" placeholder="0"
-                        {...num(`${en.id}:h${i}`, Number(en.hours[i]) || 0,
-                          (n) => { const hours = [...en.hours]; hours[i] = n; set({ hours }); },
-                          (n) => { const hours = [...en.hours]; hours[i] = n; saveEntry({ ...en, hours }); })} />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-          };
-
-          // ---------- full-week view: one card per entry ----------
-          if (!dayMode) {
-            return entries.filter((en) => nameMatch(en.employee_id)).map((en) => {
-              const emp = emps.find((e) => e.id === en.employee_id);
-              const hrs = en.hours.reduce((s, d) => s + (Number(d) || 0), 0);
-              return (
-                <div key={en.id} className="card mb-2 p-3">
-                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                    <b className="text-[15px]">{emp?.name}</b>
-                    <div className="flex shrink-0 items-center gap-2">
-                      <span className="whitespace-nowrap font-mono text-xs text-inksoft">{hrs}h this week</span>
-                      <button className="text-xs text-alert" onClick={() => delEntry(en.id!)}>✕</button>
-                    </div>
-                  </div>
-                  {entryDetail(en)}
-                </div>
-              );
-            });
-          }
-
-          // ---------- day view: one row per WORKER, release chosen per day ----------
-          const day = view as number;
-          const byWorker = new Map<string, Entry[]>();
-          entries.forEach((en) => { const l = byWorker.get(en.employee_id) || []; l.push(en); byWorker.set(en.employee_id, l); });
-          const ids = [...byWorker.keys()].filter(nameMatch)
-            .sort((a, b) => (emps.find((e) => e.id === a)?.name || "").localeCompare(emps.find((e) => e.id === b)?.name || ""));
-          const weekRels: { id: string; label: string }[] = [];
-          entries.forEach((en) => { if (en.release_id && !weekRels.some((w) => w.id === en.release_id)) weekRels.push({ id: en.release_id, label: en.job_label || "release" }); });
-
-          return ids.map((empId) => {
-            const emp = emps.find((e) => e.id === empId);
-            const ents = byWorker.get(empId)!;
-            const cur = ents.find((e) => e.id === dayPick[empId]) || ents.find((e) => Number(e.hours[day]) > 0) || ents[0];
-            const wk = ents.reduce((s, e) => s + e.hours.reduce((a, h) => a + (Number(h) || 0), 0), 0);
-            const open = openDetail === empId;
-            return (
-              <div key={empId} className="card mb-2 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <button className="min-w-0 flex-1 text-left" onClick={() => setOpenDetail(open ? null : empId)}>
-                    <b className="text-[15px]">{emp?.name}</b>
-                    <div className="truncate text-[11px] text-inksoft">
-                      {(cur.trade ?? emp?.trade ?? "").trim() || "no classification"}{ents.length > 1 ? ` · ${ents.length} jobs this week` : ""} · tap for details
-                    </div>
-                  </button>
-                  <div className="flex shrink-0 flex-wrap items-center gap-2">
-                    <select className="field w-44 px-2 py-2 text-[13px]" title="The release this worker is on for this day"
-                      value={dayRelSearch === empId ? "search" : (cur.release_id || "none")}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (v === "search") { setDayRelSearch(empId); return; }
-                        setDayRelSearch(null);
-                        if (v === "none") switchDay(empId, day, null, "");
-                        else { const w = weekRels.find((x) => x.id === v); switchDay(empId, day, v, w?.label || ""); }
-                      }}>
-                      <option value="none">No release</option>
-                      {weekRels.map((w) => <option key={w.id} value={w.id}>{w.label}</option>)}
-                      <option value="search">🔍 Find another release…</option>
-                    </select>
-                    <input className={`field w-20 px-1 py-2 text-center font-mono ${day < 2 ? "bg-work/5" : ""}`} inputMode="decimal" placeholder="0"
-                      {...num(`${cur.id}:h${day}`, Number(cur.hours[day]) || 0,
-                        (n) => { const hours = [...cur.hours]; hours[day] = n; setEntries((prev) => prev.map((x) => (x.id === cur.id ? { ...x, hours } : x))); },
-                        (n) => { const hours = [...cur.hours]; hours[day] = n; saveEntry({ ...cur, hours }); })} />
-                    <span className="whitespace-nowrap font-mono text-xs text-inksoft">{wk}h wk</span>
-                  </div>
-                </div>
-                {dayRelSearch === empId && (
-                  <div className="mt-2 grid gap-2 md:grid-cols-2">
-                    <ContractPicker contracts={contracts} value={linkContract} onChange={setLinkContract}
-                      extra={[{ id: "", label: "All contracts" }]} placeholder="Filter by contract…" />
-                    <div className="relative">
-                      <input className="field" autoFocus placeholder="Type release # or development…"
-                        value={relQ[`day:${empId}`] || ""}
-                        onChange={(e) => setRelQ({ ...relQ, [`day:${empId}`]: e.target.value })} />
-                      {(relQ[`day:${empId}`] || "").length > 0 && (
-                        <div className="card absolute inset-x-0 top-full z-10 max-h-52 overflow-y-auto shadow-lg">
-                          {rels.filter((r) => !linkContract || r.contract_id === linkContract)
-                            .filter((r) => relLabel(r).toLowerCase().includes((relQ[`day:${empId}`] || "").toLowerCase()))
-                            .slice(0, 6).map((r) => (
-                              <button key={r.id} className="block w-full border-b border-rulesoft p-2.5 text-left text-sm"
-                                onMouseDown={() => { switchDay(empId, day, r.id, `#${r.rel_number} — ${r.location}`); setRelQ({ ...relQ, [`day:${empId}`]: "" }); setDayRelSearch(null); }}>
-                                {relLabel(r)}
-                                {Number(r.labor_hours) > 0 && <span className="ml-1 font-mono text-[11px] text-inksoft">· needs {r.labor_hours}h</span>}
-                              </button>
-                            ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-                {open && (
-                  <div className="mt-2.5 border-t border-rulesoft pt-2.5">
-                    {ents.map(entryDetail)}
-                    <div className="mt-2.5 flex justify-end">
-                      <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => {
-                        (document.activeElement as HTMLElement | null)?.blur?.();
-                        setOpenDetail(null);
-                      }}>Save & close</button>
-                    </div>
-                  </div>
+                  <button className="btn btn-ghost mt-2 px-3 py-1.5 text-[13px]" onClick={() => { setAddFor(sec.key); setAddQ(""); }}>+ Add worker</button>
                 )}
               </div>
             );
           });
         })()}
-        {entries.length === 0 && <div className="card p-5 text-sm text-inksoft">Pick a worker above, then type their hours. In the day view each worker can be on a different release each day — just switch the release next to their hours box.</div>}
         {summ.length > 0 && (
           <div className="card mt-2 overflow-x-auto">
             <table className="w-full border-collapse text-sm" style={{ minWidth: 400 }}>
@@ -710,15 +556,16 @@ export default function Payroll() {
       })()}
 
       <div className="card divide-y divide-rulesoft">
-        {weeks.map((w) => (
+        {(() => { const weCounts: Record<string, number> = {}; weeks.forEach((w) => (weCounts[w.week_ending] = (weCounts[w.week_ending] || 0) + 1)); return weeks.map((w) => (
           <div key={w.id} className="flex items-center justify-between gap-3 p-3.5">
             <button className="flex-1 text-left" onClick={() => openW(w)}>
               <span className="font-mono text-[13px] font-semibold">{prettyDate(addDays(w.week_ending, -6))} – {prettyDate(w.week_ending)}</span>
+              {weCounts[w.week_ending] > 1 && <span className="ml-2 rounded-[2px] border border-alert px-1 py-px font-mono text-[9px] font-semibold text-alert" title="Two payroll weeks cover the same dates — delete the one you don't need, its hours go with it">DUPLICATE</span>}
               <span className="ml-2 text-xs text-inksoft">open →</span>
             </button>
             <button className="text-xs text-alert" title="Delete this week" onClick={() => deleteWeek(w)}>✕</button>
           </div>
-        ))}
+        )); })()}
         {weeks.length === 0 && <div className="p-5 text-sm text-inksoft">No payroll weeks yet. Add the crew, start a week, punch hours, download the weekly sheet.</div>}
       </div>
       {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}

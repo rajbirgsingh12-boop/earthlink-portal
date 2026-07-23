@@ -129,6 +129,10 @@ export default function Releases() {
   const [sosReady, setSosReady] = useState<Set<string>>(new Set());
   const [stageData, setStageData] = useState<{ items: Set<string>; walks: Set<string> }>({ items: new Set(), walks: new Set() });
   const [invPreview, setInvPreview] = useState<{ number: string; date: string; cNumber: string; relNum: string; dev: string; workOrder: string; rows: DocRow[] } | null>(null);
+  // ---- line-item editor (release_items feed the SOS form and the invoice) ----
+  type RelItemRow = { id?: string; line: number; code: string; description: string; qty: number; uom: string; unit_price: number };
+  const [itemsRel, setItemsRel] = useState<Release | null>(null);
+  const [relItems, setRelItems] = useState<RelItemRow[] | null>(null);
 
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
   const numBuf = useNumBuffer();
@@ -464,6 +468,34 @@ export default function Releases() {
     const fname = askFileName(`SOS_${cNumber}_rel${relNum}.xlsx`);
     if (!fname) return;
     XLSX.writeFile(wb, fname);
+  };
+
+  // ---------- line-item editor ----------
+  const openItems = async (r: Release) => {
+    setItemsRel(r); setRelItems(null);
+    const { data } = await sb().from("release_items").select("*").eq("release_id", r.id).order("line");
+    setRelItems(((data || []) as RelItemRow[]).map((it) => ({
+      id: it.id, line: Number(it.line) || 0, code: it.code || "", description: it.description || "",
+      qty: Number(it.qty) || 0, uom: it.uom || "EA", unit_price: Number(it.unit_price) || 0,
+    })));
+  };
+  const saveItems = async () => {
+    if (!itemsRel || !relItems) return;
+    setBusy(true);
+    const rows = relItems.filter((it) => it.description.trim() || it.code.trim());
+    const { error: de } = await sb().from("release_items").delete().eq("release_id", itemsRel.id);
+    if (de) { flash(de.message); setBusy(false); return; }
+    if (rows.length > 0) {
+      const { error } = await sb().from("release_items").insert(rows.map((it, i) => ({
+        release_id: itemsRel.id, line: it.line || i + 1, code: it.code, description: it.description,
+        qty: it.qty, uom: it.uom, unit_price: it.unit_price, amount: it.qty * it.unit_price,
+      })));
+      if (error) { flash(error.message); setBusy(false); return; }
+    }
+    setBusy(false);
+    setItemsRel(null); setRelItems(null);
+    loadRows(active, true);
+    flash(`Line items saved — ${rows.length} line${rows.length === 1 ? "" : "s"}, ${fmt(rows.reduce((s, it) => s + it.qty * it.unit_price, 0))}`);
   };
 
   // ---------- attachments ----------
@@ -1152,6 +1184,7 @@ export default function Releases() {
                 </td>
                 <td className="p-2.5">
                   <div className="flex items-center justify-end gap-2 whitespace-nowrap">
+                    {!r.canceled && !readOnly && <button className="font-mono text-xs font-semibold text-inksoft underline" title="Edit this release's line items" onClick={() => openItems(r)}>Items</button>}
                     {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-work underline" title="Make the NYCHA invoice" onClick={() => genInvoice(r)}>Invoice</button>}
                     {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-carbon underline" title="Make the Statement of Services form" onClick={() => genSOS(r)}>SOS form</button>}
                     <button className="text-inksoft" title="Documents" onClick={() => setAttachRel(r)}>📎{(r.attachments || []).length > 0 ? <span className="font-mono text-[10px]">{(r.attachments || []).length}</span> : null}</button>
@@ -1286,6 +1319,63 @@ export default function Releases() {
         </div>
         </PrintShell>
       )}
+
+      {itemsRel && (() => {
+        const COLS = "56px 96px minmax(170px,1fr) 60px 72px 88px 88px 22px";
+        const setIt = (i: number, patch: Partial<RelItemRow>) =>
+          setRelItems((prev) => (prev ? prev.map((x, j) => (j === i ? { ...x, ...patch } : x)) : prev));
+        return (
+          <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-6">
+            <div className="card mx-auto max-w-4xl border-work bg-card p-4">
+              <div className="mb-1 font-display text-lg font-bold uppercase">Line items · Release #{itemsRel.rel_number}</div>
+              <div className="mb-3 text-[13px] text-inksoft">
+                {itemsRel.location} — these lines feed the SOS form and the invoice.
+                {stageData.walks.has(String(itemsRel.rel_number).trim()) ? " Note: a walk sheet is linked to this release number, and walk-sheet quantities win on documents." : ""}
+              </div>
+              {relItems === null ? <div className="p-4 text-sm text-inksoft">Loading…</div> : (
+                <>
+                  <div className="overflow-x-auto">
+                    <div className="min-w-[680px]">
+                      <div className="mb-1 grid gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-inksoft" style={{ gridTemplateColumns: COLS }}>
+                        <span>Line</span><span>Item code</span><span>Description of work</span><span>UOM</span>
+                        <span className="text-right">Qty</span><span className="text-right">Price</span><span className="text-right">Total</span><span />
+                      </div>
+                      {relItems.map((it, i) => (
+                        <div key={i} className="mb-1.5 grid items-center gap-1.5" style={{ gridTemplateColumns: COLS }}>
+                          <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="numeric" value={it.line || ""}
+                            onChange={(e) => setIt(i, { line: parseNum(e.target.value) })} />
+                          <input className="field px-1.5 py-1.5 font-mono" value={it.code}
+                            onChange={(e) => setIt(i, { code: e.target.value })} />
+                          <input className="field" placeholder="What the line is for" value={it.description}
+                            onChange={(e) => setIt(i, { description: e.target.value })} />
+                          <input className="field px-1 py-1.5 text-center font-mono" value={it.uom}
+                            onChange={(e) => setIt(i, { uom: e.target.value })} />
+                          <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="decimal"
+                            {...numBuf(`ri:${i}:q`, it.qty, (n) => setIt(i, { qty: n }))} />
+                          <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="decimal"
+                            {...numBuf(`ri:${i}:p`, it.unit_price, (n) => setIt(i, { unit_price: n }))} />
+                          <span className="text-right font-mono text-[12px]">{fmt(it.qty * it.unit_price)}</span>
+                          <button className="text-alert" title="Remove line" onClick={() => setRelItems((prev) => (prev ? prev.filter((_, j) => j !== i) : prev))}>✕</button>
+                        </div>
+                      ))}
+                      {relItems.length === 0 && <div className="p-3 text-sm text-inksoft">No line items yet — add them below and the SOS/Invoice buttons light up for this release.</div>}
+                    </div>
+                  </div>
+                  <button className="btn btn-ghost mt-1 px-3 py-1.5 text-[13px]"
+                    onClick={() => setRelItems((prev) => [...(prev || []), { line: (prev || []).reduce((m, x) => Math.max(m, x.line), 0) + 1, code: "", description: "", qty: 1, uom: "EA", unit_price: 0 }])}>+ Add line</button>
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-mono text-sm font-semibold">Total {fmt(relItems.reduce((s, it) => s + it.qty * it.unit_price, 0))}</span>
+                    <div className="flex gap-2">
+                      <button className="btn btn-primary" onClick={saveItems} disabled={busy}>Save & close</button>
+                      <button className="btn btn-ghost" onClick={() => { setItemsRel(null); setRelItems(null); }}>Cancel</button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {msg && <div className="fixed bottom-5 left-1/2 z-[60] -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
     </div>

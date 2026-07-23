@@ -45,9 +45,9 @@ const SECTIONS: { icon: string; title: string; lines: string[] }[] = [
   {
     icon: "📅", title: "Schedule",
     lines: [
-      "Pick the day (Today / Tomorrow / any date), add a release, then assign workers to it.",
-      "Assigning a worker whose number is saved opens a ready-made text — release #, location, and work description already written. Just hit send.",
-      "The TEXTED ✓ stamp shows who's been told. “Text again” resends; “Copy message” is for group chats.",
+      "Pick the day (Today / Tomorrow / any date), add a release, write the work description, then tap + Assign worker.",
+      "Picking the worker's name is what sends it: their text opens ready to go — date, release #, location, and work description already written. Just hit send.",
+      "The TEXTED ✓ stamp shows who's been told. Tap a worker's name on the card to open their text again.",
     ],
   },
   {

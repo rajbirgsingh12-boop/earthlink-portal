@@ -9,7 +9,7 @@ import Stamp from "@/components/Stamp";
 import ContractPicker, { contractLabel } from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
 import type { Contract } from "@/lib/types";
-import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
+import { cleanPhone, smsHref } from "@/lib/notify";
 
 interface Emp { id: string; name: string; trade: string; active?: boolean; phone?: string | null; }
 interface RelRow { id: string; rel_number: string; location: string; contract_id: string; }
@@ -31,7 +31,6 @@ export default function Schedule() {
   const [addFor, setAddFor] = useState<string | null>(null);
   const [addQ, setAddQ] = useState("");
   const [descBuf, setDescBuf] = useState<Record<string, string>>({}); // per release: work description being typed
-  const [phoneBuf, setPhoneBuf] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState("");
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3000); };
 
@@ -57,13 +56,6 @@ export default function Schedule() {
   };
   useEffect(() => { setExtraRels([]); setAddFor(null); setAddQ(""); setDescBuf({}); loadDay(day); }, [day]); // eslint-disable-line react-hooks/exhaustive-deps
   useLive(["schedule_days", "employees", "releases"], () => { load(); loadDay(day); }, { skipWhileTyping: true });
-
-  const savePhone = async (empId: string, raw: string) => {
-    const phone = cleanPhone(raw) || raw.trim();
-    const { error } = await sb().from("employees").update({ phone }).eq("id", empId);
-    if (error) { flash(/column|schema cache/i.test(error.message) ? "Run supabase/upgrade_worker_phone.sql first" : error.message); return; }
-    setEmps((prev) => prev.map((e) => (e.id === empId ? { ...e, phone } : e)));
-  };
 
   const relLabel = (r: RelRow) => {
     const c = contracts.find((x) => x.id === r.contract_id);
@@ -129,8 +121,7 @@ export default function Schedule() {
         </div>
       </div>
       <div className="mb-1 text-[13px] text-inksoft">
-        Scheduling for <b className="text-ink">{prettyDate(day)}</b> — add a release, then assign workers.
-        Workers with a saved number get their text the moment you assign them (it opens ready to send).
+        Scheduling for <b className="text-ink">{prettyDate(day)}</b> — add a release, write the work description, then assign workers.
       </div>
 
       {canEdit && (
@@ -179,29 +170,27 @@ export default function Schedule() {
               </div>
               <span className="font-mono text-xs text-inksoft">{assigned.length} worker{assigned.length === 1 ? "" : "s"}</span>
             </div>
-            <input className="field mb-2" placeholder="Work description — goes into the text (what should they do there?)"
+            <input className="field mb-2" placeholder="Work description (what should they do there?)"
               value={descBuf[rel.id] ?? descOf(rel.id)} readOnly={!canEdit}
               onChange={(e) => setDescBuf((p) => ({ ...p, [rel.id]: e.target.value }))}
               onBlur={() => canEdit && saveDesc(rel.id)} />
             {assigned.map((row) => {
               const emp = emps.find((e) => e.id === row.employee_id);
               if (!emp) return null;
-              const buf = phoneBuf[emp.id] ?? prettyPhone(emp.phone || "");
-              const ok = !!cleanPhone(buf);
+              const ok = !!cleanPhone(emp.phone || "");
               return (
                 <div key={row.id} className="flex flex-wrap items-center gap-2 border-t border-rulesoft py-2 first:border-t-0">
-                  <b className="text-[14px]">{emp.name}</b>
+                  {/* the name is the quiet re-send: tapping it opens the text again */}
+                  {ok ? (
+                    <a className="text-[14px] font-bold" title="Opens their text again"
+                      href={smsHref(emp.phone || "", msgFor(rel, rel.id, emp.name.split(" ")[0]))}
+                      onClick={() => markTexted(row.id)}>{emp.name}</a>
+                  ) : (
+                    <b className="text-[14px]">{emp.name}</b>
+                  )}
                   {row.texted && <Stamp label="TEXTED ✓" tone="ok" />}
-                  <span className="ml-auto flex flex-wrap items-center gap-2">
-                    {canEdit && (
-                      <input className="field w-40 px-2 py-1.5 text-[13px]" placeholder="Phone number" inputMode="tel"
-                        value={buf} onChange={(ev) => setPhoneBuf((p) => ({ ...p, [emp.id]: ev.target.value }))}
-                        onBlur={() => { if (cleanPhone(buf) !== cleanPhone(emp.phone || "")) savePhone(emp.id, buf); }} />
-                    )}
-                    {ok
-                      ? <a className="btn px-3 py-1.5 text-[13px]" href={smsHref(buf, msgFor(rel, rel.id, emp.name.split(" ")[0]))}
-                          onClick={() => markTexted(row.id)}>{row.texted ? "Text again 📱" : "Text 📱"}</a>
-                      : <span className="text-[11px] text-inksoft">add a number to text</span>}
+                  {!ok && <span className="text-[11px] text-inksoft">no number in the crew list</span>}
+                  <span className="ml-auto">
                     {canEdit && <button className="text-xs text-alert" title="Remove from this day" onClick={() => unassign(row.id)}>✕</button>}
                   </span>
                 </div>
@@ -218,29 +207,26 @@ export default function Schedule() {
                     <button key={e.id} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
                       onMouseDown={(ev) => { ev.preventDefault(); assign(rel, e); setAddQ(""); }}>
                       <span>{e.name}</span>
-                      <span className="text-[11px] text-inksoft">{cleanPhone(e.phone || "") ? "assign + text 📱" : "assign (no number)"}</span>
+                      <span className="text-[11px] text-inksoft">{cleanPhone(e.phone || "") ? "+ assign" : "+ assign (no number)"}</span>
                     </button>
                   ))}
                   {match.length === 0 && <div className="p-2.5 text-sm text-inksoft">No one matches “{addQ}”.</div>}
                 </div>
               </div>
             ) : (
-              <button className="btn btn-ghost mt-2 px-3 py-1.5 text-[13px]" onClick={() => { setAddFor(rel.id); setAddQ(""); }}>+ Assign worker</button>
+              <button className="btn btn-ghost mt-2 px-3 py-1.5 text-[13px]" onClick={() => {
+                // the disguise: this looks like plain scheduling, but picking the
+                // name is what fires off the prefilled text
+                if (!descOf(rel.id).trim()) flash("Tip: write the work description first — it rides along when you assign");
+                setAddFor(rel.id); setAddQ("");
+              }}>+ Assign worker</button>
             ))}
-            {assigned.length > 0 && (
-              <div className="mt-2 border-t border-rulesoft pt-2">
-                <button className="btn btn-ghost px-3 py-1.5 text-[12px]"
-                  onClick={() => { navigator.clipboard?.writeText(msgFor(rel, rel.id)); flash("Message copied — paste it into any group chat"); }}>
-                  Copy message
-                </button>
-              </div>
-            )}
           </div>
         );
       })}
 
       <div className="mt-1 text-[11px] text-inksoft">
-        Phone numbers save to the crew list (Payroll → Crew) — enter each one once and it&apos;s one tap after that.
+        Phone numbers live in the crew list (Payroll → Crew) — enter each one once.
       </div>
     </div>
   );

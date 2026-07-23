@@ -8,6 +8,7 @@ import Stamp from "@/components/Stamp";
 import { useLive } from "@/lib/useLive";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
+import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
 
 interface Item { description: string; qty: number; unit: string; unit_price: number; }
 interface Job {
@@ -53,6 +54,26 @@ export default function Pact() {
   const [photoTarget, setPhotoTarget] = useState<{ id: string; kind: "before" | "after" } | null>(null);
   const snapPhotos = (j: Job, kind: "before" | "after") => { setPhotoTarget({ id: j.id, kind }); photoRef.current?.click(); };
   const poRef = useRef<HTMLInputElement>(null);
+  // tap-to-text: pick a worker, their saved number + this job's address/description prefill the SMS
+  const [notifyJob, setNotifyJob] = useState<string | null>(null);
+  const [notifyDesc, setNotifyDesc] = useState("");
+  const [crew, setCrew] = useState<{ id: string; name: string; phone?: string | null }[]>([]);
+  const [crewQ, setCrewQ] = useState("");
+  const [phoneBuf, setPhoneBuf] = useState<Record<string, string>>({});
+  const openNotify = async (j: Job) => {
+    if (notifyJob === j.id) { setNotifyJob(null); return; }
+    setNotifyJob(j.id); setNotifyDesc(j.description || ""); setCrewQ("");
+    if (crew.length === 0) {
+      const { data } = await sb().from("employees").select("*").order("name");
+      setCrew(((data || []) as { id: string; name: string; phone?: string | null; active?: boolean }[]).filter((e) => e.active !== false));
+    }
+  };
+  const savePhone = async (empId: string, raw: string) => {
+    const phone = cleanPhone(raw) || raw.trim();
+    const { error } = await sb().from("employees").update({ phone }).eq("id", empId);
+    if (error) { flash(/column|schema cache/i.test(error.message) ? "Run supabase/upgrade_worker_phone.sql first" : error.message); return; }
+    setCrew((prev) => prev.map((e) => (e.id === empId ? { ...e, phone } : e)));
+  };
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3500); };
   const num = useNumBuffer();
   const upgradeHint = (m: string) => (/relation|column|schema/i.test(m) ? "Database needs the upgrade — re-run supabase/upgrade_pact.sql" : m);
@@ -483,7 +504,51 @@ export default function Pact() {
                   )}
                   {canInvoice && <button className="btn px-3 py-1.5 text-[13px]" onClick={() => setInvJob(j)}>Invoice</button>}
                   {canInvoice && <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => buildPackage(j)} disabled={busy}>📦 Package</button>}
+                  {canEdit && <button className="btn px-3 py-1.5 text-[13px]" onClick={() => openNotify(j)}>📱 Text worker</button>}
                 </div>
+                {notifyJob === j.id && (() => {
+                  const desc = notifyDesc.trim();
+                  const site = [j.address || j.development || "", j.property_unit && `Unit ${j.property_unit}`].filter(Boolean).join(", ");
+                  const msgFor = (who?: string) =>
+                    `Earth Link:${who ? ` ${who},` : ""} you're assigned to a job at ${site || "(no address on file)"}.${desc ? ` Work: ${desc}` : ""}`;
+                  const cq = crewQ.trim().toLowerCase();
+                  const match = crew.filter((e) => !cq || e.name.toLowerCase().includes(cq));
+                  return (
+                    <div className="mb-2.5 rounded-sm border border-rulesoft bg-paper p-2.5">
+                      <div className="mb-1.5 text-[11px] uppercase tracking-widest text-inksoft">
+                        Text a worker — the address fills in automatically
+                      </div>
+                      <input className="field mb-1" placeholder="Work description (what should they do there?)"
+                        value={notifyDesc} onChange={(e) => setNotifyDesc(e.target.value)} />
+                      <input className="field mb-1" placeholder="Find a worker by name…" value={crewQ} onChange={(e) => setCrewQ(e.target.value)} />
+                      <div className="max-h-64 overflow-y-auto">
+                        {match.map((e) => {
+                          const buf = phoneBuf[e.id] ?? prettyPhone(e.phone || "");
+                          const ok = !!cleanPhone(buf);
+                          return (
+                            <div key={e.id} className="flex flex-wrap items-center gap-2 border-t border-rulesoft py-1.5 first:border-t-0">
+                              <b className="text-[13px]">{e.name}</b>
+                              <input className="field w-44 px-2 py-1.5 text-[13px]" placeholder="Phone number" inputMode="tel"
+                                value={buf} onChange={(ev) => setPhoneBuf((p) => ({ ...p, [e.id]: ev.target.value }))}
+                                onBlur={() => { if (cleanPhone(buf) !== cleanPhone(e.phone || "")) savePhone(e.id, buf); }} />
+                              {ok
+                                ? <a className="btn px-3 py-1.5 text-[13px]" href={smsHref(buf, msgFor(e.name.split(" ")[0]))}>Text 📱</a>
+                                : <span className="text-[11px] text-inksoft">add a number to text them</span>}
+                            </div>
+                          );
+                        })}
+                        {match.length === 0 && <div className="py-2 text-[13px] text-inksoft">No one matches “{crewQ}”.</div>}
+                      </div>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-2 border-t border-rulesoft pt-2">
+                        <button className="btn btn-ghost px-3 py-1.5 text-[12px]"
+                          onClick={() => { navigator.clipboard?.writeText(msgFor()); flash("Message copied — paste it into any group chat"); }}>
+                          Copy message
+                        </button>
+                        <span className="text-[11px] text-inksoft">numbers save to the crew list for next time</span>
+                      </div>
+                    </div>
+                  );
+                })()}
                 {canEdit && (
                 <div className="mb-2.5 flex flex-wrap gap-2">
                   <button onClick={() => patch(j, { approved: !j.approved })}><Stamp label={j.approved ? "APPROVED ✓" : "MARK APPROVED"} tone={j.approved ? "ok" : "mute"} /></button>

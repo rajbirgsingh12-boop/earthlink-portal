@@ -39,6 +39,7 @@ const SECTIONS: { icon: string; title: string; lines: string[] }[] = [
       "Take 📷 Before photos when you start and 📷 After photos when you finish.",
       "Work lines are what gets billed — add a line if the job runs past what the PO listed.",
       "📦 Package makes one PDF with the invoice, the PO, and all photos — ready to send. PACT has its own Schedule under the PACT menu.",
+      "📱 Text worker opens a ready-made text with the job's address and work description — pick the worker and hit send.",
     ],
   },
   {
@@ -48,6 +49,7 @@ const SECTIONS: { icon: string; title: string; lines: string[] }[] = [
       "The week opens on today: type each person's hours, one number each. Tap a name to link their hours to a release or change their classification.",
       "The Release hours check shows if a release has enough hours per trade — green means it meets the NYCHA minimum.",
       "“Weekly sheet (xlsx)” downloads the paper-style sheet. The PAID stamps track who's been paid.",
+      "📱 Text crew on a release card opens a ready-made text for each worker with the release #, location, and work description — save each worker's number once (in the Crew list) and it's one tap after that.",
     ],
   },
   {

@@ -181,3 +181,6 @@ do $$ begin alter publication supabase_realtime add table timesheet_weeks; excep
 do $$ begin alter publication supabase_realtime add table employees; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table profiles; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table pact_jobs; exception when duplicate_object then null; end $$;
+
+-- ---------- from upgrade_worker_phone.sql ----------
+alter table employees add column if not exists phone text default '';

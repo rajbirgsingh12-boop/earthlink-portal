@@ -209,3 +209,4 @@ do $$ begin
   create policy "schedule_days del" on schedule_days for delete using (my_role() in ('admin','office'));
 exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table schedule_days; exception when duplicate_object then null; end $$;
+alter table schedule_days add column if not exists address text default '';

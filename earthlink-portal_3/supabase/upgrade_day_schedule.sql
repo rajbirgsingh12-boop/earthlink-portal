@@ -6,9 +6,12 @@ create table if not exists schedule_days (
   release_id uuid references releases(id) on delete cascade,
   employee_id uuid not null references employees(id) on delete cascade,
   description text default '',
+  address text default '',
   texted boolean default false,
   created_at timestamptz default now()
 );
+-- if the table already exists from an earlier run, the address column rides in here
+alter table schedule_days add column if not exists address text default '';
 alter table schedule_days enable row level security;
 do $$ begin
   create policy "schedule_days read" on schedule_days for select using (my_role() in ('admin','office','accountant'));

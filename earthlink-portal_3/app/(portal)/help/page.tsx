@@ -46,6 +46,7 @@ const SECTIONS: { icon: string; title: string; lines: string[] }[] = [
     icon: "📅", title: "Schedule",
     lines: [
       "Pick the day (Today / Tomorrow / any date), add a release, write the work description, then tap + Assign worker.",
+      "🗺 Map opens a mini map window — type the address, check the pin, tap Use this location. The workers' texts then include a tap-to-navigate map link.",
       "Picking the worker's name is what sends it: their text opens ready to go — date, release #, location, and work description already written. Just hit send.",
       "The TEXTED ✓ stamp shows who's been told. Tap a worker's name on the card to open their text again.",
     ],

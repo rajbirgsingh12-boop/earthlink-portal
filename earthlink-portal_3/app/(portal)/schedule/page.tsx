@@ -12,8 +12,8 @@ import type { Contract } from "@/lib/types";
 import { cleanPhone, smsHref } from "@/lib/notify";
 
 interface Emp { id: string; name: string; trade: string; active?: boolean; phone?: string | null; }
-interface RelRow { id: string; rel_number: string; location: string; contract_id: string; }
-interface Assign { id: string; day: string; release_id: string | null; employee_id: string; description: string; texted: boolean; }
+interface RelRow { id: string; rel_number: string; location: string; contract_id: string; address?: string | null; }
+interface Assign { id: string; day: string; release_id: string | null; employee_id: string; description: string; texted: boolean; address?: string | null; }
 
 const upgradeMsg = "Run supabase/upgrade_day_schedule.sql first";
 
@@ -31,6 +31,11 @@ export default function Schedule() {
   const [addFor, setAddFor] = useState<string | null>(null);
   const [addQ, setAddQ] = useState("");
   const [descBuf, setDescBuf] = useState<Record<string, string>>({}); // per release: work description being typed
+  const [addrBuf, setAddrBuf] = useState<Record<string, string>>({}); // per release: address being typed
+  // the mini map window: which release it's picking for, the committed search, and the box being typed
+  const [mapFor, setMapFor] = useState<string | null>(null);
+  const [mapQ, setMapQ] = useState("");
+  const [mapInput, setMapInput] = useState("");
   const [msg, setMsg] = useState("");
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3000); };
 
@@ -42,7 +47,7 @@ export default function Schedule() {
     }
     const { data: e } = await sb().from("employees").select("*").order("name");
     setEmps(((e || []) as Emp[]).filter((x) => x.active !== false));
-    const { data: r } = await sb().from("releases").select("id,rel_number,location,contract_id").eq("canceled", false);
+    const { data: r } = await sb().from("releases").select("*").eq("canceled", false);
     setRels(((r || []) as RelRow[]).sort((x, y) => (parseFloat(x.rel_number) || 0) - (parseFloat(y.rel_number) || 0)));
     const { data: c } = await sb().from("contracts").select("id,number,name").order("number");
     setContracts((c || []) as Contract[]);
@@ -63,17 +68,27 @@ export default function Schedule() {
   };
   const descOf = (relId: string) =>
     descBuf[relId] ?? rows.find((x) => x.release_id === relId && (x.description || "").trim())?.description ?? "";
+  // the address: what's typed now → what's saved on the day's rows → the release's own address
+  const addrOf = (relId: string) =>
+    addrBuf[relId] ?? rows.find((x) => x.release_id === relId && (x.address || "").trim())?.address
+    ?? (rels.find((r) => r.id === relId)?.address || "");
+  const mapLink = (addr: string) => `https://maps.google.com/?q=${encodeURIComponent(addr)}`;
   const msgFor = (rel: RelRow, relId: string, who?: string) => {
     const desc = descOf(relId).trim();
-    return `Earth Link:${who ? ` ${who},` : ""} you're scheduled for ${prettyDate(day)} at ${rel.location} (Release #${rel.rel_number}).${desc ? ` Work: ${desc}` : ""}`;
+    const addr = addrOf(relId).trim();
+    return `Earth Link:${who ? ` ${who},` : ""} you're scheduled for ${prettyDate(day)} at ${addr || rel.location} (Release #${rel.rel_number}).`
+      + `${desc ? ` Work: ${desc}` : ""}${addr ? ` Map: ${mapLink(addr)}` : ""}`;
   };
 
   // assign, then text on the spot if the number's on file (the tap that assigns
   // is the same tap that opens Messages — nothing automatic happens in the background)
   const assign = async (rel: RelRow, emp: Emp) => {
-    const { data, error } = await sb().from("schedule_days")
-      .insert({ day, release_id: rel.id, employee_id: emp.id, description: descOf(rel.id).trim() })
-      .select().single();
+    const base = { day, release_id: rel.id, employee_id: emp.id, description: descOf(rel.id).trim() };
+    let { data, error } = await sb().from("schedule_days").insert({ ...base, address: addrOf(rel.id).trim() }).select().single();
+    if (error && /column|schema cache/i.test(error.message)) {
+      ({ data, error } = await sb().from("schedule_days").insert(base).select().single());
+      if (data) flash("Re-run supabase/upgrade_day_schedule.sql so addresses save");
+    }
     if (error) { flash(/relation|column|schema cache/i.test(error.message) ? upgradeMsg : error.message); return; }
     const row = data as Assign;
     setRows((prev) => (prev.some((x) => x.id === row.id) ? prev : [...prev, row]));
@@ -99,6 +114,19 @@ export default function Schedule() {
     if (ids.length === 0) return;
     setRows((prev) => prev.map((x) => (x.release_id === relId ? { ...x, description: desc } : x)));
     await sb().from("schedule_days").update({ description: desc }).in("id", ids);
+  };
+  const saveAddr = async (relId: string, value?: string) => {
+    const addr = (value ?? addrBuf[relId] ?? "").trim();
+    if (value !== undefined) setAddrBuf((p) => ({ ...p, [relId]: addr }));
+    const ids = rows.filter((x) => x.release_id === relId).map((x) => x.id);
+    if (ids.length === 0) return;
+    setRows((prev) => prev.map((x) => (x.release_id === relId ? { ...x, address: addr } : x)));
+    const { error } = await sb().from("schedule_days").update({ address: addr }).in("id", ids);
+    if (error && /column|schema cache/i.test(error.message)) flash("Re-run supabase/upgrade_day_schedule.sql so addresses save");
+  };
+  const openMap = (relId: string) => {
+    const start = addrOf(relId).trim() || (rels.find((r) => r.id === relId)?.location || "");
+    setMapFor(relId); setMapInput(start); setMapQ(start);
   };
 
   // one card per release on this day (assigned rows ∪ releases just added)
@@ -174,6 +202,13 @@ export default function Schedule() {
               value={descBuf[rel.id] ?? descOf(rel.id)} readOnly={!canEdit}
               onChange={(e) => setDescBuf((p) => ({ ...p, [rel.id]: e.target.value }))}
               onBlur={() => canEdit && saveDesc(rel.id)} />
+            <div className="mb-2 flex gap-2">
+              <input className="field flex-1" placeholder="Address — where they should show up"
+                value={addrBuf[rel.id] ?? addrOf(rel.id)} readOnly={!canEdit}
+                onChange={(e) => setAddrBuf((p) => ({ ...p, [rel.id]: e.target.value }))}
+                onBlur={() => canEdit && saveAddr(rel.id)} />
+              {canEdit && <button className="btn shrink-0 px-3" title="Find it on the map" onClick={() => openMap(rel.id)}>🗺 Map</button>}
+            </div>
             {assigned.map((row) => {
               const emp = emps.find((e) => e.id === row.employee_id);
               if (!emp) return null;
@@ -228,6 +263,37 @@ export default function Schedule() {
       <div className="mt-1 text-[11px] text-inksoft">
         Phone numbers live in the crew list (Payroll → Crew) — enter each one once.
       </div>
+
+      {/* mini map window: type the place, check the pin, use it — the text
+          the workers get includes a tap-to-navigate Google Maps link */}
+      {mapFor && (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-ink/60 p-4" onClick={() => setMapFor(null)}>
+          <div className="card w-full max-w-lg p-3.5" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-2 font-display text-lg font-bold uppercase">Pick the location</div>
+            <div className="mb-2 flex gap-2">
+              <input className="field flex-1" autoFocus placeholder="Type the address or place…"
+                value={mapInput} onChange={(e) => setMapInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") setMapQ(mapInput.trim()); }} />
+              <button className="btn shrink-0" onClick={() => setMapQ(mapInput.trim())}>Search</button>
+            </div>
+            {mapQ ? (
+              <iframe title="map" className="h-72 w-full rounded-sm border border-rulesoft"
+                src={`https://www.google.com/maps?q=${encodeURIComponent(mapQ)}&output=embed`} />
+            ) : (
+              <div className="flex h-72 items-center justify-center rounded-sm border border-rulesoft bg-paper text-sm text-inksoft">
+                Type an address above and hit Search to see it on the map.
+              </div>
+            )}
+            <div className="mt-2.5 flex justify-end gap-2">
+              <button className="btn btn-ghost" onClick={() => setMapFor(null)}>Cancel</button>
+              <button className="btn btn-primary" disabled={!mapInput.trim()}
+                onClick={() => { saveAddr(mapFor, mapInput.trim()); setMapFor(null); }}>
+                Use this location
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

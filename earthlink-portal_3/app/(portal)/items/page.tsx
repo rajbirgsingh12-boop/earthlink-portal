@@ -64,6 +64,27 @@ export default function Items() {
     load();
   };
   const del = async (id: string) => { await sb().from(isContract ? "contract_items" : "price_items").delete().eq("id", id); load(); };
+
+  // ---------- inline editing: one row at a time flips into input mode ----------
+  const [editId, setEditId] = useState<string | null>(null);
+  const [edit, setEdit] = useState({ line: "", code: "", description: "", category: "", unit: "", unit_price: "" });
+  const startEdit = (it: Item) => {
+    setEditId(it.id);
+    setEdit({ line: String(it.line || ""), code: it.code || "", description: it.description || "", category: it.category || "", unit: it.unit || "", unit_price: String(it.unit_price ?? "") });
+  };
+  const saveEdit = async () => {
+    if (!editId) return;
+    const base = { code: edit.code, category: edit.category, description: edit.description, unit_price: parseNum(edit.unit_price), line: Math.round(parseNum(edit.line)) };
+    const payload = isContract ? { ...base, uom: edit.unit } : { ...base, unit: edit.unit };
+    let { error } = await sb().from(isContract ? "contract_items" : "price_items").update(payload).eq("id", editId);
+    if (error && /column|schema cache/i.test(error.message)) {
+      const { line: _l, ...rest } = payload;
+      ({ error } = await sb().from(isContract ? "contract_items" : "price_items").update(rest).eq("id", editId));
+    }
+    if (error) { flash(error.message); return; }
+    setEditId(null); flash("Item saved");
+    load();
+  };
   const removeAll = async () => {
     setBusy(true);
     const { error } = isContract
@@ -179,17 +200,38 @@ export default function Items() {
             <th className="p-2.5">Line</th><th className="p-2.5">Item</th><th className="p-2.5">Description</th><th className="p-2.5">UOM</th><th className="p-2.5 text-right">Price</th><th></th></tr></thead>
           <tbody>
             {list.map((it) => (
-              <tr key={it.id} className="border-b border-rulesoft align-top">
-                <td className="p-2.5 font-mono text-xs">{it.line || ""}</td>
-                <td className="p-2.5 font-mono text-xs">{it.code}</td>
-                <td className="p-2.5">
-                  {it.description}
-                  {it.category && <div className="text-[11px] text-inksoft">{it.category}</div>}
-                </td>
-                <td className="p-2.5 font-mono text-xs">{it.unit}</td>
-                <td className="p-2.5 text-right font-mono">{fmt(Number(it.unit_price))}</td>
-                <td className="p-2.5 text-right"><button className="text-xs text-alert" onClick={() => del(it.id)}>✕</button></td>
-              </tr>
+              editId === it.id ? (
+                <tr key={it.id} className="border-b border-rulesoft bg-paper align-top">
+                  <td className="p-1.5"><input className="field w-16 px-1.5 py-1.5 text-right font-mono" inputMode="numeric" value={edit.line} onChange={(e) => setEdit({ ...edit, line: e.target.value })} /></td>
+                  <td className="p-1.5"><input className="field w-24 px-1.5 py-1.5 font-mono" value={edit.code} onChange={(e) => setEdit({ ...edit, code: e.target.value })} /></td>
+                  <td className="p-1.5">
+                    <input className="field mb-1" placeholder="Description" value={edit.description} onChange={(e) => setEdit({ ...edit, description: e.target.value })} />
+                    <input className="field" placeholder="Category" value={edit.category} onChange={(e) => setEdit({ ...edit, category: e.target.value })} />
+                  </td>
+                  <td className="p-1.5"><input className="field w-16 px-1.5 py-1.5 text-center font-mono" value={edit.unit} onChange={(e) => setEdit({ ...edit, unit: e.target.value })} /></td>
+                  <td className="p-1.5"><input className="field w-24 px-1.5 py-1.5 text-right font-mono" inputMode="decimal" value={edit.unit_price}
+                    onChange={(e) => setEdit({ ...edit, unit_price: e.target.value })} onKeyDown={(e) => e.key === "Enter" && saveEdit()} /></td>
+                  <td className="whitespace-nowrap p-1.5 text-right">
+                    <button className="btn btn-primary px-2.5 py-1 text-[12px]" onClick={saveEdit}>Save</button>
+                    <button className="ml-1.5 text-xs text-inksoft underline" onClick={() => setEditId(null)}>cancel</button>
+                  </td>
+                </tr>
+              ) : (
+                <tr key={it.id} className="border-b border-rulesoft align-top">
+                  <td className="p-2.5 font-mono text-xs">{it.line || ""}</td>
+                  <td className="p-2.5 font-mono text-xs">{it.code}</td>
+                  <td className="p-2.5">
+                    {it.description}
+                    {it.category && <div className="text-[11px] text-inksoft">{it.category}</div>}
+                  </td>
+                  <td className="p-2.5 font-mono text-xs">{it.unit}</td>
+                  <td className="p-2.5 text-right font-mono">{fmt(Number(it.unit_price))}</td>
+                  <td className="whitespace-nowrap p-2.5 text-right">
+                    <button className="text-xs text-inksoft" title="Edit this item" onClick={() => startEdit(it)}>✎</button>
+                    <button className="ml-2 text-xs text-alert" title="Remove this item" onClick={() => del(it.id)}>✕</button>
+                  </td>
+                </tr>
+              )
             ))}
             {list.length === 0 && <tr><td colSpan={6} className="p-4 text-inksoft">{isContract ? "This contract has no price book yet — hit Upload sheet and drop the contract's price sheet." : "No items yet. Upload a sheet or add the first item."}</td></tr>}
           </tbody>

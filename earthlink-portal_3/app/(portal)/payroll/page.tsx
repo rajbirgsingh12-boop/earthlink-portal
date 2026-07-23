@@ -268,7 +268,9 @@ export default function Payroll() {
       const aoa: (string | number)[][] = [];
       aoa.push([`Earth Link General Construction`]);
       aoa.push([]);
-      aoa.push(["Contract", c ? (/^\d+$/.test(c.number) ? Number(c.number) : c.number) : "(no release linked)", "", "", "Week ending", prettyDate(openWeek.week_ending)]);
+      // contract number stays a text cell — a numeric cell shows long NYCHA numbers in scientific notation
+      const contractText = c ? (c.name && c.name !== c.number ? `${c.number} — ${c.name}` : String(c.number)) : "(no release linked)";
+      aoa.push(["Contract", contractText, "", "", "Week ending", prettyDate(openWeek.week_ending)]);
       aoa.push([]);
       aoa.push(["", "", "", "Overtime", "Overtime", "", "", "", "", "", ""]);
       aoa.push(["Worker", "", "", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Category"]);
@@ -281,11 +283,16 @@ export default function Payroll() {
       const headerRow = 5, firstData = 6, totalRow = firstData + workers.length;
       ws["!merges"] = [
         { s: { r: 0, c: 0 }, e: { r: 0, c: 10 } },
+        { s: { r: 2, c: 1 }, e: { r: 2, c: 3 } },  // contract number spans B–D so it never gets cut off
+        { s: { r: 2, c: 5 }, e: { r: 2, c: 6 } },  // week-ending date spans F–G
         ...Array.from({ length: workers.length + 1 }, (_, i) => ({ s: { r: firstData + i, c: 0 }, e: { r: firstData + i, c: 2 } })),
       ];
       const cellAt = (row: number, col: number) => ws[XLSX.utils.encode_cell({ r: row, c: col })] || (ws[XLSX.utils.encode_cell({ r: row, c: col })] = { t: "s", v: "" });
-      cellAt(0, 0).s = { font: { bold: true, sz: 14 } };
+      cellAt(0, 0).s = { font: { bold: true, sz: 14 }, alignment: { vertical: "center" } };
       cellAt(2, 0).s = { font: { bold: true } }; cellAt(2, 4).s = { font: { bold: true } };
+      cellAt(2, 1).s = { font: { bold: true }, alignment: { horizontal: "left" } };
+      cellAt(2, 1).t = "s"; // force text so Excel never re-reads the number as scientific notation
+      cellAt(2, 5).s = { font: { bold: true } };
       for (const col of [3, 4]) cellAt(4, col).s = { font: { bold: true, color: { rgb: "B3510F" } }, alignment: { horizontal: "center" } };
       for (let row = headerRow; row <= totalRow; row++) {
         for (let col = 0; col < 11; col++) {
@@ -301,7 +308,7 @@ export default function Payroll() {
       ws["!rows"][0] = { hpt: 24 };
       ws["!rows"][headerRow] = { hpt: 22 };
       for (let row = firstData; row <= totalRow; row++) ws["!rows"][row] = { hpt: 19 };
-      let name = (c ? c.number : "General").slice(0, 31) || "General";
+      let name = (c ? String(c.number) : "General").replace(/[\\/?*[\]:]/g, "-").slice(0, 31) || "General";
       while (usedNames.has(name)) name = `${name}_`.slice(0, 31);
       usedNames.add(name);
       XLSX.utils.book_append_sheet(wb, ws, name);
@@ -350,7 +357,7 @@ export default function Payroll() {
                 {rels
                   .filter((r) => !linkContract || r.contract_id === linkContract)
                   .filter((r) => relLabel(r).toLowerCase().includes(relPickQ.trim().toLowerCase()))
-                  .slice(0, 8).map((r) => (
+                  .map((r) => (
                     <button key={r.id} className="block w-full border-b border-rulesoft p-2.5 text-left text-sm"
                       onMouseDown={(ev) => { ev.preventDefault(); setExtraSections((prev) => (prev.some((x) => x.release_id === r.id) ? prev : [...prev, { release_id: r.id, label: `#${r.rel_number} — ${r.location}` }])); setRelPickQ(""); setAddFor(r.id); setAddQ(""); }}>
                       {relLabel(r)}
@@ -385,10 +392,11 @@ export default function Payroll() {
             const relInfo = rel ? { id: rel.id as string | null, label: `#${rel.rel_number} — ${rel.location}` } : { id: null as string | null, label: "" };
             const inSection = new Set(ents.map((e) => e.employee_id));
             const query = addQ.trim().toLowerCase();
-            const crewMatch = emps.filter((e) => e.active !== false).filter((e) => !query || e.name.toLowerCase().includes(query)).slice(0, 8);
+            // full roster — the dropdown scrolls, so never hide anyone behind a cap
+            const crewMatch = emps.filter((e) => e.active !== false).filter((e) => !query || e.name.toLowerCase().includes(query));
             const tplMatch = TEMPLATE_CREW.map((t, i) => ({ ...t, idx: i }))
               .filter((t) => !emps.some((e) => e.name.trim().toLowerCase() === t.name.toLowerCase()))
-              .filter((t) => !query || t.name.toLowerCase().includes(query)).slice(0, 8);
+              .filter((t) => !query || t.name.toLowerCase().includes(query));
             const contract = rel ? contracts.find((x) => x.id === rel.contract_id) : null;
             return (
               <div key={sec.key} className="card mb-3 p-3.5">
@@ -454,7 +462,7 @@ export default function Payroll() {
                     <input className="field" autoFocus placeholder="Type a worker's name…" value={addQ}
                       onChange={(e) => setAddQ(e.target.value)}
                       onBlur={() => setTimeout(() => setAddFor((cur) => (cur === sec.key ? null : cur)), 150)} />
-                    <div className="card absolute inset-x-0 top-full z-10 max-h-56 overflow-y-auto shadow-lg">
+                    <div className="card absolute inset-x-0 top-full z-10 max-h-80 overflow-y-auto shadow-lg">
                       {crewMatch.map((e) => (
                         <button key={e.id} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
                           onMouseDown={(ev) => { ev.preventDefault(); addEntry(e.id, e, relInfo); setAddQ(""); }}>

@@ -21,7 +21,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
   const role = profile?.role;
   const tabs: [string, string][] = [["/", "Home"], ["/releases", "Releases"]];
   if (role === "admin" || role === "office") {
-    tabs.push(["/items", "Price Book"], ["/proposals", "Proposals"], ["/pact", "PACT"], ["/payroll", "Payroll"], ["/statements", "Invoices & Statements"], ["/settings", "Settings"]);
+    tabs.push(["/items", "Price Book"], ["/proposals", "Proposals"], ["/pact", "PACT"], ["/schedule", "Schedule"], ["/payroll", "Payroll"], ["/statements", "Invoices & Statements"], ["/settings", "Settings"]);
   } else if (role === "accountant") {
     tabs.push(["/pact", "PACT"], ["/payroll", "Payroll"], ["/statements", "Invoices & Statements"]);
   }

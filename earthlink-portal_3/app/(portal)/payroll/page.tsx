@@ -12,7 +12,7 @@ import { useLive } from "@/lib/useLive";
 import type { Contract } from "@/lib/types";
 import { TEMPLATE_CREW } from "@/lib/crew";
 import { useNumBuffer } from "@/lib/numBuffer";
-import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
+import { cleanPhone, prettyPhone } from "@/lib/notify";
 
 interface Emp { id: string; name: string; trade: string; base_rate: number; active: boolean; phone?: string | null; }
 interface Week { id: string; week_ending: string; paid_map?: Record<string, string> | null; }
@@ -66,9 +66,7 @@ export default function Payroll() {
   const [relPickQ, setRelPickQ] = useState(""); // the "+ Add a release" search
   const [addFor, setAddFor] = useState<string | null>(null); // section currently adding a worker
   const [addQ, setAddQ] = useState("");
-  // tap-to-text: which release card has its notify panel open, plus the message's work description
-  const [notifyFor, setNotifyFor] = useState<string | null>(null);
-  const [notifyDesc, setNotifyDesc] = useState("");
+  // crew phone numbers (used by the Schedule tab's tap-to-text)
   const [phoneBuf, setPhoneBuf] = useState<Record<string, string>>({});
   const checkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
@@ -531,20 +529,12 @@ export default function Payroll() {
                     {rel && <span className="ml-2 text-[14px]">{rel.location}</span>}
                     {contract && <span className="ml-1.5 text-[11px] text-inksoft">· {contractLabel(contract)}</span>}
                   </div>
-                  <span className="flex flex-wrap items-center gap-2">
-                    {check && (
-                      <span className="flex items-center gap-2">
-                        <span className="font-mono text-xs">{check.result.totalLogged}/{check.result.totalRequired}h</span>
-                        {check.result.ok ? <Stamp label="MEETS MIN" tone="ok" /> : <Stamp label="NEEDS MORE" tone="alert" />}
-                      </span>
-                    )}
-                    {rel && ents.length > 0 && (
-                      <button className="btn btn-ghost px-2.5 py-1 text-[12px]"
-                        onClick={() => { setNotifyFor((cur) => (cur === sec.key ? null : sec.key)); setNotifyDesc(""); }}>
-                        📱 Text crew
-                      </button>
-                    )}
-                  </span>
+                  {check && (
+                    <span className="flex items-center gap-2">
+                      <span className="font-mono text-xs">{check.result.totalLogged}/{check.result.totalRequired}h</span>
+                      {check.result.ok ? <Stamp label="MEETS MIN" tone="ok" /> : <Stamp label="NEEDS MORE" tone="alert" />}
+                    </span>
+                  )}
                 </div>
                 {check && check.result.rows.length > 0 && (
                   <div className="mb-2 flex flex-wrap gap-1.5">
@@ -555,44 +545,6 @@ export default function Payroll() {
                     ))}
                   </div>
                 )}
-                {notifyFor === sec.key && rel && (() => {
-                  const crew = [...new Map(ents.map((en) => [en.employee_id, emps.find((e) => e.id === en.employee_id)])).values()]
-                    .filter((e): e is Emp => !!e).sort((a, b) => a.name.localeCompare(b.name));
-                  const desc = notifyDesc.trim();
-                  const msgFor = (who?: string) =>
-                    `Earth Link:${who ? ` ${who},` : ""} you're assigned to Release #${rel.rel_number} at ${rel.location}.${desc ? ` Work: ${desc}` : ""}`;
-                  return (
-                    <div className="mb-2.5 rounded-sm border border-rulesoft bg-paper p-2.5">
-                      <div className="mb-1.5 text-[11px] uppercase tracking-widest text-inksoft">
-                        Text the crew — release # and location fill in automatically
-                      </div>
-                      <input className="field mb-1" placeholder="Work description (what should they do there?)"
-                        value={notifyDesc} onChange={(e) => setNotifyDesc(e.target.value)} />
-                      {crew.map((e) => {
-                        const buf = phoneBuf[e.id] ?? prettyPhone(e.phone || "");
-                        const ok = !!cleanPhone(buf);
-                        return (
-                          <div key={e.id} className="flex flex-wrap items-center gap-2 border-t border-rulesoft py-1.5 first:border-t-0">
-                            <b className="text-[13px]">{e.name}</b>
-                            <input className="field w-44 px-2 py-1.5 text-[13px]" placeholder="Phone number" inputMode="tel"
-                              value={buf} onChange={(ev) => setPhoneBuf((p) => ({ ...p, [e.id]: ev.target.value }))}
-                              onBlur={() => { if (cleanPhone(buf) !== cleanPhone(e.phone || "")) savePhone(e.id, buf); }} />
-                            {ok
-                              ? <a className="btn px-3 py-1.5 text-[13px]" href={smsHref(buf, msgFor(e.name.split(" ")[0]))}>Text 📱</a>
-                              : <span className="text-[11px] text-inksoft">add a number to text them</span>}
-                          </div>
-                        );
-                      })}
-                      <div className="mt-1.5 flex flex-wrap items-center gap-2 border-t border-rulesoft pt-2">
-                        <button className="btn btn-ghost px-3 py-1.5 text-[12px]"
-                          onClick={() => { navigator.clipboard?.writeText(msgFor()); flash("Message copied — paste it into any group chat"); }}>
-                          Copy message
-                        </button>
-                        <span className="text-[11px] text-inksoft">numbers save to the crew list for next time</span>
-                      </div>
-                    </div>
-                  );
-                })()}
                 {ents.map((en) => {
                   const emp = emps.find((e) => e.id === en.employee_id);
                   const set = (patch: Partial<Entry>) => setEntries((prev) => prev.map((x) => (x.id === en.id ? { ...x, ...patch } : x)));

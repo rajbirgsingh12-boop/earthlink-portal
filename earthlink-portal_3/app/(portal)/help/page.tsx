@@ -43,13 +43,21 @@ const SECTIONS: { icon: string; title: string; lines: string[] }[] = [
     ],
   },
   {
+    icon: "📅", title: "Schedule",
+    lines: [
+      "Pick the day (Today / Tomorrow / any date), add a release, then assign workers to it.",
+      "Assigning a worker whose number is saved opens a ready-made text — release #, location, and work description already written. Just hit send.",
+      "The TEXTED ✓ stamp shows who's been told. “Text again” resends; “Copy message” is for group chats.",
+    ],
+  },
+  {
     icon: "⏱", title: "Payroll",
     lines: [
       "Tap the one big button — Make payroll. It opens this week and brings the crew over from last week.",
       "The week opens on today: type each person's hours, one number each. Tap a name to link their hours to a release or change their classification.",
       "The Release hours check shows if a release has enough hours per trade — green means it meets the NYCHA minimum.",
       "“Weekly sheet (xlsx)” downloads the paper-style sheet. The PAID stamps track who's been paid.",
-      "📱 Text crew on a release card opens a ready-made text for each worker with the release #, location, and work description — save each worker's number once (in the Crew list) and it's one tap after that.",
+      "The Crew list holds each worker's phone number — enter it once and the Schedule tab texts them with one tap.",
     ],
   },
   {

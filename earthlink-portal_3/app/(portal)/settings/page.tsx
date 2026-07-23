@@ -180,6 +180,7 @@ export default function Settings() {
       { label: "Payroll paid marks", fix: "upgrade_payroll_paid.sql", probe: async () => !(await sb().from("timesheet_weeks").select("paid_map").limit(1)).error },
       { label: "Payroll entry classifications", fix: "upgrade_payroll_class.sql", probe: async () => !(await sb().from("timesheet_entries").select("trade").limit(1)).error },
       { label: "Worker phone numbers (tap-to-text)", fix: "upgrade_worker_phone.sql", probe: async () => !(await sb().from("employees").select("phone").limit(1)).error },
+      { label: "Day schedule (Schedule tab)", fix: "upgrade_day_schedule.sql", probe: async () => !(await sb().from("schedule_days").select("id").limit(1)).error },
       { label: "PACT schedule dates", fix: "upgrade_schedule.sql", probe: async () => !(await sb().from("pact_jobs").select("start_date,finish_date").limit(1)).error },
       { label: "PACT jobs & invoicing", fix: "upgrade_pact.sql", probe: async () => !(await sb().from("pact_jobs").select("id,po_number,items,tax_pct,invoice_number").limit(1)).error },
     ];

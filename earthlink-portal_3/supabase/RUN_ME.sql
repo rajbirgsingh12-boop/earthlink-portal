@@ -184,3 +184,28 @@ do $$ begin alter publication supabase_realtime add table pact_jobs; exception w
 
 -- ---------- from upgrade_worker_phone.sql ----------
 alter table employees add column if not exists phone text default '';
+
+-- ---------- from upgrade_day_schedule.sql ----------
+create table if not exists schedule_days (
+  id uuid primary key default gen_random_uuid(),
+  day text not null,
+  release_id uuid references releases(id) on delete cascade,
+  employee_id uuid not null references employees(id) on delete cascade,
+  description text default '',
+  texted boolean default false,
+  created_at timestamptz default now()
+);
+alter table schedule_days enable row level security;
+do $$ begin
+  create policy "schedule_days read" on schedule_days for select using (my_role() in ('admin','office','accountant'));
+exception when duplicate_object then null; end $$;
+do $$ begin
+  create policy "schedule_days ins" on schedule_days for insert with check (my_role() in ('admin','office'));
+exception when duplicate_object then null; end $$;
+do $$ begin
+  create policy "schedule_days upd" on schedule_days for update using (my_role() in ('admin','office'));
+exception when duplicate_object then null; end $$;
+do $$ begin
+  create policy "schedule_days del" on schedule_days for delete using (my_role() in ('admin','office'));
+exception when duplicate_object then null; end $$;
+do $$ begin alter publication supabase_realtime add table schedule_days; exception when duplicate_object then null; end $$;

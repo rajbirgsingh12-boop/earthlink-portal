@@ -246,12 +246,20 @@ export default function Payroll() {
       if (!groups.has(cid)) groups.set(cid, []);
       groups.get(cid)!.push(en);
     });
+    // a worker's real day total spans every release they touched that day — used for the over-8h flag
+    const dayTotByEmp = new Map<string, number[]>();
+    entries.forEach((en) => {
+      const arr = dayTotByEmp.get(en.employee_id) || [0, 0, 0, 0, 0, 0, 0];
+      en.hours.forEach((h, i) => (arr[i] += Number(h) || 0));
+      dayTotByEmp.set(en.employee_id, arr);
+    });
     const wb = XLSX.utils.book_new();
     const thin = { style: "thin", color: { rgb: "000000" } };
     const box = { top: thin, bottom: thin, left: thin, right: thin };
     const shade = { patternType: "solid", fgColor: { rgb: "E8E4DA" } };
     const otShade = { patternType: "solid", fgColor: { rgb: "FBE9DC" } };
     const bandShade = { patternType: "solid", fgColor: { rgb: "F3F0E8" } };
+    const overShade = { patternType: "solid", fgColor: { rgb: "FDE2E2" } };
     const usedNames = new Set<string>();
     for (const [cid, ents] of groups) {
       const c = contracts.find((x) => x.id === cid);
@@ -271,10 +279,10 @@ export default function Payroll() {
       const contractText = c ? (c.name && c.name !== c.number ? `${c.number} — ${c.name}` : String(c.number)) : "(no release linked)";
       aoa.push(["Contract", contractText, "", "", "Week ending", prettyDate(openWeek.week_ending)]);
       aoa.push([]);
-      aoa.push(["", "", "", "Overtime", "Overtime", "", "", "", "", "", ""]);
-      aoa.push(["Worker", "", "", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Category"]);
+      aoa.push(["", "", "", "Overtime", "Overtime", "", "", "", "", "", "", ""]);
+      aoa.push(["Worker", "", "", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Category", "Total Hrs"]);
       const bandRows: number[] = [];
-      const nameRows: number[] = [];
+      const nameRows: { row: number; eid: string }[] = [];
       const totals = [0, 0, 0, 0, 0, 0, 0];
       for (const rid of relOrder) {
         const rel = relById.get(rid);
@@ -289,24 +297,30 @@ export default function Payroll() {
           if (t) (tradesBy[en.employee_id] ||= new Map()).set(t.toLowerCase(), t);
         });
         const workers = Object.entries(by)
-          .map(([eid, days]) => ({ emp: emps.find((e) => e.id === eid), days, cat: [...(tradesBy[eid]?.values() || [])].join(" / ") }))
+          .map(([eid, days]) => ({ eid, emp: emps.find((e) => e.id === eid), days, cat: [...(tradesBy[eid]?.values() || [])].join(" / ") }))
           .sort((a, b) => (a.emp?.name || "").localeCompare(b.emp?.name || ""));
-        workers.forEach(({ emp, days, cat }) => {
-          nameRows.push(aoa.length);
-          aoa.push([emp?.name || "?", "", "", ...days.map((d) => d || ""), cat || (emp?.trade || "").trim()]);
+        workers.forEach(({ eid, emp, days, cat }) => {
+          nameRows.push({ row: aoa.length, eid });
+          aoa.push([emp?.name || "?", "", "", ...days.map((d) => d || ""), cat || (emp?.trade || "").trim(), days.reduce((s, d) => s + d, 0)]);
           days.forEach((d, i) => (totals[i] += d));
         });
       }
-      aoa.push(["Total", "", "", ...totals, ""]);
+      aoa.push(["Total", "", "", ...totals, "", totals.reduce((s, d) => s + d, 0)]);
       const ws = XLSX.utils.aoa_to_sheet(aoa);
-      ws["!cols"] = [{ wch: 24 }, { wch: 5 }, { wch: 5 }, { wch: 11 }, { wch: 11 }, { wch: 11 }, { wch: 11 }, { wch: 12 }, { wch: 11 }, { wch: 11 }, { wch: 16 }];
+      ws["!cols"] = [{ wch: 24 }, { wch: 5 }, { wch: 5 }, { wch: 11 }, { wch: 11 }, { wch: 11 }, { wch: 11 }, { wch: 12 }, { wch: 11 }, { wch: 11 }, { wch: 16 }, { wch: 10 }];
       const headerRow = 5, firstData = 6, totalRow = aoa.length - 1;
+      // flag any day where the worker's combined hours (all releases together) run past 8
+      const overCells = new Set<string>();
+      nameRows.forEach(({ row, eid }) => {
+        const tot = dayTotByEmp.get(eid) || [];
+        for (let i = 0; i < 7; i++) if ((tot[i] || 0) > 8) overCells.add(`${row}:${i + 3}`);
+      });
       ws["!merges"] = [
-        { s: { r: 0, c: 0 }, e: { r: 0, c: 10 } },
+        { s: { r: 0, c: 0 }, e: { r: 0, c: 11 } },
         { s: { r: 2, c: 1 }, e: { r: 2, c: 3 } },  // contract number spans B–D so it never gets cut off
         { s: { r: 2, c: 5 }, e: { r: 2, c: 6 } },  // week-ending date spans F–G
-        ...bandRows.map((row) => ({ s: { r: row, c: 0 }, e: { r: row, c: 10 } })),
-        ...nameRows.map((row) => ({ s: { r: row, c: 0 }, e: { r: row, c: 2 } })),
+        ...bandRows.map((row) => ({ s: { r: row, c: 0 }, e: { r: row, c: 11 } })),
+        ...nameRows.map(({ row }) => ({ s: { r: row, c: 0 }, e: { r: row, c: 2 } })),
         { s: { r: totalRow, c: 0 }, e: { r: totalRow, c: 2 } },
       ];
       const cellAt = (row: number, col: number) => ws[XLSX.utils.encode_cell({ r: row, c: col })] || (ws[XLSX.utils.encode_cell({ r: row, c: col })] = { t: "s", v: "" });
@@ -319,15 +333,23 @@ export default function Payroll() {
       const bandSet = new Set(bandRows);
       for (let row = headerRow; row <= totalRow; row++) {
         const isBand = bandSet.has(row);
-        for (let col = 0; col < 11; col++) {
+        for (let col = 0; col < 12; col++) {
           const cell = cellAt(row, col);
-          const s: Record<string, unknown> = { border: box, alignment: { vertical: "center", horizontal: !isBand && col >= 3 && col <= 9 ? "center" : "left" } };
-          if (row === headerRow || row === totalRow || isBand) s.font = { bold: true };
+          const s: Record<string, unknown> = { border: box, alignment: { vertical: "center", horizontal: !isBand && ((col >= 3 && col <= 9) || col === 11) ? "center" : "left" } };
+          if (row === headerRow || row === totalRow || isBand || col === 11) s.font = { bold: true };
           if (row === headerRow) s.fill = shade;
           else if (isBand) s.fill = bandShade;
+          else if (overCells.has(`${row}:${col}`)) { s.fill = overShade; s.font = { bold: true, color: { rgb: "B42318" } }; }
           else if (col === 3 || col === 4) s.fill = otShade; // Sat/Sun = overtime columns
           cell.s = s;
         }
+      }
+      if (overCells.size > 0) {
+        const noteRow = totalRow + 2;
+        const noteCell = cellAt(noteRow, 0);
+        noteCell.v = "Red = worker over 8 hours that day (all releases combined)";
+        noteCell.s = { font: { italic: true, color: { rgb: "B42318" }, sz: 10 } };
+        ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: noteRow, c: 11 } });
       }
       ws["!rows"] = [];
       ws["!rows"][0] = { hpt: 24 };
@@ -473,11 +495,16 @@ export default function Payroll() {
                   const canon = canonTrade(clsText);
                   const reqClasses = (rel?.labor_breakdown || []).map((b) => canonTrade(b.cls));
                   const fits = reqClasses.includes(canon);
+                  // combined day totals across every release this worker is on — >8h in a day gets flagged
+                  const empDayTot = Array.from({ length: 7 }, (_, i) =>
+                    entries.filter((x) => x.employee_id === en.employee_id).reduce((s, x) => s + (Number(x.hours[i]) || 0), 0));
+                  const overDays = DAYS.filter((_, i) => empDayTot[i] > 8);
                   return (
                     <div key={en.id} className="border-t border-rulesoft py-2.5 first:border-t-0">
                       <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
                         <b className="text-[14px]">{emp?.name || "?"}</b>
                         <div className="flex flex-wrap items-center gap-2">
+                          {overDays.length > 0 && <Stamp label={`OVER 8H ${overDays.join(" ")}`} tone="alert" />}
                           <input className="field w-40 px-2 py-1.5 text-[13px]" placeholder="Classification"
                             value={en.trade ?? emp?.trade ?? ""} onChange={(e) => set({ trade: e.target.value })} onBlur={() => saveEntry(en)} />
                           {clsText !== "" && reqClasses.length > 0 && (fits ? <Stamp label={`✓ ${canon}`} tone="ok" /> : <Stamp label={`no ${canon} req`} tone="work" />)}
@@ -488,8 +515,8 @@ export default function Payroll() {
                       <div className="grid grid-cols-7 gap-1.5">
                         {DAYS.map((d, i) => (
                           <div key={d}>
-                            <div className={`text-center text-[10px] uppercase tracking-wide ${i < 2 ? "font-semibold text-work" : "text-inksoft"}`}>{d}{i < 2 ? "·OT" : ""}</div>
-                            <input className={`field px-1 py-2 text-center font-mono ${i < 2 ? "bg-work/5" : ""}`} inputMode="decimal" placeholder="0"
+                            <div className={`text-center text-[10px] uppercase tracking-wide ${empDayTot[i] > 8 ? "font-semibold text-alert" : i < 2 ? "font-semibold text-work" : "text-inksoft"}`}>{d}{i < 2 ? "·OT" : ""}</div>
+                            <input className={`field px-1 py-2 text-center font-mono ${empDayTot[i] > 8 ? "bg-alert/10 ring-1 ring-alert" : i < 2 ? "bg-work/5" : ""}`} inputMode="decimal" placeholder="0"
                               {...num(`${en.id}:h${i}`, Number(en.hours[i]) || 0,
                                 (n) => { const hours = [...en.hours]; hours[i] = n; set({ hours }); },
                                 (n) => { const hours = [...en.hours]; hours[i] = n; saveEntry({ ...en, hours }); })} />

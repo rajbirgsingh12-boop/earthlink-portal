@@ -420,6 +420,9 @@ export default function Proposals() {
               <ContractPicker contracts={contracts} value={doc.contract_id || ""} onChange={(id) => saveDoc({ contract_id: id }, true)} /></div>
             <button className="self-end pb-2 text-left text-[11px] font-semibold uppercase tracking-widest text-inksoft hover:text-ink"
               onClick={() => setShowHead(!showHead)}>{showHead ? "▴ Hide sheet header" : "▾ Sheet header (dates, staff, apt…)"}</button>
+            <div className="col-span-2"><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Address of the location</div>
+              <input className="field" placeholder="e.g. 21-10 41st Ave, Queensbridge" value={doc.address || ""}
+                onChange={(e) => setDoc({ ...doc, address: e.target.value })} onBlur={(e) => saveDoc({ address: e.target.value }, true)} /></div>
           </div>
           {showHead && (
             <div className="mt-2.5 grid grid-cols-2 gap-2.5 border-t border-rulesoft pt-2.5 md:grid-cols-4">
@@ -607,14 +610,15 @@ export default function Proposals() {
           <div key={p.id} className="p-3.5">
             <button className="flex w-full items-center justify-between gap-2 text-left" onClick={() => openEditor(p)}>
               <div className="min-w-0">
-                <div className="text-[13px] font-semibold">
-                  <span className="font-mono">{p.number}</span>
-                  {p.contract_id && p.job && <span className="ml-2">{p.job}</span>}
+                <div className="text-[14px] font-semibold">
+                  {p.job
+                    ? <>{p.job}<span className="ml-1.5 font-mono text-[11px] font-normal text-inksoft">{p.number}</span></>
+                    : <span className="font-mono">{p.number}</span>}
                 </div>
                 <div className="truncate text-[13px] text-inksoft">
                   {p.contract_id
                     ? [p.development || (p.job ? "" : "NYCHA walk"), p.address, p.apt && `Apt ${p.apt}`, p.stairhall && `Stair ${p.stairhall}`, p.release_number && `Rel ${p.release_number}`].filter(Boolean).join(" · ")
-                    : `${p.client_name || "No client"}${p.job ? ` · ${p.job}` : ""}`}
+                    : p.client_name || "No client"}
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-2.5">

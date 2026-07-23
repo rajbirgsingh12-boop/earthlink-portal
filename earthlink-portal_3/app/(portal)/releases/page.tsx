@@ -586,16 +586,27 @@ export default function Releases() {
     e.target.value = "";
   };
 
+  // finds the contract in the DATABASE (not just this page's list, which can be
+  // stale right after another import created it), creating it if truly new
+  const resolveContract = async (num: string): Promise<Contract | null> => {
+    const { data: found } = await sb().from("contracts").select("id,number,name").eq("number", num).limit(1);
+    if (found && found[0]) return found[0] as Contract;
+    const { data, error } = await sb().from("contracts").insert({ number: num, name: num }).select().single();
+    if (data) return data as Contract;
+    if (error && /duplicate|unique/i.test(error.message)) {
+      const { data: again } = await sb().from("contracts").select("id,number,name").eq("number", num).limit(1);
+      if (again && again[0]) return again[0] as Contract;
+    }
+    flash(error?.message || "Couldn't create the contract");
+    return null;
+  };
+
   const runImport = async (mode: "replace" | "append") => {
     if (!pending) return;
     setBusy(true);
     const num = (pending.guess || "Contract").trim();
-    let contract = contracts.find((c) => c.number === num);
-    if (!contract) {
-      const { data, error } = await sb().from("contracts").insert({ number: num, name: num }).select().single();
-      if (error) { flash(error.message); setBusy(false); return; }
-      contract = data as Contract;
-    }
+    const contract = await resolveContract(num);
+    if (!contract) { setBusy(false); return; }
     if (mode === "replace") {
       // merge-style replace: releases already here are UPDATED in place (payroll
       // links, photos and invoice dates survive), new ones are added, leftovers
@@ -685,9 +696,9 @@ export default function Releases() {
           const num = parsed.contract.trim() || "Contract";
           let contract = cCache.get(num);
           if (!contract) {
-            const { data: nc, error } = await sb().from("contracts").insert({ number: num, name: num }).select().single();
-            if (error || !nc) { failed.push(file.name); continue; }
-            contract = nc as Contract; cCache.set(num, contract);
+            const nc = await resolveContract(num);
+            if (!nc) { failed.push(file.name); continue; }
+            contract = nc; cCache.set(num, contract);
           }
           used.add(contract.id);
           const breakdown = parsed.items.filter((it) => it.uom === "HOUR")
@@ -828,12 +839,8 @@ export default function Releases() {
     if (!pdfPending) return;
     setBusy(true);
     const num = pdfPending.contract.trim() || "Contract";
-    let contract = contracts.find((c) => c.number === num);
-    if (!contract) {
-      const { data, error } = await sb().from("contracts").insert({ number: num, name: num }).select().single();
-      if (error) { flash(error.message); setBusy(false); return; }
-      contract = data as Contract;
-    }
+    const contract = await resolveContract(num);
+    if (!contract) { setBusy(false); return; }
     // if this release number already exists on the contract, UPDATE it instead of duplicating
     const { data: existing } = await sb().from("releases").select("id,buildings,address")
       .eq("contract_id", contract.id).eq("rel_number", pdfPending.rel).limit(1);
@@ -930,8 +937,7 @@ export default function Releases() {
             Total {fmt(pending.items.reduce((s, i) => s + i.amount, 0))} · canceled flagged: {pending.items.filter((i) => i.canceled).length}
           </div>
           <div className="flex flex-wrap gap-2">
-            <button className="btn btn-primary" onClick={() => runImport("replace")} disabled={busy}>Load (replace contract)</button>
-            <button className="btn" onClick={() => runImport("append")} disabled={busy}>Append</button>
+            <button className="btn btn-primary" onClick={() => runImport("replace")} disabled={busy}>Load</button>
             <button className="btn btn-ghost" onClick={() => setPending(null)}>Cancel</button>
           </div>
         </div>
@@ -1015,8 +1021,26 @@ export default function Releases() {
         </div>
       )}
 
-      {contracts.length > 1 && (
-        <div className="mb-3"><ContractPicker contracts={contracts} value={active} onChange={(id) => { setActive(id); setLimit(100); }} /></div>
+      {(contracts.length > 1 || (active && !readOnly)) && (
+        <div className="mb-3 flex items-center gap-2">
+          {contracts.length > 1 && (
+            <div className="min-w-0 flex-1"><ContractPicker contracts={contracts} value={active} onChange={(id) => { setActive(id); setLimit(100); }} /></div>
+          )}
+          {active && !readOnly && (
+            <button className="btn btn-ghost whitespace-nowrap" title="Give this contract a name you'll recognize"
+              onClick={async () => {
+                const c = contracts.find((x) => x.id === active);
+                if (!c) return;
+                const name = window.prompt(`Name for contract ${c.number}:`, c.name && c.name !== c.number ? c.name : "");
+                if (name === null) return;
+                const clean = name.trim() || c.number;
+                const { error } = await sb().from("contracts").update({ name: clean }).eq("id", c.id);
+                if (error) { flash(error.message); return; }
+                setContracts((prev) => prev.map((x) => (x.id === c.id ? { ...x, name: clean } : x)));
+                flash("Contract name saved");
+              }}>✎ Name</button>
+          )}
+        </div>
       )}
 
       {rows.length > 0 && (() => {

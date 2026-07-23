@@ -228,6 +228,9 @@ export default function Releases() {
 
   const live = rows.filter((r) => !r.canceled);
   const canceledRows = rows.filter((r) => r.canceled);
+  // same release number twice in one contract = something to clean up
+  const relCounts: Record<string, number> = {};
+  live.forEach((r) => { const k = String(r.rel_number).trim(); if (k) relCounts[k] = (relCounts[k] || 0) + 1; });
   // chase = work done and payroll submitted, waiting on NYCHA's money
   const notR = live.filter((r) => r.payroll_done && !r.received && Number(r.amount) > 0);
   // payroll to submit = still open releases whose payroll isn't in yet
@@ -628,10 +631,12 @@ export default function Releases() {
         const slice = removeIds.slice(i, i + 100);
         const { error } = await sb().from("releases").delete().in("id", slice);
         if (!error) { removed += slice.length; continue; }
-        // some are blocked (payroll hours linked) — try one by one, keep those
+        // some are blocked (payroll hours linked) — cancel those instead so they
+        // stop counting toward the totals; the hours stay safe, restore any time
         for (const id of slice) {
           const { error: e1 } = await sb().from("releases").delete().eq("id", id);
-          if (e1) kept++; else removed++;
+          if (e1) { await sb().from("releases").update({ canceled: true }).eq("id", id); kept++; }
+          else removed++;
         }
       }
       for (let i = 0; i < toInsert.length; i += 500) {
@@ -642,7 +647,7 @@ export default function Releases() {
       }
       setPending(null); setBusy(false);
       await loadContracts(); setActive(contract.id); await loadRows(contract.id);
-      flash(`Loaded into ${num} — ${updated} updated, ${added} added${removed ? `, ${removed} removed` : ""}${kept ? `, ${kept} kept (payroll hours linked)` : ""}`);
+      flash(`Loaded into ${num} — ${updated} updated, ${added} added${removed ? `, ${removed} removed` : ""}${kept ? `, ${kept} moved to Canceled (payroll hours linked — restore from the Canceled list if needed)` : ""}`);
       return;
     }
     for (let i = 0; i < pending.items.length; i += 500) {
@@ -1104,6 +1109,9 @@ export default function Releases() {
                             title="Payroll hours logged vs the release minimum — live from the Payroll tab">
                             ⏱ {got}{need > 0 ? `/${need}` : ""}h{need > 0 && got >= need ? " ✓" : ""}
                           </span>
+                        )}
+                        {relCounts[String(r.rel_number).trim()] > 1 && (
+                          <span className="ml-1 rounded-[2px] border border-alert px-1 py-px font-mono text-[9px] font-semibold text-alert" title="This release number appears more than once on this contract — cancel or delete the extra copy">DUPLICATE</span>
                         )}
                       </div>
                     );

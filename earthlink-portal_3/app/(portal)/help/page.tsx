@@ -45,10 +45,10 @@ const SECTIONS: { icon: string; title: string; lines: string[] }[] = [
   {
     icon: "📅", title: "Schedule",
     lines: [
-      "Pick the day (Today / Tomorrow / any date), add a release, write the work description, then tap + Assign worker.",
+      "Pick the day (Today / Tomorrow / any date), add a release, write the work description, then + Add worker for everyone going.",
       "🗺 Map opens a mini map window — type the address, check the pin, tap Use this location. The workers' texts then include a tap-to-navigate map link.",
-      "Picking the worker's name is what sends it: their text opens ready to go — date, release #, location, and work description already written. Just hit send.",
-      "The TEXTED ✓ stamp shows who's been told. Tap a worker's name on the card to open their text again.",
+      "Assign & text messages the whole crew in one tap — date, release #, address with map link, and the work description.",
+      "With the company number connected (Twilio keys in Vercel), texts send silently from that number; otherwise a group text opens on your phone. TEXTED ✓ shows who's been told; “resend” re-sends one person.",
     ],
   },
   {

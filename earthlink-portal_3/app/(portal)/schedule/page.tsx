@@ -9,7 +9,7 @@ import Stamp from "@/components/Stamp";
 import ContractPicker, { contractLabel } from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
 import type { Contract } from "@/lib/types";
-import { cleanPhone, smsHref } from "@/lib/notify";
+import { cleanPhone, smsHref, sendServerTexts, textMachineReady } from "@/lib/notify";
 
 interface Emp { id: string; name: string; trade: string; active?: boolean; phone?: string | null; }
 interface RelRow { id: string; rel_number: string; location: string; contract_id: string; address?: string | null; }
@@ -37,7 +37,10 @@ export default function Schedule() {
   const [mapQ, setMapQ] = useState("");
   const [mapInput, setMapInput] = useState("");
   const [msg, setMsg] = useState("");
-  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3000); };
+  const [machine, setMachine] = useState(false); // company Twilio number configured?
+  const [sending, setSending] = useState<string | null>(null); // release currently texting
+  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 4000); };
+  useEffect(() => { textMachineReady().then(setMachine); }, []);
 
   const load = async () => {
     const { data: { user } } = await sb().auth.getUser();
@@ -80,9 +83,8 @@ export default function Schedule() {
       + `${desc ? ` Work: ${desc}` : ""}${addr ? ` Map: ${mapLink(addr)}` : ""}`;
   };
 
-  // assign, then text on the spot if the number's on file (the tap that assigns
-  // is the same tap that opens Messages — nothing automatic happens in the background)
-  const assign = async (rel: RelRow, emp: Emp) => {
+  // + Add worker just adds them to the day — no message goes out until Assign & text
+  const addWorker = async (rel: RelRow, emp: Emp) => {
     const base = { day, release_id: rel.id, employee_id: emp.id, description: descOf(rel.id).trim() };
     let { data, error } = await sb().from("schedule_days").insert({ ...base, address: addrOf(rel.id).trim() }).select().single();
     if (error && /column|schema cache/i.test(error.message)) {
@@ -92,11 +94,43 @@ export default function Schedule() {
     if (error) { flash(/relation|column|schema cache/i.test(error.message) ? upgradeMsg : error.message); return; }
     const row = data as Assign;
     setRows((prev) => (prev.some((x) => x.id === row.id) ? prev : [...prev, row]));
-    const phone = cleanPhone(emp.phone || "");
-    if (phone) {
-      await sb().from("schedule_days").update({ texted: true }).eq("id", row.id);
-      setRows((prev) => prev.map((x) => (x.id === row.id ? { ...x, texted: true } : x)));
-      window.location.href = smsHref(phone, msgFor(rel, rel.id, emp.name.split(" ")[0]));
+  };
+
+  // Assign & text: one tap messages the whole crew on this release.
+  // With the company number set up (Twilio keys in Vercel) the texts go out
+  // silently from that number; otherwise it opens a group text on this phone.
+  const textCrew = async (rel: RelRow) => {
+    const assigned = rows.filter((x) => x.release_id === rel.id);
+    const targets = assigned
+      .map((row) => ({ row, emp: emps.find((e) => e.id === row.employee_id) }))
+      .filter((t): t is { row: Assign; emp: Emp } => !!t.emp)
+      .map((t) => ({ ...t, phone: cleanPhone(t.emp.phone || "") }))
+      .filter((t) => t.phone);
+    if (targets.length === 0) { flash("No saved numbers on this crew — add them in Payroll → Crew first"); return; }
+    if (!descOf(rel.id).trim() && !window.confirm("No work description yet — send the assignments anyway?")) return;
+    const markAll = async () => {
+      const ids = targets.map((t) => t.row.id);
+      setRows((prev) => prev.map((x) => (ids.includes(x.id) ? { ...x, texted: true } : x)));
+      await sb().from("schedule_days").update({ texted: true }).in("id", ids);
+    };
+    setSending(rel.id);
+    const res = await sendServerTexts(
+      targets.map((t) => ({ to: t.phone, body: msgFor(rel, rel.id, t.emp.name.split(" ")[0]) })),
+      (await sb().auth.getSession()).data.session?.access_token || null
+    );
+    setSending(null);
+    if (res.ok) {
+      await markAll();
+      const fails = res.failed || [];
+      flash(fails.length === 0
+        ? `Sent ${res.sent} text${res.sent === 1 ? "" : "s"} from the company number ✓`
+        : `Sent ${res.sent}, but ${fails.length} didn't go through — check those numbers in Payroll → Crew`);
+    } else if (res.status === 501) {
+      // no company number yet — group text from this phone instead
+      await markAll();
+      window.location.href = `sms:${targets.map((t) => t.phone).join(",")}?&body=${encodeURIComponent(msgFor(rel, rel.id))}`;
+    } else {
+      flash(res.error || "Couldn't send — try again");
     }
   };
   const unassign = async (id: string) => {
@@ -149,7 +183,8 @@ export default function Schedule() {
         </div>
       </div>
       <div className="mb-1 text-[13px] text-inksoft">
-        Scheduling for <b className="text-ink">{prettyDate(day)}</b> — add a release, write the work description, then assign workers.
+        Scheduling for <b className="text-ink">{prettyDate(day)}</b> — add a release, write the description, add workers, then <b className="text-ink">Assign &amp; text</b> messages the whole crew at once
+        {machine ? " from the company number." : " (opens a group text on this phone)."}
       </div>
 
       {canEdit && (
@@ -215,24 +250,32 @@ export default function Schedule() {
               const ok = !!cleanPhone(emp.phone || "");
               return (
                 <div key={row.id} className="flex flex-wrap items-center gap-2 border-t border-rulesoft py-2 first:border-t-0">
-                  {/* the name is the quiet re-send: tapping it opens the text again */}
-                  {ok ? (
-                    <a className="text-[14px] font-bold" title="Opens their text again"
-                      href={smsHref(emp.phone || "", msgFor(rel, rel.id, emp.name.split(" ")[0]))}
-                      onClick={() => markTexted(row.id)}>{emp.name}</a>
-                  ) : (
-                    <b className="text-[14px]">{emp.name}</b>
-                  )}
+                  <b className="text-[14px]">{emp.name}</b>
                   {row.texted && <Stamp label="TEXTED ✓" tone="ok" />}
                   {!ok && <span className="text-[11px] text-inksoft">no number in the crew list</span>}
-                  <span className="ml-auto">
+                  <span className="ml-auto flex items-center gap-2.5">
+                    {ok && !machine && (
+                      <a className="text-[11px] text-inksoft underline" title="Opens their text on this phone"
+                        href={smsHref(emp.phone || "", msgFor(rel, rel.id, emp.name.split(" ")[0]))}
+                        onClick={() => markTexted(row.id)}>resend</a>
+                    )}
+                    {ok && machine && canEdit && (
+                      <button className="text-[11px] text-inksoft underline" title="Resend from the company number"
+                        onClick={async () => {
+                          const res = await sendServerTexts(
+                            [{ to: cleanPhone(emp.phone || ""), body: msgFor(rel, rel.id, emp.name.split(" ")[0]) }],
+                            (await sb().auth.getSession()).data.session?.access_token || null);
+                          if (res.ok && (res.failed || []).length === 0) { markTexted(row.id); flash(`Texted ${emp.name.split(" ")[0]} ✓`); }
+                          else flash(res.failed?.[0]?.error || res.error || "Couldn't send");
+                        }}>resend</button>
+                    )}
                     {canEdit && <button className="text-xs text-alert" title="Remove from this day" onClick={() => unassign(row.id)}>✕</button>}
                   </span>
                 </div>
               );
             })}
-            {assigned.length === 0 && <div className="py-1.5 text-[13px] text-inksoft">No one assigned yet.</div>}
-            {canEdit && (addFor === rel.id ? (
+            {assigned.length === 0 && <div className="py-1.5 text-[13px] text-inksoft">No one added yet — add workers, then hit Assign & text.</div>}
+            {canEdit && addFor === rel.id && (
               <div className="relative mt-2">
                 <input className="field" autoFocus placeholder="Type a worker's name…" value={addQ}
                   onChange={(e) => setAddQ(e.target.value)}
@@ -240,28 +283,35 @@ export default function Schedule() {
                 <div className="card absolute inset-x-0 top-full z-10 max-h-80 overflow-y-auto shadow-lg">
                   {match.map((e) => (
                     <button key={e.id} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
-                      onMouseDown={(ev) => { ev.preventDefault(); assign(rel, e); setAddQ(""); }}>
+                      onMouseDown={(ev) => { ev.preventDefault(); addWorker(rel, e); setAddQ(""); }}>
                       <span>{e.name}</span>
-                      <span className="text-[11px] text-inksoft">{cleanPhone(e.phone || "") ? "+ assign" : "+ assign (no number)"}</span>
+                      <span className="text-[11px] text-inksoft">{cleanPhone(e.phone || "") ? "+ add" : "+ add (no number)"}</span>
                     </button>
                   ))}
                   {match.length === 0 && <div className="p-2.5 text-sm text-inksoft">No one matches “{addQ}”.</div>}
                 </div>
               </div>
-            ) : (
-              <button className="btn btn-ghost mt-2 px-3 py-1.5 text-[13px]" onClick={() => {
-                // the disguise: this looks like plain scheduling, but picking the
-                // name is what fires off the prefilled text
-                if (!descOf(rel.id).trim()) flash("Tip: write the work description first — it rides along when you assign");
-                setAddFor(rel.id); setAddQ("");
-              }}>+ Assign worker</button>
-            ))}
+            )}
+            {canEdit && addFor !== rel.id && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button className="btn px-3 py-1.5 text-[13px]" onClick={() => { setAddFor(rel.id); setAddQ(""); }}>+ Add worker</button>
+                {assigned.length > 0 && (
+                  <button className="btn btn-primary px-3 py-1.5 text-[13px]" disabled={sending === rel.id}
+                    onClick={() => textCrew(rel)}>
+                    {sending === rel.id ? "Sending…" : `Assign & text ${assigned.length === 1 ? "worker" : "crew"} 📱`}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         );
       })}
 
       <div className="mt-1 text-[11px] text-inksoft">
         Phone numbers live in the crew list (Payroll → Crew) — enter each one once.
+        {machine
+          ? " Company texting number is connected ✓"
+          : " Want texts to come from a company number instead of your phone? Add the TWILIO keys in Vercel → Settings → Environment Variables."}
       </div>
 
       {/* mini map window: type the place, check the pin, use it — the text

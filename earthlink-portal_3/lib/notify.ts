@@ -21,3 +21,30 @@ export const prettyPhone = (s: string): string => {
   const m = p.match(/^\+1(\d{3})(\d{3})(\d{4})$/);
   return m ? `(${m[1]}) ${m[2]}-${m[3]}` : p || s;
 };
+
+// The company "text machine" (Twilio behind /api/text). Returns configured=false
+// with status 501 when the keys aren't in Vercel yet — callers fall back to sms: links.
+export async function sendServerTexts(
+  messages: { to: string; body: string }[],
+  token: string | null
+): Promise<{ ok: boolean; status: number; configured?: boolean; sent?: number; failed?: { to: string; error: string }[]; error?: string }> {
+  try {
+    const res = await fetch("/api/text", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ messages }),
+    });
+    const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    return { ok: res.ok, status: res.status, ...j };
+  } catch {
+    return { ok: false, status: 0, error: "network error" };
+  }
+}
+
+export async function textMachineReady(): Promise<boolean> {
+  try {
+    const res = await fetch("/api/text");
+    const j = (await res.json()) as { configured?: boolean };
+    return !!j.configured;
+  } catch { return false; }
+}

@@ -14,6 +14,18 @@ const env = (k: string) => process.env[k] || "";
 const configured = () =>
   !!(env("TWILIO_ACCOUNT_SID") && env("TWILIO_AUTH_TOKEN") && (env("TWILIO_FROM") || env("TWILIO_MESSAGING_SERVICE_SID")));
 
+// spend guard: even a signed-in account can't fire more than 200 texts an hour
+// (a 20-man crew texted daily is ~20 — this only stops runaways and stolen sessions)
+const sentLog = new Map<string, number[]>();
+const overLimit = (userId: string, count: number) => {
+  const now = Date.now();
+  const kept = (sentLog.get(userId) || []).filter((t) => now - t < 3600_000);
+  if (kept.length + count > 200) { sentLog.set(userId, kept); return true; }
+  for (let i = 0; i < count; i++) kept.push(now);
+  sentLog.set(userId, kept);
+  return false;
+};
+
 export async function GET() {
   return NextResponse.json({ configured: configured() });
 }
@@ -46,6 +58,9 @@ export async function POST(req: Request) {
     .filter((m) => /^\+\d{10,15}$/.test(m.to) && m.body);
   if (messages.length === 0 || messages.length > 100) {
     return NextResponse.json({ error: "Nothing to send (check the phone numbers)" }, { status: 400 });
+  }
+  if (overLimit(user.id, messages.length)) {
+    return NextResponse.json({ error: "Texting limit reached for this hour — try again later" }, { status: 429 });
   }
 
   const sid = env("TWILIO_ACCOUNT_SID");

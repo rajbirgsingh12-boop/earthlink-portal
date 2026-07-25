@@ -125,7 +125,9 @@ export default function Releases() {
   // ---- whole-folder attach: every file matched to the release it belongs to ----
   const folderRef = useRef<HTMLInputElement>(null);
   const [folderPlan, setFolderPlan] = useState<{
-    rows: (FileMatch & { file: File })[]; folder: string; ignored: number; capped: number;
+    // relNum is kept even when the release isn't in this contract, so the list can
+    // still be shown in release order
+    rows: (FileMatch & { file: File; relNum?: string })[]; folder: string; ignored: number; capped: number;
     notPdf?: number; notRelease?: number; otherContract?: number;
   } | null>(null);
   // rows the office chose to re-pick by hand (a select per row would be thousands of nodes)
@@ -744,7 +746,7 @@ export default function Releases() {
 
     setBusy(true);
     setFolderProgress(`Reading 0 of ${files.length}…`);
-    const plan: (FileMatch & { file: File })[] = [];
+    const plan: (FileMatch & { file: File; relNum?: string })[] = [];
     let notRelease = 0, otherContract = 0;
     try {
       const pdfjs = await import("pdfjs-dist");
@@ -777,18 +779,18 @@ export default function Releases() {
           if (!ident) { notRelease += 1; continue; } // not a release PDF — leave it alone
           if (activeKey && contractKey(ident.contract) !== activeKey) {
             otherContract += 1;
-            plan.push({ ...base, relId: null, confidence: "none", why: `contract ${ident.contract} — not this contract` });
+            plan.push({ ...base, relNum: ident.rel, relId: null, confidence: "none", why: `contract ${ident.contract} — not this contract` });
             continue;
           }
           const found = byNum.get(ident.rel) || [];
           if (found.length === 1) {
             plan.push({
-              ...base, relId: found[0].id, confidence: fromFile ? "high" : "low",
+              ...base, relNum: ident.rel, relId: found[0].id, confidence: fromFile ? "high" : "low",
               why: `release #${ident.rel} · contract ${ident.contract}${fromFile ? "" : " — from the file name (PDF unreadable)"}`,
             });
           } else {
             plan.push({
-              ...base, relId: null, confidence: "none",
+              ...base, relNum: ident.rel, relId: null, confidence: "none",
               why: found.length === 0 ? `release #${ident.rel} isn't in this contract` : `#${ident.rel} is listed twice — pick one`,
             });
           }
@@ -1157,10 +1159,18 @@ export default function Releases() {
             </div>
             {(() => {
               // rows needing a decision come first and get a picker; matched rows stay
-              // compact (a dropdown on every one of a thousand rows would lock up the page)
+              // compact (a dropdown on every one of a thousand rows would lock up the page).
+              // Both groups run in release order — #1, #2 … #10000 — not folder order.
+              const numOf = ({ r }: { r: FileMatch & { file: File; relNum?: string } }) => {
+                const n = r.relId ? rows.find((x) => x.id === r.relId)?.rel_number : r.relNum;
+                const v = parseFloat(String(n ?? "").replace(/[^\d.]/g, ""));
+                return Number.isFinite(v) ? v : Number.MAX_SAFE_INTEGER; // no number → last
+              };
+              const inRelOrder = (a: { r: FileMatch & { file: File; relNum?: string } }, b: typeof a) =>
+                numOf(a) - numOf(b) || a.r.name.localeCompare(b.r.name, undefined, { numeric: true });
               const idx = folderPlan.rows.map((r, i) => ({ r, i }));
-              const needs = idx.filter(({ r }) => !r.relId);
-              const ok = idx.filter(({ r }) => r.relId);
+              const needs = idx.filter(({ r }) => !r.relId).sort(inRelOrder);
+              const ok = idx.filter(({ r }) => r.relId).sort(inRelOrder);
               const SHOWN = 300;
               const picker = (i: number, value: string | null) => (
                 <select className="field w-56 px-2 py-1.5 text-[13px]" value={value || ""}
@@ -1173,10 +1183,18 @@ export default function Releases() {
               );
               return (
                 <div className="max-h-80 overflow-y-auto rounded-sm border border-rulesoft">
+                  {needs.length > 0 && (
+                    <div className="sticky top-0 z-10 border-b border-rulesoft bg-alert/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-widest text-alert">
+                      Need a release — {needs.length}
+                    </div>
+                  )}
                   {needs.slice(0, SHOWN).map(({ r, i }) => (
                     <div key={`n${i}`} className="flex flex-wrap items-center gap-2 border-b border-rulesoft bg-alert/5 p-2">
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-[13px]">{r.name}</div>
+                        <div className="truncate text-[13px]">
+                          {r.relNum && <><b className="font-mono">#{r.relNum}</b> <span className="text-inksoft">·</span> </>}
+                          {r.name}
+                        </div>
                         <div className="truncate text-[11px] text-inksoft">{r.why}</div>
                       </div>
                       {picker(i, r.relId)}
@@ -1185,10 +1203,19 @@ export default function Releases() {
                   {needs.length > SHOWN && (
                     <div className="border-b border-rulesoft p-2 text-[12px] text-inksoft">…and {needs.length - SHOWN} more needing a release — sort these out, attach, then run the folder again.</div>
                   )}
-                  {ok.slice(0, SHOWN).map(({ r, i }) => (
+                  {ok.length > 0 && (
+                    <div className="sticky top-0 z-10 border-b border-rulesoft bg-paper px-2 py-1 text-[11px] font-semibold uppercase tracking-widest text-inksoft">
+                      Matched, in release order — {ok.length}
+                    </div>
+                  )}
+                  {ok.slice(0, SHOWN).map(({ r, i }) => {
+                    const relNo = rows.find((x) => x.id === r.relId)?.rel_number;
+                    return (
                     <div key={`m${i}`} className="flex flex-wrap items-center gap-2 border-b border-rulesoft p-2 last:border-b-0">
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-[13px]">{r.name}</div>
+                        <div className="truncate text-[13px]">
+                          <b className="font-mono">#{relNo ?? "?"}</b> <span className="text-inksoft">·</span> {r.name}
+                        </div>
                         <div className="truncate text-[11px] text-inksoft">{r.why}</div>
                       </div>
                       {folderEdit.has(i)
@@ -1198,7 +1225,8 @@ export default function Releases() {
                             onClick={() => setFolderEdit((p) => new Set(p).add(i))}>change</button>
                         )}
                     </div>
-                  ))}
+                    );
+                  })}
                   {ok.length > SHOWN && (
                     <div className="p-2 text-[12px] text-inksoft">…and {ok.length - SHOWN} more matched files — all of them will be attached.</div>
                   )}

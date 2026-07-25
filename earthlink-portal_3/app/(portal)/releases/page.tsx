@@ -826,6 +826,12 @@ export default function Releases() {
     });
     let ok = 0; const bad: string[] = [];
     let n = 0;
+    // line items are read out of the same PDFs so the SOS and invoice are ready —
+    // but never for a release that's already been paid, and never over line items
+    // that are already there (someone may have edited them by hand)
+    let sosMade = 0, skipPaid = 0, skipHave = 0, noItems = 0;
+    const pdfjs = await import("pdfjs-dist").catch(() => null);
+    if (pdfjs) pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
     for (const [relId, group] of byRel) {
       const { data: cur } = await sb().from("releases").select("attachments").eq("id", relId).single();
       const existing = ((cur as { attachments?: { name: string; path: string }[] } | null)?.attachments) || [];
@@ -860,9 +866,54 @@ export default function Releases() {
         if (error) { bad.push(`${added.length} on one release`); }
         else setRows((prev) => prev.map((x) => (x.id === relId ? { ...x, attachments: list } : x)));
       }
+
+      // ---- read the line items so SOS + Invoice are ready on this release ----
+      const rel = rows.find((x) => x.id === relId);
+      if (!rel || !pdfjs) continue;
+      if (rel.received) { skipPaid += 1; continue; }        // already paid — leave it as it was
+      if (stageData.items.has(relId)) { skipHave += 1; continue; } // already has line items
+      let filled = false;
+      for (const item of group) {
+        if (!/\.pdf$/i.test(item.file.name)) continue;
+        setFolderProgress(`Reading line items · ${item.name}`);
+        let doc: PdfDocLite | null = null;
+        try {
+          const loaded = await pdfjs.getDocument({ data: await item.file.arrayBuffer() }).promise;
+          doc = loaded as unknown as PdfDocLite;
+          let text = "";
+          for (let pg = 1; pg <= loaded.numPages; pg++) {
+            const tc = await (await loaded.getPage(pg)).getTextContent();
+            text += tc.items.map((it) => ("str" in it ? it.str : "")).join(" ") + "\n";
+          }
+          const parsed = parseReleasePdfText(text);
+          if (!parsed || parsed.items.length === 0) continue;
+          const { error } = await sb().from("release_items").insert(parsed.items.map((it) => ({ release_id: relId, ...it })));
+          if (error) { bad.push(`line items for #${rel.rel_number}`); break; }
+          sosMade += 1; filled = true;
+          // required labour comes off the same PDF — only filled in when it's missing
+          if (!Number(rel.labor_hours) && parsed.laborHours > 0) {
+            const breakdown = parsed.items.filter((it) => it.uom === "HOUR")
+              .map((it) => ({ cls: it.description.replace(/,?\s*Regular Hours/i, "").trim(), hours: it.qty }));
+            const patch = { labor_hours: parsed.laborHours, labor_breakdown: breakdown };
+            const { error: le } = await sb().from("releases").update(patch).eq("id", relId);
+            if (le && /column|schema cache/i.test(le.message)) { /* older database — skip quietly */ }
+          }
+          break;
+        } catch { /* try the next file for this release */ }
+        finally { try { await doc?.destroy(); } catch { /* already gone */ } }
+      }
+      if (!filled && !rel.received) noItems += 1;
     }
     setFolderProgress(""); setBusy(false); setFolderPlan(null); setFolderEdit(new Set());
-    flash(`Attached ${ok} file${ok === 1 ? "" : "s"} to ${byRel.size} release${byRel.size === 1 ? "" : "s"}${bad.length ? ` · ${bad.length} failed` : ""}`);
+    if (active) await loadRows(active, true); // lights up the SOS / Invoice buttons
+    flash(
+      `Attached ${ok} file${ok === 1 ? "" : "s"} to ${byRel.size} release${byRel.size === 1 ? "" : "s"}`
+      + (sosMade ? ` · SOS + invoice ready on ${sosMade}` : "")
+      + (skipPaid ? ` · ${skipPaid} already paid, left alone` : "")
+      + (skipHave ? ` · ${skipHave} already had line items` : "")
+      + (noItems ? ` · ${noItems} had no readable line items` : "")
+      + (bad.length ? ` · ${bad.length} failed` : "")
+    );
   };
 
   // ---------- mass import: several release PDFs at once, saved automatically ----------

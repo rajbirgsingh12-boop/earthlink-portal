@@ -13,7 +13,8 @@ const SECTIONS: { icon: string; title: string; lines: string[] }[] = [
     icon: "📄", title: "Releases",
     lines: [
       "Every NYCHA release lives here. Tap “+ From PDF(s)” and pick the release PDFs — the app reads them and fills everything in.",
-      "📁 Attach folder takes a whole contract folder at once. It picks out only the NYCHA release PDFs (RELEASE_81_2215867_2_0_US.pdf and the like), opens each one to read which release it actually is, and files it on that release. You get a list to check — and fix anything it wasn't sure about — before a single file uploads.",
+      "📁 Attach folder takes a whole contract folder at once. It opens each PDF to read which release it actually is and files it on that release. You get a list to check — and fix anything it wasn't sure about — before a single file uploads.",
+      "Attaching also reads the line items out of each release PDF, so the SOS form and Invoice buttons light up by themselves. Releases that are already paid are left exactly as they are, and line items you've already got (or edited by hand) are never overwritten.",
       "The little green chips on each row show how far along it is: walk sheet → release → work done → payroll → invoiced → paid.",
       "The ⏱ number is payroll hours worked vs. required — it updates by itself as hours are entered on the Payroll tab.",
       "When NYCHA pays, tap the Received stamp. Paid releases move to the Received list to keep the screen clean.",

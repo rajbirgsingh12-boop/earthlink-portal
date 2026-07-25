@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { sb } from "@/lib/supabase";
+import { COMPANY, COMPANY_ADDRESS } from "@/lib/company";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -46,9 +47,23 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen grid place-items-center p-4">
+    <div className="min-h-screen p-4">
+      {/* public identity block — the site plainly belongs to the registered business */}
+      <div className="mx-auto mt-6 max-w-sm text-center">
+        <div className="font-display text-3xl font-bold uppercase leading-none">{COMPANY.shortName}</div>
+        <div className="mt-1 text-[11px] uppercase tracking-[.2em] text-inksoft">{COMPANY.legalName}</div>
+        <div className="mt-3 text-[13px] leading-relaxed text-inksoft">{COMPANY.blurb}</div>
+        <div className="mt-3 text-[12px] text-inksoft">
+          {COMPANY_ADDRESS}
+          <br />
+          <a className="underline" href={`tel:${COMPANY.phoneHref}`}>{COMPANY.phone}</a>
+          {" · "}
+          <a className="underline" href={`mailto:${COMPANY.email}`}>{COMPANY.email}</a>
+        </div>
+      </div>
+      <div className="mx-auto mt-6 grid max-w-sm place-items-center">
       <div className="card w-full max-w-sm p-6">
-        <div className="font-display text-3xl font-bold uppercase leading-none">Earth Link</div>
+        <div className="font-display text-lg font-bold uppercase leading-none">Employee sign-in</div>
         <div className="text-[10px] uppercase tracking-[.25em] text-inksoft mb-6">Field Office</div>
         <label className="text-[11px] uppercase tracking-widest text-inksoft">Email</label>
         <input className="field mb-3 mt-1" value={email} onChange={(e) => setEmail(e.target.value)} inputMode="email" autoCapitalize="none" />
@@ -60,6 +75,11 @@ export default function Login() {
         <button className="btn mt-2.5 w-full" onClick={magicLink} disabled={busy}>✉️ Email me a sign-in link</button>
         <button className="mt-3 w-full text-center text-xs text-inksoft underline" onClick={forgot} disabled={busy}>Forgot password?</button>
         <div className="mt-4 text-xs text-inksoft">Accounts are created by the admin. Ask the office if you need one.</div>
+      </div>
+      </div>
+      <div className="mx-auto mt-6 max-w-sm text-center text-[11px] text-inksoft">
+        <a className="underline" href="/legal">Privacy Policy &amp; Text Message Terms</a>
+        <div className="mt-1.5">© {new Date().getFullYear()} {COMPANY.legalName}. Staff portal — authorized users only.</div>
       </div>
     </div>
   );

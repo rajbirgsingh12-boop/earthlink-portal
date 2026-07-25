@@ -26,14 +26,20 @@ const securityHeaders = [
   { key: "X-Frame-Options", value: "DENY" },
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-  // an internal tool: tell search engines to stay out entirely
-  { key: "X-Robots-Tag", value: "noindex, nofollow, noarchive" },
   { key: "Permissions-Policy", value: "camera=(self), microphone=(), geolocation=(), payment=()" },
 ];
 
 const nextConfig = {
   async headers() {
-    return [{ source: "/(.*)", headers: securityHeaders }];
+    return [
+      { source: "/(.*)", headers: securityHeaders },
+      // the portal stays out of search results; the public company page and the
+      // privacy/SMS terms are left indexable so the business can be verified
+      {
+        source: "/((?!login|legal).*)",
+        headers: [{ key: "X-Robots-Tag", value: "noindex, nofollow, noarchive" }],
+      },
+    ];
   },
 };
 export default nextConfig;

@@ -145,3 +145,15 @@ export function parseReleasePdfText(rawText: string): ParsedRelease | null {
     items: list,
   };
 }
+
+// Quick identity read: who is this release PDF, without parsing every line item.
+// The header carries "Contract/PO Number 2215867-2" — contract 2215867, release 2
+// (the number in the file name is NYCHA's document id, not the release).
+export function quickReleaseId(rawText: string): { contract: string; rel: string } | null {
+  const t = rawText.replace(/\s+/g, " ");
+  const m =
+    t.match(/Contract\/PO Number\s*(\d+)\s*-\s*(\d+)/i) ||
+    t.match(/Blanket Release\s*(\d+)\s*-\s*(\d+)/i);
+  if (!m) return null;
+  return { contract: m[1], rel: m[2].replace(/^0+(?=\d)/, "") };
+}

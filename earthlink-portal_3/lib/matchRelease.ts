@@ -28,6 +28,27 @@ const COUNTER_PREFIX = /(img|dsc|dscn|pxl|mvimg|scan|photo|pic|dji|gopr|vid|movi
 
 const norm = (s: string) => s.replace(/^0+(?=\d)/, ""); // 006693 → 6693
 
+// The file NYCHA hands you: RELEASE_81_2215867_2_0_US.pdf
+//   RELEASE _ document id _ contract number _ release number _ revision _ locale
+// The leading 81 is NYCHA's document id, NOT the release — inside, the header
+// reads "Contract/PO Number 2215867-2", i.e. contract 2215867, release 2.
+// Reading the file itself is what decides; this is only the fallback for a PDF
+// whose text can't be read (a scan).
+const RELEASE_FILE_RE = /^\s*release[ _-]+(\d+)[ _-]+(\d+)[ _-]+(\d+)/i;
+
+export function parseReleaseFileName(fileName: string): { docId: string; contract: string; rel: string } | null {
+  if (!/\.pdf$/i.test(fileName)) return null;
+  const m = fileName.match(RELEASE_FILE_RE);
+  if (!m) return null;
+  return { docId: m[1], contract: m[2], rel: norm(m[3]) };
+}
+
+// true for the NYCHA release PDFs only — used to ignore everything else in a folder
+export const isReleaseFileName = (fileName: string) => parseReleaseFileName(fileName) !== null;
+
+// "2215867-2", "2215867 -2", "2215867" all describe the same contract
+export const contractKey = (n: string) => (String(n || "").match(/\d+/) || [""])[0].replace(/^0+(?=\d)/, "");
+
 // digit runs in one path segment, with the few characters before each run so
 // counter prefixes (IMG_0042) can be told apart from real numbers
 const tokensOf = (segment: string): { digits: string; before: string }[] => {
@@ -58,6 +79,26 @@ export function matchFile(relativePath: string, releases: RelLite[]): FileMatch 
     if (!byNum.has(k)) byNum.set(k, []);
     byNum.get(k)!.push(r);
   });
+
+  // an official NYCHA release PDF says exactly which release it is — take it and
+  // stop, so the contract and revision numbers in the name are never mistaken
+  // for release numbers
+  const official = parseReleaseFileName(name);
+  if (official) {
+    const found = byNum.get(official.rel) || [];
+    if (found.length === 1) {
+      return {
+        path: relativePath, name, relId: found[0].id, confidence: "high",
+        why: `release #${official.rel} · contract ${official.contract} (from the file name)`,
+      };
+    }
+    return {
+      path: relativePath, name, relId: null, confidence: "none",
+      why: found.length === 0
+        ? `release #${official.rel} isn't in this contract`
+        : `#${official.rel} is listed more than once — pick one`,
+    };
+  }
 
   type Hit = { rel: RelLite; strong: boolean; counter: boolean; why: string };
   const hits: Hit[] = [];

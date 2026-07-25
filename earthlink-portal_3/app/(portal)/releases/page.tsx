@@ -20,6 +20,13 @@ import { planFolder, isReleaseFileName, parseReleaseFileName, contractKey, type 
 
 type Filter = "all" | "chase" | "payroll" | "received" | "canceled" | "hours";
 // just the bits of a pdfjs document the folder scan touches
+// one file in the folder-attach plan: where it goes, or that it makes a new release
+type PlanRow = FileMatch & {
+  file: File;
+  relNum?: string;
+  newRel?: { contractNum: string; rel: string };
+  willCreate?: boolean;
+};
 type PdfDocLite = {
   getPage: (n: number) => Promise<{ getTextContent: () => Promise<{ items: unknown[] }> }>;
   destroy: () => Promise<void>;
@@ -127,7 +134,7 @@ export default function Releases() {
   const [folderPlan, setFolderPlan] = useState<{
     // relNum is kept even when the release isn't in this contract, so the list can
     // still be shown in release order
-    rows: (FileMatch & { file: File; relNum?: string })[]; folder: string; ignored: number; capped: number;
+    rows: PlanRow[]; folder: string; ignored: number; capped: number;
     notPdf?: number; notRelease?: number; otherContract?: number;
     // releases/contracts the scan actually matched against — may span several
     // contracts, so this doesn't depend on whichever one is open
@@ -743,7 +750,7 @@ export default function Releases() {
 
     setBusy(true);
     setFolderProgress(`Reading 0 of ${files.length}…`);
-    const plan: (FileMatch & { file: File; relNum?: string })[] = [];
+    const plan: PlanRow[] = [];
     let notRelease = 0, otherContract = 0;
     let planRels: Release[] = [];
     let planContracts: Contract[] = [];
@@ -816,10 +823,12 @@ export default function Releases() {
         const contract = cByKey.get(ck);
         const cLabel = contract ? contractLabelOf(contract) : `contract ${ident.contract}`;
         if (!contract) {
+          // neither the contract nor the release is on file — both get made from the PDF
           otherContract += 1;
           plan.push({
             ...base, relNum: ident.rel, relId: null, confidence: "none",
-            why: `contract ${ident.contract} isn't in the app yet — load its sheet first`,
+            newRel: { contractNum: ident.contract, rel: ident.rel }, willCreate: true,
+            why: `new — contract ${ident.contract} and release #${ident.rel} will be created`,
           });
           continue;
         }
@@ -829,10 +838,17 @@ export default function Releases() {
             ...base, relNum: ident.rel, relId: found[0].id, confidence: fromFile ? "high" : "low",
             why: `release #${ident.rel} · ${cLabel}${fromFile ? "" : " — from the file name (PDF unreadable)"}`,
           });
+        } else if (found.length === 0) {
+          // the release isn't on file yet — build it from what the PDF says
+          plan.push({
+            ...base, relNum: ident.rel, relId: null, confidence: "none",
+            newRel: { contractNum: ident.contract, rel: ident.rel }, willCreate: true,
+            why: `new release #${ident.rel} in ${cLabel} — will be created`,
+          });
         } else {
           plan.push({
             ...base, relNum: ident.rel, relId: null, confidence: "none",
-            why: found.length === 0 ? `#${ident.rel} isn't in ${cLabel}` : `#${ident.rel} is listed twice in ${cLabel} — pick one`,
+            why: `#${ident.rel} is listed twice in ${cLabel} — pick one`,
           });
         }
       }
@@ -855,16 +871,85 @@ export default function Releases() {
     });
   };
 
+  // full read of a release PDF — needed to build a release that isn't on file yet
+  const fullParse = async (
+    file: File,
+    pdfjs: typeof import("pdfjs-dist") | null
+  ) => {
+    if (!pdfjs) return null;
+    let doc: PdfDocLite | null = null;
+    try {
+      const loaded = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+      doc = loaded as unknown as PdfDocLite;
+      let text = "";
+      for (let pg = 1; pg <= loaded.numPages; pg++) {
+        const tc = await (await loaded.getPage(pg)).getTextContent();
+        text += tc.items.map((it) => ("str" in it ? it.str : "")).join(" ") + "\n";
+      }
+      return parseReleasePdfText(text);
+    } catch { return null; }
+    finally { try { await doc?.destroy(); } catch { /* already gone */ } }
+  };
+
   const runFolderAttach = async () => {
     if (!folderPlan) return;
-    const todo = folderPlan.rows.filter((r) => r.relId);
+    const todo = folderPlan.rows.filter((r) => r.relId || r.willCreate);
     if (todo.length === 0) { flash("Nothing to attach — pick a release for at least one file"); return; }
     setBusy(true);
+    const pdfjsEarly = await import("pdfjs-dist").catch(() => null);
+    if (pdfjsEarly) pdfjsEarly.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+
+    // ---- releases the app doesn't have yet are built from their own PDF first ----
+    let made = 0; const madeFailed: string[] = [];
+    const toMake = new Map<string, PlanRow[]>(); // contract+release → its files
+    todo.filter((r) => r.willCreate && !r.relId && r.newRel)
+      .forEach((r) => {
+        const k = `${contractKey(r.newRel!.contractNum)}:${r.newRel!.rel}`;
+        if (!toMake.has(k)) toMake.set(k, []);
+        toMake.get(k)!.push(r);
+      });
+    const madeIds = new Map<string, string>(); // same key → the new release's id
+    const madeRels = new Map<string, Release>(); // and the row itself, for the steps below
+    let mk = 0;
+    for (const [key, group] of toMake) {
+      mk += 1;
+      setFolderProgress(`Creating release ${mk} of ${toMake.size}…`);
+      let relId: string | null = null;
+      for (const item of group) {
+        const parsed = await fullParse(item.file, pdfjsEarly);
+        if (!parsed) continue;
+        const contract = await resolveContract(parsed.contract.trim() || item.newRel!.contractNum);
+        if (!contract) break;
+        const breakdown = parsed.items.filter((it) => it.uom === "HOUR")
+          .map((it) => ({ cls: it.description.replace(/,?\s*Regular Hours/i, "").trim(), hours: it.qty }));
+        const payload: Record<string, unknown> = {
+          contract_id: contract.id, rel_number: parsed.rel, location: parsed.development,
+          buildings: "", ticket: parsed.workOrders[0] || "", amount: parsed.total,
+          labor_hours: parsed.laborHours, labor_breakdown: breakdown,
+          date_completed: "", pre_check: "", payroll_done: false, received: false, canceled: false, assigned_to: null,
+        };
+        const strip = (o: Record<string, unknown>) => { const { labor_breakdown: _b, labor_hours: _h, ...rest } = o; return rest; };
+        let { data: rel, error } = await sb().from("releases").insert(payload).select().single();
+        if (error && /column|schema cache/i.test(error.message)) {
+          ({ data: rel, error } = await sb().from("releases").insert(strip(payload)).select().single());
+        }
+        if (error || !rel) { madeFailed.push(`#${item.newRel!.rel}`); break; }
+        relId = (rel as Release).id;
+        madeRels.set(relId, rel as Release);
+        made += 1;
+        break; // one file is enough to build the release; the rest just attach to it
+      }
+      if (relId) madeIds.set(key, relId);
+      else if (!madeFailed.length) madeFailed.push(key.split(":")[1]);
+    }
+
     // group by release so each release's attachment list is written once
-    const byRel = new Map<string, (FileMatch & { file: File })[]>();
+    const byRel = new Map<string, PlanRow[]>();
     todo.forEach((r) => {
-      if (!byRel.has(r.relId!)) byRel.set(r.relId!, []);
-      byRel.get(r.relId!)!.push(r);
+      const id = r.relId || (r.newRel ? madeIds.get(`${contractKey(r.newRel.contractNum)}:${r.newRel.rel}`) : null);
+      if (!id) return; // its release couldn't be created — reported below
+      if (!byRel.has(id)) byRel.set(id, []);
+      byRel.get(id)!.push(r);
     });
     let ok = 0; const bad: string[] = [];
     let n = 0;
@@ -872,8 +957,7 @@ export default function Releases() {
     // but never for a release that's already been paid, and never over line items
     // that are already there (someone may have edited them by hand)
     let sosMade = 0, skipPaid = 0, skipHave = 0, noItems = 0;
-    const pdfjs = await import("pdfjs-dist").catch(() => null);
-    if (pdfjs) pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+    const pdfjs = pdfjsEarly;
     for (const [relId, group] of byRel) {
       const { data: cur } = await sb().from("releases").select("attachments").eq("id", relId).single();
       const existing = ((cur as { attachments?: { name: string; path: string }[] } | null)?.attachments) || [];
@@ -910,7 +994,7 @@ export default function Releases() {
       }
 
       // ---- read the line items so SOS + Invoice are ready on this release ----
-      const rel = folderPlan.rels.find((x) => x.id === relId) || rows.find((x) => x.id === relId);
+      const rel = madeRels.get(relId) || folderPlan.rels.find((x) => x.id === relId) || rows.find((x) => x.id === relId);
       if (!rel || !pdfjs) continue;
       if (rel.received) { skipPaid += 1; continue; }        // already paid — leave it as it was
       // line items already on file (possibly hand-edited) are never overwritten —
@@ -952,13 +1036,17 @@ export default function Releases() {
     setFolderProgress(""); setBusy(false);
     // if everything landed on one contract, show that contract — the folder may
     // well belong to a different one than was open when it was picked
-    const touched = [...new Set([...byRel.keys()].map((id) => folderPlan.rels.find((r) => r.id === id)?.contract_id).filter(Boolean))] as string[];
+    const touched = [...new Set([...byRel.keys()]
+      .map((id) => (madeRels.get(id) || folderPlan.rels.find((r) => r.id === id))?.contract_id)
+      .filter(Boolean))] as string[];
     const target = touched.length === 1 ? touched[0] : active;
     setFolderPlan(null); setFolderEdit(new Set());
     if (target && target !== active) { await loadContracts(); setActive(target); }
     if (target) await loadRows(target, true); // lights up the SOS / Invoice buttons
     flash(
       `Attached ${ok} file${ok === 1 ? "" : "s"} to ${byRel.size} release${byRel.size === 1 ? "" : "s"}`
+      + (made ? ` · ${made} new release${made === 1 ? "" : "s"} created` : "")
+      + (madeFailed.length ? ` · ${madeFailed.length} couldn't be created` : "")
       + (sosMade ? ` · SOS + invoice ready on ${sosMade}` : "")
       + (skipPaid ? ` · ${skipPaid} already paid, left alone` : "")
       + (skipHave ? ` · ${skipHave} already had line items` : "")
@@ -1238,7 +1326,8 @@ export default function Releases() {
       {/* folder review — nothing uploads until this is confirmed */}
       {folderPlan && (() => {
         const matched = folderPlan.rows.filter((r) => r.relId).length;
-        const unmatched = folderPlan.rows.length - matched;
+        const creating = folderPlan.rows.filter((r) => !r.relId && r.willCreate).length;
+        const unmatched = folderPlan.rows.length - matched - creating;
         // pick from every release the scan matched against — which may span contracts
         const planRelsList = folderPlan.rels.length > 0 ? folderPlan.rels : rows;
         const cNumOf = (r: Release) => folderPlan.contracts.find((c) => c.id === r.contract_id)?.number || "";
@@ -1248,8 +1337,16 @@ export default function Releases() {
             || String(a.rel_number).localeCompare(String(b.rel_number), undefined, { numeric: true })
         );
         const relById = new Map(planRelsList.map((r) => [r.id, r]));
-        const setRow = (i: number, relId: string | null) =>
-          setFolderPlan((prev) => prev && ({ ...prev, rows: prev.rows.map((r, k) => (k === i ? { ...r, relId, why: relId ? "picked by hand" : "skipped" } : r)) }));
+        const setRow = (i: number, value: string) =>
+          setFolderPlan((prev) => prev && ({
+            ...prev,
+            rows: prev.rows.map((r, k) => {
+              if (k !== i) return r;
+              if (value === "__new__" && r.newRel) return { ...r, relId: null, willCreate: true, why: `new release #${r.newRel.rel} — will be created` };
+              if (!value) return { ...r, relId: null, willCreate: false, why: "skipped" };
+              return { ...r, relId: value, willCreate: false, why: "picked by hand" };
+            }),
+          }));
         return (
           <div className="card mb-4 border-work p-4">
             <div className="mb-1 font-display text-base font-semibold uppercase">
@@ -1257,13 +1354,14 @@ export default function Releases() {
             </div>
             <div className="mb-3 text-[13px] text-inksoft">
               <b className="text-ok">{matched} matched</b>
+              {creating > 0 && <> · <b className="text-work">{creating} new release{creating === 1 ? "" : "s"} to create</b></>}
               {unmatched > 0 && <> · <b className="text-alert">{unmatched} need a release</b> (leave blank to skip)</>}
               {" — nothing uploads until you press Attach."}
               <div className="mt-1 text-[12px]">
                 Read {folderPlan.rows.length + (folderPlan.notRelease || 0)} PDF{folderPlan.rows.length === 1 ? "" : "s"} in this folder
                 {(folderPlan.notRelease || 0) > 0 && <> · {folderPlan.notRelease} weren&apos;t release PDFs (left alone)</>}
                 {(folderPlan.notPdf || 0) > 0 && <> · {folderPlan.notPdf} non-PDF file{folderPlan.notPdf === 1 ? "" : "s"} skipped</>}
-                {(folderPlan.otherContract || 0) > 0 && <> · {folderPlan.otherContract} name a contract that isn&apos;t loaded in the app yet</>}
+                {(folderPlan.otherContract || 0) > 0 && <> · {folderPlan.otherContract} bring in a contract that isn&apos;t in the app yet (it&apos;ll be created too)</>}
                 {manyContracts && <> · files are matched to their own contract, whichever one is open</>}
                 {folderPlan.capped > 0 && <> · {folderPlan.capped} past the {MAX_FOLDER_FILES}-file limit — run it again for the rest</>}
               </div>
@@ -1272,20 +1370,22 @@ export default function Releases() {
               // rows needing a decision come first and get a picker; matched rows stay
               // compact (a dropdown on every one of a thousand rows would lock up the page).
               // Both groups run in release order — #1, #2 … #10000 — not folder order.
-              const numOf = ({ r }: { r: FileMatch & { file: File; relNum?: string } }) => {
-                const n = r.relId ? relById.get(r.relId)?.rel_number : r.relNum;
+              const numOf = ({ r }: { r: PlanRow }) => {
+                const n = r.relId ? relById.get(r.relId)?.rel_number : (r.relNum || r.newRel?.rel);
                 const v = parseFloat(String(n ?? "").replace(/[^\d.]/g, ""));
                 return Number.isFinite(v) ? v : Number.MAX_SAFE_INTEGER; // no number → last
               };
-              const inRelOrder = (a: { r: FileMatch & { file: File; relNum?: string } }, b: typeof a) =>
+              const inRelOrder = (a: { r: PlanRow }, b: typeof a) =>
                 numOf(a) - numOf(b) || a.r.name.localeCompare(b.r.name, undefined, { numeric: true });
               const idx = folderPlan.rows.map((r, i) => ({ r, i }));
-              const needs = idx.filter(({ r }) => !r.relId).sort(inRelOrder);
-              const ok = idx.filter(({ r }) => r.relId).sort(inRelOrder);
+              const needs = idx.filter(({ r }) => !r.relId && !r.willCreate).sort(inRelOrder);
+              const ok = idx.filter(({ r }) => r.relId || r.willCreate).sort(inRelOrder);
               const SHOWN = 300;
-              const picker = (i: number, value: string | null) => (
-                <select className="field w-56 px-2 py-1.5 text-[13px]" value={value || ""}
-                  onChange={(e) => { setRow(i, e.target.value || null); setFolderEdit((p) => { const n = new Set(p); n.delete(i); return n; }); }}>
+              const picker = (i: number, row: PlanRow) => (
+                <select className="field w-60 px-2 py-1.5 text-[13px]"
+                  value={row.relId || (row.willCreate ? "__new__" : "")}
+                  onChange={(e) => { setRow(i, e.target.value); setFolderEdit((p) => { const n = new Set(p); n.delete(i); return n; }); }}>
+                  {row.newRel && <option value="__new__">➕ Make release #{row.newRel.rel} (from this PDF)</option>}
                   <option value="">— skip this file —</option>
                   {relOptions.map((o) => (
                     <option key={o.id} value={o.id}>
@@ -1310,7 +1410,7 @@ export default function Releases() {
                         </div>
                         <div className="truncate text-[11px] text-inksoft">{r.why}</div>
                       </div>
-                      {picker(i, r.relId)}
+                      {picker(i, r)}
                     </div>
                   ))}
                   {needs.length > SHOWN && (
@@ -1318,21 +1418,23 @@ export default function Releases() {
                   )}
                   {ok.length > 0 && (
                     <div className="sticky top-0 z-10 border-b border-rulesoft bg-paper px-2 py-1 text-[11px] font-semibold uppercase tracking-widest text-inksoft">
-                      Matched, in release order — {ok.length}
+                      In release order — {ok.length}
                     </div>
                   )}
                   {ok.slice(0, SHOWN).map(({ r, i }) => {
-                    const relNo = relById.get(r.relId!)?.rel_number;
+                    const relNo = r.relId ? relById.get(r.relId)?.rel_number : r.newRel?.rel;
                     return (
                     <div key={`m${i}`} className="flex flex-wrap items-center gap-2 border-b border-rulesoft p-2 last:border-b-0">
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-[13px]">
-                          <b className="font-mono">#{relNo ?? "?"}</b> <span className="text-inksoft">·</span> {r.name}
+                          <b className="font-mono">#{relNo ?? "?"}</b>
+                          {!r.relId && r.willCreate && <span className="ml-1 rounded-[2px] border border-work px-1 py-px font-mono text-[9px] font-semibold text-work">NEW</span>}
+                          <span className="text-inksoft"> · </span>{r.name}
                         </div>
                         <div className="truncate text-[11px] text-inksoft">{r.why}</div>
                       </div>
                       {folderEdit.has(i)
-                        ? picker(i, r.relId)
+                        ? picker(i, r)
                         : (
                           <button className="text-[11px] text-inksoft underline"
                             onClick={() => setFolderEdit((p) => new Set(p).add(i))}>change</button>
@@ -1347,8 +1449,10 @@ export default function Releases() {
               );
             })()}
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <button className="btn btn-primary" disabled={busy || matched === 0} onClick={runFolderAttach}>
-                {busy ? folderProgress || "Attaching…" : `Attach ${matched} file${matched === 1 ? "" : "s"}`}
+              <button className="btn btn-primary" disabled={busy || matched + creating === 0} onClick={runFolderAttach}>
+                {busy
+                  ? folderProgress || "Attaching…"
+                  : `Attach ${matched + creating} file${matched + creating === 1 ? "" : "s"}${creating > 0 ? ` · make ${creating} release${creating === 1 ? "" : "s"}` : ""}`}
               </button>
               <button className="btn btn-ghost" disabled={busy} onClick={() => { setFolderPlan(null); setFolderEdit(new Set()); }}>Cancel</button>
               {unmatched > 0 && !busy && (

@@ -14,6 +14,7 @@ const SECTIONS: { icon: string; title: string; lines: string[] }[] = [
     lines: [
       "Every NYCHA release lives here. Tap “+ From PDF(s)” and pick the release PDFs — the app reads them and fills everything in.",
       "📁 Attach folder takes a whole contract folder at once. It opens each PDF to read which release it actually is and files it on that release. You get a list to check — and fix anything it wasn't sure about — before a single file uploads.",
+      "If a release in the folder isn't in the app yet, it gets created from its own PDF — development, amount, work order and required hours and all. Those show as NEW in the list before you press Attach.",
       "Attaching also reads the line items out of each release PDF, so the SOS form and Invoice buttons light up by themselves. Releases that are already paid are left exactly as they are, and line items you've already got (or edited by hand) are never overwritten.",
       "The little green chips on each row show how far along it is: walk sheet → release → work done → payroll → invoiced → paid.",
       "The ⏱ number is payroll hours worked vs. required — it updates by itself as hours are entered on the Payroll tab.",

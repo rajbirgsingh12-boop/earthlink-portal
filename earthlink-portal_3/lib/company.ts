@@ -4,7 +4,7 @@
 export const COMPANY = {
   legalName: "Earth Link General Construction Inc.",
   shortName: "Earth Link General Construction",
-  street: "110-117 Atlantic Avenue",
+  street: "117-01 Atlantic Avenue",
   city: "Richmond Hill",
   state: "New York",
   zip: "11418",

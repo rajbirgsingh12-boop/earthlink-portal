@@ -19,6 +19,11 @@ import { useNumBuffer } from "@/lib/numBuffer";
 import { planFolder, isReleaseFileName, parseReleaseFileName, contractKey, type FileMatch } from "@/lib/matchRelease";
 
 type Filter = "all" | "chase" | "payroll" | "received" | "canceled" | "hours";
+// just the bits of a pdfjs document the folder scan touches
+type PdfDocLite = {
+  getPage: (n: number) => Promise<{ getTextContent: () => Promise<{ items: unknown[] }> }>;
+  destroy: () => Promise<void>;
+};
 type PriceRow = { code: string; category: string; description: string; unit: string; unit_price: number };
 type SosRow = { line: number; code: string; category: string; description: string; uom: string; qty: number; unit_price: number };
 
@@ -119,7 +124,12 @@ export default function Releases() {
   const propRef = useRef<HTMLInputElement>(null);
   // ---- whole-folder attach: every file matched to the release it belongs to ----
   const folderRef = useRef<HTMLInputElement>(null);
-  const [folderPlan, setFolderPlan] = useState<{ rows: (FileMatch & { file: File })[]; folder: string; ignored: number; capped: number } | null>(null);
+  const [folderPlan, setFolderPlan] = useState<{
+    rows: (FileMatch & { file: File })[]; folder: string; ignored: number; capped: number;
+    notPdf?: number; notRelease?: number; otherContract?: number;
+  } | null>(null);
+  // rows the office chose to re-pick by hand (a select per row would be thousands of nodes)
+  const [folderEdit, setFolderEdit] = useState<Set<number>>(new Set());
   const [folderProgress, setFolderProgress] = useState("");
 
   // ---- SOS / attachments / aging state ----
@@ -709,21 +719,19 @@ export default function Releases() {
   };
 
   // ---------- attach a whole folder: each file lands on its own release ----------
-  const MAX_FOLDER_FILES = 400;
+  const MAX_FOLDER_FILES = 2000;
   const handleFolder = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const all = Array.from(e.target.files || []).filter((f) => f.size > 0);
     e.target.value = "";
     if (all.length === 0) return;
     if (rows.length === 0) { flash("Open the contract with these releases first, then attach the folder"); return; }
-    // only the release PDFs NYCHA issues (RELEASE_81_2215867_2_0_US.pdf) — everything
-    // else in the folder is left alone
-    const picked = all.filter((f) => isReleaseFileName(f.name));
-    const ignored = all.length - picked.length;
-    if (picked.length === 0) {
-      flash(`No release PDFs in that folder — looking for files named like RELEASE_81_2215867_2_0_US.pdf (${all.length} other file${all.length === 1 ? "" : "s"} ignored)`);
-      return;
-    }
-    const files = picked.slice(0, MAX_FOLDER_FILES);
+    // every PDF is opened and its header read — the file itself decides whether it
+    // is a release, so odd file names never cause one to be skipped. Anything that
+    // isn't a release PDF is simply left alone.
+    const pdfs = all.filter((f) => /\.pdf$/i.test(f.name));
+    const notPdf = all.length - pdfs.length;
+    if (pdfs.length === 0) { flash(`No PDFs in that folder (${all.length} file${all.length === 1 ? "" : "s"})`); return; }
+    const files = pdfs.slice(0, MAX_FOLDER_FILES);
     const relPath = (f: File) => (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name;
     const activeKey = contractKey(contracts.find((c) => c.id === active)?.number || "");
     const byNum = new Map<string, Release[]>();
@@ -734,47 +742,56 @@ export default function Releases() {
       byNum.get(k)!.push(r);
     });
 
-    // open each PDF and read its header — the file itself says which release it is
-    // ("Contract/PO Number 2215867-2" = contract 2215867, release 2). Only page 1
-    // is read, so a folder of a few hundred goes quickly.
     setBusy(true);
+    setFolderProgress(`Reading 0 of ${files.length}…`);
     const plan: (FileMatch & { file: File })[] = [];
+    let notRelease = 0, otherContract = 0;
     try {
       const pdfjs = await import("pdfjs-dist");
       pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        setFolderProgress(`Reading ${i + 1} of ${files.length}…`);
+      // page 1 only, a few at a time, and each document is closed straight after —
+      // a thousand-file folder would otherwise crawl and eat memory
+      const readOne = async (file: File) => {
         let ident: { contract: string; rel: string } | null = null;
         let fromFile = true;
+        let doc: PdfDocLite | null = null;
         try {
-          const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+          doc = (await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise) as unknown as PdfDocLite;
           const tc = await (await doc.getPage(1)).getTextContent();
-          ident = quickReleaseId(tc.items.map((it) => ("str" in it ? it.str : "")).join(" "));
+          ident = quickReleaseId((tc.items as { str?: string }[]).map((it) => it.str || "").join(" "));
         } catch { ident = null; }
+        finally { try { await doc?.destroy(); } catch { /* already gone */ } }
         if (!ident) {
-          // scanned or unreadable — fall back to what the name says
-          const guess = parseReleaseFileName(file.name);
+          const guess = parseReleaseFileName(file.name); // scan with no text layer
           if (guess) { ident = { contract: guess.contract, rel: guess.rel }; fromFile = false; }
         }
-        const base = { path: relPath(file), name: file.name, file };
-        if (!ident) {
-          plan.push({ ...base, relId: null, confidence: "none", why: "couldn't read this PDF — pick the release" });
-          continue;
-        }
-        const source = fromFile ? "read from the file" : "from the file name (PDF unreadable)";
-        if (activeKey && contractKey(ident.contract) !== activeKey) {
-          plan.push({ ...base, relId: null, confidence: "none", why: `contract ${ident.contract} — not this contract` });
-          continue;
-        }
-        const found = byNum.get(ident.rel) || [];
-        if (found.length === 1) {
-          plan.push({ ...base, relId: found[0].id, confidence: fromFile ? "high" : "low", why: `release #${ident.rel} · contract ${ident.contract} — ${source}` });
-        } else {
-          plan.push({
-            ...base, relId: null, confidence: "none",
-            why: found.length === 0 ? `release #${ident.rel} isn't in this contract` : `#${ident.rel} is listed twice — pick one`,
-          });
+        return { file, ident, fromFile };
+      };
+      const BATCH = 4;
+      for (let i = 0; i < files.length; i += BATCH) {
+        const chunk = files.slice(i, i + BATCH);
+        const results = await Promise.all(chunk.map(readOne));
+        setFolderProgress(`Reading ${Math.min(i + BATCH, files.length)} of ${files.length}…`);
+        for (const { file, ident, fromFile } of results) {
+          const base = { path: relPath(file), name: file.name, file };
+          if (!ident) { notRelease += 1; continue; } // not a release PDF — leave it alone
+          if (activeKey && contractKey(ident.contract) !== activeKey) {
+            otherContract += 1;
+            plan.push({ ...base, relId: null, confidence: "none", why: `contract ${ident.contract} — not this contract` });
+            continue;
+          }
+          const found = byNum.get(ident.rel) || [];
+          if (found.length === 1) {
+            plan.push({
+              ...base, relId: found[0].id, confidence: fromFile ? "high" : "low",
+              why: `release #${ident.rel} · contract ${ident.contract}${fromFile ? "" : " — from the file name (PDF unreadable)"}`,
+            });
+          } else {
+            plan.push({
+              ...base, relId: null, confidence: "none",
+              why: found.length === 0 ? `release #${ident.rel} isn't in this contract` : `#${ident.rel} is listed twice — pick one`,
+            });
+          }
         }
       }
     } catch {
@@ -783,8 +800,15 @@ export default function Releases() {
       guessed.forEach((m, i) => plan.push({ ...m, file: files[i] }));
     }
     setFolderProgress(""); setBusy(false);
+    if (plan.length === 0) {
+      flash(`Read ${files.length} PDF${files.length === 1 ? "" : "s"} — none of them are release PDFs for this contract`);
+      return;
+    }
     const top = (relPath(files[0]).split("/")[0] || "").trim();
-    setFolderPlan({ rows: plan, folder: top, ignored, capped: picked.length - files.length });
+    setFolderPlan({
+      rows: plan, folder: top, capped: pdfs.length - files.length,
+      ignored: notPdf + notRelease, notPdf, notRelease, otherContract,
+    });
   };
 
   const runFolderAttach = async () => {
@@ -835,7 +859,7 @@ export default function Releases() {
         else setRows((prev) => prev.map((x) => (x.id === relId ? { ...x, attachments: list } : x)));
       }
     }
-    setFolderProgress(""); setBusy(false); setFolderPlan(null);
+    setFolderProgress(""); setBusy(false); setFolderPlan(null); setFolderEdit(new Set());
     flash(`Attached ${ok} file${ok === 1 ? "" : "s"} to ${byRel.size} release${byRel.size === 1 ? "" : "s"}${bad.length ? ` · ${bad.length} failed` : ""}`);
   };
 
@@ -1120,34 +1144,72 @@ export default function Releases() {
               Attach folder{folderPlan.folder ? ` “${folderPlan.folder}”` : ""}
             </div>
             <div className="mb-3 text-[13px] text-inksoft">
-              {folderPlan.rows.length} release PDF{folderPlan.rows.length === 1 ? "" : "s"} · <b className="text-ok">{matched} matched</b>
+              <b className="text-ok">{matched} matched</b>
               {unmatched > 0 && <> · <b className="text-alert">{unmatched} need a release</b> (leave blank to skip)</>}
-              {folderPlan.ignored > 0 && <> · {folderPlan.ignored} other file{folderPlan.ignored === 1 ? "" : "s"} in the folder ignored</>}
-              {folderPlan.capped > 0 && <> · {folderPlan.capped} past the {MAX_FOLDER_FILES}-file limit left for a second run</>}
-              {" — "}nothing uploads until you press Attach.
+              {" — nothing uploads until you press Attach."}
+              <div className="mt-1 text-[12px]">
+                Read {folderPlan.rows.length + (folderPlan.notRelease || 0)} PDF{folderPlan.rows.length === 1 ? "" : "s"} in this folder
+                {(folderPlan.notRelease || 0) > 0 && <> · {folderPlan.notRelease} weren&apos;t release PDFs (left alone)</>}
+                {(folderPlan.notPdf || 0) > 0 && <> · {folderPlan.notPdf} non-PDF file{folderPlan.notPdf === 1 ? "" : "s"} skipped</>}
+                {(folderPlan.otherContract || 0) > 0 && <> · {folderPlan.otherContract} belong to another contract</>}
+                {folderPlan.capped > 0 && <> · {folderPlan.capped} past the {MAX_FOLDER_FILES}-file limit — run it again for the rest</>}
+              </div>
             </div>
-            <div className="max-h-80 overflow-y-auto rounded-sm border border-rulesoft">
-              {folderPlan.rows.map((r, i) => (
-                <div key={`${r.path}:${i}`} className={`flex flex-wrap items-center gap-2 border-b border-rulesoft p-2 last:border-b-0 ${r.relId ? "" : "bg-alert/5"}`}>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[13px]">{r.name}</div>
-                    <div className="truncate text-[11px] text-inksoft">{r.path !== r.name ? `${r.path} · ` : ""}{r.why}</div>
-                  </div>
-                  <select className="field w-56 px-2 py-1.5 text-[13px]" value={r.relId || ""}
-                    onChange={(e) => setRow(i, e.target.value || null)}>
-                    <option value="">— skip this file —</option>
-                    {relOptions.map((o) => (
-                      <option key={o.id} value={o.id}>#{o.rel_number} — {o.location || "no location"}</option>
-                    ))}
-                  </select>
+            {(() => {
+              // rows needing a decision come first and get a picker; matched rows stay
+              // compact (a dropdown on every one of a thousand rows would lock up the page)
+              const idx = folderPlan.rows.map((r, i) => ({ r, i }));
+              const needs = idx.filter(({ r }) => !r.relId);
+              const ok = idx.filter(({ r }) => r.relId);
+              const SHOWN = 300;
+              const picker = (i: number, value: string | null) => (
+                <select className="field w-56 px-2 py-1.5 text-[13px]" value={value || ""}
+                  onChange={(e) => { setRow(i, e.target.value || null); setFolderEdit((p) => { const n = new Set(p); n.delete(i); return n; }); }}>
+                  <option value="">— skip this file —</option>
+                  {relOptions.map((o) => (
+                    <option key={o.id} value={o.id}>#{o.rel_number} — {o.location || "no location"}</option>
+                  ))}
+                </select>
+              );
+              return (
+                <div className="max-h-80 overflow-y-auto rounded-sm border border-rulesoft">
+                  {needs.slice(0, SHOWN).map(({ r, i }) => (
+                    <div key={`n${i}`} className="flex flex-wrap items-center gap-2 border-b border-rulesoft bg-alert/5 p-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[13px]">{r.name}</div>
+                        <div className="truncate text-[11px] text-inksoft">{r.why}</div>
+                      </div>
+                      {picker(i, r.relId)}
+                    </div>
+                  ))}
+                  {needs.length > SHOWN && (
+                    <div className="border-b border-rulesoft p-2 text-[12px] text-inksoft">…and {needs.length - SHOWN} more needing a release — sort these out, attach, then run the folder again.</div>
+                  )}
+                  {ok.slice(0, SHOWN).map(({ r, i }) => (
+                    <div key={`m${i}`} className="flex flex-wrap items-center gap-2 border-b border-rulesoft p-2 last:border-b-0">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[13px]">{r.name}</div>
+                        <div className="truncate text-[11px] text-inksoft">{r.why}</div>
+                      </div>
+                      {folderEdit.has(i)
+                        ? picker(i, r.relId)
+                        : (
+                          <button className="text-[11px] text-inksoft underline"
+                            onClick={() => setFolderEdit((p) => new Set(p).add(i))}>change</button>
+                        )}
+                    </div>
+                  ))}
+                  {ok.length > SHOWN && (
+                    <div className="p-2 text-[12px] text-inksoft">…and {ok.length - SHOWN} more matched files — all of them will be attached.</div>
+                  )}
                 </div>
-              ))}
-            </div>
+              );
+            })()}
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <button className="btn btn-primary" disabled={busy || matched === 0} onClick={runFolderAttach}>
                 {busy ? folderProgress || "Attaching…" : `Attach ${matched} file${matched === 1 ? "" : "s"}`}
               </button>
-              <button className="btn btn-ghost" disabled={busy} onClick={() => setFolderPlan(null)}>Cancel</button>
+              <button className="btn btn-ghost" disabled={busy} onClick={() => { setFolderPlan(null); setFolderEdit(new Set()); }}>Cancel</button>
               {unmatched > 0 && !busy && (
                 <span className="text-[11px] text-inksoft">Files left blank are skipped — nothing is deleted either way.</span>
               )}

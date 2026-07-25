@@ -16,6 +16,7 @@ import { gatherReleaseDoc, buildInvoiceXlsx, type DocRow } from "@/lib/releaseDo
 import PrintShell from "@/components/PrintShell";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { useNumBuffer } from "@/lib/numBuffer";
+import { planFolder, type FileMatch } from "@/lib/matchRelease";
 
 type Filter = "all" | "chase" | "payroll" | "received" | "canceled" | "hours";
 type PriceRow = { code: string; category: string; description: string; unit: string; unit_price: number };
@@ -116,6 +117,10 @@ export default function Releases() {
   } | null>(null);
   const pdfRef = useRef<HTMLInputElement>(null);
   const propRef = useRef<HTMLInputElement>(null);
+  // ---- whole-folder attach: every file matched to the release it belongs to ----
+  const folderRef = useRef<HTMLInputElement>(null);
+  const [folderPlan, setFolderPlan] = useState<{ rows: (FileMatch & { file: File })[]; folder: string } | null>(null);
+  const [folderProgress, setFolderProgress] = useState("");
 
   // ---- SOS / attachments / aging state ----
   const [org, setOrg] = useState<Org | null>(null);
@@ -703,6 +708,73 @@ export default function Releases() {
     flash(`Loaded into ${num}`);
   };
 
+  // ---------- attach a whole folder: each file lands on its own release ----------
+  const MAX_FOLDER_FILES = 400;
+  const handleFolder = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = Array.from(e.target.files || []).filter((f) => f.size > 0 && !/^\./.test(f.name) && f.name !== ".DS_Store");
+    e.target.value = "";
+    if (picked.length === 0) return;
+    if (rows.length === 0) { flash("Open the contract with these releases first, then attach the folder"); return; }
+    const files = picked.slice(0, MAX_FOLDER_FILES);
+    const rel = (f: File) => (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name;
+    const plan = planFolder(files.map((f) => ({ relativePath: rel(f) })), rows);
+    const top = (rel(files[0]).split("/")[0] || "").trim();
+    setFolderPlan({ rows: plan.map((m, i) => ({ ...m, file: files[i] })), folder: top });
+    if (picked.length > files.length) flash(`That folder has ${picked.length} files — showing the first ${MAX_FOLDER_FILES}`);
+  };
+
+  const runFolderAttach = async () => {
+    if (!folderPlan) return;
+    const todo = folderPlan.rows.filter((r) => r.relId);
+    if (todo.length === 0) { flash("Nothing to attach — pick a release for at least one file"); return; }
+    setBusy(true);
+    // group by release so each release's attachment list is written once
+    const byRel = new Map<string, (FileMatch & { file: File })[]>();
+    todo.forEach((r) => {
+      if (!byRel.has(r.relId!)) byRel.set(r.relId!, []);
+      byRel.get(r.relId!)!.push(r);
+    });
+    let ok = 0; const bad: string[] = [];
+    let n = 0;
+    for (const [relId, group] of byRel) {
+      const { data: cur } = await sb().from("releases").select("attachments").eq("id", relId).single();
+      const existing = ((cur as { attachments?: { name: string; path: string }[] } | null)?.attachments) || [];
+      const added: { name: string; path: string }[] = [];
+      const taken = new Set(existing.map((a) => a.name.toLowerCase()));
+      for (const item of group) {
+        n += 1;
+        setFolderProgress(`Attaching ${n} of ${todo.length}…`);
+        try {
+          // photos get shrunk on the way in, same as camera uploads
+          const raw = isImg(item.file.name) ? await shrinkImage(item.file) : item.file;
+          // two files with the same name on one release would overwrite each other
+          let name = item.file.name;
+          if (taken.has(name.toLowerCase())) {
+            const ext = (name.match(/\.[^.]+$/) || [""])[0];
+            const stem = name.slice(0, name.length - ext.length);
+            let k = 2;
+            while (taken.has(`${stem} (${k})${ext}`.toLowerCase())) k += 1;
+            name = `${stem} (${k})${ext}`;
+          }
+          taken.add(name.toLowerCase());
+          const path = `${relId}/${name}`;
+          const { error } = await sb().storage.from("docs").upload(path, raw, { upsert: true });
+          if (error) { bad.push(item.name); continue; }
+          added.push({ name, path });
+          ok += 1;
+        } catch { bad.push(item.name); }
+      }
+      if (added.length > 0) {
+        const list = [...existing.filter((a) => !added.some((b) => b.path === a.path)), ...added];
+        const { error } = await sb().from("releases").update({ attachments: list }).eq("id", relId);
+        if (error) { bad.push(`${added.length} on one release`); }
+        else setRows((prev) => prev.map((x) => (x.id === relId ? { ...x, attachments: list } : x)));
+      }
+    }
+    setFolderProgress(""); setBusy(false); setFolderPlan(null);
+    flash(`Attached ${ok} file${ok === 1 ? "" : "s"} to ${byRel.size} release${byRel.size === 1 ? "" : "s"}${bad.length ? ` · ${bad.length} failed` : ""}`);
+  };
+
   // ---------- mass import: several release PDFs at once, saved automatically ----------
   const importPdfBatch = async (files: File[]) => {
     setBusy(true);
@@ -952,13 +1024,64 @@ export default function Releases() {
         <div className="font-display text-2xl font-bold uppercase">Releases</div>
         <div className="flex gap-2">
           {!readOnly && <button className="btn btn-ghost" onClick={() => pdfRef.current?.click()}>+ From PDF(s)</button>}
+          {!readOnly && rows.length > 0 && <button className="btn btn-ghost" onClick={() => folderRef.current?.click()}>📁 Attach folder</button>}
           {!readOnly && <button className="btn btn-ghost" onClick={() => fileRef.current?.click()}>Upload sheet</button>}
           {rows.length > 0 && <button className="btn btn-ghost" onClick={exportSheet}>Download</button>}
         </div>
       </div>
       <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFile} />
       <input ref={pdfRef} type="file" accept="application/pdf" multiple className="hidden" onChange={handlePdf} />
+      {/* folder picker — webkitdirectory isn't in React's types, hence the cast */}
+      <input ref={folderRef} type="file" multiple className="hidden" onChange={handleFolder}
+        {...({ webkitdirectory: "", directory: "" } as unknown as Record<string, string>)} />
       <input ref={propRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleProposal} />
+
+      {/* folder review — nothing uploads until this is confirmed */}
+      {folderPlan && (() => {
+        const matched = folderPlan.rows.filter((r) => r.relId).length;
+        const unmatched = folderPlan.rows.length - matched;
+        const relOptions = [...rows].sort((a, b) => String(a.rel_number).localeCompare(String(b.rel_number), undefined, { numeric: true }));
+        const setRow = (i: number, relId: string | null) =>
+          setFolderPlan((prev) => prev && ({ ...prev, rows: prev.rows.map((r, k) => (k === i ? { ...r, relId, why: relId ? "picked by hand" : "skipped" } : r)) }));
+        return (
+          <div className="card mb-4 border-work p-4">
+            <div className="mb-1 font-display text-base font-semibold uppercase">
+              Attach folder{folderPlan.folder ? ` “${folderPlan.folder}”` : ""}
+            </div>
+            <div className="mb-3 text-[13px] text-inksoft">
+              {folderPlan.rows.length} file{folderPlan.rows.length === 1 ? "" : "s"} · <b className="text-ok">{matched} matched</b>
+              {unmatched > 0 && <> · <b className="text-alert">{unmatched} need a release</b> (leave blank to skip)</>}
+              {" — "}matched against the releases in this contract. Nothing uploads until you press Attach.
+            </div>
+            <div className="max-h-80 overflow-y-auto rounded-sm border border-rulesoft">
+              {folderPlan.rows.map((r, i) => (
+                <div key={`${r.path}:${i}`} className={`flex flex-wrap items-center gap-2 border-b border-rulesoft p-2 last:border-b-0 ${r.relId ? "" : "bg-alert/5"}`}>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[13px]">{r.name}</div>
+                    <div className="truncate text-[11px] text-inksoft">{r.path !== r.name ? `${r.path} · ` : ""}{r.why}</div>
+                  </div>
+                  <select className="field w-56 px-2 py-1.5 text-[13px]" value={r.relId || ""}
+                    onChange={(e) => setRow(i, e.target.value || null)}>
+                    <option value="">— skip this file —</option>
+                    {relOptions.map((o) => (
+                      <option key={o.id} value={o.id}>#{o.rel_number} — {o.location || "no location"}</option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button className="btn btn-primary" disabled={busy || matched === 0} onClick={runFolderAttach}>
+                {busy ? folderProgress || "Attaching…" : `Attach ${matched} file${matched === 1 ? "" : "s"}`}
+              </button>
+              <button className="btn btn-ghost" disabled={busy} onClick={() => setFolderPlan(null)}>Cancel</button>
+              {unmatched > 0 && !busy && (
+                <span className="text-[11px] text-inksoft">Files left blank are skipped — nothing is deleted either way.</span>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {pending && (
         <div className="card mb-4 border-work p-4">

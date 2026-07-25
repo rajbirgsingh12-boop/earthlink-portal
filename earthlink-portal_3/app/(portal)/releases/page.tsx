@@ -129,6 +129,9 @@ export default function Releases() {
     // still be shown in release order
     rows: (FileMatch & { file: File; relNum?: string })[]; folder: string; ignored: number; capped: number;
     notPdf?: number; notRelease?: number; otherContract?: number;
+    // releases/contracts the scan actually matched against — may span several
+    // contracts, so this doesn't depend on whichever one is open
+    rels: Release[]; contracts: Contract[];
   } | null>(null);
   // rows the office chose to re-pick by hand (a select per row would be thousands of nodes)
   const [folderEdit, setFolderEdit] = useState<Set<number>>(new Set());
@@ -722,11 +725,13 @@ export default function Releases() {
 
   // ---------- attach a whole folder: each file lands on its own release ----------
   const MAX_FOLDER_FILES = 2000;
+  // a contract's own name may be wrong or missing — the number is what identifies it
+  const contractLabelOf = (c: { number: string; name?: string | null }) =>
+    c.name && c.name !== c.number ? `${c.number} (${c.name})` : `contract ${c.number}`;
   const handleFolder = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const all = Array.from(e.target.files || []).filter((f) => f.size > 0);
     e.target.value = "";
     if (all.length === 0) return;
-    if (rows.length === 0) { flash("Open the contract with these releases first, then attach the folder"); return; }
     // every PDF is opened and its header read — the file itself decides whether it
     // is a release, so odd file names never cause one to be skipped. Anything that
     // isn't a release PDF is simply left alone.
@@ -735,19 +740,13 @@ export default function Releases() {
     if (pdfs.length === 0) { flash(`No PDFs in that folder (${all.length} file${all.length === 1 ? "" : "s"})`); return; }
     const files = pdfs.slice(0, MAX_FOLDER_FILES);
     const relPath = (f: File) => (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name;
-    const activeKey = contractKey(contracts.find((c) => c.id === active)?.number || "");
-    const byNum = new Map<string, Release[]>();
-    rows.forEach((r) => {
-      const k = String(r.rel_number || "").trim().replace(/^0+(?=\d)/, "");
-      if (!k) return;
-      if (!byNum.has(k)) byNum.set(k, []);
-      byNum.get(k)!.push(r);
-    });
 
     setBusy(true);
     setFolderProgress(`Reading 0 of ${files.length}…`);
     const plan: (FileMatch & { file: File; relNum?: string })[] = [];
     let notRelease = 0, otherContract = 0;
+    let planRels: Release[] = [];
+    let planContracts: Contract[] = [];
     try {
       const pdfjs = await import("pdfjs-dist");
       pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
@@ -770,46 +769,89 @@ export default function Releases() {
         return { file, ident, fromFile };
       };
       const BATCH = 4;
+      const read: { file: File; ident: { contract: string; rel: string } | null; fromFile: boolean }[] = [];
       for (let i = 0; i < files.length; i += BATCH) {
         const chunk = files.slice(i, i + BATCH);
-        const results = await Promise.all(chunk.map(readOne));
+        read.push(...await Promise.all(chunk.map(readOne)));
         setFolderProgress(`Reading ${Math.min(i + BATCH, files.length)} of ${files.length}…`);
-        for (const { file, ident, fromFile } of results) {
-          const base = { path: relPath(file), name: file.name, file };
-          if (!ident) { notRelease += 1; continue; } // not a release PDF — leave it alone
-          if (activeKey && contractKey(ident.contract) !== activeKey) {
-            otherContract += 1;
-            plan.push({ ...base, relNum: ident.rel, relId: null, confidence: "none", why: `contract ${ident.contract} — not this contract` });
-            continue;
-          }
-          const found = byNum.get(ident.rel) || [];
-          if (found.length === 1) {
-            plan.push({
-              ...base, relNum: ident.rel, relId: found[0].id, confidence: fromFile ? "high" : "low",
-              why: `release #${ident.rel} · contract ${ident.contract}${fromFile ? "" : " — from the file name (PDF unreadable)"}`,
-            });
-          } else {
-            plan.push({
-              ...base, relNum: ident.rel, relId: null, confidence: "none",
-              why: found.length === 0 ? `release #${ident.rel} isn't in this contract` : `#${ident.rel} is listed twice — pick one`,
-            });
-          }
+      }
+
+      // Each file names its own contract, so the releases are looked up per file —
+      // it doesn't matter which contract happens to be open, and a contract whose
+      // NAME is wrong still matches because matching is on the number.
+      const wanted = [...new Set(read.map((r) => r.ident && contractKey(r.ident.contract)).filter(Boolean) as string[])];
+      setFolderProgress("Finding the contracts…");
+      const { data: allC } = await sb().from("contracts").select("id,number,name");
+      const cByKey = new Map<string, Contract>();
+      ((allC || []) as Contract[]).forEach((c) => {
+        const k = contractKey(c.number);
+        if (k && !cByKey.has(k)) cByKey.set(k, c);
+      });
+      const cids = wanted.map((k) => cByKey.get(k)?.id).filter(Boolean) as string[];
+      const relsAll: Release[] = [];
+      for (let i = 0; i < cids.length; i += 20) {
+        for (let f = 0; ; f += 1000) {
+          const { data } = await sb().from("releases").select("*").in("contract_id", cids.slice(i, i + 20)).range(f, f + 999);
+          relsAll.push(...((data || []) as Release[]));
+          if (!data || data.length < 1000) break;
+        }
+      }
+      // keyed contract+release, so #2 on Brooklyn never collides with #2 on Manhattan
+      const byKey = new Map<string, Release[]>();
+      relsAll.forEach((r) => {
+        const ck = contractKey(((allC || []) as Contract[]).find((c) => c.id === r.contract_id)?.number || "");
+        const rk = String(r.rel_number || "").trim().replace(/^0+(?=\d)/, "");
+        if (!ck || !rk) return;
+        const k = `${ck}:${rk}`;
+        if (!byKey.has(k)) byKey.set(k, []);
+        byKey.get(k)!.push(r);
+      });
+      planRels = relsAll;
+      planContracts = (allC || []) as Contract[];
+
+      for (const { file, ident, fromFile } of read) {
+        const base = { path: relPath(file), name: file.name, file };
+        if (!ident) { notRelease += 1; continue; } // not a release PDF — leave it alone
+        const ck = contractKey(ident.contract);
+        const contract = cByKey.get(ck);
+        const cLabel = contract ? contractLabelOf(contract) : `contract ${ident.contract}`;
+        if (!contract) {
+          otherContract += 1;
+          plan.push({
+            ...base, relNum: ident.rel, relId: null, confidence: "none",
+            why: `contract ${ident.contract} isn't in the app yet — load its sheet first`,
+          });
+          continue;
+        }
+        const found = byKey.get(`${ck}:${ident.rel}`) || [];
+        if (found.length === 1) {
+          plan.push({
+            ...base, relNum: ident.rel, relId: found[0].id, confidence: fromFile ? "high" : "low",
+            why: `release #${ident.rel} · ${cLabel}${fromFile ? "" : " — from the file name (PDF unreadable)"}`,
+          });
+        } else {
+          plan.push({
+            ...base, relNum: ident.rel, relId: null, confidence: "none",
+            why: found.length === 0 ? `#${ident.rel} isn't in ${cLabel}` : `#${ident.rel} is listed twice in ${cLabel} — pick one`,
+          });
         }
       }
     } catch {
       // pdfjs wouldn't load — fall back to names alone so the import still works
       const guessed = planFolder(files.map((f) => ({ relativePath: relPath(f) })), rows);
       guessed.forEach((m, i) => plan.push({ ...m, file: files[i] }));
+      planRels = rows;
     }
     setFolderProgress(""); setBusy(false);
     if (plan.length === 0) {
-      flash(`Read ${files.length} PDF${files.length === 1 ? "" : "s"} — none of them are release PDFs for this contract`);
+      flash(`Read ${files.length} PDF${files.length === 1 ? "" : "s"} — none of them are NYCHA release PDFs`);
       return;
     }
     const top = (relPath(files[0]).split("/")[0] || "").trim();
     setFolderPlan({
       rows: plan, folder: top, capped: pdfs.length - files.length,
       ignored: notPdf + notRelease, notPdf, notRelease, otherContract,
+      rels: planRels, contracts: planContracts,
     });
   };
 
@@ -868,10 +910,13 @@ export default function Releases() {
       }
 
       // ---- read the line items so SOS + Invoice are ready on this release ----
-      const rel = rows.find((x) => x.id === relId);
+      const rel = folderPlan.rels.find((x) => x.id === relId) || rows.find((x) => x.id === relId);
       if (!rel || !pdfjs) continue;
       if (rel.received) { skipPaid += 1; continue; }        // already paid — leave it as it was
-      if (stageData.items.has(relId)) { skipHave += 1; continue; } // already has line items
+      // line items already on file (possibly hand-edited) are never overwritten —
+      // checked against the database because these releases can span contracts
+      const { data: had } = await sb().from("release_items").select("id").eq("release_id", relId).limit(1);
+      if ((had || []).length > 0) { skipHave += 1; continue; }
       let filled = false;
       for (const item of group) {
         if (!/\.pdf$/i.test(item.file.name)) continue;
@@ -904,8 +949,14 @@ export default function Releases() {
       }
       if (!filled && !rel.received) noItems += 1;
     }
-    setFolderProgress(""); setBusy(false); setFolderPlan(null); setFolderEdit(new Set());
-    if (active) await loadRows(active, true); // lights up the SOS / Invoice buttons
+    setFolderProgress(""); setBusy(false);
+    // if everything landed on one contract, show that contract — the folder may
+    // well belong to a different one than was open when it was picked
+    const touched = [...new Set([...byRel.keys()].map((id) => folderPlan.rels.find((r) => r.id === id)?.contract_id).filter(Boolean))] as string[];
+    const target = touched.length === 1 ? touched[0] : active;
+    setFolderPlan(null); setFolderEdit(new Set());
+    if (target && target !== active) { await loadContracts(); setActive(target); }
+    if (target) await loadRows(target, true); // lights up the SOS / Invoice buttons
     flash(
       `Attached ${ok} file${ok === 1 ? "" : "s"} to ${byRel.size} release${byRel.size === 1 ? "" : "s"}`
       + (sosMade ? ` · SOS + invoice ready on ${sosMade}` : "")
@@ -1165,7 +1216,7 @@ export default function Releases() {
         <div className="font-display text-2xl font-bold uppercase">Releases</div>
         <div className="flex gap-2">
           {!readOnly && <button className="btn btn-ghost" onClick={() => pdfRef.current?.click()}>+ From PDF(s)</button>}
-          {!readOnly && rows.length > 0 && <button className="btn btn-ghost" onClick={() => folderRef.current?.click()}>📁 Attach folder</button>}
+          {!readOnly && <button className="btn btn-ghost" onClick={() => folderRef.current?.click()}>📁 Attach folder</button>}
           {!readOnly && <button className="btn btn-ghost" onClick={() => fileRef.current?.click()}>Upload sheet</button>}
           {rows.length > 0 && <button className="btn btn-ghost" onClick={exportSheet}>Download</button>}
         </div>
@@ -1188,7 +1239,15 @@ export default function Releases() {
       {folderPlan && (() => {
         const matched = folderPlan.rows.filter((r) => r.relId).length;
         const unmatched = folderPlan.rows.length - matched;
-        const relOptions = [...rows].sort((a, b) => String(a.rel_number).localeCompare(String(b.rel_number), undefined, { numeric: true }));
+        // pick from every release the scan matched against — which may span contracts
+        const planRelsList = folderPlan.rels.length > 0 ? folderPlan.rels : rows;
+        const cNumOf = (r: Release) => folderPlan.contracts.find((c) => c.id === r.contract_id)?.number || "";
+        const manyContracts = new Set(planRelsList.map((r) => r.contract_id)).size > 1;
+        const relOptions = [...planRelsList].sort(
+          (a, b) => String(cNumOf(a)).localeCompare(String(cNumOf(b)), undefined, { numeric: true })
+            || String(a.rel_number).localeCompare(String(b.rel_number), undefined, { numeric: true })
+        );
+        const relById = new Map(planRelsList.map((r) => [r.id, r]));
         const setRow = (i: number, relId: string | null) =>
           setFolderPlan((prev) => prev && ({ ...prev, rows: prev.rows.map((r, k) => (k === i ? { ...r, relId, why: relId ? "picked by hand" : "skipped" } : r)) }));
         return (
@@ -1204,7 +1263,8 @@ export default function Releases() {
                 Read {folderPlan.rows.length + (folderPlan.notRelease || 0)} PDF{folderPlan.rows.length === 1 ? "" : "s"} in this folder
                 {(folderPlan.notRelease || 0) > 0 && <> · {folderPlan.notRelease} weren&apos;t release PDFs (left alone)</>}
                 {(folderPlan.notPdf || 0) > 0 && <> · {folderPlan.notPdf} non-PDF file{folderPlan.notPdf === 1 ? "" : "s"} skipped</>}
-                {(folderPlan.otherContract || 0) > 0 && <> · {folderPlan.otherContract} belong to another contract</>}
+                {(folderPlan.otherContract || 0) > 0 && <> · {folderPlan.otherContract} name a contract that isn&apos;t loaded in the app yet</>}
+                {manyContracts && <> · files are matched to their own contract, whichever one is open</>}
                 {folderPlan.capped > 0 && <> · {folderPlan.capped} past the {MAX_FOLDER_FILES}-file limit — run it again for the rest</>}
               </div>
             </div>
@@ -1213,7 +1273,7 @@ export default function Releases() {
               // compact (a dropdown on every one of a thousand rows would lock up the page).
               // Both groups run in release order — #1, #2 … #10000 — not folder order.
               const numOf = ({ r }: { r: FileMatch & { file: File; relNum?: string } }) => {
-                const n = r.relId ? rows.find((x) => x.id === r.relId)?.rel_number : r.relNum;
+                const n = r.relId ? relById.get(r.relId)?.rel_number : r.relNum;
                 const v = parseFloat(String(n ?? "").replace(/[^\d.]/g, ""));
                 return Number.isFinite(v) ? v : Number.MAX_SAFE_INTEGER; // no number → last
               };
@@ -1228,7 +1288,9 @@ export default function Releases() {
                   onChange={(e) => { setRow(i, e.target.value || null); setFolderEdit((p) => { const n = new Set(p); n.delete(i); return n; }); }}>
                   <option value="">— skip this file —</option>
                   {relOptions.map((o) => (
-                    <option key={o.id} value={o.id}>#{o.rel_number} — {o.location || "no location"}</option>
+                    <option key={o.id} value={o.id}>
+                      {manyContracts ? `${cNumOf(o)} · ` : ""}#{o.rel_number} — {o.location || "no location"}
+                    </option>
                   ))}
                 </select>
               );
@@ -1260,7 +1322,7 @@ export default function Releases() {
                     </div>
                   )}
                   {ok.slice(0, SHOWN).map(({ r, i }) => {
-                    const relNo = rows.find((x) => x.id === r.relId)?.rel_number;
+                    const relNo = relById.get(r.relId!)?.rel_number;
                     return (
                     <div key={`m${i}`} className="flex flex-wrap items-center gap-2 border-b border-rulesoft p-2 last:border-b-0">
                       <div className="min-w-0 flex-1">
@@ -1411,6 +1473,19 @@ export default function Releases() {
           )}
         </div>
       )}
+      {/* which contract is this really? the developments in it say so — handy when a
+          contract's name doesn't match the work that's actually in it */}
+      {active && rows.length > 0 && (() => {
+        const c = contracts.find((x) => x.id === active);
+        const devs = [...new Set(rows.map((r) => (r.location || "").trim()).filter(Boolean))];
+        if (devs.length === 0) return null;
+        return (
+          <div className="mb-3 -mt-1 text-[11px] text-inksoft">
+            Contract <b className="font-mono">{c?.number}</b> · {rows.length} release{rows.length === 1 ? "" : "s"} ·{" "}
+            {devs.slice(0, 4).join(", ")}{devs.length > 4 ? `, +${devs.length - 4} more` : ""}
+          </div>
+        );
+      })()}
 
       {rows.length > 0 && (() => {
         const rec = live.filter((r) => r.received).reduce((s, r) => s + Number(r.amount), 0);

@@ -1,7 +1,13 @@
 import type { MetadataRoute } from "next";
 
-// The portal itself stays out of search engines; the public company page and the
-// privacy/SMS terms stay visible so the business can be verified at its own domain.
+// The public pages (company page, sign-in, legal) stay visible so the business can
+// be found and verified at its own domain; the staff portal stays out of search.
 export default function robots(): MetadataRoute.Robots {
-  return { rules: { userAgent: "*", allow: ["/login", "/legal"], disallow: "/" } };
+  return {
+    rules: {
+      userAgent: "*",
+      allow: "/",
+      disallow: ["/home", "/releases", "/payroll", "/pact", "/schedule", "/items", "/proposals", "/statements", "/settings", "/admin", "/reset", "/api"],
+    },
+  };
 }

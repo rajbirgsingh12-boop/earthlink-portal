@@ -25,7 +25,7 @@ export default function Reset() {
     setBusy(true); setErr("");
     const { error } = await sb().auth.updateUser({ password });
     if (error) { setErr(error.message); setBusy(false); return; }
-    window.location.href = "/";
+    window.location.href = "/home";
   };
 
   return (

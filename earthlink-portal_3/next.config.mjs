@@ -35,10 +35,10 @@ const nextConfig = {
       { source: "/(.*)", headers: securityHeaders },
       // the portal stays out of search results; the public company page and the
       // privacy/SMS terms are left indexable so the business can be verified
-      {
-        source: "/((?!login|legal).*)",
-        headers: [{ key: "X-Robots-Tag", value: "noindex, nofollow, noarchive" }],
-      },
+      // the portal only — the public company page, sign-in and legal page stay indexable
+      ...["home", "releases", "payroll", "pact", "schedule", "items", "proposals", "statements", "settings", "admin", "reset"]
+        .flatMap((p) => [`/${p}`, `/${p}/:path*`])
+        .map((source) => ({ source, headers: [{ key: "X-Robots-Tag", value: "noindex, nofollow, noarchive" }] })),
     ];
   },
 };

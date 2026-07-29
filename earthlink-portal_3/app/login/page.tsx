@@ -12,7 +12,7 @@ export default function Login() {
   // Already signed in → straight to the portal (was middleware's job).
   useEffect(() => {
     sb().auth.getUser().then(({ data: { user } }) => {
-      if (user) window.location.href = "/";
+      if (user) window.location.href = "/home";
     });
   }, []);
 
@@ -20,7 +20,7 @@ export default function Login() {
     setBusy(true); setErr("");
     const { error } = await sb().auth.signInWithPassword({ email, password });
     if (error) { setErr(error.message); setBusy(false); return; }
-    window.location.href = "/";
+    window.location.href = "/home";
   };
 
   const [resetMsg, setResetMsg] = useState("");
@@ -39,7 +39,7 @@ export default function Login() {
     setErr(""); setBusy(true);
     const { error } = await sb().auth.signInWithOtp({
       email: email.trim(),
-      options: { emailRedirectTo: `${window.location.origin}/`, shouldCreateUser: false },
+      options: { emailRedirectTo: `${window.location.origin}/home`, shouldCreateUser: false },
     });
     setBusy(false);
     if (error) { setErr(/not allowed|signups/i.test(error.message) ? "No account with that email — ask the office to add you" : error.message); return; }

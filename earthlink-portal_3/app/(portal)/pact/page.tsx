@@ -9,6 +9,7 @@ import { useLive } from "@/lib/useLive";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
+import { parsePactPoText, type PactPoFields } from "@/lib/parsePactPo";
 
 interface Item { description: string; qty: number; unit: string; unit_price: number; }
 interface Job {
@@ -128,78 +129,72 @@ export default function Pact() {
   };
 
   // ---------- PO upload: the job builds itself from the partner's PO ----------
-  const handlePo = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // The PDF is read on the SERVER (same engine every time, no phone-browser
+  // quirks); if the server can't be reached, the browser reads it as a backup.
+  // Either way the upload always completes — worst case a blank job with the
+  // PDF attached and a note to type the details.
+  const handlePo = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async (ev) => {
+    setBusy(true);
+    try {
+      let fields: PactPoFields | null = null;
+      let how = "";
+      // 1) server read
       try {
-        setBusy(true);
-        // reading the text can fail (a scanned PO has none) — the upload still
-        // goes through either way; worst case the job is created blank with the
-        // PDF attached and the office types the details
-        let raw = "";
+        const { data: { session } } = await sb().auth.getSession();
+        const res = await fetch("/api/parse-po", {
+          method: "POST",
+          headers: { "Content-Type": "application/pdf", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) },
+          body: file,
+        });
+        if (res.ok) fields = ((await res.json()) as { fields: PactPoFields }).fields;
+        else how = `server said ${res.status}`;
+      } catch { how = "server unreachable"; }
+      // 2) browser fallback
+      if (!fields) {
         try {
           const pdfjs = await import("pdfjs-dist");
           pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
-          const doc = await pdfjs.getDocument({ data: (ev.target?.result as ArrayBuffer).slice(0) }).promise;
+          const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+          let raw = "";
           for (let pg = 1; pg <= doc.numPages; pg++) {
             const tc = await (await doc.getPage(pg)).getTextContent();
             raw += tc.items.map((it) => ("str" in it ? it.str : "")).join(" ") + " ";
           }
-        } catch { raw = ""; }
-        const t = raw.replace(/\s+/g, " ");
-        const po = t.match(/Purchase Order No\.?\s*:?\s*(\w+)/i)?.[1] || "";
-        const poDate = t.match(/Date Ordered\s*:?\s*([\d/]+)/i)?.[1] || "";
-        const desc = t.match(/Description\s*:?\s*(.*?)\s+(?:Contact info|Scheduled|Date Payment|PO Closed|Bill To)/i)?.[1]?.trim() || "";
-        const billBlock = t.match(/Bill To\s+(.*?)\s+Ship To/i)?.[1] || "";
-        const shipBlock = t.match(/Ship To\s+(.*?)\s+Description\s/i)?.[1] || "";
-        const partner = billBlock.match(/^(.*?)(?=\s+\d)/)?.[1]?.trim() || billBlock.trim();
-        // the ship-to block is the job site (the bill-to is the partner's office)
-        const address = (partner && shipBlock.startsWith(partner) ? shipBlock.slice(partner.length) : shipBlock).trim();
-        // "Alfredo: 914-507-7192 · Adolfo: 914-507-7172" — every name+number pair on the PO
-        const contacts = [...t.matchAll(/([A-Z][a-z]+(?: [A-Z][a-z]+)?)\s*:?\s+((?:\d{3}[-.\s]?){2}\d{4})/g)]
-          .map((m) => `${m[1]} ${m[2]}`);
-        // the line-item table: Description Qty Unit-Price Total-Cost [Property] [Unit]
-        const seg = t.match(/Description\s+Qty\s+Unit Price\s+Total Cost(?:\s+Property)?(?:\s+Unit)?\s+(.*?)\s+Total\s+\$/i)?.[1] || "";
-        const rows = [...seg.matchAll(/(.+?)\s+(\d+(?:\.\d+)?)\s+\$\s*([\d,]+(?:\.\d+)?)\s+\$\s*([\d,]+(?:\.\d+)?)(?:\s+((?!\d+\.\d)[\w-]+))?(?:\s+((?!\$)[\w-]+))?(?=\s|$)/g)]
-          .map((m) => ({ description: m[1].trim(), qty: parseFloat(m[2]) || 1, unit_price: parseFloat(m[3].replace(/,/g, "")) || 0, property: m[5] || "", unit: m[6] || "" }));
-        const grand = [...t.matchAll(/Total\s+\$\s*([\d,]+\.\d{2})/g)].map((m) => parseFloat(m[1].replace(/,/g, "")));
-        const amount = grand.length > 0 ? grand[grand.length - 1] : rows.reduce((s, r) => s + r.qty * r.unit_price, 0);
-        const punit = rows[0]?.property
-          ? `${rows[0].property}${rows[0].unit ? ` ${rows[0].unit}` : ""}`
-          : t.match(/\$\s*[\d.,]+\s+([0-9]+-[0-9]+)/)?.[1] || "";
-        // nothing readable → the job is still created, blank, with the PDF attached
-        const unreadable = !po && !partner && !desc;
-        const seed: Item[] = rows.length > 0
-          ? rows.map((r) => ({ description: r.description, qty: r.qty, unit: unitFor(r.description), unit_price: r.unit_price }))
-          : desc ? [{ description: desc, qty: 1, unit: unitFor(desc), unit_price: 0 }] : [];
-        const { data: job, error } = await sb().from("pact_jobs").insert({
-          partner, development: "", job_number: po, description: desc, amount,
-          po_number: po, po_date: poDate, address, property_unit: punit,
-          contact: contacts.length > 0 ? contacts.join(" · ") : (t.match(/([A-Z][a-z]+ [A-Z][a-z]+)\s+(\d{3}[-.]?\d{3}[-.]?\d{4})/)?.slice(1, 3).join(" ") || ""),
-          bill_to: billBlock, items: seed, invoice_number: po ? `${po}-1` : "",
-        }).select().single();
-        if (error || !job) { setBusy(false); flash(upgradeHint(error?.message || "Save failed")); return; }
-        // attach the PO itself
-        const path = `pact/${(job as Job).id}/${file.name}`;
-        const { error: ue } = await sb().storage.from("docs").upload(path, file, { upsert: true });
-        if (!ue) await sb().from("pact_jobs").update({ attachments: [{ name: file.name, path }] }).eq("id", (job as Job).id);
-        setBusy(false);
-        await load();
-        // open the fresh job with its details showing so what was read is on screen
-        setOpenId((job as Job).id);
-        setShowDetails(true);
-        flash(unreadable
-          ? "PDF attached, but its text couldn't be read (scanned copy?) — type the partner, address and description below"
-          : `PO ${po || "imported"} — check the details and work lines below`);
-      } catch (err) {
-        setBusy(false);
-        flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
+          fields = parsePactPoText(raw);
+        } catch {
+          fields = parsePactPoText(""); // truly unreadable here — job still gets created
+        }
       }
-    };
-    reader.readAsArrayBuffer(file);
-    e.target.value = "";
+      const f = fields;
+      const unreadable = !f.po && !f.partner && !f.desc;
+      const seed: Item[] = f.rows.length > 0
+        ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: unitFor(r.description), unit_price: r.unit_price }))
+        : f.desc ? [{ description: f.desc, qty: 1, unit: unitFor(f.desc), unit_price: 0 }] : [];
+      const { data: job, error } = await sb().from("pact_jobs").insert({
+        partner: f.partner, development: "", job_number: f.po, description: f.desc, amount: f.amount,
+        po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,
+        contact: f.contact, bill_to: f.billBlock, items: seed, invoice_number: f.po ? `${f.po}-1` : "",
+      }).select().single();
+      if (error || !job) { setBusy(false); flash(upgradeHint(error?.message || "Save failed")); return; }
+      // attach the PO itself
+      const path = `pact/${(job as Job).id}/${file.name}`;
+      const { error: ue } = await sb().storage.from("docs").upload(path, file, { upsert: true });
+      if (!ue) await sb().from("pact_jobs").update({ attachments: [{ name: file.name, path }] }).eq("id", (job as Job).id);
+      setBusy(false);
+      await load();
+      // open the fresh job with its details showing so what was read is on screen
+      setOpenId((job as Job).id);
+      setShowDetails(true);
+      flash(unreadable
+        ? `PDF attached, but no text could be read (scanned copy?${how ? ` · ${how}` : ""}) — type the partner, address and description below`
+        : `PO ${f.po || "imported"} — check the details and work lines below`);
+    } catch (err) {
+      setBusy(false);
+      flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
+    }
   };
 
   const addJob = async () => {

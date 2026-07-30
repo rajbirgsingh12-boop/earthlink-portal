@@ -30,6 +30,9 @@ const securityHeaders = [
 ];
 
 const nextConfig = {
+  // pdfjs must load from node_modules at runtime on the server — bundling it
+  // breaks its internal worker resolution (/api/parse-po)
+  experimental: { serverComponentsExternalPackages: ["pdfjs-dist"] },
   async headers() {
     return [
       { source: "/(.*)", headers: securityHeaders },

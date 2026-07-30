@@ -754,7 +754,7 @@ export default function Releases() {
   };
 
   // ---------- attach a whole folder: each file lands on its own release ----------
-  const MAX_FOLDER_FILES = 2000;
+  const MAX_FOLDER_FILES = 5000;
   // a contract's own name may be wrong or missing — the number is what identifies it
   const contractLabelOf = (c: { number: string; name?: string | null }) =>
     c.name && c.name !== c.number ? `${c.number} (${c.name})` : `contract ${c.number}`;
@@ -986,28 +986,37 @@ export default function Releases() {
       const existing = ((cur as { attachments?: { name: string; path: string }[] } | null)?.attachments) || [];
       const added: { name: string; path: string }[] = [];
       const taken = new Set(existing.map((a) => a.name.toLowerCase()));
-      for (const item of group) {
-        n += 1;
-        setFolderProgress(`Attaching ${n} of ${todo.length}…`);
-        try {
-          // photos get shrunk on the way in, same as camera uploads
-          const raw = isImg(item.file.name) ? await shrinkImage(item.file) : item.file;
-          // two files with the same name on one release would overwrite each other
-          let name = item.file.name;
-          if (taken.has(name.toLowerCase())) {
-            const ext = (name.match(/\.[^.]+$/) || [""])[0];
-            const stem = name.slice(0, name.length - ext.length);
-            let k = 2;
-            while (taken.has(`${stem} (${k})${ext}`.toLowerCase())) k += 1;
-            name = `${stem} (${k})${ext}`;
-          }
-          taken.add(name.toLowerCase());
-          const path = `${relId}/${name}`;
-          const { error } = await sb().storage.from("docs").upload(path, raw, { upsert: true });
-          if (error) { bad.push(item.name); continue; }
-          added.push({ name, path });
-          ok += 1;
-        } catch { bad.push(item.name); }
+      // names are settled first (two same-named files must not overwrite each other),
+      // then the uploads themselves run six at a time instead of one by one
+      const jobs = group.map((item) => {
+        let name = item.file.name;
+        if (taken.has(name.toLowerCase())) {
+          const ext = (name.match(/\.[^.]+$/) || [""])[0];
+          const stem = name.slice(0, name.length - ext.length);
+          let k = 2;
+          while (taken.has(`${stem} (${k})${ext}`.toLowerCase())) k += 1;
+          name = `${stem} (${k})${ext}`;
+        }
+        taken.add(name.toLowerCase());
+        return { item, name, path: `${relId}/${name}` };
+      });
+      const POOL = 6;
+      for (let i = 0; i < jobs.length; i += POOL) {
+        const chunk = jobs.slice(i, i + POOL);
+        const results = await Promise.all(chunk.map(async (j) => {
+          try {
+            // photos get shrunk on the way in, same as camera uploads
+            const raw = isImg(j.item.file.name) ? await shrinkImage(j.item.file) : j.item.file;
+            const { error } = await sb().storage.from("docs").upload(j.path, raw, { upsert: true });
+            return { j, sent: !error };
+          } catch { return { j, sent: false }; }
+        }));
+        results.forEach(({ j, sent }) => {
+          if (sent) { added.push({ name: j.name, path: j.path }); ok += 1; }
+          else bad.push(j.item.name);
+        });
+        n += chunk.length;
+        setFolderProgress(`Attaching ${Math.min(n, todo.length)} of ${todo.length}…`);
       }
       if (added.length > 0) {
         const list = [...existing.filter((a) => !added.some((b) => b.path === a.path)), ...added];

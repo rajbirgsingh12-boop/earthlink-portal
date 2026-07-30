@@ -870,8 +870,66 @@ export default function Releases() {
         else merged += 1;
       }
     }
+    // strip stacked attachment copies: "RELEASE_81... (2).pdf" next to the original
+    setFolderProgress("Cleaning up duplicate file copies…");
+    let attCopies = 0;
+    const attPatches: { id: string; attachments: { name: string; path: string }[] }[] = [];
+    const deadPaths: string[] = [];
+    const survivors = new Map<string, Release>();
+    all.forEach((r) => { if (!survivors.has(r.id)) survivors.set(r.id, r); });
+    for (const r of survivors.values()) {
+      const atts = r.attachments || [];
+      if (atts.length < 2) continue;
+      const seen = new Map<string, { name: string; path: string }>();
+      const keepList: { name: string; path: string }[] = [];
+      for (const a of atts) {
+        const base = a.name.replace(/ \((\d+)\)(\.[^.]+)$/i, "$2").toLowerCase();
+        const prior = seen.get(base);
+        if (!prior) { seen.set(base, a); keepList.push(a); continue; }
+        // the plain-named one is the original; a "(n)" copy loses
+        if (/ \(\d+\)\.[^.]+$/i.test(prior.name) && !/ \(\d+\)\.[^.]+$/i.test(a.name)) {
+          deadPaths.push(prior.path); attCopies += 1;
+          keepList[keepList.indexOf(prior)] = a; seen.set(base, a);
+        } else {
+          deadPaths.push(a.path); attCopies += 1;
+        }
+      }
+      if (keepList.length !== atts.length) attPatches.push({ id: r.id, attachments: keepList });
+    }
+    for (let i = 0; i < attPatches.length; i += 500) {
+      await sb().from("releases").upsert(attPatches.slice(i, i + 500));
+    }
+    for (let i = 0; i < deadPaths.length; i += 100) {
+      await sb().storage.from("docs").remove(deadPaths.slice(i, i + 100)).then(() => null, () => null);
+    }
     setFolderProgress("");
-    return { merged, blocked, contractsMerged, dupGroups: dupGroups.length, keeperContractId: keeperContract.id };
+    return { merged, blocked, contractsMerged, attCopies, dupGroups: dupGroups.length, keeperContractId: keeperContract.id };
+  };
+
+  // every contract in one go — for when duplicates are spread across the board
+  const fixDuplicatesEverywhere = async () => {
+    if (!window.confirm(
+      "Fix duplicates in EVERY contract?\n\nFor each release number only the original is kept (received / invoiced / photos win) — copies are merged into it and removed, and stacked file copies like \"name (2).pdf\" are cleaned off. Nothing received or payroll-linked is ever deleted."
+    )) return;
+    setBusy(true);
+    const doneKeys = new Set<string>();
+    let merged = 0, contractsMerged = 0, blocked = 0, attCopies = 0;
+    for (const c of contracts) {
+      const key = contractKey(c.number);
+      if (!key || doneKeys.has(key)) continue;
+      doneKeys.add(key);
+      setFolderProgress(`Checking contract ${key}…`);
+      const res = await mergeDuplicatesCore(c, contracts).catch(() => null);
+      if (res) { merged += res.merged; contractsMerged += res.contractsMerged; blocked += res.blocked; attCopies += res.attCopies; }
+    }
+    setFolderProgress(""); setBusy(false);
+    await loadContracts();
+    if (active) await loadRows(active);
+    flash(
+      merged + contractsMerged + attCopies === 0
+        ? "No duplicates found anywhere — everything is clean"
+        : `All contracts cleaned — ${merged} duplicate release${merged === 1 ? "" : "s"} merged away${contractsMerged ? `, ${contractsMerged} twin contract${contractsMerged === 1 ? "" : "s"} merged` : ""}${attCopies ? `, ${attCopies} duplicate file cop${attCopies === 1 ? "y" : "ies"} removed` : ""}${blocked ? `, ${blocked} moved to Canceled (payroll linked)` : ""}.`
+    );
   };
 
   const fixDuplicates = async () => {
@@ -891,7 +949,7 @@ export default function Releases() {
     flash(
       res.dupGroups === 0 && res.contractsMerged === 0
         ? "No duplicates found — this contract is clean"
-        : `Done — ${res.merged} duplicate release${res.merged === 1 ? "" : "s"} merged away${res.contractsMerged ? `, ${res.contractsMerged} twin contract${res.contractsMerged === 1 ? "" : "s"} merged` : ""}${res.blocked ? `, ${res.blocked} moved to Canceled (payroll hours linked)` : ""}. Totals are back to the real numbers.`
+        : `Done — ${res.merged} duplicate release${res.merged === 1 ? "" : "s"} merged away${res.contractsMerged ? `, ${res.contractsMerged} twin contract${res.contractsMerged === 1 ? "" : "s"} merged` : ""}${res.attCopies ? `, ${res.attCopies} duplicate file cop${res.attCopies === 1 ? "y" : "ies"} removed` : ""}${res.blocked ? `, ${res.blocked} moved to Canceled (payroll hours linked)` : ""}. Totals are back to the real numbers.`
     );
   };
 
@@ -1089,6 +1147,7 @@ export default function Releases() {
     // ---- releases the app doesn't have yet are built from their own PDF first ----
     let made = 0; const madeFailed: string[] = [];
     let recvFilesSkipped = 0; // files aimed at received releases — deliberately dropped
+    let alreadyAttached = 0;  // same file name already on the release — re-run of the same folder
     const toMake = new Map<string, PlanRow[]>(); // contract+release → its files
     todo.filter((r) => r.willCreate && !r.relId && r.newRel)
       .forEach((r) => {
@@ -1196,20 +1255,15 @@ export default function Releases() {
       const existing = ((cur as { attachments?: { name: string; path: string }[] } | null)?.attachments) || [];
       const added: { name: string; path: string }[] = [];
       const taken = new Set(existing.map((a) => a.name.toLowerCase()));
-      // names are settled first (two same-named files must not overwrite each other),
-      // then the uploads themselves run six at a time instead of one by one
-      const jobs = group.map((item) => {
-        let name = item.file.name;
-        if (taken.has(name.toLowerCase())) {
-          const ext = (name.match(/\.[^.]+$/) || [""])[0];
-          const stem = name.slice(0, name.length - ext.length);
-          let k = 2;
-          while (taken.has(`${stem} (${k})${ext}`.toLowerCase())) k += 1;
-          name = `${stem} (${k})${ext}`;
-        }
+      // a file already attached under the same name IS this file (re-running the
+      // same folder) — skip it instead of stacking "name (2).pdf" copies
+      const jobs: { item: PlanRow; name: string; path: string }[] = [];
+      for (const item of group) {
+        const name = item.file.name;
+        if (taken.has(name.toLowerCase())) { alreadyAttached += 1; continue; }
         taken.add(name.toLowerCase());
-        return { item, name, path: `${relId}/${name}` };
-      });
+        jobs.push({ item, name, path: `${relId}/${name}` });
+      }
       const POOL = 6;
       for (let i = 0; i < jobs.length; i += POOL) {
         const chunk = jobs.slice(i, i + POOL);
@@ -1303,6 +1357,7 @@ export default function Releases() {
       + (autoMerged ? ` · ${autoMerged} duplicate${autoMerged === 1 ? "" : "s"} merged away` : "")
       + (madeFailed.length ? ` · ${madeFailed.length} couldn't be created` : "")
       + (sosMade ? ` · SOS + invoice ready on ${sosMade}` : "")
+      + (alreadyAttached ? ` · ${alreadyAttached} already attached before — skipped` : "")
       + (recvFilesSkipped ? ` · ${recvFilesSkipped} file${recvFilesSkipped === 1 ? "" : "s"} for received releases left alone` : "")
       + (skipPaid ? ` · ${skipPaid} already paid, left alone` : "")
       + (skipHave ? ` · ${skipHave} already had line items` : "")
@@ -1561,6 +1616,7 @@ export default function Releases() {
         <div className="flex gap-2">
           {!readOnly && <button className="btn btn-ghost" onClick={() => pdfRef.current?.click()}>+ From PDF(s)</button>}
           {!readOnly && <button className="btn btn-ghost" onClick={() => folderRef.current?.click()}>📁 Attach folder</button>}
+          {!readOnly && contracts.length > 0 && <button className="btn btn-ghost" onClick={fixDuplicatesEverywhere} disabled={busy}>🧹 Fix all duplicates</button>}
           {!readOnly && <button className="btn btn-ghost" onClick={() => fileRef.current?.click()}>Upload sheet</button>}
           {rows.length > 0 && <button className="btn btn-ghost" onClick={exportSheet}>Download</button>}
         </div>

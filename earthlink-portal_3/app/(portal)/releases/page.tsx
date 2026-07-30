@@ -843,6 +843,7 @@ export default function Releases() {
     });
     const dupGroups = [...groupsByNum.values()].filter((g) => g.length > 1);
     let merged = 0, blocked = 0, gi = 0;
+    const goneIds = new Set<string>(); // rows deleted below — never patched afterwards
     for (const g of dupGroups) {
       gi += 1;
       setFolderProgress(`Merging duplicate releases ${gi} of ${dupGroups.length}…`);
@@ -867,16 +868,18 @@ export default function Releases() {
         }
         const { error } = await sb().from("releases").delete().eq("id", dupe.id);
         if (error) { await sb().from("releases").update({ canceled: true }).eq("id", dupe.id); blocked += 1; }
-        else merged += 1;
+        else { merged += 1; goneIds.add(dupe.id); }
       }
     }
-    // strip stacked attachment copies: "RELEASE_81... (2).pdf" next to the original
+    // strip duplicate documents on every remaining release: the same name twice
+    // (same file merged in from a copy under a different storage path) and the
+    // stacked "name (2).pdf" copies both collapse down to one entry
     setFolderProgress("Cleaning up duplicate file copies…");
     let attCopies = 0;
     const attPatches: { id: string; attachments: { name: string; path: string }[] }[] = [];
     const deadPaths: string[] = [];
     const survivors = new Map<string, Release>();
-    all.forEach((r) => { if (!survivors.has(r.id)) survivors.set(r.id, r); });
+    all.forEach((r) => { if (!goneIds.has(r.id) && !survivors.has(r.id)) survivors.set(r.id, r); });
     for (const r of survivors.values()) {
       const atts = r.attachments || [];
       if (atts.length < 2) continue;
@@ -886,21 +889,36 @@ export default function Releases() {
         const base = a.name.replace(/ \((\d+)\)(\.[^.]+)$/i, "$2").toLowerCase();
         const prior = seen.get(base);
         if (!prior) { seen.set(base, a); keepList.push(a); continue; }
-        // the plain-named one is the original; a "(n)" copy loses
-        if (/ \(\d+\)\.[^.]+$/i.test(prior.name) && !/ \(\d+\)\.[^.]+$/i.test(a.name)) {
-          deadPaths.push(prior.path); attCopies += 1;
+        attCopies += 1;
+        // the plain-named one on this release's own folder is the original
+        const priorIsCopy = / \(\d+\)\.[^.]+$/i.test(prior.name) || !prior.path.startsWith(`${r.id}/`);
+        const curIsCopy = / \(\d+\)\.[^.]+$/i.test(a.name) || !a.path.startsWith(`${r.id}/`);
+        if (priorIsCopy && !curIsCopy) {
+          if (prior.path !== a.path) deadPaths.push(prior.path);
           keepList[keepList.indexOf(prior)] = a; seen.set(base, a);
         } else {
-          deadPaths.push(a.path); attCopies += 1;
+          if (prior.path !== a.path) deadPaths.push(a.path);
         }
       }
       if (keepList.length !== atts.length) attPatches.push({ id: r.id, attachments: keepList });
     }
-    for (let i = 0; i < attPatches.length; i += 500) {
-      await sb().from("releases").upsert(attPatches.slice(i, i + 500));
+    // plain updates, a few at a time — never upsert here: an upsert that touches a
+    // just-deleted id turns into an INSERT and fails the whole batch silently
+    for (let i = 0; i < attPatches.length; i += 10) {
+      const chunk = attPatches.slice(i, i + 10);
+      const results = await Promise.all(chunk.map((p) => sb().from("releases").update({ attachments: p.attachments }).eq("id", p.id)));
+      const bad = results.find((r) => r.error);
+      if (bad?.error) flash(`Some file cleanups didn't save: ${bad.error.message}`);
     }
-    for (let i = 0; i < deadPaths.length; i += 100) {
-      await sb().storage.from("docs").remove(deadPaths.slice(i, i + 100)).then(() => null, () => null);
+    // only paths no surviving release still points to (AFTER the cleanup) get removed
+    const finalLists = new Map<string, { name: string; path: string }[]>();
+    survivors.forEach((r) => finalLists.set(r.id, r.attachments || []));
+    attPatches.forEach((p) => finalLists.set(p.id, p.attachments));
+    const stillUsed = new Set<string>();
+    finalLists.forEach((list) => list.forEach((a) => stillUsed.add(a.path)));
+    const removable = [...new Set(deadPaths)].filter((p) => !stillUsed.has(p));
+    for (let i = 0; i < removable.length; i += 100) {
+      await sb().storage.from("docs").remove(removable.slice(i, i + 100)).then(() => null, () => null);
     }
     setFolderProgress("");
     return { merged, blocked, contractsMerged, attCopies, dupGroups: dupGroups.length, keeperContractId: keeperContract.id };

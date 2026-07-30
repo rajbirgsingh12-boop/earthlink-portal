@@ -208,14 +208,17 @@ export default function Releases() {
     // or a walk sheet (with quantities) whose Release # matches
     const ready = new Set<string>();
     const ids = all.map((r) => r.id);
-    for (let i = 0; i < ids.length; i += 200) {
+    // all chunks fetch together — serially this scan alone took seconds on a big contract
+    const chunks: string[][] = [];
+    for (let i = 0; i < ids.length; i += 200) chunks.push(ids.slice(i, i + 200));
+    await Promise.all(chunks.map(async (chunk) => {
       // page inside each chunk too — 200 releases can hold >1000 line items
       for (let f = 0; ; f += 1000) {
-        const { data: its } = await sb().from("release_items").select("release_id").in("release_id", ids.slice(i, i + 200)).range(f, f + 999);
+        const { data: its } = await sb().from("release_items").select("release_id").in("release_id", chunk).range(f, f + 999);
         ((its || []) as { release_id: string }[]).forEach((it) => ready.add(it.release_id));
         if (!its || its.length < 1000) break;
       }
-    }
+    }));
     const { data: props } = await sb().from("proposals").select("release_number,qty_map").eq("contract_id", cid);
     if (token !== loadSeq.current) return;
     const walkNums = new Set(
@@ -681,17 +684,28 @@ export default function Releases() {
       let updated = 0, added = 0;
       const toInsert: typeof pending.items = [];
       const matched = new Set<string>();
+      const toUpdate: { id: string; patch: Record<string, unknown> }[] = [];
       for (const it of pending.items) {
         const k = String(it.rel_number).trim();
         const ids = k ? byNum.get(k) : undefined;
         if (ids && ids.length > 0 && !matched.has(k)) {
           matched.add(k);
           const { assigned_to: _a, ...patch } = it;
-          const { error } = await sb().from("releases").update(patch).eq("id", ids[0]);
-          if (error) { flash(error.message); setBusy(false); return; }
-          updated++;
+          toUpdate.push({ id: ids[0], patch });
         } else toInsert.push(it);
       }
+      // updates run a batch at a time instead of one by one — a big sheet used to
+      // mean a thousand sequential round-trips and minutes of waiting
+      const PAR = 15;
+      for (let i = 0; i < toUpdate.length; i += PAR) {
+        const chunk = toUpdate.slice(i, i + PAR);
+        const results = await Promise.all(chunk.map((u) => sb().from("releases").update(u.patch).eq("id", u.id)));
+        const bad = results.find((r) => r.error);
+        if (bad?.error) { flash(bad.error.message); setBusy(false); return; }
+        updated += chunk.length;
+        setFolderProgress(`Updating ${Math.min(i + PAR, toUpdate.length)} of ${toUpdate.length} releases…`);
+      }
+      setFolderProgress("");
       // remove rows the sheet no longer has, plus duplicate copies of matched ones
       const keepIds = new Set<string>();
       matched.forEach((k) => { const ids = byNum.get(k); if (ids) keepIds.add(ids[0]); });
@@ -1319,7 +1333,7 @@ export default function Releases() {
       {!folderPlan && folderProgress && (
         <div className="card mb-4 border-work p-4 text-sm">
           <b>{folderProgress}</b>
-          <div className="text-[12px] text-inksoft">Opening each release PDF to see which release it is — nothing is uploaded yet.</div>
+          <div className="text-[12px] text-inksoft">Working — leave this tab open until it finishes.</div>
         </div>
       )}
 

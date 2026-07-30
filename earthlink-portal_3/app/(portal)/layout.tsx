@@ -20,6 +20,16 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
     setMenuX(Math.max(8, x));
     setMenu(key);
   };
+  // tapping anywhere outside the nav closes an open menu (phones have no hover-out)
+  useEffect(() => {
+    if (!menu) return;
+    const close = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (!t || !t.closest("[data-navwrap]")) setMenu(null);
+    };
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, [menu]);
 
   useEffect(() => {
     (async () => {
@@ -94,11 +104,11 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
           </div>
         </div>
         {openGroup && (
-          <>
-            {/* tap anywhere else to close (phones) */}
-            <div className="fixed inset-0 z-10" onClick={() => setMenu(null)} />
-            <div className="absolute top-full z-20 min-w-52 border-[1.5px] border-ink bg-paper shadow-lg"
-              style={{ left: menuX }}>
+          /* in the page flow, not floating — the content below slides down, so the
+             menu can never sit on top of a button */
+          <div className="border-t border-rulesoft bg-paper pb-2 pt-1">
+            <div className="inline-block border-[1.5px] border-ink bg-paper shadow-md"
+              style={{ marginLeft: Math.max(8, menuX) }}>
               {openGroup.items.map(([h, l]) => (
                 <a key={h} href={h}
                   className={`block whitespace-nowrap border-b border-rulesoft px-4 py-3 font-display text-[14px] font-semibold uppercase tracking-wider last:border-b-0 ${path === h ? "text-work" : "text-inksoft hover:bg-card hover:text-ink"}`}>
@@ -106,7 +116,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
                 </a>
               ))}
             </div>
-          </>
+          </div>
         )}
       </div>
       <div className="mx-auto max-w-5xl px-4 pb-24 pt-5">{children}</div>

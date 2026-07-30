@@ -1029,10 +1029,39 @@ export default function Releases() {
       });
     const madeIds = new Map<string, string>(); // same key → the new release's id
     const madeRels = new Map<string, Release>(); // and the row itself, for the steps below
+
+    // final gate before anything is created: a FRESH look at the database.
+    // If a release with this number already exists on any twin of the contract —
+    // received, payroll-linked, whatever — it is reused, never created again.
+    // This holds even if the screen's list is stale or another device just imported.
+    const freshByKey = new Map<string, { id: string; canceled: boolean }>();
+    if (toMake.size > 0) {
+      setFolderProgress("Double-checking against the database…");
+      const keys = [...new Set([...toMake.keys()].map((k) => k.split(":")[0]))];
+      for (const ck of keys) {
+        const ids = folderPlan.contracts.filter((c) => contractKey(c.number) === ck).map((c) => c.id);
+        if (ids.length === 0) continue;
+        for (let f = 0; ; f += 1000) {
+          const { data } = await sb().from("releases").select("id,rel_number,canceled").in("contract_id", ids).range(f, f + 999);
+          ((data || []) as { id: string; rel_number: string; canceled: boolean }[]).forEach((r) => {
+            const rk = String(r.rel_number || "").trim().replace(/^0+(?=\d)/, "");
+            if (!rk) return;
+            const k = `${ck}:${rk}`;
+            const cur = freshByKey.get(k);
+            // a live release beats a canceled one as the reuse target
+            if (!cur || (cur.canceled && !r.canceled)) freshByKey.set(k, { id: r.id, canceled: !!r.canceled });
+          });
+          if (!data || data.length < 1000) break;
+        }
+      }
+    }
+    let reused = 0;
     let mk = 0;
     for (const [key, group] of toMake) {
       mk += 1;
       setFolderProgress(`Creating release ${mk} of ${toMake.size}…`);
+      const already = freshByKey.get(key);
+      if (already) { madeIds.set(key, already.id); reused += 1; continue; }
       let relId: string | null = null;
       for (const item of group) {
         const parsed = await fullParse(item.file, pdfjsEarly);
@@ -1183,6 +1212,7 @@ export default function Releases() {
     flash(
       `Attached ${ok} file${ok === 1 ? "" : "s"} to ${byRel.size} release${byRel.size === 1 ? "" : "s"}`
       + (made ? ` · ${made} new release${made === 1 ? "" : "s"} created` : "")
+      + (reused ? ` · ${reused} already existed — files attached to the originals instead` : "")
       + (madeFailed.length ? ` · ${madeFailed.length} couldn't be created` : "")
       + (sosMade ? ` · SOS + invoice ready on ${sosMade}` : "")
       + (skipPaid ? ` · ${skipPaid} already paid, left alone` : "")

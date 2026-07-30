@@ -753,6 +753,95 @@ export default function Releases() {
     flash(`Loaded into ${num}`);
   };
 
+  // ---------- fix duplicates: merge twin contracts, then twin releases ----------
+  // Repairs what a bad import created: contract rows sharing one number get
+  // merged into the one holding the most releases, then releases sharing a
+  // number keep the original (received / invoiced / with photos) and the copy's
+  // attachments and line items are moved over before the copy is deleted.
+  const fixDuplicates = async () => {
+    const cur = contracts.find((c) => c.id === active);
+    if (!cur) return;
+    const key = contractKey(cur.number);
+    const twins = contracts.filter((c) => contractKey(c.number) === key);
+    if (!window.confirm(
+      `Fix duplicates for contract ${key}?\n\nDuplicate copies of the same release will be merged into the original — the original's payment status, photos and line items always win, and the copy's attachments move over before the copy is removed. Nothing that's been received or has payroll hours is deleted.`
+    )) return;
+    setBusy(true);
+    setFolderProgress("Checking for duplicates…");
+    // releases across every twin contract row
+    const all: Release[] = [];
+    for (const t of twins) {
+      for (let f = 0; ; f += 1000) {
+        const { data } = await sb().from("releases").select("*").eq("contract_id", t.id).range(f, f + 999);
+        all.push(...((data || []) as Release[]));
+        if (!data || data.length < 1000) break;
+      }
+    }
+    // keeper contract = the twin holding the most releases
+    const keeperContract = [...twins].sort((a, b) =>
+      all.filter((r) => r.contract_id === b.id).length - all.filter((r) => r.contract_id === a.id).length)[0];
+    let contractsMerged = 0;
+    for (const t of twins) {
+      if (t.id === keeperContract.id) continue;
+      setFolderProgress(`Merging contract ${t.number} into ${keeperContract.number}…`);
+      await sb().from("releases").update({ contract_id: keeperContract.id }).eq("contract_id", t.id);
+      await sb().from("contract_items").update({ contract_id: keeperContract.id }).eq("contract_id", t.id).then(() => null, () => null);
+      await sb().from("proposals").update({ contract_id: keeperContract.id }).eq("contract_id", t.id).then(() => null, () => null);
+      const { error } = await sb().from("contracts").delete().eq("id", t.id);
+      if (!error) contractsMerged += 1;
+    }
+    all.forEach((r) => { if (twins.some((t) => t.id === r.contract_id)) r.contract_id = keeperContract.id; });
+    // group releases by number; more than one copy = a duplicate to merge
+    const groupsByNum = new Map<string, Release[]>();
+    all.forEach((r) => {
+      const k = String(r.rel_number || "").trim().replace(/^0+(?=\d)/, "");
+      if (!k) return;
+      if (!groupsByNum.has(k)) groupsByNum.set(k, []);
+      groupsByNum.get(k)!.push(r);
+    });
+    const dupGroups = [...groupsByNum.values()].filter((g) => g.length > 1);
+    let merged = 0, blocked = 0, gi = 0;
+    for (const g of dupGroups) {
+      gi += 1;
+      setFolderProgress(`Merging duplicate releases ${gi} of ${dupGroups.length}…`);
+      // the original wins: received > invoiced > payroll-done > has photos > first
+      const score = (r: Release) =>
+        (r.received ? 8 : 0) + (r.invoice_sent ? 4 : 0) + (r.payroll_done ? 2 : 0) + Math.min(1, (r.attachments || []).length);
+      const keep = [...g].sort((a, b) => score(b) - score(a))[0];
+      const { data: keepItems } = await sb().from("release_items").select("id").eq("release_id", keep.id).limit(1);
+      const keeperHasItems = (keepItems || []).length > 0;
+      for (const dupe of g) {
+        if (dupe.id === keep.id) continue;
+        // the copy's paperwork moves to the original before the copy goes
+        if (!keeperHasItems) {
+          await sb().from("release_items").update({ release_id: keep.id }).eq("release_id", dupe.id).then(() => null, () => null);
+        } else {
+          await sb().from("release_items").delete().eq("release_id", dupe.id).then(() => null, () => null);
+        }
+        const mergedAtt = [
+          ...(keep.attachments || []),
+          ...((dupe.attachments || []).filter((a) => !(keep.attachments || []).some((b) => b.path === a.path))),
+        ];
+        if (mergedAtt.length !== (keep.attachments || []).length) {
+          await sb().from("releases").update({ attachments: mergedAtt }).eq("id", keep.id);
+          keep.attachments = mergedAtt;
+        }
+        const { error } = await sb().from("releases").delete().eq("id", dupe.id);
+        if (error) { await sb().from("releases").update({ canceled: true }).eq("id", dupe.id); blocked += 1; }
+        else merged += 1;
+      }
+    }
+    setFolderProgress(""); setBusy(false);
+    await loadContracts();
+    setActive(keeperContract.id);
+    await loadRows(keeperContract.id);
+    flash(
+      dupGroups.length === 0 && contractsMerged === 0
+        ? "No duplicates found — this contract is clean"
+        : `Done — ${merged} duplicate release${merged === 1 ? "" : "s"} merged away${contractsMerged ? `, ${contractsMerged} twin contract${contractsMerged === 1 ? "" : "s"} merged` : ""}${blocked ? `, ${blocked} moved to Canceled (payroll hours linked)` : ""}. Totals are back to the real numbers.`
+    );
+  };
+
   // ---------- attach a whole folder: each file lands on its own release ----------
   const MAX_FOLDER_FILES = 5000;
   // a contract's own name may be wrong or missing — the number is what identifies it
@@ -812,12 +901,18 @@ export default function Releases() {
       const wanted = [...new Set(read.map((r) => r.ident && contractKey(r.ident.contract)).filter(Boolean) as string[])];
       setFolderProgress("Finding the contracts…");
       const { data: allC } = await sb().from("contracts").select("id,number,name");
-      const cByKey = new Map<string, Contract>();
+      // the same contract number can exist as more than one row ("2215867" and
+      // "2215867-2") — ALL of them count, and their releases are searched together.
+      // Picking just one row here is what once made already-imported releases look
+      // "new" and created duplicates.
+      const cByKey = new Map<string, Contract[]>();
       ((allC || []) as Contract[]).forEach((c) => {
         const k = contractKey(c.number);
-        if (k && !cByKey.has(k)) cByKey.set(k, c);
+        if (!k) return;
+        if (!cByKey.has(k)) cByKey.set(k, []);
+        cByKey.get(k)!.push(c);
       });
-      const cids = wanted.map((k) => cByKey.get(k)?.id).filter(Boolean) as string[];
+      const cids = wanted.flatMap((k) => (cByKey.get(k) || []).map((c) => c.id));
       const relsAll: Release[] = [];
       for (let i = 0; i < cids.length; i += 20) {
         for (let f = 0; ; f += 1000) {
@@ -843,7 +938,8 @@ export default function Releases() {
         const base = { path: relPath(file), name: file.name, file };
         if (!ident) { notRelease += 1; continue; } // not a release PDF — leave it alone
         const ck = contractKey(ident.contract);
-        const contract = cByKey.get(ck);
+        const cands = cByKey.get(ck) || [];
+        const contract = cands[0];
         const cLabel = contract ? contractLabelOf(contract) : `contract ${ident.contract}`;
         if (!contract) {
           // neither the contract nor the release is on file — both get made from the PDF
@@ -941,7 +1037,16 @@ export default function Releases() {
       for (const item of group) {
         const parsed = await fullParse(item.file, pdfjsEarly);
         if (!parsed) continue;
-        const contract = await resolveContract(parsed.contract.trim() || item.newRel!.contractNum);
+        // reuse the existing contract with this number — when the number exists as
+        // several rows, the one that actually holds releases wins, so a duplicate
+        // twin contract is never created
+        const ck2 = contractKey(parsed.contract.trim() || item.newRel!.contractNum);
+        const cands2 = folderPlan.contracts.filter((c) => contractKey(c.number) === ck2);
+        const contract =
+          cands2.sort((a, b) =>
+            folderPlan.rels.filter((r) => r.contract_id === b.id).length -
+            folderPlan.rels.filter((r) => r.contract_id === a.id).length)[0]
+          || await resolveContract(parsed.contract.trim() || item.newRel!.contractNum);
         if (!contract) break;
         const breakdown = parsed.items.filter((it) => it.uom === "HOUR")
           .map((it) => ({ cls: it.description.replace(/,?\s*Regular Hours/i, "").trim(), hours: it.qty }));
@@ -1614,11 +1719,25 @@ export default function Releases() {
       {active && rows.length > 0 && (() => {
         const c = contracts.find((x) => x.id === active);
         const devs = [...new Set(rows.map((r) => (r.location || "").trim()).filter(Boolean))];
-        if (devs.length === 0) return null;
+        const twinCount = c ? contracts.filter((x) => contractKey(x.number) === contractKey(c.number)).length : 1;
+        const numCounts = new Map<string, number>();
+        rows.forEach((r) => {
+          const k = String(r.rel_number || "").trim().replace(/^0+(?=\d)/, "");
+          if (k) numCounts.set(k, (numCounts.get(k) || 0) + 1);
+        });
+        const dupNums = [...numCounts.values()].filter((n) => n > 1).length;
+        const hasDupes = twinCount > 1 || dupNums > 0;
         return (
-          <div className="mb-3 -mt-1 text-[11px] text-inksoft">
-            Contract <b className="font-mono">{c?.number}</b> · {rows.length} release{rows.length === 1 ? "" : "s"} ·{" "}
-            {devs.slice(0, 4).join(", ")}{devs.length > 4 ? `, +${devs.length - 4} more` : ""}
+          <div className="mb-3 -mt-1 flex flex-wrap items-center gap-2 text-[11px] text-inksoft">
+            <span>
+              Contract <b className="font-mono">{c?.number}</b> · {rows.length} release{rows.length === 1 ? "" : "s"}
+              {devs.length > 0 && <> · {devs.slice(0, 4).join(", ")}{devs.length > 4 ? `, +${devs.length - 4} more` : ""}</>}
+            </span>
+            {hasDupes && !readOnly && (
+              <button className="btn btn-ghost px-2.5 py-1 text-[11px] text-alert" onClick={fixDuplicates} disabled={busy}>
+                🧹 Fix duplicates{dupNums > 0 ? ` (${dupNums} release #s doubled)` : twinCount > 1 ? " (contract listed twice)" : ""}
+              </button>
+            )}
           </div>
         );
       })()}

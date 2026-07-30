@@ -167,6 +167,17 @@ export default function Settings() {
 
   type CheckResult = { label: string; fix: string; ok: boolean };
   const [checks, setChecks] = useState<CheckResult[] | null>(null);
+  // storage meter: how full the docs bucket is (via the storage_usage() function)
+  const [storage, setStorage] = useState<{ bytes: number; files: number } | "missing" | null>(null);
+  const [storageBusy, setStorageBusy] = useState(false);
+  const checkStorage = async () => {
+    setStorageBusy(true);
+    const { data, error } = await sb().rpc("storage_usage");
+    setStorageBusy(false);
+    if (error) { setStorage(/function|schema cache|not.*found/i.test(error.message) ? "missing" : null); if (storage !== "missing" && !/function|schema cache|not.*found/i.test(error.message)) flash(error.message); return; }
+    const d = data as { bytes?: number; files?: number } | null;
+    setStorage({ bytes: Number(d?.bytes) || 0, files: Number(d?.files) || 0 });
+  };
   const [checking, setChecking] = useState(false);
   const runSystemCheck = async () => {
     setChecking(true); setChecks(null);
@@ -269,6 +280,42 @@ export default function Settings() {
           </div>
         </>
       )}
+
+      <div className="mb-2 mt-6 flex items-baseline justify-between">
+        <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">File storage</div>
+        <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={checkStorage} disabled={storageBusy}>{storageBusy ? "Measuring…" : "Check storage"}</button>
+      </div>
+      <div className="card p-3.5 text-sm">
+        {storage === null && !storageBusy && (
+          <div className="text-inksoft">How full is the photo &amp; document storage — tap Check storage. The free Supabase plan includes 1 GB; upgrade only when this gets near the top.</div>
+        )}
+        {storage === "missing" && (
+          <div className="text-inksoft">Run <span className="font-mono">supabase/upgrade_storage_meter.sql</span> (it&apos;s in RUN_ME.sql too) to turn on the storage meter.</div>
+        )}
+        {storage !== null && storage !== "missing" && (() => {
+          const gb = 1024 * 1024 * 1024;
+          const pct = Math.min(100, Math.round((storage.bytes / gb) * 100));
+          const mb = Math.round(storage.bytes / 1024 / 1024);
+          const tone = pct < 60 ? "text-ok" : pct < 85 ? "text-work" : "text-alert";
+          return (
+            <>
+              <div className="mb-1.5 flex items-baseline justify-between">
+                <span className="font-mono font-semibold">{mb < 1024 ? `${mb} MB` : `${(mb / 1024).toFixed(2)} GB`} of 1 GB</span>
+                <span className={`font-mono text-xs font-semibold ${tone}`}>{pct}% · {storage.files.toLocaleString()} files</span>
+              </div>
+              <div className="h-2 w-full rounded-sm bg-rulesoft">
+                <div className={`h-2 rounded-sm ${pct < 60 ? "bg-ok" : pct < 85 ? "bg-work" : "bg-alert"}`} style={{ width: `${Math.max(2, pct)}%` }} />
+              </div>
+              <div className="mt-1.5 text-xs text-inksoft">
+                {pct < 60 && "Plenty of room — no need to upgrade Supabase."}
+                {pct >= 60 && pct < 85 && "Getting fuller — fine for now, but plan on Supabase Pro ($25/mo, 100 GB) in the coming months."}
+                {pct >= 85 && "Nearly full — upgrade to Supabase Pro ($25/mo, 100 GB) soon, or new photo uploads will start failing."}
+                {" "}(If you&apos;ve already upgraded, the real limit is 100 GB and this bar reads against 1 GB.)
+              </div>
+            </>
+          );
+        })()}
+      </div>
 
       <div className="mb-2 mt-6 flex items-baseline justify-between">
         <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Backup</div>

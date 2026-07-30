@@ -210,3 +210,21 @@ do $$ begin
 exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table schedule_days; exception when duplicate_object then null; end $$;
 alter table schedule_days add column if not exists address text default '';
+
+-- ---------- from upgrade_storage_meter.sql ----------
+-- used, so upgrading the Supabase plan is a decision made on real numbers.
+create or replace function public.storage_usage()
+returns json
+language sql
+security definer
+set search_path = ''
+as $$
+  select json_build_object(
+    'bytes', coalesce(sum((metadata->>'size')::bigint), 0),
+    'files', count(*)
+  )
+  from storage.objects
+  where bucket_id = 'docs';
+$$;
+revoke all on function public.storage_usage() from public;
+grant execute on function public.storage_usage() to authenticated;

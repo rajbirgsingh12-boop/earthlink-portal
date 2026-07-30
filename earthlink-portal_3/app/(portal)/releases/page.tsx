@@ -694,16 +694,21 @@ export default function Releases() {
           toUpdate.push({ id: ids[0], patch });
         } else toInsert.push(it);
       }
-      // updates run a batch at a time instead of one by one — a big sheet used to
-      // mean a thousand sequential round-trips and minutes of waiting
-      const PAR = 15;
-      for (let i = 0; i < toUpdate.length; i += PAR) {
-        const chunk = toUpdate.slice(i, i + PAR);
-        const results = await Promise.all(chunk.map((u) => sb().from("releases").update(u.patch).eq("id", u.id)));
-        const bad = results.find((r) => r.error);
-        if (bad?.error) { flash(bad.error.message); setBusy(false); return; }
+      // all updates go as bulk writes, 500 rows per request — the database matches
+      // each row by its id and only touches the sheet's columns, so photos,
+      // invoice dates and payroll links survive exactly as before
+      for (let i = 0; i < toUpdate.length; i += 500) {
+        const chunk = toUpdate.slice(i, i + 500).map((u) => ({ id: u.id, ...u.patch }));
+        setFolderProgress(`Updating ${Math.min(i + 500, toUpdate.length)} of ${toUpdate.length} releases…`);
+        let { error } = await sb().from("releases").upsert(chunk);
+        if (error) {
+          // fall back to row-by-row (in parallel) so one odd row can't sink the import
+          const results = await Promise.all(chunk.map(({ id, ...patch }) => sb().from("releases").update(patch).eq("id", id)));
+          const bad = results.find((r) => r.error);
+          if (bad?.error) { flash(bad.error.message); setFolderProgress(""); setBusy(false); return; }
+          error = null;
+        }
         updated += chunk.length;
-        setFolderProgress(`Updating ${Math.min(i + PAR, toUpdate.length)} of ${toUpdate.length} releases…`);
       }
       setFolderProgress("");
       // remove rows the sheet no longer has, plus duplicate copies of matched ones
@@ -713,16 +718,20 @@ export default function Releases() {
       let removed = 0, kept = 0;
       for (let i = 0; i < removeIds.length; i += 100) {
         const slice = removeIds.slice(i, i + 100);
+        if (removeIds.length > 100) setFolderProgress(`Cleaning up ${Math.min(i + 100, removeIds.length)} of ${removeIds.length}…`);
         const { error } = await sb().from("releases").delete().in("id", slice);
         if (!error) { removed += slice.length; continue; }
         // some are blocked (payroll hours linked) — cancel those instead so they
         // stop counting toward the totals; the hours stay safe, restore any time
-        for (const id of slice) {
-          const { error: e1 } = await sb().from("releases").delete().eq("id", id);
-          if (e1) { await sb().from("releases").update({ canceled: true }).eq("id", id); kept++; }
-          else removed++;
+        const results = await Promise.all(slice.map((id) => sb().from("releases").delete().eq("id", id).then((r) => ({ id, error: r.error }))));
+        const blocked = results.filter((r) => r.error).map((r) => r.id);
+        removed += slice.length - blocked.length;
+        if (blocked.length > 0) {
+          await sb().from("releases").update({ canceled: true }).in("id", blocked);
+          kept += blocked.length;
         }
       }
+      setFolderProgress("");
       for (let i = 0; i < toInsert.length; i += 500) {
         const chunk = toInsert.slice(i, i + 500).map((it) => ({ ...it, contract_id: contract!.id }));
         const { error } = await sb().from("releases").insert(chunk);

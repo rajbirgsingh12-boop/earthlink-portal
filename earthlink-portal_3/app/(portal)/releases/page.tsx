@@ -673,25 +673,41 @@ export default function Releases() {
       // merge-style replace: releases already here are UPDATED in place (payroll
       // links, photos and invoice dates survive), new ones are added, leftovers
       // are deleted where nothing depends on them — payroll-linked ones are kept
-      const existing: { id: string; rel_number: string }[] = [];
-      for (let from = 0; ; from += 1000) {
-        const { data: page } = await sb().from("releases").select("id,rel_number").eq("contract_id", contract.id).range(from, from + 999);
-        existing.push(...((page || []) as typeof existing));
-        if (!page || page.length < 1000) break;
+      // full rows, and across every twin of this contract number — so the sheet
+      // always lands on the ORIGINAL of a duplicated release, never the copy
+      const twinIds = contracts.filter((c) => contractKey(c.number) === contractKey(contract.number)).map((c) => c.id);
+      if (!twinIds.includes(contract.id)) twinIds.push(contract.id);
+      const existing: Release[] = [];
+      for (const tid of twinIds) {
+        for (let from = 0; ; from += 1000) {
+          const { data: page } = await sb().from("releases").select("*").eq("contract_id", tid).range(from, from + 999);
+          existing.push(...((page || []) as Release[]));
+          if (!page || page.length < 1000) break;
+        }
       }
-      const byNum = new Map<string, string[]>();
-      existing.forEach((r) => { const k = String(r.rel_number).trim(); byNum.set(k, [...(byNum.get(k) || []), r.id]); });
+      const byNum = new Map<string, Release[]>();
+      existing.forEach((r) => {
+        const k = String(r.rel_number).trim();
+        if (!k) return;
+        if (!byNum.has(k)) byNum.set(k, []);
+        byNum.get(k)!.push(r);
+      });
       let updated = 0, added = 0;
       const toInsert: typeof pending.items = [];
       const matched = new Set<string>();
+      const keeperByNum = new Map<string, Release>();
       const toUpdate: { id: string; patch: Record<string, unknown> }[] = [];
       for (const it of pending.items) {
         const k = String(it.rel_number).trim();
-        const ids = k ? byNum.get(k) : undefined;
-        if (ids && ids.length > 0 && !matched.has(k)) {
+        const group = k ? byNum.get(k) : undefined;
+        if (group && group.length > 0 && !matched.has(k)) {
           matched.add(k);
+          // the received / invoiced / photographed one is the original — it gets
+          // the sheet's update; any copies get merged away below
+          const keeper = [...group].sort((a, b) => relScore(b) - relScore(a))[0];
+          keeperByNum.set(k, keeper);
           const { assigned_to: _a, ...patch } = it;
-          toUpdate.push({ id: ids[0], patch });
+          toUpdate.push({ id: keeper.id, patch });
         } else toInsert.push(it);
       }
       // all updates go as bulk writes, 500 rows per request — the database matches
@@ -711,10 +727,37 @@ export default function Releases() {
         updated += chunk.length;
       }
       setFolderProgress("");
-      // remove rows the sheet no longer has, plus duplicate copies of matched ones
-      const keepIds = new Set<string>();
-      matched.forEach((k) => { const ids = byNum.get(k); if (ids) keepIds.add(ids[0]); });
-      const removeIds = existing.filter((r) => !keepIds.has(r.id)).map((r) => r.id);
+      // sort out everything that ISN'T a keeper:
+      //  - a copy of a matched number → rescue its photos onto the original, then remove
+      //  - not in the sheet but RECEIVED → left completely alone (paid history is sacred)
+      //  - not in the sheet, not received → removed (canceled if payroll hours block it)
+      const keepIds = new Set<string>([...keeperByNum.values()].map((r) => r.id));
+      const removeIds: string[] = [];
+      const attachPatches: { id: string; attachments: { name: string; path: string }[] }[] = [];
+      let keptReceived = 0;
+      for (const r of existing) {
+        if (keepIds.has(r.id)) continue;
+        const k = String(r.rel_number).trim();
+        const keeper = keeperByNum.get(k);
+        if (keeper) {
+          // duplicate copy — its attachments move to the original before it goes
+          const extra = (r.attachments || []).filter((a) => !(keeper.attachments || []).some((b) => b.path === a.path));
+          if (extra.length > 0) {
+            keeper.attachments = [...(keeper.attachments || []), ...extra];
+            const prior = attachPatches.find((p) => p.id === keeper.id);
+            if (prior) prior.attachments = keeper.attachments;
+            else attachPatches.push({ id: keeper.id, attachments: keeper.attachments });
+          }
+          removeIds.push(r.id);
+        } else if (r.received) {
+          keptReceived += 1; // paid but missing from the sheet — never deleted
+        } else {
+          removeIds.push(r.id);
+        }
+      }
+      for (let i = 0; i < attachPatches.length; i += 500) {
+        await sb().from("releases").upsert(attachPatches.slice(i, i + 500));
+      }
       let removed = 0, kept = 0;
       for (let i = 0; i < removeIds.length; i += 100) {
         const slice = removeIds.slice(i, i + 100);
@@ -740,7 +783,7 @@ export default function Releases() {
       }
       setPending(null); setBusy(false);
       await loadContracts(); setActive(contract.id); await loadRows(contract.id);
-      flash(`Loaded into ${num} — ${updated} updated, ${added} added${removed ? `, ${removed} removed` : ""}${kept ? `, ${kept} moved to Canceled (payroll hours linked — restore from the Canceled list if needed)` : ""}`);
+      flash(`Loaded into ${num} — ${updated} updated, ${added} added${removed ? `, ${removed} removed (incl. duplicate copies)` : ""}${keptReceived ? `, ${keptReceived} received release${keptReceived === 1 ? "" : "s"} not in the sheet left untouched` : ""}${kept ? `, ${kept} moved to Canceled (payroll hours linked — restore from the Canceled list if needed)` : ""}`);
       return;
     }
     for (let i = 0; i < pending.items.length; i += 500) {
@@ -758,16 +801,14 @@ export default function Releases() {
   // merged into the one holding the most releases, then releases sharing a
   // number keep the original (received / invoiced / with photos) and the copy's
   // attachments and line items are moved over before the copy is deleted.
-  const fixDuplicates = async () => {
-    const cur = contracts.find((c) => c.id === active);
-    if (!cur) return;
+  // the original wins: received > invoiced > payroll-done > has photos > first
+  const relScore = (r: Release) =>
+    (r.received ? 8 : 0) + (r.invoice_sent ? 4 : 0) + (r.payroll_done ? 2 : 0) + Math.min(1, (r.attachments || []).length);
+
+  // core merge, shared by the button, the sheet import and the folder attach
+  const mergeDuplicatesCore = async (cur: Contract, allContracts: Contract[]) => {
     const key = contractKey(cur.number);
-    const twins = contracts.filter((c) => contractKey(c.number) === key);
-    if (!window.confirm(
-      `Fix duplicates for contract ${key}?\n\nDuplicate copies of the same release will be merged into the original — the original's payment status, photos and line items always win, and the copy's attachments move over before the copy is removed. Nothing that's been received or has payroll hours is deleted.`
-    )) return;
-    setBusy(true);
-    setFolderProgress("Checking for duplicates…");
+    const twins = allContracts.filter((c) => contractKey(c.number) === key);
     // releases across every twin contract row
     const all: Release[] = [];
     for (const t of twins) {
@@ -804,10 +845,7 @@ export default function Releases() {
     for (const g of dupGroups) {
       gi += 1;
       setFolderProgress(`Merging duplicate releases ${gi} of ${dupGroups.length}…`);
-      // the original wins: received > invoiced > payroll-done > has photos > first
-      const score = (r: Release) =>
-        (r.received ? 8 : 0) + (r.invoice_sent ? 4 : 0) + (r.payroll_done ? 2 : 0) + Math.min(1, (r.attachments || []).length);
-      const keep = [...g].sort((a, b) => score(b) - score(a))[0];
+      const keep = [...g].sort((a, b) => relScore(b) - relScore(a))[0];
       const { data: keepItems } = await sb().from("release_items").select("id").eq("release_id", keep.id).limit(1);
       const keeperHasItems = (keepItems || []).length > 0;
       for (const dupe of g) {
@@ -831,14 +869,28 @@ export default function Releases() {
         else merged += 1;
       }
     }
-    setFolderProgress(""); setBusy(false);
+    setFolderProgress("");
+    return { merged, blocked, contractsMerged, dupGroups: dupGroups.length, keeperContractId: keeperContract.id };
+  };
+
+  const fixDuplicates = async () => {
+    const cur = contracts.find((c) => c.id === active);
+    if (!cur) return;
+    const key = contractKey(cur.number);
+    if (!window.confirm(
+      `Fix duplicates for contract ${key}?\n\nDuplicate copies of the same release will be merged into the original — the original's payment status, photos and line items always win, and the copy's attachments move over before the copy is removed. Nothing that's been received or has payroll hours is deleted.`
+    )) return;
+    setBusy(true);
+    setFolderProgress("Checking for duplicates…");
+    const res = await mergeDuplicatesCore(cur, contracts);
+    setBusy(false);
     await loadContracts();
-    setActive(keeperContract.id);
-    await loadRows(keeperContract.id);
+    setActive(res.keeperContractId);
+    await loadRows(res.keeperContractId);
     flash(
-      dupGroups.length === 0 && contractsMerged === 0
+      res.dupGroups === 0 && res.contractsMerged === 0
         ? "No duplicates found — this contract is clean"
-        : `Done — ${merged} duplicate release${merged === 1 ? "" : "s"} merged away${contractsMerged ? `, ${contractsMerged} twin contract${contractsMerged === 1 ? "" : "s"} merged` : ""}${blocked ? `, ${blocked} moved to Canceled (payroll hours linked)` : ""}. Totals are back to the real numbers.`
+        : `Done — ${res.merged} duplicate release${res.merged === 1 ? "" : "s"} merged away${res.contractsMerged ? `, ${res.contractsMerged} twin contract${res.contractsMerged === 1 ? "" : "s"} merged` : ""}${res.blocked ? `, ${res.blocked} moved to Canceled (payroll hours linked)` : ""}. Totals are back to the real numbers.`
     );
   };
 
@@ -965,9 +1017,13 @@ export default function Releases() {
             why: `new release #${ident.rel} in ${cLabel} — will be created`,
           });
         } else {
+          // the number exists more than once — the file goes to the ORIGINAL
+          // (received / invoiced / photographed wins); the copies get merged
+          // away automatically after the attach
+          const keeper = [...found].sort((a, b) => relScore(b) - relScore(a))[0];
           plan.push({
-            ...base, relNum: ident.rel, relId: null, confidence: "none",
-            why: `#${ident.rel} is listed twice in ${cLabel} — pick one`,
+            ...base, relNum: ident.rel, relId: keeper.id, confidence: fromFile ? "high" : "low",
+            why: `release #${ident.rel} · ${cLabel} — original of ${found.length} copies (duplicates get cleaned up)`,
           });
         }
       }
@@ -1207,12 +1263,24 @@ export default function Releases() {
       .filter(Boolean))] as string[];
     const target = touched.length === 1 ? touched[0] : active;
     setFolderPlan(null); setFolderEdit(new Set());
+    // any duplicates in the touched contracts get merged away automatically —
+    // the original keeps everything, copies disappear, totals stay honest
+    let autoMerged = 0;
+    const { data: freshC } = await sb().from("contracts").select("id,number,name");
+    const allC2 = (freshC || contracts) as Contract[];
+    for (const cid of touched) {
+      const cur = allC2.find((c) => c.id === cid);
+      if (!cur) continue;
+      const res = await mergeDuplicatesCore(cur, allC2).catch(() => null);
+      if (res) autoMerged += res.merged + res.contractsMerged;
+    }
     if (target && target !== active) { await loadContracts(); setActive(target); }
     if (target) await loadRows(target, true); // lights up the SOS / Invoice buttons
     flash(
       `Attached ${ok} file${ok === 1 ? "" : "s"} to ${byRel.size} release${byRel.size === 1 ? "" : "s"}`
       + (made ? ` · ${made} new release${made === 1 ? "" : "s"} created` : "")
       + (reused ? ` · ${reused} already existed — files attached to the originals instead` : "")
+      + (autoMerged ? ` · ${autoMerged} duplicate${autoMerged === 1 ? "" : "s"} merged away` : "")
       + (madeFailed.length ? ` · ${madeFailed.length} couldn't be created` : "")
       + (sosMade ? ` · SOS + invoice ready on ${sosMade}` : "")
       + (skipPaid ? ` · ${skipPaid} already paid, left alone` : "")

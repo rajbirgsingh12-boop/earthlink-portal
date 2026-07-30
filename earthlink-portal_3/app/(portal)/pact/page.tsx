@@ -146,20 +146,33 @@ export default function Pact() {
         const t = raw.replace(/\s+/g, " ");
         const po = t.match(/Purchase Order No\.?\s*:?\s*(\w+)/i)?.[1] || "";
         const poDate = t.match(/Date Ordered\s*:?\s*([\d/]+)/i)?.[1] || "";
-        const desc = t.match(/Description\s*:?\s*(.*?)\s+(?:Scheduled|Date Payment|PO Closed|Bill To)/i)?.[1]?.trim() || "";
+        const desc = t.match(/Description\s*:?\s*(.*?)\s+(?:Contact info|Scheduled|Date Payment|PO Closed|Bill To)/i)?.[1]?.trim() || "";
         const billBlock = t.match(/Bill To\s+(.*?)\s+Ship To/i)?.[1] || "";
         const shipBlock = t.match(/Ship To\s+(.*?)\s+Description\s/i)?.[1] || "";
         const partner = billBlock.match(/^(.*?)(?=\s+\d)/)?.[1]?.trim() || billBlock.trim();
+        // the ship-to block is the job site (the bill-to is the partner's office)
         const address = (partner && shipBlock.startsWith(partner) ? shipBlock.slice(partner.length) : shipBlock).trim();
-        const contact = t.match(/([A-Z][a-z]+ [A-Z][a-z]+)\s+(\d{3}[-.]?\d{3}[-.]?\d{4})/);
-        const punit = t.match(/\$\s*[\d.,]+\s+([0-9]+-[0-9]+)/)?.[1] || "";
+        // "Alfredo: 914-507-7192 · Adolfo: 914-507-7172" — every name+number pair on the PO
+        const contacts = [...t.matchAll(/([A-Z][a-z]+(?: [A-Z][a-z]+)?)\s*:?\s+((?:\d{3}[-.\s]?){2}\d{4})/g)]
+          .map((m) => `${m[1]} ${m[2]}`);
+        // the line-item table: Description Qty Unit-Price Total-Cost [Property] [Unit]
+        const seg = t.match(/Description\s+Qty\s+Unit Price\s+Total Cost(?:\s+Property)?(?:\s+Unit)?\s+(.*?)\s+Total\s+\$/i)?.[1] || "";
+        const rows = [...seg.matchAll(/(.+?)\s+(\d+(?:\.\d+)?)\s+\$\s*([\d,]+(?:\.\d+)?)\s+\$\s*([\d,]+(?:\.\d+)?)(?:\s+((?!\d+\.\d)[\w-]+))?(?:\s+((?!\$)[\w-]+))?(?=\s|$)/g)]
+          .map((m) => ({ description: m[1].trim(), qty: parseFloat(m[2]) || 1, unit_price: parseFloat(m[3].replace(/,/g, "")) || 0, property: m[5] || "", unit: m[6] || "" }));
+        const grand = [...t.matchAll(/Total\s+\$\s*([\d,]+\.\d{2})/g)].map((m) => parseFloat(m[1].replace(/,/g, "")));
+        const amount = grand.length > 0 ? grand[grand.length - 1] : rows.reduce((s, r) => s + r.qty * r.unit_price, 0);
+        const punit = rows[0]?.property
+          ? `${rows[0].property}${rows[0].unit ? ` ${rows[0].unit}` : ""}`
+          : t.match(/\$\s*[\d.,]+\s+([0-9]+-[0-9]+)/)?.[1] || "";
         if (!po && !partner) { setBusy(false); flash("Couldn't read this PDF as a PACT purchase order"); return; }
-        const seed: Item[] = desc ? [{ description: desc, qty: 1, unit: unitFor(desc), unit_price: 0 }] : [];
+        const seed: Item[] = rows.length > 0
+          ? rows.map((r) => ({ description: r.description, qty: r.qty, unit: unitFor(r.description), unit_price: r.unit_price }))
+          : desc ? [{ description: desc, qty: 1, unit: unitFor(desc), unit_price: 0 }] : [];
         const { data: job, error } = await sb().from("pact_jobs").insert({
-          partner, development: "", job_number: po, description: desc, amount: 0,
+          partner, development: "", job_number: po, description: desc, amount,
           po_number: po, po_date: poDate, address, property_unit: punit,
-          contact: contact ? `${contact[1]} ${contact[2]}` : "", bill_to: billBlock,
-          items: seed, invoice_number: po ? `${po}-1` : "",
+          contact: contacts.length > 0 ? contacts.join(" · ") : (t.match(/([A-Z][a-z]+ [A-Z][a-z]+)\s+(\d{3}[-.]?\d{3}[-.]?\d{4})/)?.slice(1, 3).join(" ") || ""),
+          bill_to: billBlock, items: seed, invoice_number: po ? `${po}-1` : "",
         }).select().single();
         if (error || !job) { setBusy(false); flash(upgradeHint(error?.message || "Save failed")); return; }
         // attach the PO itself
@@ -459,6 +472,18 @@ export default function Pact() {
         </div>
       )}
 
+      {canEdit && (
+        <div className="card mb-3 flex flex-wrap items-center justify-between gap-2 border-work p-3.5">
+          <div className="min-w-0 text-sm">
+            <b>Got a purchase order?</b>{" "}
+            <span className="text-inksoft">Upload the PDF — the job builds itself with the address, contacts, work lines and amount.</span>
+          </div>
+          <div className="flex shrink-0 gap-2">
+            <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy}>📄 Upload PO (PDF)</button>
+            <button className="btn btn-ghost" onClick={() => setAddOpen(!addOpen)}>+ Manual</button>
+          </div>
+        </div>
+      )}
       <input className="field mb-3" placeholder="Search partner, address, PO #…" value={q} onChange={(e) => setQ(e.target.value)} />
 
       <div className="card divide-y divide-rulesoft">

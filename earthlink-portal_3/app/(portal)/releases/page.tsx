@@ -1481,7 +1481,12 @@ export default function Releases() {
           text += tc.items.map((it) => ("str" in it ? it.str : "")).join(" ") + "\n";
         }
         const parsed = parseReleasePdfText(text);
-        if (!parsed) { flash("Couldn't read this PDF — is it a NYCHA blanket release?"); setBusy(false); return; }
+        if (!parsed) {
+          flash(/Purchase Order No/i.test(text)
+            ? "That's a PACT purchase order — upload it under PACT → Jobs → 📄 Upload PO (PDF)"
+            : "Couldn't read this PDF — is it a NYCHA blanket release?");
+          setBusy(false); return;
+        }
         const breakdown = parsed.items
           .filter((it) => it.uom === "HOUR")
           .map((it) => ({ cls: it.description.replace(/,?\s*Regular Hours/i, "").trim(), hours: it.qty }));

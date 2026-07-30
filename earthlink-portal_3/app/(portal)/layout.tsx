@@ -12,7 +12,14 @@ type Group = { key: "nycha" | "pact"; label: string; items: [string, string][] }
 export default function PortalLayout({ children }: { children: React.ReactNode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [menu, setMenu] = useState<"nycha" | "pact" | null>(null);
+  const [menuX, setMenuX] = useState(0); // dropdown panel lines up under its tab
   const path = usePathname();
+  const openAt = (key: "nycha" | "pact", el: HTMLElement) => {
+    const wrap = el.closest("[data-navwrap]") as HTMLElement | null;
+    const x = wrap ? el.getBoundingClientRect().left - wrap.getBoundingClientRect().left : 0;
+    setMenuX(Math.max(8, x));
+    setMenu(key);
+  };
 
   useEffect(() => {
     (async () => {
@@ -60,7 +67,8 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
           </div>
         </div>
       </div>
-      <div className="sticky top-[57px] z-10 border-b-[1.5px] border-ink bg-card" onMouseLeave={() => setMenu(null)}>
+      <div className="sticky top-[57px] z-10 border-b-[1.5px] border-ink bg-card" data-navwrap
+        style={{ position: "relative" }} onMouseLeave={() => setMenu(null)}>
         <div className="overflow-x-auto">
           <div className="mx-auto flex max-w-5xl">
             {entries.map((e) => {
@@ -77,8 +85,8 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
               // a tap (phones have no hover) toggles the menu; hover opens it
               return (
                 <button key={g.key} type="button" className={tabCls(groupActive(g))}
-                  onMouseEnter={() => setMenu(g.key)}
-                  onClick={() => setMenu((cur) => (cur === g.key ? null : g.key))}>
+                  onMouseEnter={(ev) => openAt(g.key, ev.currentTarget)}
+                  onClick={(ev) => (menu === g.key ? setMenu(null) : openAt(g.key, ev.currentTarget))}>
                   {g.label} ▾
                 </button>
               );
@@ -86,16 +94,19 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
           </div>
         </div>
         {openGroup && (
-          <div className="border-t border-rulesoft bg-paper" onMouseLeave={() => setMenu(null)}>
-            <div className="mx-auto flex max-w-5xl gap-1 overflow-x-auto px-2">
+          <>
+            {/* tap anywhere else to close (phones) */}
+            <div className="fixed inset-0 z-10" onClick={() => setMenu(null)} />
+            <div className="absolute top-full z-20 min-w-52 border-[1.5px] border-ink bg-paper shadow-lg"
+              style={{ left: menuX }}>
               {openGroup.items.map(([h, l]) => (
                 <a key={h} href={h}
-                  className={`whitespace-nowrap px-3 py-2 font-display text-[13px] font-semibold uppercase tracking-wider ${path === h ? "text-work" : "text-inksoft hover:text-ink"}`}>
+                  className={`block whitespace-nowrap border-b border-rulesoft px-4 py-3 font-display text-[14px] font-semibold uppercase tracking-wider last:border-b-0 ${path === h ? "text-work" : "text-inksoft hover:bg-card hover:text-ink"}`}>
                   {l}
                 </a>
               ))}
             </div>
-          </div>
+          </>
         )}
       </div>
       <div className="mx-auto max-w-5xl px-4 pb-24 pt-5">{children}</div>

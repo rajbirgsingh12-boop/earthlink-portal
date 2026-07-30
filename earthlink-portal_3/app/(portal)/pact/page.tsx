@@ -135,14 +135,19 @@ export default function Pact() {
     reader.onload = async (ev) => {
       try {
         setBusy(true);
-        const pdfjs = await import("pdfjs-dist");
-        pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
-        const doc = await pdfjs.getDocument({ data: (ev.target?.result as ArrayBuffer).slice(0) }).promise;
+        // reading the text can fail (a scanned PO has none) — the upload still
+        // goes through either way; worst case the job is created blank with the
+        // PDF attached and the office types the details
         let raw = "";
-        for (let pg = 1; pg <= doc.numPages; pg++) {
-          const tc = await (await doc.getPage(pg)).getTextContent();
-          raw += tc.items.map((it) => ("str" in it ? it.str : "")).join(" ") + " ";
-        }
+        try {
+          const pdfjs = await import("pdfjs-dist");
+          pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+          const doc = await pdfjs.getDocument({ data: (ev.target?.result as ArrayBuffer).slice(0) }).promise;
+          for (let pg = 1; pg <= doc.numPages; pg++) {
+            const tc = await (await doc.getPage(pg)).getTextContent();
+            raw += tc.items.map((it) => ("str" in it ? it.str : "")).join(" ") + " ";
+          }
+        } catch { raw = ""; }
         const t = raw.replace(/\s+/g, " ");
         const po = t.match(/Purchase Order No\.?\s*:?\s*(\w+)/i)?.[1] || "";
         const poDate = t.match(/Date Ordered\s*:?\s*([\d/]+)/i)?.[1] || "";
@@ -164,7 +169,8 @@ export default function Pact() {
         const punit = rows[0]?.property
           ? `${rows[0].property}${rows[0].unit ? ` ${rows[0].unit}` : ""}`
           : t.match(/\$\s*[\d.,]+\s+([0-9]+-[0-9]+)/)?.[1] || "";
-        if (!po && !partner) { setBusy(false); flash("Couldn't read this PDF as a PACT purchase order"); return; }
+        // nothing readable → the job is still created, blank, with the PDF attached
+        const unreadable = !po && !partner && !desc;
         const seed: Item[] = rows.length > 0
           ? rows.map((r) => ({ description: r.description, qty: r.qty, unit: unitFor(r.description), unit_price: r.unit_price }))
           : desc ? [{ description: desc, qty: 1, unit: unitFor(desc), unit_price: 0 }] : [];
@@ -184,8 +190,13 @@ export default function Pact() {
         // open the fresh job with its details showing so what was read is on screen
         setOpenId((job as Job).id);
         setShowDetails(true);
-        flash(`PO ${po || "imported"} — check the details and work lines below`);
-      } catch { setBusy(false); flash("Couldn't read that PDF"); }
+        flash(unreadable
+          ? "PDF attached, but its text couldn't be read (scanned copy?) — type the partner, address and description below"
+          : `PO ${po || "imported"} — check the details and work lines below`);
+      } catch (err) {
+        setBusy(false);
+        flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
+      }
     };
     reader.readAsArrayBuffer(file);
     e.target.value = "";

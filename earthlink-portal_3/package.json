@@ -15,6 +15,7 @@
     "pdfjs-dist": "4.6.82",
     "react": "18.3.1",
     "react-dom": "18.3.1",
+    "unpdf": "^1.8.0",
     "xlsx": "0.18.5",
     "xlsx-js-style": "^1.2.0"
   },

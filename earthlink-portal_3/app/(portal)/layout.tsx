@@ -12,14 +12,7 @@ type Group = { key: "nycha" | "pact"; label: string; items: [string, string][] }
 export default function PortalLayout({ children }: { children: React.ReactNode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [menu, setMenu] = useState<"nycha" | "pact" | null>(null);
-  const [menuX, setMenuX] = useState(0); // dropdown panel lines up under its tab
   const path = usePathname();
-  const openAt = (key: "nycha" | "pact", el: HTMLElement) => {
-    const wrap = el.closest("[data-navwrap]") as HTMLElement | null;
-    const x = wrap ? el.getBoundingClientRect().left - wrap.getBoundingClientRect().left : 0;
-    setMenuX(Math.max(8, x));
-    setMenu(key);
-  };
   // tapping anywhere outside the nav closes an open menu (phones have no hover-out)
   useEffect(() => {
     if (!menu) return;
@@ -95,8 +88,8 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
               // a tap (phones have no hover) toggles the menu; hover opens it
               return (
                 <button key={g.key} type="button" className={tabCls(groupActive(g))}
-                  onMouseEnter={(ev) => openAt(g.key, ev.currentTarget)}
-                  onClick={(ev) => (menu === g.key ? setMenu(null) : openAt(g.key, ev.currentTarget))}>
+                  onMouseEnter={() => setMenu(g.key)}
+                  onClick={() => setMenu((cur) => (cur === g.key ? null : g.key))}>
                   {g.label} ▾
                 </button>
               );
@@ -104,14 +97,13 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
           </div>
         </div>
         {openGroup && (
-          /* in the page flow, not floating — the content below slides down, so the
-             menu can never sit on top of a button */
-          <div className="border-t border-rulesoft bg-paper pb-2 pt-1">
-            <div className="inline-block border-[1.5px] border-ink bg-paper shadow-md"
-              style={{ marginLeft: Math.max(8, menuX) }}>
+          /* one slim row in the page flow: nothing gets covered and the page
+             barely moves — the menu itself is only as tall as one tab */
+          <div className="border-t border-rulesoft bg-paper">
+            <div className="mx-auto flex max-w-5xl gap-1 overflow-x-auto px-2">
               {openGroup.items.map(([h, l]) => (
                 <a key={h} href={h}
-                  className={`block whitespace-nowrap border-b border-rulesoft px-4 py-3 font-display text-[14px] font-semibold uppercase tracking-wider last:border-b-0 ${path === h ? "text-work" : "text-inksoft hover:bg-card hover:text-ink"}`}>
+                  className={`whitespace-nowrap px-3 py-2.5 font-display text-[13px] font-semibold uppercase tracking-wider ${path === h ? "text-work" : "text-inksoft hover:text-ink"}`}>
                   {l}
                 </a>
               ))}

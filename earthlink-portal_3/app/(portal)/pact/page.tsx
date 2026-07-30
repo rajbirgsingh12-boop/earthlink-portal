@@ -150,7 +150,7 @@ export default function Pact() {
           body: file,
         });
         if (res.ok) fields = ((await res.json()) as { fields: PactPoFields }).fields;
-        else how = `server said ${res.status}`;
+        else how = `server said ${res.status}: ${(await res.text().catch(() => "")).slice(0, 90)}`;
       } catch { how = "server unreachable"; }
       // 2) browser fallback
       if (!fields) {
@@ -439,8 +439,6 @@ export default function Pact() {
         <div className="font-display text-2xl font-bold uppercase">PACT</div>
         <div className="flex flex-wrap gap-2">
           <a className="btn btn-ghost" href="/pact/schedule">📅 Schedule</a>
-          {canEdit && <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy}>+ Upload PO (PDF)</button>}
-          {canEdit && <button className="btn btn-ghost" onClick={() => setAddOpen(!addOpen)}>+ Manual job</button>}
         </div>
       </div>
       <input ref={poRef} type="file" accept="application/pdf" className="hidden" onChange={handlePo} />

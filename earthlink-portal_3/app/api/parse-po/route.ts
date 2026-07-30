@@ -27,15 +27,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Send the PDF file itself (max 15 MB)" }, { status: 400 });
   }
   try {
-    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-    const doc = await pdfjs.getDocument({ data: new Uint8Array(buf), useSystemFonts: true }).promise;
-    let raw = "";
-    for (let pg = 1; pg <= doc.numPages; pg++) {
-      const tc = await (await doc.getPage(pg)).getTextContent();
-      raw += (tc.items as { str?: string }[]).map((it) => it.str || "").join(" ") + " ";
-    }
-    await doc.destroy().catch(() => null);
-    return NextResponse.json({ ok: true, fields: parsePactPoText(raw) });
+    // unpdf bundles its own pdf engine specifically for serverless — no worker
+    // files to resolve, so it can't break in deployment the way raw pdfjs can
+    const { extractText, getDocumentProxy } = await import("unpdf");
+    const doc = await getDocumentProxy(new Uint8Array(buf));
+    const { text } = await extractText(doc, { mergePages: true });
+    return NextResponse.json({ ok: true, fields: parsePactPoText(String(text || "")) });
   } catch (e) {
     return NextResponse.json({ error: `Couldn't open the PDF: ${e instanceof Error ? e.message.slice(0, 120) : "unknown"}` }, { status: 422 });
   }

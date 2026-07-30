@@ -26,6 +26,7 @@ type PlanRow = FileMatch & {
   relNum?: string;
   newRel?: { contractNum: string; rel: string };
   willCreate?: boolean;
+  skipped?: boolean; // already received — the file is deliberately left alone
 };
 type PdfDocLite = {
   getPage: (n: number) => Promise<{ getTextContent: () => Promise<{ items: unknown[] }> }>;
@@ -1005,10 +1006,16 @@ export default function Releases() {
         }
         const found = byKey.get(`${ck}:${ident.rel}`) || [];
         if (found.length === 1) {
-          plan.push({
-            ...base, relNum: ident.rel, relId: found[0].id, confidence: fromFile ? "high" : "low",
-            why: `release #${ident.rel} · ${cLabel}${fromFile ? "" : " — from the file name (PDF unreadable)"}`,
-          });
+          if (found[0].received) {
+            // received = closed. Nothing gets attached, created or changed on it.
+            plan.push({ ...base, relNum: ident.rel, relId: null, confidence: "none", skipped: true,
+              why: `release #${ident.rel} is already received — left alone` });
+          } else {
+            plan.push({
+              ...base, relNum: ident.rel, relId: found[0].id, confidence: fromFile ? "high" : "low",
+              why: `release #${ident.rel} · ${cLabel}${fromFile ? "" : " — from the file name (PDF unreadable)"}`,
+            });
+          }
         } else if (found.length === 0) {
           // the release isn't on file yet — build it from what the PDF says
           plan.push({
@@ -1021,10 +1028,15 @@ export default function Releases() {
           // (received / invoiced / photographed wins); the copies get merged
           // away automatically after the attach
           const keeper = [...found].sort((a, b) => relScore(b) - relScore(a))[0];
-          plan.push({
-            ...base, relNum: ident.rel, relId: keeper.id, confidence: fromFile ? "high" : "low",
-            why: `release #${ident.rel} · ${cLabel} — original of ${found.length} copies (duplicates get cleaned up)`,
-          });
+          if (keeper.received) {
+            plan.push({ ...base, relNum: ident.rel, relId: null, confidence: "none", skipped: true,
+              why: `release #${ident.rel} is already received — left alone` });
+          } else {
+            plan.push({
+              ...base, relNum: ident.rel, relId: keeper.id, confidence: fromFile ? "high" : "low",
+              why: `release #${ident.rel} · ${cLabel} — original of ${found.length} copies (duplicates get cleaned up)`,
+            });
+          }
         }
       }
     } catch {
@@ -1076,6 +1088,7 @@ export default function Releases() {
 
     // ---- releases the app doesn't have yet are built from their own PDF first ----
     let made = 0; const madeFailed: string[] = [];
+    let recvFilesSkipped = 0; // files aimed at received releases — deliberately dropped
     const toMake = new Map<string, PlanRow[]>(); // contract+release → its files
     todo.filter((r) => r.willCreate && !r.relId && r.newRel)
       .forEach((r) => {
@@ -1090,7 +1103,7 @@ export default function Releases() {
     // If a release with this number already exists on any twin of the contract —
     // received, payroll-linked, whatever — it is reused, never created again.
     // This holds even if the screen's list is stale or another device just imported.
-    const freshByKey = new Map<string, { id: string; canceled: boolean }>();
+    const freshByKey = new Map<string, { id: string; canceled: boolean; received: boolean }>();
     if (toMake.size > 0) {
       setFolderProgress("Double-checking against the database…");
       const keys = [...new Set([...toMake.keys()].map((k) => k.split(":")[0]))];
@@ -1098,14 +1111,14 @@ export default function Releases() {
         const ids = folderPlan.contracts.filter((c) => contractKey(c.number) === ck).map((c) => c.id);
         if (ids.length === 0) continue;
         for (let f = 0; ; f += 1000) {
-          const { data } = await sb().from("releases").select("id,rel_number,canceled").in("contract_id", ids).range(f, f + 999);
-          ((data || []) as { id: string; rel_number: string; canceled: boolean }[]).forEach((r) => {
+          const { data } = await sb().from("releases").select("id,rel_number,canceled,received").in("contract_id", ids).range(f, f + 999);
+          ((data || []) as { id: string; rel_number: string; canceled: boolean; received: boolean }[]).forEach((r) => {
             const rk = String(r.rel_number || "").trim().replace(/^0+(?=\d)/, "");
             if (!rk) return;
             const k = `${ck}:${rk}`;
             const cur = freshByKey.get(k);
             // a live release beats a canceled one as the reuse target
-            if (!cur || (cur.canceled && !r.canceled)) freshByKey.set(k, { id: r.id, canceled: !!r.canceled });
+            if (!cur || (cur.canceled && !r.canceled)) freshByKey.set(k, { id: r.id, canceled: !!r.canceled, received: !!r.received });
           });
           if (!data || data.length < 1000) break;
         }
@@ -1117,6 +1130,7 @@ export default function Releases() {
       mk += 1;
       setFolderProgress(`Creating release ${mk} of ${toMake.size}…`);
       const already = freshByKey.get(key);
+      if (already?.received) { recvFilesSkipped += group.length; continue; } // received = untouchable
       if (already) { madeIds.set(key, already.id); reused += 1; continue; }
       let relId: string | null = null;
       for (const item of group) {
@@ -1156,11 +1170,17 @@ export default function Releases() {
       else if (!madeFailed.length) madeFailed.push(key.split(":")[1]);
     }
 
-    // group by release so each release's attachment list is written once
+    // group by release so each release's attachment list is written once —
+    // and nothing, ever, lands on a release that's already received
+    const isReceivedRel = (id: string) => {
+      const rel = madeRels.get(id) || folderPlan.rels.find((x) => x.id === id) || rows.find((x) => x.id === id);
+      return !!rel?.received;
+    };
     const byRel = new Map<string, PlanRow[]>();
     todo.forEach((r) => {
       const id = r.relId || (r.newRel ? madeIds.get(`${contractKey(r.newRel.contractNum)}:${r.newRel.rel}`) : null);
       if (!id) return; // its release couldn't be created — reported below
+      if (isReceivedRel(id)) { recvFilesSkipped += 1; return; }
       if (!byRel.has(id)) byRel.set(id, []);
       byRel.get(id)!.push(r);
     });
@@ -1283,6 +1303,7 @@ export default function Releases() {
       + (autoMerged ? ` · ${autoMerged} duplicate${autoMerged === 1 ? "" : "s"} merged away` : "")
       + (madeFailed.length ? ` · ${madeFailed.length} couldn't be created` : "")
       + (sosMade ? ` · SOS + invoice ready on ${sosMade}` : "")
+      + (recvFilesSkipped ? ` · ${recvFilesSkipped} file${recvFilesSkipped === 1 ? "" : "s"} for received releases left alone` : "")
       + (skipPaid ? ` · ${skipPaid} already paid, left alone` : "")
       + (skipHave ? ` · ${skipHave} already had line items` : "")
       + (noItems ? ` · ${noItems} had no readable line items` : "")
@@ -1562,7 +1583,8 @@ export default function Releases() {
       {folderPlan && (() => {
         const matched = folderPlan.rows.filter((r) => r.relId).length;
         const creating = folderPlan.rows.filter((r) => !r.relId && r.willCreate).length;
-        const unmatched = folderPlan.rows.length - matched - creating;
+        const skippedRecv = folderPlan.rows.filter((r) => r.skipped).length;
+        const unmatched = folderPlan.rows.length - matched - creating - skippedRecv;
         // pick from every release the scan matched against — which may span contracts
         const planRelsList = folderPlan.rels.length > 0 ? folderPlan.rels : rows;
         const cNumOf = (r: Release) => folderPlan.contracts.find((c) => c.id === r.contract_id)?.number || "";
@@ -1590,6 +1612,7 @@ export default function Releases() {
             <div className="mb-3 text-[13px] text-inksoft">
               <b className="text-ok">{matched} matched</b>
               {creating > 0 && <> · <b className="text-work">{creating} new release{creating === 1 ? "" : "s"} to create</b></>}
+              {skippedRecv > 0 && <> · {skippedRecv} for received releases — left alone</>}
               {unmatched > 0 && <> · <b className="text-alert">{unmatched} need a release</b> (leave blank to skip)</>}
               {" — nothing uploads until you press Attach."}
               <div className="mt-1 text-[12px]">
@@ -1613,7 +1636,7 @@ export default function Releases() {
               const inRelOrder = (a: { r: PlanRow }, b: typeof a) =>
                 numOf(a) - numOf(b) || a.r.name.localeCompare(b.r.name, undefined, { numeric: true });
               const idx = folderPlan.rows.map((r, i) => ({ r, i }));
-              const needs = idx.filter(({ r }) => !r.relId && !r.willCreate).sort(inRelOrder);
+              const needs = idx.filter(({ r }) => !r.relId && !r.willCreate && !r.skipped).sort(inRelOrder);
               const ok = idx.filter(({ r }) => r.relId || r.willCreate).sort(inRelOrder);
               const SHOWN = 300;
               const picker = (i: number, row: PlanRow) => (

@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 let XLSX!: typeof import("xlsx-js-style");
 const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import { sb } from "@/lib/supabase";
+import { myProfile } from "@/lib/profile";
 import { fmt, askFileName } from "@/lib/format";
 import { Org, prettyDate, localISO } from "@/lib/docs";
 import type { Contract, Release } from "@/lib/types";
@@ -45,21 +46,25 @@ export default function Statements() {
 
   useEffect(() => {
     (async () => {
-      const { data: { user } } = await sb().auth.getUser();
-      if (user) {
-        const { data: prof } = await sb().from("profiles").select("role").eq("id", user.id).single();
-        setRole((prof as { role?: string } | null)?.role || "");
-      }
-      const { data } = await sb().from("contracts").select("id,number,name").order("number");
+      // independent reads go out together instead of one after another
+      const fetchRel = async () => {
+        // (ordered — pages of an unordered scan can overlap between requests)
+        const rel: { contract_id: string; amount: number; received: boolean; canceled: boolean }[] = [];
+        for (let from = 0; ; from += 1000) {
+          const { data: page } = await sb().from("releases").select("contract_id,amount,received,canceled").order("id").range(from, from + 999);
+          rel.push(...((page || []) as typeof rel));
+          if (!page || page.length < 1000) break;
+        }
+        return rel;
+      };
+      const [prof, { data }, rel] = await Promise.all([
+        myProfile(),
+        sb().from("contracts").select("id,number,name").order("number"),
+        fetchRel(),
+      ]);
+      setRole(prof?.role || "");
       const cs = (data || []) as Contract[];
       // only contracts with an active statement (something still owed)
-      // (ordered — pages of an unordered scan can overlap between requests)
-      const rel: { contract_id: string; amount: number; received: boolean; canceled: boolean }[] = [];
-      for (let from = 0; ; from += 1000) {
-        const { data: page } = await sb().from("releases").select("contract_id,amount,received,canceled").order("id").range(from, from + 999);
-        rel.push(...((page || []) as typeof rel));
-        if (!page || page.length < 1000) break;
-      }
       const open = new Set(
         rel
           .filter((r) => !r.canceled && !r.received && Number(r.amount) > 0)
@@ -80,7 +85,10 @@ export default function Statements() {
     (async () => {
       const pages: Release[] = [];
       for (let from = 0; ; from += 1000) { // paginated — an unranged select stops silently at 1000
-        const { data } = await sb().from("releases").select("*").eq("contract_id", sel).order("id").range(from, from + 999);
+        // the statement needs a dozen columns, not attachments and labor JSON
+        const { data } = await sb().from("releases")
+          .select("id,contract_id,rel_number,location,buildings,address,ticket,amount,received,canceled,invoice_sent,paid_date")
+          .eq("contract_id", sel).order("id").range(from, from + 999);
         pages.push(...((data || []) as Release[]));
         if (!data || data.length < 1000) break;
       }
@@ -88,17 +96,24 @@ export default function Statements() {
       // only releases with real release data connected — imported line items
       // or a walk sheet with quantities on the same release number
       const ready = new Set<string>();
-      const ids = all.map((r) => r.id);
-      // chunks fetch together — serially this was seconds of dead time on big contracts
-      const chunks: string[][] = [];
-      for (let i = 0; i < ids.length; i += 200) chunks.push(ids.slice(i, i + 200));
-      await Promise.all(chunks.map(async (chunk) => {
-        for (let f = 0; ; f += 1000) {
-          const { data: its } = await sb().from("release_items").select("release_id").in("release_id", chunk).range(f, f + 999);
-          ((its || []) as { release_id: string }[]).forEach((it) => ready.add(it.release_id));
-          if (!its || its.length < 1000) break;
-        }
-      }));
+      // one tiny answer from the database (run supabase/upgrade_speed.sql) —
+      // otherwise fall back to downloading a row id per line item
+      const { data: withItems, error: wiErr } = await sb().rpc("releases_with_items", { cid: sel });
+      if (!wiErr && Array.isArray(withItems)) {
+        (withItems as string[]).forEach((id) => ready.add(id));
+      } else {
+        const ids = all.map((r) => r.id);
+        // chunks fetch together — serially this was seconds of dead time on big contracts
+        const chunks: string[][] = [];
+        for (let i = 0; i < ids.length; i += 200) chunks.push(ids.slice(i, i + 200));
+        await Promise.all(chunks.map(async (chunk) => {
+          for (let f = 0; ; f += 1000) {
+            const { data: its } = await sb().from("release_items").select("release_id").in("release_id", chunk).range(f, f + 999);
+            ((its || []) as { release_id: string }[]).forEach((it) => ready.add(it.release_id));
+            if (!its || its.length < 1000) break;
+          }
+        }));
+      }
       const { data: props } = await sb().from("proposals").select("release_number,qty_map").eq("contract_id", sel);
       // "007" and "7" are the same release — compare with leading zeros stripped
       const relNorm = (v: unknown) => String(v ?? "").trim().replace(/^0+(?=\d)/, "");

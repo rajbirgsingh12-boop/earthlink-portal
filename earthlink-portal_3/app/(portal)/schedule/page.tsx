@@ -4,6 +4,7 @@
 // release location and work description already written, one tap to send.
 import { useEffect, useRef, useState } from "react";
 import { sb } from "@/lib/supabase";
+import { myProfile } from "@/lib/profile";
 import { prettyDate, addDays, localISO } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
 import ContractPicker, { contractLabel } from "@/components/ContractPicker";
@@ -43,24 +44,33 @@ export default function Schedule() {
   useEffect(() => { textMachineReady().then(setMachine); }, []);
 
   const load = async () => {
-    const { data: { user } } = await sb().auth.getUser();
-    if (user) {
-      const { data: p } = await sb().from("profiles").select("role").eq("id", user.id).single();
-      if (p) setRole((p as { role: string }).role);
-    }
-    const { data: e } = await sb().from("employees").select("*").order("name");
+    // independent reads go out together; releases only carry the columns the
+    // pickers and texts use, not attachments and money details
+    const fetchRels = async () => {
+      const allR: RelRow[] = [];
+      for (let from = 0; ; from += 1000) { // paginated — an unranged select stops silently at 1000
+        const { data: r } = await sb().from("releases").select("id,rel_number,location,contract_id,address").eq("canceled", false).order("id").range(from, from + 999);
+        if (r) allR.push(...(r as RelRow[]));
+        else { // address column may predate its upgrade — fall back to full rows
+          const { data: r2 } = await sb().from("releases").select("*").eq("canceled", false).order("id").range(from, from + 999);
+          allR.push(...((r2 || []) as RelRow[]));
+          if (!r2 || r2.length < 1000) break;
+          continue;
+        }
+        if (r.length < 1000) break;
+      }
+      return allR;
+    };
+    const [{ data: e }, allR, { data: c }] = await Promise.all([
+      sb().from("employees").select("*").order("name"),
+      fetchRels(),
+      sb().from("contracts").select("id,number,name").order("number"),
+    ]);
     setEmps(((e || []) as Emp[]).filter((x) => x.active !== false));
-    const allR: RelRow[] = [];
-    for (let from = 0; ; from += 1000) { // paginated — an unranged select stops silently at 1000
-      const { data: r } = await sb().from("releases").select("*").eq("canceled", false).range(from, from + 999);
-      allR.push(...((r || []) as RelRow[]));
-      if (!r || r.length < 1000) break;
-    }
     setRels(allR.sort((x, y) => (parseFloat(x.rel_number) || 0) - (parseFloat(y.rel_number) || 0)));
-    const { data: c } = await sb().from("contracts").select("id,number,name").order("number");
     setContracts((c || []) as Contract[]);
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { myProfile().then((p) => setRole(p?.role || "")); load(); }, []);
 
   const loadDay = async (d: string) => {
     const { data, error } = await sb().from("schedule_days").select("*").eq("day", d).order("created_at");
@@ -70,7 +80,11 @@ export default function Schedule() {
   };
   const dayRef = useRef(day);
   useEffect(() => { dayRef.current = day; setExtraRels([]); setAddFor(null); setAddQ(""); setDescBuf({}); setAddrBuf({}); setMapFor(null); loadDay(day); }, [day]); // eslint-disable-line react-hooks/exhaustive-deps
-  useLive(["schedule_days", "employees", "releases"], () => { load(); loadDay(day); }, { skipWhileTyping: true });
+  // a schedule_days event only refreshes the day; crew/release changes reload the lists
+  useLive(["schedule_days", "employees", "releases"], (changed) => {
+    if (!changed || changed.some((t) => t !== "schedule_days")) load();
+    loadDay(day);
+  }, { skipWhileTyping: true });
 
   const relLabel = (r: RelRow) => {
     const c = contracts.find((x) => x.id === r.contract_id);
@@ -231,6 +245,7 @@ export default function Schedule() {
                 {rels
                   .filter((r) => !linkContract || r.contract_id === linkContract)
                   .filter((r) => relLabel(r).toLowerCase().includes(relPickQ.trim().toLowerCase()))
+                  .slice(0, 40)
                   .map((r) => (
                     <button key={r.id} className="block w-full border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
                       onMouseDown={(ev) => { ev.preventDefault(); setExtraRels((prev) => (prev.includes(r.id) ? prev : [...prev, r.id])); setRelPickQ(""); setAddFor(r.id); setAddQ(""); }}>

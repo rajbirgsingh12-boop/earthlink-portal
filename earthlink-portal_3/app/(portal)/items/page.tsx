@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 // the sheet reader is heavy — it loads on demand, never with the page itself
-let XLSX!: typeof import("xlsx");
-const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx")); };
+let XLSX!: typeof import("xlsx-js-style");
+const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import { sb } from "@/lib/supabase";
 import { fmt, parseNum } from "@/lib/format";
 import type { Contract } from "@/lib/types";

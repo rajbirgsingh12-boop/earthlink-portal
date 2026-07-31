@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 // pdf-lib is heavy — loaded only when a package PDF is actually built
 import { sb } from "@/lib/supabase";
+import { myProfile } from "@/lib/profile";
 import { fmt, parseNum, askFileName } from "@/lib/format";
 import { prettyDate, localISO, type Org } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
@@ -96,12 +97,7 @@ export default function Pact() {
   useEffect(() => {
     load();
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
-    (async () => {
-      const { data: { user } } = await sb().auth.getUser();
-      if (!user) return;
-      const { data: prof } = await sb().from("profiles").select("role").eq("id", user.id).single();
-      setRole((prof as { role?: string } | null)?.role || "");
-    })();
+    myProfile().then((p) => setRole(p?.role || ""));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // live: PACT jobs changing anywhere refresh the list without a reload

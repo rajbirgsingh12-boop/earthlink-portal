@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { sb } from "@/lib/supabase";
+import { myProfile } from "@/lib/profile";
 import { useLive } from "@/lib/useLive";
 import Stamp from "@/components/Stamp";
 
@@ -28,12 +29,7 @@ export default function PactSchedule() {
   };
   useEffect(() => {
     load();
-    (async () => {
-      const { data: { user } } = await sb().auth.getUser();
-      if (!user) return;
-      const { data: prof } = await sb().from("profiles").select("role").eq("id", user.id).single();
-      setRole((prof as { role?: string } | null)?.role || "");
-    })();
+    myProfile().then((p) => setRole(p?.role || ""));
   }, []);
   useLive(["pact_jobs"], () => load(), { skipWhileTyping: true });
 

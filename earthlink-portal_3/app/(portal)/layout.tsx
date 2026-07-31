@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import { sb } from "@/lib/supabase";
+import { myProfile, clearMyProfile } from "@/lib/profile";
 import type { Profile } from "@/lib/types";
 
 // The nav is split by line of business: everything NYCHA lives under one menu,
@@ -33,12 +34,10 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
   }, [menu]);
 
   useEffect(() => {
-    (async () => {
-      const { data: { user } } = await sb().auth.getUser();
-      if (!user) { window.location.href = "/login"; return; }
-      const { data } = await sb().from("profiles").select("id,name,role").eq("id", user.id).single();
-      if (data) setProfile(data as Profile);
-    })();
+    myProfile().then((p) => {
+      if (!p) { window.location.href = "/login"; return; }
+      setProfile(p as Profile);
+    });
   }, []);
 
   const role = profile?.role;
@@ -81,7 +80,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
           </div>
           <div className="flex items-center gap-3 text-xs text-[#A9A69C]">
             <span>{profile?.name || ""} · {profile?.role || ""}</span>
-            <button className="underline" onClick={async () => { await sb().auth.signOut(); window.location.href = "/login"; }}>Sign out</button>
+            <button className="underline" onClick={async () => { clearMyProfile(); await sb().auth.signOut(); window.location.href = "/login"; }}>Sign out</button>
           </div>
         </div>
       </div>

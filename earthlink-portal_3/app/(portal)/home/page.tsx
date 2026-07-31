@@ -31,36 +31,50 @@ export default function Home() {
 
   useEffect(() => {
     (async () => {
-      const { data: c } = await sb().from("contracts").select("id,number,name").order("number");
+      // one round of parallel fetches — serial awaits doubled the board's load
+      // time on a phone; only the columns the board actually uses come over
+      const fetchReleases = async () => {
+        const all: Row[] = [];
+        let from = 0;
+        for (;;) {
+          // ordered — pages of an unordered scan can overlap between requests,
+          // double-counting money in the totals
+          const { data } = await sb().from("releases")
+            .select("id,contract_id,rel_number,location,amount,received,payroll_done,canceled,invoice_sent,labor_hours,labor_breakdown")
+            .order("id").range(from, from + 999);
+          if (!data || data.length === 0) break;
+          all.push(...(data as Row[]));
+          if (data.length < 1000) break;
+          from += 1000;
+        }
+        return all;
+      };
+      const fri0 = new Date(localISO() + "T00:00:00");
+      fri0.setDate(fri0.getDate() + ((5 - fri0.getDay() + 7) % 7));
+      const [{ data: c }, all, { data: props }, { data: allEmps }, { data: wk }] = await Promise.all([
+        sb().from("contracts").select("id,number,name").order("number"),
+        fetchReleases(),
+        sb().from("proposals").select("*").eq("status", "draft").order("created_at"),
+        sb().from("employees").select("id,trade"),
+        sb().from("timesheet_weeks").select("id").eq("week_ending", localISO(fri0)),
+      ]);
       setContracts((c || []) as Contract[]);
-      const all: Row[] = [];
-      let from = 0;
-      for (;;) {
-        // ordered — pages of an unordered scan can overlap between requests,
-        // double-counting money in the totals
-        const { data } = await sb().from("releases").select("*").order("id").range(from, from + 999);
-        if (!data || data.length === 0) break;
-        all.push(...(data as Row[]));
-        if (data.length < 1000) break;
-        from += 1000;
-      }
       setRows(all);
       // walk sheets with quantities that never became a release / got delivered
-      const { data: props } = await sb().from("proposals").select("*").eq("status", "draft").order("created_at");
       setWalks(((props || []) as Prop[]).filter((p) => p.contract_id && p.qty_map && Object.keys(p.qty_map).length > 0));
       // payroll shortfalls against release minimums
       const need = all.filter((r) => !r.canceled && !r.received && !r.payroll_done && (Number(r.labor_hours) > 0 || (r.labor_breakdown || []).length > 0));
       if (need.length > 0) {
         const needIds = need.map((r) => r.id);
         const ents: { release_id: string | null; employee_id: string; hours: number[]; trade?: string | null }[] = [];
-        for (let i = 0; i < needIds.length; i += 200) {
+        // chunks fetch together, each page-looped and ordered
+        await Promise.all(Array.from({ length: Math.ceil(needIds.length / 200) }, (_, x) => x * 200).map(async (i) => {
           for (let f = 0; ; f += 1000) { // paginated — an unranged select stops silently at 1000
             const { data: chunk } = await sb().from("timesheet_entries").select("*").in("release_id", needIds.slice(i, i + 200)).order("id").range(f, f + 999);
             ents.push(...((chunk || []) as typeof ents));
             if (!chunk || chunk.length < 1000) break;
           }
-        }
-        const { data: allEmps } = await sb().from("employees").select("id,trade");
+        }));
         const tradeById = new Map(((allEmps || []) as { id: string; trade: string }[]).map((e) => [e.id, canonTrade(e.trade)]));
         const byRel = aggregateLogged(ents, tradeById);
         setShorts(need
@@ -74,12 +88,9 @@ export default function Home() {
           .slice(0, 5)
           .map(({ r, missing }) => ({ r, missing })));
       }
-      // has anyone entered hours for the current payroll week? (local Friday, not UTC)
-      const fri = new Date(localISO() + "T00:00:00");
-      fri.setDate(fri.getDate() + ((5 - fri.getDay() + 7) % 7));
-      // all week rows for that Friday — with an accidental duplicate week the
-      // hours could live on either copy, and reading just one falsely nags
-      const { data: wk } = await sb().from("timesheet_weeks").select("id").eq("week_ending", localISO(fri));
+      // has anyone entered hours for the current payroll week? (all week rows
+      // for that Friday — with an accidental duplicate week the hours could
+      // live on either copy, and reading just one falsely nags)
       if (wk && wk.length > 0) {
         const ids = (wk as { id: string }[]).map((w) => w.id);
         const { data: es } = await sb().from("timesheet_entries").select("hours").in("week_id", ids);

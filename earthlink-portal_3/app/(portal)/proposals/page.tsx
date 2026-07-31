@@ -54,7 +54,16 @@ export default function Proposals() {
   const upgradeHint = (m: string) => (/column|schema|relation|qty_map/i.test(m) ? "Database needs the upgrade — run supabase/upgrade_proposal_creator.sql" : m);
 
   const load = async () => {
-    const { data } = await sb().from("proposals").select("*").order("created_at", { ascending: false });
+    // the list never shows quantities — leaving qty_map out cuts the payload
+    // by far the most; opening a sheet fetches its full row on demand
+    const { data, error } = await sb().from("proposals")
+      .select("id,number,client_name,job,date,tax_pct,status,notes,contract_id,development,address,apt,stairhall,walk_date,release_number,nycha_staff,vendor_staff,start_date,finish_date,total,created_at")
+      .order("created_at", { ascending: false });
+    if (error) { // older database without some columns — fall back to full rows
+      const { data: d2 } = await sb().from("proposals").select("*").order("created_at", { ascending: false });
+      setList((d2 || []) as Proposal[]);
+      return;
+    }
     setList((data || []) as Proposal[]);
   };
   useEffect(() => {
@@ -89,6 +98,13 @@ export default function Proposals() {
     openDocId.current = p.id;
     setDoc(p); setSearch(""); setCollapsed(new Set());
     setQty({}); // never show the previous sheet's quantities while this one loads
+    qtyDirty.current = false;
+    // the list rows travel without qty_map — the full sheet loads here
+    if (p.qty_map === undefined) {
+      const { data: full } = await sb().from("proposals").select("*").eq("id", p.id).single();
+      if (openDocId.current !== p.id) return;
+      if (full) { p = full as Proposal; setDoc(p); }
+    }
     const m: Record<string, string> = {};
     Object.entries(p.qty_map || {}).forEach(([k, v]) => { if (Number(v) > 0) m[k] = String(v); });
     // fall back to line items ONLY for drafts saved before qty_map existed —
@@ -180,7 +196,9 @@ export default function Proposals() {
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  const qtyDirty = useRef(false); // did any quantity change since the sheet opened?
   const setLineQty = (code: string, v: string) => {
+    qtyDirty.current = true;
     const next = { ...qty, [code]: v };
     if (!v) delete next[code];
     setQty(next); scheduleAutosave(next);
@@ -218,7 +236,9 @@ export default function Proposals() {
     }
     return rows;
   };
-  const closeEditor = async () => { if (doc?.contract_id && catalog) await materialize(); setDoc(null); setItems([]); };
+  // closing only rewrites the saved lines when something changed — before, every
+  // open-and-look deleted and re-inserted the whole sheet for nothing
+  const closeEditor = async () => { if (doc?.contract_id && catalog && qtyDirty.current) await materialize(); setDoc(null); setItems([]); };
 
   // ---------- catalog upload (per contract, header-name matched) ----------
   const handleContractSheet = (e: React.ChangeEvent<HTMLInputElement>) => {

@@ -5,6 +5,7 @@ import { useDeferredValue, useEffect, useRef, useState } from "react";
 let XLSX!: typeof import("xlsx-js-style");
 const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import { sb } from "@/lib/supabase";
+import { myProfile } from "@/lib/profile";
 import { fmt, parseNum, askFileName } from "@/lib/format";
 import Stamp from "@/components/Stamp";
 import type { Contract, Release } from "@/lib/types";
@@ -183,10 +184,8 @@ export default function Releases() {
     loadLogged();
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
     (async () => {
-      const { data: { user } } = await sb().auth.getUser();
-      if (!user) return;
-      const { data: prof } = await sb().from("profiles").select("role").eq("id", user.id).single();
-      setRole((prof as { role?: string } | null)?.role || "");
+      const prof = await myProfile();
+      setRole(prof?.role || "");
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -211,18 +210,25 @@ export default function Releases() {
     // which releases can produce an SOS? those with imported line items,
     // or a walk sheet (with quantities) whose Release # matches
     const ready = new Set<string>();
-    const ids = all.map((r) => r.id);
-    // all chunks fetch together — serially this scan alone took seconds on a big contract
-    const chunks: string[][] = [];
-    for (let i = 0; i < ids.length; i += 200) chunks.push(ids.slice(i, i + 200));
-    await Promise.all(chunks.map(async (chunk) => {
-      // page inside each chunk too — 200 releases can hold >1000 line items
-      for (let f = 0; ; f += 1000) {
-        const { data: its } = await sb().from("release_items").select("release_id").in("release_id", chunk).range(f, f + 999);
-        ((its || []) as { release_id: string }[]).forEach((it) => ready.add(it.release_id));
-        if (!its || its.length < 1000) break;
-      }
-    }));
+    // one tiny answer from the database (run supabase/upgrade_speed.sql) —
+    // otherwise fall back to downloading a row id per line item
+    const { data: withItems, error: wiErr } = await sb().rpc("releases_with_items", { cid });
+    if (!wiErr && Array.isArray(withItems)) {
+      (withItems as string[]).forEach((id) => ready.add(id));
+    } else {
+      const ids = all.map((r) => r.id);
+      // all chunks fetch together — serially this scan alone took seconds on a big contract
+      const chunks: string[][] = [];
+      for (let i = 0; i < ids.length; i += 200) chunks.push(ids.slice(i, i + 200));
+      await Promise.all(chunks.map(async (chunk) => {
+        // page inside each chunk too — 200 releases can hold >1000 line items
+        for (let f = 0; ; f += 1000) {
+          const { data: its } = await sb().from("release_items").select("release_id").in("release_id", chunk).range(f, f + 999);
+          ((its || []) as { release_id: string }[]).forEach((it) => ready.add(it.release_id));
+          if (!its || its.length < 1000) break;
+        }
+      }));
+    }
     const { data: props } = await sb().from("proposals").select("release_number,qty_map").eq("contract_id", cid);
     if (token !== loadSeq.current) return;
     // "007" and "7" are the same release — compare with leading zeros stripped
@@ -254,14 +260,26 @@ export default function Releases() {
   useEffect(() => { loadRows(active); }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // live: releases, their items, walk sheets, contracts AND payroll hours refresh this page
-  useLive(["releases", "release_items", "proposals", "contracts", "timesheet_entries"], () => { loadRows(active, true); loadContracts(); loadLogged(); }, { enabled: !!active && !busy, delay: 1500, skipWhileTyping: true });
+  // enabled stays keyed to the contract only — flipping it with busy would tear
+  // down and rejoin the realtime channel on every import; a ref skips instead
+  const busyRef = useRef(busy); busyRef.current = busy;
+  useLive(["releases", "release_items", "proposals", "contracts", "timesheet_entries"], () => { if (busyRef.current) return; loadRows(active, true); loadContracts(); loadLogged(); }, { enabled: !!active, delay: 1500, skipWhileTyping: true });
 
   const loadLogged = async () => {
-    // paginated — an unranged select silently stops at 1000 rows and the
-    // payroll-hours chips would quietly go wrong past that
+    // the database sums the hours itself (run supabase/upgrade_speed.sql) —
+    // one number per release instead of the whole timesheet history
+    const { data: sums, error } = await sb().rpc("logged_hours_by_release");
+    if (!error && Array.isArray(sums)) {
+      const agg: Record<string, number> = {};
+      (sums as { release_id: string; hours: number }[]).forEach((s) => { agg[s.release_id] = Number(s.hours) || 0; });
+      setLogged(agg);
+      return;
+    }
+    // fallback: paginated scan — an unranged select silently stops at 1000 rows
     const all: { release_id: string | null; hours: number[] }[] = [];
     for (let from = 0; ; from += 1000) {
-      const { data } = await sb().from("timesheet_entries").select("release_id,hours").range(from, from + 999);
+      // only rows tied to a release — shop/misc hours can't affect these chips
+      const { data } = await sb().from("timesheet_entries").select("release_id,hours").not("release_id", "is", null).order("id").range(from, from + 999);
       all.push(...((data || []) as typeof all));
       if (!data || data.length < 1000) break;
     }

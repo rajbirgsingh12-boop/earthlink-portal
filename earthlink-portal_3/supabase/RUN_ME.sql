@@ -239,3 +239,80 @@ create policy "docs read" on storage.objects for select
       where r.id::text = (storage.foldername(name))[1] and r.assigned_to = auth.uid()
     )
   ));
+
+-- ---------- from upgrade_speed.sql (indexes + once-per-query role checks) ----------
+-- SPEED UPGRADE — safe to run any time, changes no behavior, only makes the
+-- database faster. Two parts:
+--
+-- 1) Missing indexes: filters the app uses constantly (payroll week, day
+--    schedule, walk sheets by contract…) get proper indexes so lookups stop
+--    scanning whole tables as they grow.
+create index if not exists timesheet_entries_week_idx on timesheet_entries(week_id);
+create index if not exists timesheet_entries_release_idx on timesheet_entries(release_id);
+create index if not exists timesheet_weeks_ending_idx on timesheet_weeks(week_ending);
+create index if not exists schedule_days_day_idx on schedule_days(day);
+create index if not exists proposals_contract_idx on proposals(contract_id);
+create index if not exists proposal_items_proposal_idx on proposal_items(proposal_id);
+create index if not exists releases_assigned_idx on releases(assigned_to) where assigned_to is not null;
+create index if not exists invoices_proposal_idx on invoices(proposal_id);
+create index if not exists invoice_items_invoice_idx on invoice_items(invoice_id);
+create index if not exists pact_jobs_po_idx on pact_jobs(po_number);
+
+-- 2) Row-security speedup: every policy calls my_role() / auth.uid(), and
+--    Postgres re-runs those for EVERY ROW it checks (they can't be inlined —
+--    my_role() is SECURITY DEFINER). Wrapping each call as a scalar subselect
+--    makes Postgres evaluate it ONCE per query instead. On a 2,000-release
+--    fetch that's 1 profiles lookup instead of 2,000. This block rewrites all
+--    existing policies in place — same rules, just cached role checks.
+do $$
+declare
+  p record;
+  new_qual text;
+  new_check text;
+  cmd text;
+begin
+  for p in
+    select schemaname, tablename, policyname, qual, with_check
+    from pg_policies
+    where schemaname in ('public', 'storage')
+  loop
+    new_qual := p.qual;
+    new_check := p.with_check;
+
+    -- wrap my_role() calls (skip expressions already wrapped by a prior run —
+    -- the wrapped form deparses with SELECT directly next to the call)
+    if new_qual is not null and new_qual !~* 'select\s+(public\.)?my_role' then
+      new_qual := replace(new_qual, 'public.my_role()', '<<MR>>');
+      new_qual := replace(new_qual, 'my_role()', '<<MR>>');
+      new_qual := replace(new_qual, '<<MR>>', '(select public.my_role())');
+    end if;
+    if new_check is not null and new_check !~* 'select\s+(public\.)?my_role' then
+      new_check := replace(new_check, 'public.my_role()', '<<MR>>');
+      new_check := replace(new_check, 'my_role()', '<<MR>>');
+      new_check := replace(new_check, '<<MR>>', '(select public.my_role())');
+    end if;
+
+    -- wrap auth.uid() calls the same way
+    if new_qual is not null and new_qual !~* 'select\s+auth\.uid' then
+      new_qual := replace(new_qual, 'auth.uid()', '(select auth.uid())');
+    end if;
+    if new_check is not null and new_check !~* 'select\s+auth\.uid' then
+      new_check := replace(new_check, 'auth.uid()', '(select auth.uid())');
+    end if;
+
+    if new_qual is distinct from p.qual or new_check is distinct from p.with_check then
+      cmd := format('alter policy %I on %I.%I', p.policyname, p.schemaname, p.tablename);
+      if new_qual is distinct from p.qual and new_qual is not null then
+        cmd := cmd || format(' using (%s)', new_qual);
+      end if;
+      if new_check is distinct from p.with_check and new_check is not null then
+        cmd := cmd || format(' with check (%s)', new_check);
+      end if;
+      begin
+        execute cmd;
+      exception when others then
+        raise notice 'skipped %.% policy % (%)', p.schemaname, p.tablename, p.policyname, sqlerrm;
+      end;
+    end if;
+  end loop;
+end $$;

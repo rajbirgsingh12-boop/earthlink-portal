@@ -89,7 +89,7 @@ export async function POST(req: Request) {
   const msvc = env("TWILIO_MESSAGING_SERVICE_SID");
   const failed: { to: string; error: string }[] = [];
   let sent = 0;
-  for (const m of messages) {
+  const sendOne = async (m: { to: string; body: string; id: string }) => {
     const form = new URLSearchParams({ To: m.to, Body: m.body });
     if (msvc) form.set("MessagingServiceSid", msvc); else form.set("From", from);
     try {
@@ -114,6 +114,11 @@ export async function POST(req: Request) {
     } catch (e) {
       failed.push({ to: m.to, error: e instanceof Error ? e.message : "network error" });
     }
+  };
+  // five at a time — a 20-worker crew goes out in ~2s instead of ~8s, still
+  // gentle enough for Twilio's per-number rate limits
+  for (let i = 0; i < messages.length; i += 5) {
+    await Promise.all(messages.slice(i, i + 5).map(sendOne));
   }
   return NextResponse.json({ configured: true, sent, skipped, failed });
 }

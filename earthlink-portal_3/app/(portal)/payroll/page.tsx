@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 let XLSX!: typeof import("xlsx-js-style");
 const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import { sb } from "@/lib/supabase";
+import { myProfile } from "@/lib/profile";
 import { askFileName } from "@/lib/format";
 import { prettyDate, addDays, localISO } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged, type LaborResult } from "@/lib/labor";
@@ -79,12 +80,7 @@ export default function Payroll() {
   const [role, setRole] = useState("");
   const readOnly = role === "accountant";
   useEffect(() => {
-    (async () => {
-      const { data: { user } } = await sb().auth.getUser();
-      if (!user) return;
-      const { data: prof } = await sb().from("profiles").select("role").eq("id", user.id).single();
-      setRole((prof as { role?: string } | null)?.role || "");
-    })();
+    myProfile().then((p) => setRole(p?.role || ""));
   }, []);
 
   const savePhone = async (empId: string, raw: string) => {
@@ -94,29 +90,41 @@ export default function Payroll() {
     setEmps((prev) => prev.map((e) => (e.id === empId ? { ...e, phone } : e)));
   };
 
-  const load = async () => {
-    // all employees (incl. deactivated) so past weeks still show their names
-    const { data: e } = await sb().from("employees").select("*").order("name");
-    setEmps((e || []) as Emp[]);
-    const { data: w } = await sb().from("timesheet_weeks").select("*").order("week_ending", { ascending: false });
-    setWeeks((w || []) as Week[]);
-    setOpenWeek((prev) => (prev ? { ...prev, ...(((w || []) as Week[]).find((x) => x.id === prev.id) || {}) } : prev));
-    const allR: RelRow[] = [];
-    for (let from = 0; ; from += 1000) { // paginated — an unranged select stops silently at 1000
-      // canceled releases stay in the list (flagged) so hours already punched on
-      // them keep their release name — the pickers below filter them out
-      const { data: r } = await sb().from("releases").select("id,rel_number,location,contract_id,labor_hours,labor_breakdown,canceled").order("id").range(from, from + 999);
-      allR.push(...((r || []) as RelRow[]));
-      if (!r || r.length < 1000) break;
+  const load = async (only?: string[]) => {
+    // the four reads don't depend on each other — they go out together; a
+    // realtime event names its table so everything else is skipped
+    const want = (t: string) => !only || only.includes(t);
+    const fetchRels = async () => {
+      const allR: RelRow[] = [];
+      for (let from = 0; ; from += 1000) { // paginated — an unranged select stops silently at 1000
+        // canceled releases stay in the list (flagged) so hours already punched on
+        // them keep their release name — the pickers below filter them out
+        const { data: r } = await sb().from("releases").select("id,rel_number,location,contract_id,labor_hours,labor_breakdown,canceled").order("id").range(from, from + 999);
+        allR.push(...((r || []) as RelRow[]));
+        if (!r || r.length < 1000) break;
+      }
+      return allR;
+    };
+    const [e, w, allR, c] = await Promise.all([
+      // all employees (incl. deactivated) so past weeks still show their names
+      want("employees") ? sb().from("employees").select("*").order("name").then((r) => r.data) : null,
+      want("timesheet_weeks") ? sb().from("timesheet_weeks").select("*").order("week_ending", { ascending: false }).then((r) => r.data) : null,
+      want("releases") ? fetchRels() : null,
+      want("contracts") ? sb().from("contracts").select("id,number,name").order("number").then((r) => r.data) : null,
+    ]);
+    if (e) setEmps(e as Emp[]);
+    if (w) {
+      setWeeks(w as Week[]);
+      setOpenWeek((prev) => (prev ? { ...prev, ...((w as Week[]).find((x) => x.id === prev.id) || {}) } : prev));
     }
-    setRels(allR.sort((x, y) => (parseFloat(x.rel_number) || 0) - (parseFloat(y.rel_number) || 0)));
-    const { data: c } = await sb().from("contracts").select("id,number,name").order("number");
-    setContracts((c || []) as Contract[]);
+    if (allR) setRels(allR.sort((x, y) => (parseFloat(x.rel_number) || 0) - (parseFloat(y.rel_number) || 0)));
+    if (c) setContracts(c as Contract[]);
   };
   useEffect(() => { load(); }, []);
 
-  // live: crew, weeks (incl. paid marks), releases and contracts stay current
-  useLive(["timesheet_weeks", "employees", "releases", "contracts"], () => load(), { skipWhileTyping: true });
+  // live: crew, weeks (incl. paid marks), releases and contracts stay current —
+  // refetching only the table the event came from
+  useLive(["timesheet_weeks", "employees", "releases", "contracts"], (changed) => load(changed), { skipWhileTyping: true });
   // live: hours entered on another device appear in the open week
   useLive(["timesheet_entries"], async () => {
     if (!openWeek) return;
@@ -251,7 +259,15 @@ export default function Payroll() {
     flash(missingTradeCol.test(error.message) ? "Run supabase/upgrade_payroll_class.sql so classifications save" : error.message);
   };
   const saveDay = async (en: Entry, i: number, n: number) => {
-    // merge the one day onto the row as the database has it right now
+    // one atomic write of just that day (run supabase/upgrade_speed.sql) —
+    // two phones on different days of the same worker can never collide
+    const { data: updated, error: rpcErr } = await sb().rpc("set_day_hours", { eid: en.id!, di: i, val: n });
+    if (!rpcErr && Array.isArray(updated)) {
+      const hours = (updated as number[]).map((h) => Number(h) || 0);
+      setEntries((prev) => prev.map((x) => (x.id === en.id ? { ...x, hours } : x)));
+      return;
+    }
+    // fallback: merge the one day onto the row as the database has it right now
     const { data } = await sb().from("timesheet_entries").select("hours").eq("id", en.id!).single();
     const hours = ((((data as { hours?: number[] } | null)?.hours) || en.hours) as number[]).map((h) => Number(h) || 0);
     hours[i] = n;
@@ -523,6 +539,7 @@ export default function Payroll() {
                   .filter((r) => !r.canceled)
                   .filter((r) => !linkContract || r.contract_id === linkContract)
                   .filter((r) => relLabel(r).toLowerCase().includes(relPickQ.trim().toLowerCase()))
+                  .slice(0, 40)
                   .map((r) => (
                     <button key={r.id} className="block w-full border-b border-rulesoft p-2.5 text-left text-sm"
                       onMouseDown={(ev) => { ev.preventDefault(); setExtraSections((prev) => (prev.some((x) => x.release_id === r.id) ? prev : [...prev, { release_id: r.id, label: `#${r.rel_number} — ${r.location}` }])); setRelPickQ(""); setAddFor(r.id); setAddQ(""); }}>

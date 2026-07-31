@@ -17,7 +17,7 @@ export async function gatherReleaseDoc(
   contractId: string,
   rel: { id: string; rel_number: string; location?: string; address?: string; buildings?: string }
 ): Promise<ReleaseDocData> {
-  const { data: props } = await sb().from("proposals").select("*")
+  const { data: props } = await sb().from("proposals").select("release_number,qty_map,development,address,apt,stairhall")
     .eq("contract_id", contractId).not("release_number", "is", null)
     .order("created_at", { ascending: false });
   const matches = ((props || []) as { release_number?: string; qty_map?: Record<string, number> | null; development?: string; address?: string; apt?: string; stairhall?: string }[])

@@ -16,9 +16,9 @@ const config: Config = {
         inksoft: "#6B6B63",
       },
       fontFamily: {
-        display: ["'Barlow Condensed'", "sans-serif"],
-        mono: ["'IBM Plex Mono'", "monospace"],
-        body: ["Inter", "system-ui", "sans-serif"],
+        display: ["var(--font-display)", "'Barlow Condensed'", "sans-serif"],
+        mono: ["var(--font-mono)", "'IBM Plex Mono'", "monospace"],
+        body: ["var(--font-body)", "Inter", "system-ui", "sans-serif"],
       },
     },
   },

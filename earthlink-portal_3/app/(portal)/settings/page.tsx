@@ -1,7 +1,9 @@
 "use client";
 import { useEffect, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
-import * as XLSX from "xlsx-js-style";
+// the export engine is heavy — it loads on demand, never with the page itself
+let XLSX!: typeof import("xlsx-js-style");
+const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import { useLive } from "@/lib/useLive";
 import { sb } from "@/lib/supabase";
 import { askFileName } from "@/lib/format";
@@ -116,6 +118,7 @@ export default function Settings() {
     return out;
   };
   const downloadBackup = async () => {
+    await ensureXLSX();
     setBackingUp(true);
     try {
       const [cs, rels, emps, wks, ents, pact, props] = await Promise.all([

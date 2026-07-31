@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { sb } from "@/lib/supabase";
 import { fmt } from "@/lib/format";
 import { prettyDate, localISO } from "@/lib/docs";
@@ -108,23 +109,23 @@ export default function Home() {
       <div className="mb-4 grid grid-cols-2 gap-2.5 md:grid-cols-4">
         {([["⏱", "Enter today's hours", "/payroll"], ["📋", "Fill out a walk sheet", "/proposals"],
            ["🧾", "Make an invoice", "/statements"], ["📄", "See the releases", "/releases"]] as [string, string, string][]).map(([icon, label, href]) => (
-          <a key={href} href={href} className="card flex items-center gap-2.5 p-3.5 transition-shadow hover:shadow">
+          <Link key={href} href={href} prefetch={false} className="card flex items-center gap-2.5 p-3.5 transition-shadow hover:shadow">
             <span className="text-xl">{icon}</span>
             <span className="font-display text-[14px] font-semibold uppercase leading-tight tracking-wide">{label}</span>
-          </a>
+          </Link>
         ))}
       </div>
       {loading ? <div className="text-sm text-inksoft">Opening the books…</div> : (
         <>
           {payrollNudge && (
-            <a href="/payroll" className="card mb-2.5 block border-alert p-3 text-[14px]">
+            <Link href="/payroll" prefetch={false} className="card mb-2.5 block border-alert p-3 text-[14px]">
               ⏱ <b>No hours entered for this week yet.</b> Tap here, hit Make payroll, and punch them in before Friday.
-            </a>
+            </Link>
           )}
           {stale.length > 0 && (
-            <a href="/statements" className="card mb-2.5 block border-work p-3 text-[14px]">
+            <Link href="/statements" prefetch={false} className="card mb-2.5 block border-work p-3 text-[14px]">
               🧾 <b>{stale.length} invoice{stale.length === 1 ? "" : "s"} out over 45 days</b> — worth a call. Tap to see who owes what.
-            </a>
+            </Link>
           )}
           <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
             {cards.map(([l, v, cls]) => (
@@ -139,7 +140,7 @@ export default function Home() {
             <div className="card p-3.5">
               <div className="mb-2 flex items-baseline justify-between">
                 <div className="font-display text-sm font-bold uppercase">Chase these first</div>
-                <a href="/statements" className="text-xs text-inksoft underline">Statements →</a>
+                <Link href="/statements" prefetch={false} className="text-xs text-inksoft underline">Statements →</Link>
               </div>
               {oldest.map((r) => (
                 <div key={r.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
@@ -157,7 +158,7 @@ export default function Home() {
             <div className="card p-3.5">
               <div className="mb-2 flex items-baseline justify-between">
                 <div className="font-display text-sm font-bold uppercase">Walk sheets undelivered</div>
-                <a href="/proposals" className="text-xs text-inksoft underline">Proposals →</a>
+                <Link href="/proposals" prefetch={false} className="text-xs text-inksoft underline">Proposals →</Link>
               </div>
               {walks.slice(0, 5).map((p) => (
                 <div key={p.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
@@ -172,7 +173,7 @@ export default function Home() {
             <div className="card p-3.5">
               <div className="mb-2 flex items-baseline justify-between">
                 <div className="font-display text-sm font-bold uppercase">Payroll short</div>
-                <a href="/payroll" className="text-xs text-inksoft underline">Payroll →</a>
+                <Link href="/payroll" prefetch={false} className="text-xs text-inksoft underline">Payroll →</Link>
               </div>
               {shorts.map(({ r, missing }) => (
                 <div key={r.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
@@ -184,7 +185,7 @@ export default function Home() {
             </div>
           </div>
 
-          <a href="/releases" className="btn btn-primary mt-5 inline-block">Open releases →</a>
+          <Link href="/releases" prefetch={false} className="btn btn-primary mt-5 inline-block">Open releases →</Link>
         </>
       )}
     </div>

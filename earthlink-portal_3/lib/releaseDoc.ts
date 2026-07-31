@@ -1,7 +1,9 @@
 // Shared document data for a release: the SOS and the invoice both pull line
 // items the same way — the walk sheet tied to the release number first, the
 // items imported from the release PDF as fallback.
-import * as XLSX from "xlsx-js-style";
+// heavy export engine — loaded only when an invoice xlsx is actually built
+let XLSX!: typeof import("xlsx-js-style");
+const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import { sb } from "./supabase";
 import { prettyDate, type Org } from "./docs";
 
@@ -52,7 +54,7 @@ export async function gatherReleaseDoc(
 // NYCHA "Standard Invoice" — same layout as Earth Link's paper template
 // (Original To / copy to on the left, FROM on the right, contract-release-
 // development-period block, item table), styled like the SOS export.
-export function buildInvoiceXlsx(a: {
+export async function buildInvoiceXlsx(a: {
   org: Org; cNumber: string; relNum: string; workOrder: string; dev: string;
   number: string; date: string; rows: DocRow[]; filename?: string;
 }) {

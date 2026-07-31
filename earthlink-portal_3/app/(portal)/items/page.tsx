@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import * as XLSX from "xlsx";
+// the sheet reader is heavy — it loads on demand, never with the page itself
+let XLSX!: typeof import("xlsx");
+const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx")); };
 import { sb } from "@/lib/supabase";
 import { fmt, parseNum } from "@/lib/format";
 import type { Contract } from "@/lib/types";
@@ -101,6 +103,7 @@ export default function Items() {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = async (ev) => {
+      await ensureXLSX();
       try {
         const wb = XLSX.read(ev.target?.result, { type: "array" });
         const raw: string[][] = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "", raw: false });

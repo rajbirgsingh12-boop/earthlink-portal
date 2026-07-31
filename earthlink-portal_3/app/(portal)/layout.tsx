@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
+import Link from "next/link";
 import { sb } from "@/lib/supabase";
 import type { Profile } from "@/lib/types";
 
@@ -79,9 +80,9 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
                 const [, href, label] = e;
                 // hovering a plain tab closes any open menu, same as before
                 return (
-                  <a key={href} href={href} className={tabCls(path === href)} onMouseEnter={() => setMenu(null)}>
+                  <Link key={href} href={href} prefetch={false} className={tabCls(path === href)} onMouseEnter={() => setMenu(null)}>
                     {label}
-                  </a>
+                  </Link>
                 );
               }
               const g = e[1];
@@ -102,10 +103,10 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
           <div className="border-t border-rulesoft bg-paper">
             <div className="mx-auto flex max-w-5xl gap-1 overflow-x-auto px-2">
               {openGroup.items.map(([h, l]) => (
-                <a key={h} href={h}
+                <Link key={h} href={h} prefetch={false} onClick={() => setMenu(null)}
                   className={`whitespace-nowrap px-3 py-2.5 font-display text-[13px] font-semibold uppercase tracking-wider ${path === h ? "text-work" : "text-inksoft hover:text-ink"}`}>
                   {l}
-                </a>
+                </Link>
               ))}
             </div>
           </div>

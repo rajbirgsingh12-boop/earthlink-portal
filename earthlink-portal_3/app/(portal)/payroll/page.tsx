@@ -1,7 +1,9 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the export
-import * as XLSX from "xlsx-js-style";
+// the export engine is heavy — it loads on demand, never with the page itself
+let XLSX!: typeof import("xlsx-js-style");
+const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import { sb } from "@/lib/supabase";
 import { askFileName } from "@/lib/format";
 import { prettyDate, addDays, localISO } from "@/lib/docs";
@@ -242,7 +244,8 @@ export default function Payroll() {
   const totHrs = summ.reduce((s, x) => s + x.hrs, 0);
 
   // ---------- weekly sheet in the paper-template layout, one tab per contract ----------
-  const exportTemplate = () => {
+  const exportTemplate = async () => {
+    await ensureXLSX();
     if (!openWeek || entries.length === 0) { flash("No hours this week yet"); return; }
     const relById = new Map(rels.map((r) => [r.id, r]));
     const groups = new Map<string, Entry[]>();

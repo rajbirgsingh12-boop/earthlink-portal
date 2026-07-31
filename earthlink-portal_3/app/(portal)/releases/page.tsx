@@ -1,7 +1,9 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the SOS export
-import * as XLSX from "xlsx-js-style";
+// the export engine is heavy — it loads on demand, never with the page itself
+let XLSX!: typeof import("xlsx-js-style");
+const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import { sb } from "@/lib/supabase";
 import { fmt, parseNum, askFileName } from "@/lib/format";
 import Stamp from "@/components/Stamp";
@@ -393,7 +395,8 @@ export default function Releases() {
     });
   };
 
-  const downloadSOS = () => {
+  const downloadSOS = async () => {
+    await ensureXLSX();
     if (!sosView) return;
     const { relNum, ticket, cNumber, dev, addr, stair, apt, rows, total } = sosView;
     const today = prettyDate(localISO());
@@ -613,6 +616,7 @@ export default function Releases() {
     reader.onload = async (ev) => {
       try {
         const buf = ev.target?.result as ArrayBuffer;
+        await ensureXLSX();
         const redRows = await detectRedRows(buf);
         const wb = XLSX.read(buf, { type: "array" });
         const sheet = wb.Sheets[wb.SheetNames[0]];
@@ -1508,8 +1512,9 @@ export default function Releases() {
     const file = e.target.files?.[0];
     if (!file || !pdfPending) return;
     const reader = new FileReader();
-    reader.onload = (ev) => {
+    reader.onload = async (ev) => {
       try {
+        await ensureXLSX();
         const wb = XLSX.read(ev.target?.result as ArrayBuffer, { type: "array" });
         const sheet = wb.Sheets[wb.SheetNames[0]];
         const raw: string[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false, blankrows: false });
@@ -1620,7 +1625,8 @@ export default function Releases() {
     flash(`Release ${saved.rel} ${updated ? "updated" : "added"} — ${saved.items.length} line items`);
   };
 
-  const exportSheet = () => {
+  const exportSheet = async () => {
+    await ensureXLSX();
     const c = contracts.find((x) => x.id === active);
     const out = rows.map((r) => ({
       Release: r.rel_number, Location: r.location, Buildings: r.buildings, "Ticket #": r.ticket,

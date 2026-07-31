@@ -1,7 +1,9 @@
 "use client";
 import { useEffect, useState } from "react";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the export
-import * as XLSX from "xlsx-js-style";
+// the export engine is heavy — it loads on demand, never with the page itself
+let XLSX!: typeof import("xlsx-js-style");
+const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import { sb } from "@/lib/supabase";
 import { fmt, askFileName } from "@/lib/format";
 import { Org, prettyDate, localISO } from "@/lib/docs";
@@ -101,7 +103,8 @@ export default function Statements() {
   const total = rows.reduce((s, r) => s + Number(r.amount), 0);
   const sorted = [...rows].sort((a, b) => (days(b) ?? -1) - (days(a) ?? -1));
 
-  const downloadExcel = () => {
+  const downloadExcel = async () => {
+    await ensureXLSX();
     if (!contract) return;
     const aoa: (string | number)[][] = [];
     aoa.push(["STATEMENT OF ACCOUNT"]);

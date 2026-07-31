@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import Link from "next/link";
+// pdf-lib is heavy — loaded only when a package PDF is actually built
 import { sb } from "@/lib/supabase";
 import { fmt, parseNum, askFileName } from "@/lib/format";
 import { prettyDate, localISO, type Org } from "@/lib/docs";
@@ -278,6 +279,7 @@ export default function Pact() {
 
   // ---------- the submitted package: invoice + PO + before/after, one PDF ----------
   const buildPackage = async (j: Job) => {
+    const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
     if (!org) return;
     const items = itemsOf(j).filter((it) => Number(it.qty) > 0 && it.description.trim());
     if (items.length === 0) { flash("Fill in the invoice lines first (open the job → Invoice)"); return; }
@@ -438,7 +440,7 @@ export default function Pact() {
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div className="font-display text-2xl font-bold uppercase">PACT</div>
         <div className="flex flex-wrap gap-2">
-          <a className="btn btn-ghost" href="/pact/schedule">📅 Schedule</a>
+          <Link className="btn btn-ghost" href="/pact/schedule" prefetch={false}>📅 Schedule</Link>
         </div>
       </div>
       <input ref={poRef} type="file" accept="application/pdf" className="hidden" onChange={handlePo} />

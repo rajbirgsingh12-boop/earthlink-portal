@@ -1,7 +1,9 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the export
-import * as XLSX from "xlsx-js-style";
+// the export engine is heavy — it loads on demand, never with the page itself
+let XLSX!: typeof import("xlsx-js-style");
+const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import { sb } from "@/lib/supabase";
 import { fmt, parseNum, askFileName } from "@/lib/format";
 import Stamp from "@/components/Stamp";
@@ -206,6 +208,7 @@ export default function Proposals() {
     const reader = new FileReader();
     reader.onload = async (ev) => {
       try {
+        await ensureXLSX();
         const wb = XLSX.read(ev.target?.result as ArrayBuffer, { type: "array" });
         const raw: (string | number)[][] = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "", raw: false, blankrows: false });
         const hIdx = raw.findIndex((r) => r.some((c) => /^item$/i.test(String(c).trim())) && r.some((c) => /^price$/i.test(String(c).trim())));
@@ -240,6 +243,7 @@ export default function Proposals() {
 
   // ---------- export: NYCHA walk-sheet layout, used lines only, bordered ----------
   const exportWalkSheet = async () => {
+    await ensureXLSX();
     if (!doc || !catalog) return;
     await materialize();
     const c = contracts.find((x) => x.id === doc.contract_id);

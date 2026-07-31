@@ -51,7 +51,11 @@ export default function Statements() {
         // (ordered — pages of an unordered scan can overlap between requests)
         const rel: { contract_id: string; amount: number; received: boolean; canceled: boolean }[] = [];
         for (let from = 0; ; from += 1000) {
-          const { data: page } = await sb().from("releases").select("contract_id,amount,received,canceled").order("id").range(from, from + 999);
+          // the database keeps paid/canceled/zero rows to itself — only open
+          // balances come over (usually a few dozen rows, not thousands)
+          const { data: page } = await sb().from("releases").select("contract_id,amount,received,canceled")
+            .not("received", "is", true).not("canceled", "is", true).gt("amount", 0)
+            .order("id").range(from, from + 999);
           rel.push(...((page || []) as typeof rel));
           if (!page || page.length < 1000) break;
         }

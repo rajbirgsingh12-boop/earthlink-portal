@@ -17,22 +17,34 @@ export async function gatherReleaseDoc(
   contractId: string,
   rel: { id: string; rel_number: string; location?: string; address?: string; buildings?: string }
 ): Promise<ReleaseDocData> {
-  const { data: props } = await sb().from("proposals").select("release_number,qty_map,development,address,apt,stairhall")
+  // headers only — the fat qty_map comes in a second, tiny read below
+  const { data: props } = await sb().from("proposals").select("id,release_number,development,address,apt,stairhall")
     .eq("contract_id", contractId).not("release_number", "is", null)
     .order("created_at", { ascending: false });
-  const matches = ((props || []) as { release_number?: string; qty_map?: Record<string, number> | null; development?: string; address?: string; apt?: string; stairhall?: string }[])
+  const matches = ((props || []) as { id: string; release_number?: string; development?: string; address?: string; apt?: string; stairhall?: string }[])
     .filter((p) => relNorm(p.release_number) === relNorm(rel.rel_number));
   // quantities come from the newest matching sheet that actually HAS them —
   // an empty duplicate draft on top must not hide a filled one underneath
-  const prop = matches.find((p) => p.qty_map && Object.keys(p.qty_map).length > 0) ?? matches[0];
+  let map: Record<string, number> | null = null;
+  let prop: (typeof matches)[number] | undefined;
+  if (matches.length > 0) {
+    const { data: qs } = await sb().from("proposals").select("id,qty_map").in("id", matches.map((m) => m.id));
+    const qmap = new Map(((qs || []) as { id: string; qty_map?: Record<string, number> | null }[]).map((q) => [q.id, q.qty_map]));
+    prop = matches.find((m) => { const q = qmap.get(m.id); return q && Object.keys(q).length > 0; }) ?? matches[0];
+    map = qmap.get(prop.id) || null;
+  }
   const head = matches[0] ?? prop;
   let rows: DocRow[] = [];
-  if (prop?.qty_map && Object.keys(prop.qty_map).length > 0) {
-    const { data: cat } = await sb().from("contract_items").select("*").eq("contract_id", contractId).order("line");
-    const map = prop.qty_map;
+  if (map && Object.keys(map).length > 0) {
+    // fetch only the catalog lines the sheet actually uses, not the whole book
+    const codes = Object.keys(map).filter((k) => Number(map![k]) > 0);
+    const { data: cat } = codes.length > 0
+      ? await sb().from("contract_items").select("line,code,category,description,uom,unit_price").eq("contract_id", contractId).in("code", codes).order("line")
+      : { data: [] };
+    const m2 = map;
     rows = ((cat || []) as { line: number; code: string; category: string; description: string; uom: string; unit_price: number }[])
-      .filter((ci) => Number(map[ci.code]) > 0)
-      .map((ci) => ({ line: ci.line, code: ci.code, category: ci.category, description: ci.description, uom: ci.uom, qty: Number(map[ci.code]), unit_price: Number(ci.unit_price) }));
+      .filter((ci) => Number(m2[ci.code]) > 0)
+      .map((ci) => ({ line: ci.line, code: ci.code, category: ci.category, description: ci.description, uom: ci.uom, qty: Number(m2[ci.code]), unit_price: Number(ci.unit_price) }));
   }
   if (rows.length === 0) {
     const { data: cd } = await sb().from("contract_items").select("code,category").eq("contract_id", contractId);

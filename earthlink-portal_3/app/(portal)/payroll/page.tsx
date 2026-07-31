@@ -558,6 +558,16 @@ export default function Payroll() {
 
         {(() => {
           const groups = new Map<string, { release_id: string | null; label: string }>();
+          // one pass over all entries for the per-worker day totals (the >8h
+          // flag) — computing this inside every row made typing sluggish on
+          // big weeks — and one lookup map instead of scanning rels per section
+          const dayTotAll = new Map<string, number[]>();
+          entries.forEach((en) => {
+            const arr = dayTotAll.get(en.employee_id) || [0, 0, 0, 0, 0, 0, 0];
+            en.hours.forEach((h, i) => (arr[i] += Number(h) || 0));
+            dayTotAll.set(en.employee_id, arr);
+          });
+          const relById2 = new Map(rels.map((r) => [r.id, r]));
           entries.forEach((en) => {
             const key = en.release_id || "none";
             if (!groups.has(key)) groups.set(key, { release_id: en.release_id || null, label: en.release_id ? en.job_label || "release" : "" });
@@ -567,7 +577,7 @@ export default function Payroll() {
             .sort((a, b) => (a.release_id === null ? 1 : b.release_id === null ? -1 : a.label.localeCompare(b.label, undefined, { numeric: true })));
           // when a contract is picked up top, only its releases show — the rest stay saved, just hidden
           const sections = linkContract
-            ? allSections.filter((s) => s.release_id !== null && rels.find((r) => r.id === s.release_id)?.contract_id === linkContract)
+            ? allSections.filter((s) => s.release_id !== null && relById2.get(s.release_id)?.contract_id === linkContract)
             : allSections;
           const hiddenCount = allSections.length - sections.length;
           if (sections.length === 0) {
@@ -588,7 +598,7 @@ export default function Payroll() {
           )}
           {sections.map((sec) => {
             const ents = entries.filter((en) => (en.release_id || "none") === sec.key);
-            const rel = sec.release_id ? rels.find((r) => r.id === sec.release_id) : null;
+            const rel = sec.release_id ? relById2.get(sec.release_id) ?? null : null;
             const check = sec.release_id ? weekCheck.find((wc) => wc.rel.id === sec.release_id) : null;
             const relInfo = rel ? { id: rel.id as string | null, label: `#${rel.rel_number} — ${rel.location}` } : { id: null as string | null, label: "" };
             const inSection = new Set(ents.map((e) => e.employee_id));
@@ -632,8 +642,7 @@ export default function Payroll() {
                   const reqClasses = (rel?.labor_breakdown || []).map((b) => canonTrade(b.cls));
                   const fits = reqClasses.includes(canon);
                   // combined day totals across every release this worker is on — >8h in a day gets flagged
-                  const empDayTot = Array.from({ length: 7 }, (_, i) =>
-                    entries.filter((x) => x.employee_id === en.employee_id).reduce((s, x) => s + (Number(x.hours[i]) || 0), 0));
+                  const empDayTot = dayTotAll.get(en.employee_id) || [0, 0, 0, 0, 0, 0, 0];
                   const overDays = DAYS.filter((_, i) => empDayTot[i] > 8);
                   return (
                     <div key={en.id} className="border-t border-rulesoft py-2.5 first:border-t-0">

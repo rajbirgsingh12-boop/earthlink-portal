@@ -263,7 +263,15 @@ export default function Releases() {
   // enabled stays keyed to the contract only — flipping it with busy would tear
   // down and rejoin the realtime channel on every import; a ref skips instead
   const busyRef = useRef(busy); busyRef.current = busy;
-  useLive(["releases", "release_items", "proposals", "contracts", "timesheet_entries"], () => { if (busyRef.current) return; loadRows(active, true); loadContracts(); loadLogged(); }, { enabled: !!active, delay: 1500, skipWhileTyping: true });
+  useLive(["releases", "release_items", "proposals", "contracts", "timesheet_entries"], (changed) => {
+    if (busyRef.current) return;
+    // refetch only what the event touched — a payroll keystroke on another
+    // phone must not re-download the whole releases list
+    const hit = (t: string) => !changed || changed.includes(t);
+    if (hit("releases") || hit("release_items") || hit("proposals")) loadRows(active, true);
+    if (hit("contracts")) loadContracts();
+    if (hit("timesheet_entries")) loadLogged();
+  }, { enabled: !!active, delay: 1500, skipWhileTyping: true });
 
   const loadLogged = async () => {
     // the database sums the hours itself (run supabase/upgrade_speed.sql) —
@@ -390,21 +398,33 @@ export default function Releases() {
     const c = contracts.find((x) => x.id === active);
     // prefer the walk sheet (proposal) tied to this release number ("007" = "7")
     const relNorm2 = (v: unknown) => String(v ?? "").trim().replace(/^0+(?=\d)/, "");
-    const { data: props } = await sb().from("proposals").select("*")
+    // headers only — the fat qty_map comes in a second, tiny read below
+    const { data: props } = await sb().from("proposals").select("id,release_number,development,address,apt,stairhall")
       .eq("contract_id", active).not("release_number", "is", null)
       .order("created_at", { ascending: false });
-    const matches = ((props || []) as { release_number?: string; qty_map?: Record<string, number> | null; development?: string; address?: string; apt?: string; stairhall?: string }[])
+    const matches = ((props || []) as { id: string; release_number?: string; development?: string; address?: string; apt?: string; stairhall?: string }[])
       .filter((p) => relNorm2(p.release_number) === relNorm2(r.rel_number));
     // the newest sheet WITH quantities wins — an empty duplicate draft on top
     // must not hide a filled one underneath
-    const prop = matches.find((p) => p.qty_map && Object.keys(p.qty_map).length > 0) ?? matches[0];
+    let map: Record<string, number> | null = null;
+    let prop: (typeof matches)[number] | undefined;
+    if (matches.length > 0) {
+      const { data: qs } = await sb().from("proposals").select("id,qty_map").in("id", matches.map((m) => m.id));
+      const qmap = new Map(((qs || []) as { id: string; qty_map?: Record<string, number> | null }[]).map((q) => [q.id, q.qty_map]));
+      prop = matches.find((m) => { const q = qmap.get(m.id); return q && Object.keys(q).length > 0; }) ?? matches[0];
+      map = qmap.get(prop.id) || null;
+    }
     let rows: SosRow[] = [];
-    if (prop && prop.qty_map && Object.keys(prop.qty_map).length > 0) {
-      const { data: cat } = await sb().from("contract_items").select("*").eq("contract_id", active).order("line");
-      const map = prop.qty_map;
+    if (map && Object.keys(map).length > 0) {
+      // fetch only the catalog lines the sheet actually uses, not the whole book
+      const codes = Object.keys(map).filter((k) => Number(map![k]) > 0);
+      const { data: cat } = codes.length > 0
+        ? await sb().from("contract_items").select("line,code,category,description,uom,unit_price").eq("contract_id", active).in("code", codes).order("line")
+        : { data: [] };
+      const m2 = map;
       rows = ((cat || []) as { line: number; code: string; category: string; description: string; uom: string; unit_price: number }[])
-        .filter((ci) => Number(map[ci.code]) > 0)
-        .map((ci) => ({ line: ci.line, code: ci.code, category: ci.category, description: ci.description, uom: ci.uom, qty: Number(map[ci.code]), unit_price: Number(ci.unit_price) }));
+        .filter((ci) => Number(m2[ci.code]) > 0)
+        .map((ci) => ({ line: ci.line, code: ci.code, category: ci.category, description: ci.description, uom: ci.uom, qty: Number(m2[ci.code]), unit_price: Number(ci.unit_price) }));
     }
     if (rows.length === 0) {
       // fall back to the line items imported from the release PDF
@@ -1366,6 +1386,27 @@ export default function Releases() {
     // that are already there (someone may have edited them by hand)
     let sosMade = 0, skipPaid = 0, skipHave = 0, noItems = 0;
     const pdfjs = pdfjsEarly;
+    // two reads the loop used to make PER RELEASE come down in a few batched
+    // requests up front — a 200-release folder saves ~400 round trips
+    const relIds = [...byRel.keys()];
+    const attsById = new Map<string, { name: string; path: string }[]>();
+    const hasItems = new Set<string>();
+    await Promise.all(Array.from({ length: Math.ceil(relIds.length / 200) }, (_, x) => relIds.slice(x * 200, x * 200 + 200)).map(async (chunk) => {
+      const [{ data: attRows }] = await Promise.all([
+        sb().from("releases").select("id,attachments").in("id", chunk),
+        (async () => {
+          // paged — without .range the 1000-row cap silently truncates and the
+          // never-overwrite-hand-edited-items guard breaks on re-runs
+          for (let f = 0; ; f += 1000) {
+            const { data: its } = await sb().from("release_items").select("release_id").in("release_id", chunk).range(f, f + 999);
+            ((its || []) as { release_id: string }[]).forEach((it) => hasItems.add(it.release_id));
+            if (!its || its.length < 1000) break;
+          }
+        })(),
+      ]);
+      ((attRows || []) as { id: string; attachments?: { name: string; path: string }[] | null }[])
+        .forEach((r2) => attsById.set(r2.id, r2.attachments || []));
+    }));
     for (const [relId, group] of byRel) {
       // a fresh release PDF for a canceled row means the release is live again
       const relRow = madeRels.get(relId) || folderPlan.rels.find((x) => x.id === relId) || rows.find((x) => x.id === relId);
@@ -1373,8 +1414,7 @@ export default function Releases() {
         const { error: unc } = await sb().from("releases").update({ canceled: false }).eq("id", relId);
         if (!unc) { relRow.canceled = false; setRows((prev) => prev.map((x) => (x.id === relId ? { ...x, canceled: false } : x))); }
       }
-      const { data: cur } = await sb().from("releases").select("attachments").eq("id", relId).single();
-      const existing = ((cur as { attachments?: { name: string; path: string }[] } | null)?.attachments) || [];
+      const existing = attsById.get(relId) || [];
       const added: { name: string; path: string }[] = [];
       const taken = new Set(existing.map((a) => a.name.toLowerCase()));
       // a file already attached under the same name IS this file (re-running the
@@ -1417,8 +1457,7 @@ export default function Releases() {
       if (rel.received) { skipPaid += 1; continue; }        // already paid — leave it as it was
       // line items already on file (possibly hand-edited) are never overwritten —
       // checked against the database because these releases can span contracts
-      const { data: had } = await sb().from("release_items").select("id").eq("release_id", relId).limit(1);
-      if ((had || []).length > 0) { skipHave += 1; continue; }
+      if (hasItems.has(relId)) { skipHave += 1; continue; }
       let filled = false;
       for (const item of group) {
         if (!/\.pdf$/i.test(item.file.name)) continue;

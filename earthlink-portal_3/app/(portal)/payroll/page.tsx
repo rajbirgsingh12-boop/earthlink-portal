@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 // the export engine is heavy — it loads on demand, never with the page itself
 let XLSX!: typeof import("xlsx-js-style");
 const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
+import Link from "next/link";
 import { sb } from "@/lib/supabase";
 import { myProfile } from "@/lib/profile";
 import { askFileName } from "@/lib/format";
@@ -744,7 +745,10 @@ export default function Payroll() {
     <div>
       <div className="mb-3 flex items-baseline justify-between">
         <div className="font-display text-2xl font-bold uppercase">Payroll</div>
-        <button className="btn btn-ghost" onClick={() => { const n = !showCrew; setShowCrew(n); if (n && !readOnly) seedCrew(); }}>Crew ({emps.filter((e) => e.active !== false).length})</button>
+        <div className="flex flex-wrap justify-end gap-2">
+          <Link className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" href="/payroll/certified" title="Turn certified payroll PDFs into a CSV for eComply">📄 eComply CSV</Link>
+          <button className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" onClick={() => { const n = !showCrew; setShowCrew(n); if (n && !readOnly) seedCrew(); }}>Crew ({emps.filter((e) => e.active !== false).length})</button>
+        </div>
       </div>
       {showCrew && (
         <div className="card mb-3 p-3.5">

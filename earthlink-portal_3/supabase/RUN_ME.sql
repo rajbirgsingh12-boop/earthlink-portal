@@ -228,3 +228,14 @@ as $$
 $$;
 revoke all on function public.storage_usage() from public;
 grant execute on function public.storage_usage() to authenticated;
+
+-- ---------- from upgrade_docs_read.sql ----------
+drop policy if exists "docs read" on storage.objects;
+create policy "docs read" on storage.objects for select
+  using (bucket_id = 'docs' and (
+    public.my_role() in ('admin','office','accountant')
+    or exists (
+      select 1 from public.releases r
+      where r.id::text = (storage.foldername(name))[1] and r.assigned_to = auth.uid()
+    )
+  ));

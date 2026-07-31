@@ -23,8 +23,8 @@ export async function POST(req: Request) {
   if (role !== "admin" && role !== "office") return NextResponse.json({ error: "Not allowed" }, { status: 403 });
 
   const buf = await req.arrayBuffer();
-  if (buf.byteLength === 0 || buf.byteLength > 15 * 1024 * 1024) {
-    return NextResponse.json({ error: "Send the PDF file itself (max 15 MB)" }, { status: 400 });
+  if (buf.byteLength === 0 || buf.byteLength > 4 * 1024 * 1024) {
+    return NextResponse.json({ error: "Send the PDF file itself (max 4 MB — bigger files are read on the phone)" }, { status: 400 });
   }
   try {
     // unpdf bundles a serverless-safe pdf engine (no worker files to resolve);

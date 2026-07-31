@@ -3,13 +3,20 @@
 // Browser-side hardening: these headers ride on every response.
 // The CSP only lets the page talk to itself, Supabase, Google Fonts, and the
 // Google Maps embed — a script sneaking in from anywhere else is dead on arrival.
+// pin the CSP to this project's own Supabase host when the env is present at
+// build time (Vercel) — the wildcard only remains for local fake-env builds
+const SUPA = (() => {
+  try { return new URL(process.env.NEXT_PUBLIC_SUPABASE_URL || "").host; } catch { return ""; }
+})();
+const supaHosts = SUPA ? `https://${SUPA}` : "https://*.supabase.co";
+const supaWs = SUPA ? `wss://${SUPA}` : "wss://*.supabase.co";
 const csp = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com",
-  "img-src 'self' data: blob: https://*.supabase.co",
-  "connect-src 'self' https://*.supabase.co wss://*.supabase.co",
+  `img-src 'self' data: blob: ${supaHosts}`,
+  `connect-src 'self' ${supaHosts} ${supaWs}`,
   "frame-src https://www.google.com https://maps.google.com",
   "worker-src 'self' blob:",
   "object-src 'none'",
@@ -36,7 +43,7 @@ const nextConfig = {
       // the portal stays out of search results; the public company page and the
       // privacy/SMS terms are left indexable so the business can be verified
       // the portal only — the public company page, sign-in and legal page stay indexable
-      ...["home", "releases", "payroll", "pact", "schedule", "items", "proposals", "statements", "settings", "admin", "reset"]
+      ...["home", "releases", "payroll", "pact", "schedule", "items", "proposals", "statements", "settings", "admin", "reset", "help"]
         .flatMap((p) => [`/${p}`, `/${p}/:path*`])
         .map((source) => ({ source, headers: [{ key: "X-Robots-Tag", value: "noindex, nofollow, noarchive" }] })),
     ];

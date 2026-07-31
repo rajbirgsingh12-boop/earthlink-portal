@@ -1,13 +1,9 @@
 import type { MetadataRoute } from "next";
 
-// The public pages (company page, sign-in, legal) stay visible so the business can
-// be found and verified at its own domain; the staff portal stays out of search.
+// The public pages stay visible so the business can be verified at its own
+// domain. The portal pages are left crawlable but carry X-Robots-Tag: noindex —
+// a robots.txt Disallow would HIDE that header from crawlers, which can leave
+// bare URLs in search results; noindex actually removes them.
 export default function robots(): MetadataRoute.Robots {
-  return {
-    rules: {
-      userAgent: "*",
-      allow: "/",
-      disallow: ["/home", "/releases", "/payroll", "/pact", "/schedule", "/items", "/proposals", "/statements", "/settings", "/admin", "/reset", "/api"],
-    },
-  };
+  return { rules: { userAgent: "*", allow: "/", disallow: ["/api"] } };
 }

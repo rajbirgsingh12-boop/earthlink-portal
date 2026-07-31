@@ -108,9 +108,9 @@ grant execute on function public.releases_with_items(uuid), public.logged_hours_
 --    including the attachments list — a bulk folder attach wrote megabytes of
 --    history. The heavy keys stay out; everything else is still recorded.
 create or replace function public.audit_releases() returns trigger
-language plpgsql security definer as $$
+language plpgsql security definer set search_path = public as $$
 begin
-  insert into audit_log (actor, action, entity, entity_id, before, after)
+  insert into audit_log (user_id, action, table_name, record_id, before, after)
   values (auth.uid(), TG_OP, 'releases', coalesce(new.id, old.id),
           to_jsonb(old) - 'attachments', to_jsonb(new) - 'attachments');
   return coalesce(new, old);

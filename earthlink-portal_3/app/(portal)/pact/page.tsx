@@ -120,12 +120,16 @@ export default function Pact() {
     const paths = (((freshRow as { attachments?: { path: string }[] } | null)?.attachments) || j.attachments || []).map((a) => a.path);
     const { error } = await sb().from("pact_jobs").delete().eq("id", j.id);
     if (error) { flash(upgradeHint(error.message)); return; }
-    if (paths.length > 0) await sb().storage.from("docs").remove(paths);
+    let cleanupFailed = false;
+    if (paths.length > 0) {
+      const { error: se } = await sb().storage.from("docs").remove(paths);
+      cleanupFailed = !!se;
+    }
     if (openId === j.id) setOpenId(null);
     if (attachJob?.id === j.id) setAttachJob(null);
     if (invJob?.id === j.id) setInvJob(null);
     setJobs((prev) => prev.filter((x) => x.id !== j.id));
-    flash("Job deleted");
+    flash(cleanupFailed ? "Job deleted — some of its files couldn't be cleaned up (they still count toward storage)" : "Job deleted");
   };
 
   // ---------- PO upload: the job builds itself from the partner's PO ----------

@@ -4,8 +4,9 @@
 import { useEffect, useRef } from "react";
 import { sb } from "./supabase";
 
-// "typing" means a keystroke happened recently — a phone parked with a field
-// focused (very common with an on-screen keyboard) still gets fresh data
+// "typing" means a keystroke happened within the last minute — a phone parked
+// with a field focused still gets fresh data eventually, but a mid-thought
+// pause can never let a refresh wipe a half-typed box
 let lastTyped = 0;
 let typingHooked = false;
 const hookTyping = () => {
@@ -41,7 +42,7 @@ export function useLive(
         // has paused a few seconds, refresh even with the field still focused.
         if (skipWhileTyping && typeof document !== "undefined") {
           const el = document.activeElement;
-          if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA") && Date.now() - lastTyped < 5000) { fire(); return; }
+          if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA") && Date.now() - lastTyped < 60000) { fire(); return; }
         }
         const changed = [...pending];
         pending.clear();

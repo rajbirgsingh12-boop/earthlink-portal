@@ -34,9 +34,13 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
   }, [menu]);
 
   useEffect(() => {
+    // last-known profile paints the right tabs immediately on a reload — the
+    // fresh fetch still corrects it if the role changed
+    try { const saved = JSON.parse(localStorage.getItem("elgc-profile") || "null"); if (saved) setProfile(saved as Profile); } catch {}
     myProfile().then((p) => {
       if (!p) { window.location.href = "/login"; return; }
       setProfile(p as Profile);
+      try { localStorage.setItem("elgc-profile", JSON.stringify(p)); } catch {}
     });
   }, []);
 
@@ -80,7 +84,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
           </div>
           <div className="flex items-center gap-3 text-xs text-[#A9A69C]">
             <span>{profile?.name || ""} · {profile?.role || ""}</span>
-            <button className="underline" onClick={async () => { clearMyProfile(); await sb().auth.signOut(); window.location.href = "/login"; }}>Sign out</button>
+            <button className="underline" onClick={async () => { clearMyProfile(); try { localStorage.removeItem("elgc-profile"); } catch {} await sb().auth.signOut(); window.location.href = "/login"; }}>Sign out</button>
           </div>
         </div>
       </div>
@@ -130,7 +134,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
           </div>
         )}
       </div>
-      <div className="mx-auto max-w-5xl px-4 pb-24 pt-5">{children}</div>
+      <div key={path} className="page-enter mx-auto max-w-5xl px-4 pb-24 pt-5">{children}</div>
     </div>
   );
 }

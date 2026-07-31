@@ -134,7 +134,26 @@ export default function Home() {
           </Link>
         ))}
       </div>
-      {loading ? <div className="text-sm text-inksoft">Opening the books…</div> : (
+      {loading ? (
+        /* the board's shape, shimmering — no text flash, no layout jump */
+        <div aria-label="Opening the books…">
+          <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className="card p-3.5"><div className="skeleton mb-2 h-3 w-20" /><div className="skeleton h-6 w-24" /></div>
+            ))}
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="card p-3.5">
+                <div className="skeleton mb-3 h-4 w-32" />
+                <div className="skeleton mb-2 h-3 w-full" />
+                <div className="skeleton mb-2 h-3 w-5/6" />
+                <div className="skeleton h-3 w-2/3" />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
         <>
           {payrollNudge && (
             <Link href="/payroll" className="card mb-2.5 block border-alert p-3 text-[14px]">

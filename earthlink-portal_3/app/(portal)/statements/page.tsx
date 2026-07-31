@@ -24,6 +24,8 @@ export default function Statements() {
   const [printOpen, setPrintOpen] = useState(false);
   const [invPreview, setInvPreview] = useState<{ number: string; date: string; cNumber: string; relNum: string; dev: string; workOrder: string; rows: DocRow[] } | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
+  const [booted, setBooted] = useState(false); // first fetch finished?
+  const [stubs, setStubs] = useState<Release[]>([]); // open releases with no release data yet
   const [msg, setMsg] = useState("");
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3000); };
   // the accountant can read everything here but the database won't accept their
@@ -77,6 +79,7 @@ export default function Statements() {
       const activeContracts = cs.filter((c) => open.has(c.id));
       setContracts(activeContracts);
       if (activeContracts[0]) setSel(activeContracts[0].id);
+      setBooted(true);
     })();
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
   }, []);
@@ -85,7 +88,7 @@ export default function Statements() {
   useLive(["releases", "release_items", "proposals", "contracts"], () => setReloadTick((t) => t + 1), { enabled: !!sel });
 
   useEffect(() => {
-    if (!sel) { setRows([]); return; }
+    if (!sel) { setRows([]); setStubs([]); return; }
     (async () => {
       const pages: Release[] = [];
       for (let from = 0; ; from += 1000) { // paginated — an unranged select stops silently at 1000
@@ -129,6 +132,8 @@ export default function Statements() {
       const connected = all.filter((r) => ready.has(r.id) || walkNums.has(relNorm(r.rel_number)));
       connected.sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
       setRows(connected);
+      // open money the statement can't show yet — so "all square" is never a lie
+      setStubs(all.filter((r) => !ready.has(r.id) && !walkNums.has(relNorm(r.rel_number))));
     })();
   }, [sel, reloadTick]);
 
@@ -219,7 +224,7 @@ export default function Statements() {
                       <td className="p-2.5">
                         {readOnly
                           ? <span className="font-mono text-xs">{r.invoice_sent ? prettyDate(r.invoice_sent) : "—"}</span>
-                          : <input type="date" className="rounded-sm border border-rulesoft p-1 font-mono text-xs" defaultValue={r.invoice_sent || ""}
+                          : <input type="date" className="rounded-sm border border-rulesoft p-1 font-mono text-base sm:text-xs" defaultValue={r.invoice_sent || ""}
                               onChange={async (e) => {
                                 const v = e.target.value || null;
                                 const { error } = await sb().from("releases").update({ invoice_sent: v }).eq("id", r.id);
@@ -233,11 +238,16 @@ export default function Statements() {
                     </tr>
                   );
                 })}
-                {sorted.length === 0 && <tr><td colSpan={6} className="p-4 text-inksoft">Nothing outstanding on contract {contract.number}. All square. 🎉</td></tr>}
+                {sorted.length === 0 && <tr><td colSpan={6} className="p-4 text-inksoft">{stubs.length > 0
+                  ? `${stubs.length} open release${stubs.length === 1 ? "" : "s"} totaling ${fmt(stubs.reduce((s, r) => s + Number(r.amount), 0))} ${stubs.length === 1 ? "is" : "are"} waiting on release data — import the release PDF or fill a walk sheet to put ${stubs.length === 1 ? "it" : "them"} on the statement.`
+                  : `Nothing outstanding on contract ${contract.number}. All square. 🎉`}</td></tr>}
                 {sorted.length > 0 && <tr><td colSpan={5} className="p-2.5 font-display font-bold uppercase">Total due</td><td className="p-2.5 text-right font-mono text-base font-bold">{fmt(total)}</td></tr>}
               </tbody>
             </table>
           </div>
+          {sorted.length > 0 && stubs.length > 0 && (
+            <div className="no-print mt-2 text-xs text-inksoft">Not on this statement: {stubs.length} open release{stubs.length === 1 ? "" : "s"} totaling {fmt(stubs.reduce((s, r) => s + Number(r.amount), 0))} still waiting on release data (import the release PDF or fill a walk sheet).</div>
+          )}
           {sorted.length > 0 && (
             <>
               <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-5">
@@ -315,7 +325,9 @@ export default function Statements() {
           onExcel={() => { const fname = askFileName(`invoice_${invPreview.cNumber}_rel${invPreview.relNum}.xlsx`); if (fname) buildInvoiceXlsx({ org, cNumber: invPreview.cNumber, relNum: invPreview.relNum, workOrder: invPreview.workOrder, dev: invPreview.dev, number: invPreview.number, date: invPreview.date, rows: invPreview.rows, filename: fname }); }}
           close={() => setInvPreview(null)} />
       )}
-      {contracts.length === 0 && <div className="text-sm text-inksoft">No active statements — nothing is currently owed on any contract. Releases you haven&apos;t been paid for show up here automatically.</div>}
+      {contracts.length === 0 && (booted
+        ? <div className="text-sm text-inksoft">No active statements — nothing is currently owed on any contract. Releases you haven&apos;t been paid for show up here automatically.</div>
+        : <div className="card p-3.5"><div className="skeleton mb-3 h-4 w-40" /><div className="skeleton mb-2 h-3 w-full" /><div className="skeleton h-3 w-2/3" /></div>)}
       {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
     </div>
   );

@@ -159,8 +159,10 @@ export default function Proposals() {
     Object.entries(nextQty).forEach(([k, v]) => { const n = parseNum(v); if (n > 0) map[k] = n; });
     const total = (catalog || []).reduce((s, ci) => s + (map[ci.code] || 0) * Number(ci.unit_price), 0);
     // parked locally too — a page killed mid-save (screen off, app switch)
-    // gets pushed to the database on the next visit
-    try { localStorage.setItem(PENDING_KEY, JSON.stringify({ docId, map, total, ts: Date.now() })); } catch {}
+    // gets pushed to the database on the next visit. The sheet's map as it was
+    // when opened rides along, so recovery can tell whether someone else
+    // edited in the meantime and back off instead of overwriting them.
+    try { localStorage.setItem(PENDING_KEY, JSON.stringify({ docId, map, total, ts: Date.now(), base: doc.qty_map ?? null })); } catch {}
     const run = async () => {
       pendingSave.current = null;
       const { error } = await sb().from("proposals").update({ qty_map: map, total }).eq("id", docId);
@@ -184,16 +186,24 @@ export default function Proposals() {
     document.addEventListener("visibilitychange", flushNow);
     return () => { window.removeEventListener("pagehide", flushNow); document.removeEventListener("visibilitychange", flushNow); };
   }, []);
-  // recover an autosave the browser killed before it reached the database
+  // recover an autosave the browser killed before it reached the database —
+  // but never over edits someone made from another device in the meantime
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(PENDING_KEY);
-      if (!raw) return;
-      const p = JSON.parse(raw) as { docId?: string; map?: Record<string, number>; total?: number; ts?: number };
-      if (!p?.docId || !p.map || !p.ts || Date.now() - p.ts > 6 * 3600_000) { localStorage.removeItem(PENDING_KEY); return; }
-      sb().from("proposals").update({ qty_map: p.map, total: p.total || 0 }).eq("id", p.docId)
-        .then(({ error }) => { if (!error) { try { localStorage.removeItem(PENDING_KEY); } catch {} load(); } });
-    } catch {}
+    (async () => {
+      try {
+        const raw = localStorage.getItem(PENDING_KEY);
+        if (!raw) return;
+        const p = JSON.parse(raw) as { docId?: string; map?: Record<string, number>; total?: number; ts?: number; base?: Record<string, number> | null };
+        if (!p?.docId || !p.map || !p.ts || Date.now() - p.ts > 6 * 3600_000) { localStorage.removeItem(PENDING_KEY); return; }
+        const norm = (m: Record<string, number> | null | undefined) => JSON.stringify(Object.entries(m || {}).filter(([, v]) => Number(v) > 0).sort());
+        const { data: cur } = await sb().from("proposals").select("qty_map").eq("id", p.docId).single();
+        const dbMap = (cur as { qty_map?: Record<string, number> | null } | null)?.qty_map;
+        // matches what this phone last saw (or is already the pending value) → safe to push
+        if (norm(dbMap) !== norm(p.base) && norm(dbMap) !== norm(p.map)) { localStorage.removeItem(PENDING_KEY); return; }
+        const { error } = await sb().from("proposals").update({ qty_map: p.map, total: p.total || 0 }).eq("id", p.docId);
+        if (!error) { try { localStorage.removeItem(PENDING_KEY); } catch {} load(); }
+      } catch {}
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const qtyDirty = useRef(false); // did any quantity change since the sheet opened?
@@ -347,8 +357,14 @@ export default function Proposals() {
   // ---------- add a proposal to its contract as a release (works from the dashboard) ----------
   const itemsFor = async (p: Proposal): Promise<NychaLineItem[]> => {
     if (doc && doc.id === p.id) return materialize(); // editor open: use live quantities
+    // list rows travel without qty_map — fetch it for this one sheet
+    let qmap = p.qty_map;
+    if (qmap === undefined) {
+      const { data: full } = await sb().from("proposals").select("qty_map").eq("id", p.id).single();
+      qmap = (full as { qty_map?: Record<string, number> | null } | null)?.qty_map ?? null;
+    }
     const { data } = await sb().from("contract_items").select("*").eq("contract_id", p.contract_id!).order("line");
-    const map = p.qty_map || {};
+    const map = qmap || {};
     return ((data || []) as ContractItem[])
       .filter((ci) => Number(map[ci.code]) > 0)
       .map((ci) => ({ line: ci.line, code: ci.code, category: ci.category, description: ci.description, unit: ci.uom, qty: Number(map[ci.code]), unit_price: Number(ci.unit_price) }));

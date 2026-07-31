@@ -795,6 +795,14 @@ export default function Releases() {
           // a column the sheet doesn't have says nothing — it must not blank or
           // un-receive what's already stored
           for (const key of pending.omit || []) delete (patch as Record<string, unknown>)[key];
+          // and a BLANK cell in a present Received column says nothing either:
+          // the app marked this release paid — a sheet that doesn't say "yes"
+          // must not flip it back or rewrite its settled amount
+          if (keeper.received && !(patch as Record<string, unknown>).received) {
+            delete (patch as Record<string, unknown>).received;
+            delete (patch as Record<string, unknown>).amount;
+            delete (patch as Record<string, unknown>).paid_date;
+          }
           toUpdate.push({ id: keeper.id, patch });
         } else toInsert.push(it);
       }
@@ -959,7 +967,7 @@ export default function Releases() {
       groupsByNum.get(k)!.push(r);
     });
     const dupGroups = [...groupsByNum.values()].filter((g) => g.length > 1);
-    let merged = 0, blocked = 0, gi = 0;
+    let merged = 0, blocked = 0, keptReceivedDupes = 0, gi = 0;
     const goneIds = new Set<string>(); // rows deleted below — never patched afterwards
     for (const g of dupGroups) {
       gi += 1;
@@ -969,6 +977,9 @@ export default function Releases() {
       let keeperHasItems = (keepItems || []).length > 0;
       for (const dupe of g) {
         if (dupe.id === keep.id) continue;
+        // a received copy is paid history — it is never merged away, and its
+        // items/files stay exactly where they are
+        if (dupe.received) { keptReceivedDupes += 1; continue; }
         // the copy's paperwork moves to the original before the copy goes
         if (!keeperHasItems) {
           const { error: mvErr } = await sb().from("release_items").update({ release_id: keep.id }).eq("release_id", dupe.id);
@@ -1039,7 +1050,7 @@ export default function Releases() {
       await sb().storage.from("docs").remove(removable.slice(i, i + 100)).then(() => null, () => null);
     }
     setFolderProgress("");
-    return { merged, blocked, contractsMerged, attCopies, dupGroups: dupGroups.length, keeperContractId: keeperContract.id };
+    return { merged, blocked, keptReceivedDupes, contractsMerged, attCopies, dupGroups: dupGroups.length, keeperContractId: keeperContract.id };
   };
 
   // every contract in one go — for when duplicates are spread across the board
@@ -1049,14 +1060,14 @@ export default function Releases() {
     )) return;
     setBusy(true);
     const doneKeys = new Set<string>();
-    let merged = 0, contractsMerged = 0, blocked = 0, attCopies = 0;
+    let merged = 0, contractsMerged = 0, blocked = 0, attCopies = 0, keptRecv = 0;
     for (const c of contracts) {
       const key = contractKey(c.number);
       if (!key || doneKeys.has(key)) continue;
       doneKeys.add(key);
       setFolderProgress(`Checking contract ${key}…`);
       const res = await mergeDuplicatesCore(c, contracts).catch(() => null);
-      if (res) { merged += res.merged; contractsMerged += res.contractsMerged; blocked += res.blocked; attCopies += res.attCopies; }
+      if (res) { merged += res.merged; contractsMerged += res.contractsMerged; blocked += res.blocked; attCopies += res.attCopies; keptRecv += res.keptReceivedDupes; }
     }
     setFolderProgress(""); setBusy(false);
     await loadContracts();
@@ -1064,7 +1075,7 @@ export default function Releases() {
     flash(
       merged + contractsMerged + attCopies === 0
         ? "No duplicates found anywhere — everything is clean"
-        : `All contracts cleaned — ${merged} duplicate release${merged === 1 ? "" : "s"} merged away${contractsMerged ? `, ${contractsMerged} twin contract${contractsMerged === 1 ? "" : "s"} merged` : ""}${attCopies ? `, ${attCopies} duplicate file cop${attCopies === 1 ? "y" : "ies"} removed` : ""}${blocked ? `, ${blocked} moved to Canceled (payroll linked)` : ""}.`
+        : `All contracts cleaned — ${merged} duplicate release${merged === 1 ? "" : "s"} merged away${contractsMerged ? `, ${contractsMerged} twin contract${contractsMerged === 1 ? "" : "s"} merged` : ""}${attCopies ? `, ${attCopies} duplicate file cop${attCopies === 1 ? "y" : "ies"} removed` : ""}${blocked ? `, ${blocked} moved to Canceled (payroll linked)` : ""}${keptRecv ? `, ${keptRecv} received duplicate${keptRecv === 1 ? "" : "s"} left alone` : ""}.`
     );
   };
 
@@ -1085,7 +1096,7 @@ export default function Releases() {
     flash(
       res.dupGroups === 0 && res.contractsMerged === 0
         ? "No duplicates found — this contract is clean"
-        : `Done — ${res.merged} duplicate release${res.merged === 1 ? "" : "s"} merged away${res.contractsMerged ? `, ${res.contractsMerged} twin contract${res.contractsMerged === 1 ? "" : "s"} merged` : ""}${res.attCopies ? `, ${res.attCopies} duplicate file cop${res.attCopies === 1 ? "y" : "ies"} removed` : ""}${res.blocked ? `, ${res.blocked} moved to Canceled (payroll hours linked)` : ""}. Totals are back to the real numbers.`
+        : `Done — ${res.merged} duplicate release${res.merged === 1 ? "" : "s"} merged away${res.contractsMerged ? `, ${res.contractsMerged} twin contract${res.contractsMerged === 1 ? "" : "s"} merged` : ""}${res.attCopies ? `, ${res.attCopies} duplicate file cop${res.attCopies === 1 ? "y" : "ies"} removed` : ""}${res.blocked ? `, ${res.blocked} moved to Canceled (payroll hours linked)` : ""}${res.keptReceivedDupes ? `, ${res.keptReceivedDupes} received duplicate${res.keptReceivedDupes === 1 ? "" : "s"} left alone` : ""}. Totals are back to the real numbers.`
     );
   };
 
@@ -1398,7 +1409,9 @@ export default function Releases() {
           // paged — without .range the 1000-row cap silently truncates and the
           // never-overwrite-hand-edited-items guard breaks on re-runs
           for (let f = 0; ; f += 1000) {
-            const { data: its } = await sb().from("release_items").select("release_id").in("release_id", chunk).range(f, f + 999);
+            // ordered — unordered pages can overlap/skip, and a missed row here
+            // would let the import overwrite hand-edited line items
+            const { data: its } = await sb().from("release_items").select("release_id").in("release_id", chunk).order("id").range(f, f + 999);
             ((its || []) as { release_id: string }[]).forEach((it) => hasItems.add(it.release_id));
             if (!its || its.length < 1000) break;
           }
@@ -1445,7 +1458,11 @@ export default function Releases() {
         setFolderProgress(`Attaching ${Math.min(n, todo.length)} of ${todo.length}…`);
       }
       if (added.length > 0) {
-        const list = [...existing.filter((a) => !added.some((b) => b.path === a.path)), ...added];
+        // merge onto the row as it is NOW — a photo attached from another phone
+        // while this run was going must survive the write
+        const { data: cur2 } = await sb().from("releases").select("attachments").eq("id", relId).single();
+        const nowList = (((cur2 as { attachments?: { name: string; path: string }[] } | null)?.attachments) || existing);
+        const list = [...nowList.filter((a) => !added.some((b) => b.path === a.path)), ...added];
         const { error } = await sb().from("releases").update({ attachments: list }).eq("id", relId);
         if (error) { bad.push(`${added.length} on one release`); }
         else setRows((prev) => prev.map((x) => (x.id === relId ? { ...x, attachments: list } : x)));
@@ -1532,6 +1549,7 @@ export default function Releases() {
     setBusy(true);
     flash(`Reading ${files.length} PDFs…`);
     const done: string[] = []; const failed: string[] = [];
+    let skippedRecv = 0;
     const cCache = new Map<string, Contract>();
     contracts.forEach((c) => cCache.set(c.number, c));
     const used = new Set<string>();
@@ -1559,10 +1577,13 @@ export default function Releases() {
           used.add(contract.id);
           const breakdown = parsed.items.filter((it) => it.uom === "HOUR")
             .map((it) => ({ cls: it.description.replace(/,?\s*Regular Hours/i, "").trim(), hours: it.qty }));
-          const { data: existing } = await sb().from("releases").select("id").eq("contract_id", contract.id).eq("rel_number", parsed.rel).limit(1);
+          const { data: existing } = await sb().from("releases").select("id,received").eq("contract_id", contract.id).eq("rel_number", parsed.rel).limit(1);
           let relId: string;
           const stripNew = (o: Record<string, unknown>) => { const { labor_breakdown: _b, labor_hours: _h, ...rest } = o; return rest; };
           if (existing && existing[0]) {
+            // a received (paid) release is settled business — the import may not
+            // touch its numbers, line items, or files
+            if ((existing[0] as { received?: boolean }).received) { skippedRecv += 1; continue; }
             relId = (existing[0] as { id: string }).id;
             const patch: Record<string, unknown> = {
               amount: parsed.total, labor_hours: parsed.laborHours, labor_breakdown: breakdown,
@@ -1602,7 +1623,7 @@ export default function Releases() {
     await loadContracts();
     const target = used.size === 1 ? [...used][0] : active;
     if (target) { setActive(target); loadRows(target); }
-    flash(`${done.length} release${done.length === 1 ? "" : "s"} added${done.length ? ` (${done.slice(0, 10).join(", ")})` : ""}${failed.length ? ` · ${failed.length} failed` : ""} — SOS is ready on each row`);
+    flash(`${done.length} release${done.length === 1 ? "" : "s"} added${done.length ? ` (${done.slice(0, 10).join(", ")})` : ""}${failed.length ? ` · ${failed.length} failed` : ""}${skippedRecv ? ` · ${skippedRecv} already received — left alone` : ""} — SOS is ready on each row`);
   };
 
   // ---------- release PDF import ----------
@@ -1704,9 +1725,13 @@ export default function Releases() {
     const contract = await resolveContract(num);
     if (!contract) { setBusy(false); return; }
     // if this release number already exists on the contract, UPDATE it instead of duplicating
-    const { data: existing } = await sb().from("releases").select("id,buildings,address")
+    const { data: existing } = await sb().from("releases").select("id,buildings,address,received")
       .eq("contract_id", contract.id).eq("rel_number", pdfPending.rel).limit(1);
     const prior = (existing || [])[0] as (Release & { address?: string }) | undefined;
+    if (prior?.received) {
+      flash(`Release ${pdfPending.rel} is already received (paid) — its numbers stay as they are. Flip it to NOT received on the row first if you really need to change it.`);
+      setPdfPending(null); setBusy(false); return;
+    }
     let relId: string;
     // works even before RUN_ME.sql adds the labor/address columns
     const stripNew = (o: Record<string, unknown>) => { const { labor_breakdown: _b, labor_hours: _h, address: _a, ...rest } = o; return rest; };
@@ -1779,14 +1804,14 @@ export default function Releases() {
 
   return (
     <div>
-      <div className="mb-3 flex items-baseline justify-between gap-2">
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
         <div className="font-display text-2xl font-bold uppercase">Releases</div>
-        <div className="flex gap-2">
-          {!readOnly && <button className="btn btn-ghost" onClick={() => pdfRef.current?.click()}>+ From PDF(s)</button>}
-          {!readOnly && <button className="btn btn-ghost" onClick={() => folderRef.current?.click()}>📁 Attach folder</button>}
-          {!readOnly && contracts.length > 0 && <button className="btn btn-ghost" onClick={fixDuplicatesEverywhere} disabled={busy}>🧹 Fix all duplicates</button>}
-          {!readOnly && <button className="btn btn-ghost" onClick={() => fileRef.current?.click()}>Upload sheet</button>}
-          {rows.length > 0 && <button className="btn btn-ghost" onClick={exportSheet}>Download</button>}
+        <div className="flex flex-wrap justify-end gap-2">
+          {!readOnly && <button className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" onClick={() => pdfRef.current?.click()}>+ From PDF(s)</button>}
+          {!readOnly && <button className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" onClick={() => folderRef.current?.click()}>📁 Attach folder</button>}
+          {!readOnly && contracts.length > 0 && <button className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" onClick={fixDuplicatesEverywhere} disabled={busy}>🧹 Fix all duplicates</button>}
+          {!readOnly && <button className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" onClick={() => fileRef.current?.click()}>Upload sheet</button>}
+          {rows.length > 0 && <button className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" onClick={exportSheet}>Download</button>}
         </div>
       </div>
       <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFile} />
@@ -2151,7 +2176,7 @@ export default function Releases() {
         <table className="w-full border-collapse text-sm" style={{ minWidth: 560 }}>
           <thead>
             <tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
-              <th className="p-2.5">Rel</th><th className="p-2.5">Location</th><th className="p-2.5 text-right">Amount</th>
+              <th className="p-2.5">Rel</th><th className="min-w-[210px] p-2.5">Location</th><th className="p-2.5 text-right">Amount</th>
               <th className="p-2.5 text-center">Payroll</th><th className="p-2.5 text-center">Received</th><th className="p-2.5"></th>
             </tr>
           </thead>
@@ -2204,10 +2229,24 @@ export default function Releases() {
                     {!r.canceled && !readOnly && <button className="font-mono text-xs font-semibold text-inksoft underline" title="Edit this release's line items" onClick={() => openItems(r)}>Items</button>}
                     {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-work underline" title="Make the NYCHA invoice" onClick={() => genInvoice(r)}>Invoice</button>}
                     {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-carbon underline" title="Make the Statement of Services form" onClick={() => genSOS(r)}>SOS form</button>}
-                    <button className="text-inksoft" title="Documents" onClick={() => setAttachRel(r)}>📎{(r.attachments || []).length > 0 ? <span className="font-mono text-[10px]">{(r.attachments || []).length}</span> : null}</button>
-                    {!readOnly && <button className={r.canceled ? "text-ok" : "text-alert"} title={r.canceled ? "Restore" : "Mark canceled"} onClick={() => toggle(r, { canceled: !r.canceled })}>{r.canceled ? "↺" : "✕"}</button>}
+                    <button className="p-1.5 text-inksoft" title="Documents" onClick={() => setAttachRel(r)}>📎{(r.attachments || []).length > 0 ? <span className="font-mono text-[10px]">{(r.attachments || []).length}</span> : null}</button>
+                    {!readOnly && <button className={`${r.canceled ? "text-ok" : "text-alert"} p-1.5`} title={r.canceled ? "Restore" : "Mark canceled"} onClick={() => {
+                      if (!r.canceled && !window.confirm(`Cancel release ${r.rel_number}? It moves to the Canceled tab — you can restore it any time.`)) return;
+                      toggle(r, { canceled: !r.canceled });
+                    }}>{r.canceled ? "↺" : "✕"}</button>}
                   </div>
                 </td>
+              </tr>
+            ))}
+            {shown.length === 0 && busy && [0, 1, 2, 3, 4].map((i) => (
+              /* the table's shape, shimmering, while the contract loads */
+              <tr key={`sk${i}`} className="border-b border-rulesoft">
+                <td className="p-2.5"><div className="skeleton h-4 w-8" /></td>
+                <td className="p-2.5"><div className="skeleton h-4 w-40" /></td>
+                <td className="p-2.5"><div className="skeleton ml-auto h-4 w-20" /></td>
+                <td className="p-2.5"><div className="skeleton mx-auto h-4 w-12" /></td>
+                <td className="p-2.5"><div className="skeleton mx-auto h-4 w-12" /></td>
+                <td className="p-2.5"><div className="skeleton ml-auto h-4 w-24" /></td>
               </tr>
             ))}
             {shown.length === 0 && !busy && (

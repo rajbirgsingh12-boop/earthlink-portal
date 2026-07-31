@@ -258,7 +258,13 @@ export default function Payroll() {
     if (!error) return;
     flash(missingTradeCol.test(error.message) ? "Run supabase/upgrade_payroll_class.sql so classifications save" : error.message);
   };
-  const saveDay = async (en: Entry, i: number, n: number) => {
+  const dayChain = useRef<Promise<void>>(Promise.resolve()); // fallback saves run one at a time
+  const saveDay = (en: Entry, i: number, n: number) => {
+    const run = dayChain.current.then(() => saveDayNow(en, i, n)).catch(() => {});
+    dayChain.current = run;
+    return run;
+  };
+  const saveDayNow = async (en: Entry, i: number, n: number) => {
     // one atomic write of just that day (run supabase/upgrade_speed.sql) —
     // two phones on different days of the same worker can never collide
     const { data: updated, error: rpcErr } = await sb().rpc("set_day_hours", { eid: en.id!, di: i, val: n });
@@ -297,11 +303,10 @@ export default function Payroll() {
   const togglePaid = async (eid: string) => {
     if (!openWeek) return;
     // start from the row as the database has it — writing this device's copy
-    // wholesale would erase a PAID mark just made on another phone. Local wins
-    // for keys it knows (a second quick click builds on the optimistic map).
+    // wholesale would erase a PAID mark just made on another phone, and letting
+    // this device's stale copy win could resurrect a mark someone just cleared
     const { data: fresh } = await sb().from("timesheet_weeks").select("paid_map").eq("id", openWeek.id).single();
-    const dbMap = ((fresh as { paid_map?: Record<string, string> | null } | null)?.paid_map) || {};
-    const map = { ...dbMap, ...(openWeek.paid_map || {}) };
+    const map = { ...((((fresh as { paid_map?: Record<string, string> | null } | null)?.paid_map) || openWeek.paid_map) || {}) };
     if (map[eid]) delete map[eid]; else map[eid] = localISO();
     setOpenWeek({ ...openWeek, paid_map: map });
     const { error } = await sb().from("timesheet_weeks").update({ paid_map: map }).eq("id", openWeek.id);

@@ -17,12 +17,15 @@ export function myProfile(): Promise<MyProfile | null> {
     inflight = (async () => {
       try {
         const { data: { user } } = await sb().auth.getUser();
-        if (!user) return null;
+        if (!user) return null; // truly signed out — callers may redirect to login
         const { data } = await sb().from("profiles").select("id,name,role").eq("id", user.id).single();
-        cached = (data as MyProfile) || null;
-        return cached;
+        if (data) { cached = data as MyProfile; return cached; }
+        // signed in but the profile read failed (bad signal): report a blank
+        // role WITHOUT caching it, so the next call can try again — and never
+        // null, which would bounce a signed-in user to the login page
+        return { id: user.id, name: "", role: "" };
       } catch {
-        return null;
+        return { id: "", name: "", role: "" };
       } finally {
         inflight = null;
       }

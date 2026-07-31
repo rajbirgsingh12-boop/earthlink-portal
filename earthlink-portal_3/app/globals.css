@@ -6,6 +6,10 @@ body { @apply bg-paper text-ink font-body antialiased; }
 /* professional touch-feel: no gray tap flash, no double-tap zoom delay on controls */
 * { -webkit-tap-highlight-color: transparent; }
 button, a, input, select, textarea, label { touch-action: manipulation; }
+/* iPhones auto-zoom into any field under 16px — keep fields at 16px on phones */
+@media (max-width: 640px) {
+  input, select, textarea { font-size: 16px; }
+}
 /* keyboard users get a clear focus ring; mouse users are not shouted at */
 :focus-visible { outline: 2px solid theme('colors.work'); outline-offset: 2px; border-radius: 2px; }
 ::selection { background: rgb(191 84 26 / 0.22); }
@@ -13,9 +17,34 @@ button, a, input, select, textarea, label { touch-action: manipulation; }
 *::-webkit-scrollbar { height: 8px; width: 8px; }
 *::-webkit-scrollbar-thumb { @apply rounded-full bg-rule; }
 *::-webkit-scrollbar-track { background: transparent; }
+/* content never hides behind the iPhone home indicator */
+body { padding-bottom: env(safe-area-inset-bottom); }
+/* pages slide in gently instead of popping */
+@keyframes pagein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.page-enter { animation: pagein 160ms ease-out; }
+/* while data loads, shimmering placeholders hold the layout steady */
+.skeleton { position: relative; overflow: hidden; border-radius: 2px; @apply bg-rulesoft; }
+.skeleton::after {
+  content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  animation: shimmer 1.2s infinite;
+}
+@keyframes shimmer { to { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) { .skeleton::after, .page-enter { animation: none; } }
+/* wide tables hint that they scroll: soft shadows appear at the clipped edge */
+.card.overflow-x-auto {
+  background:
+    linear-gradient(90deg, #FCFBF8 30%, rgba(252, 251, 248, 0)) left / 32px 100%,
+    linear-gradient(270deg, #FCFBF8 30%, rgba(252, 251, 248, 0)) right / 32px 100%,
+    linear-gradient(90deg, rgba(23, 22, 20, 0.10), transparent) left / 12px 100%,
+    linear-gradient(270deg, rgba(23, 22, 20, 0.10), transparent) right / 12px 100%;
+  background-repeat: no-repeat;
+  background-attachment: local, local, scroll, scroll;
+}
 .stamp { @apply inline-block border-2 rounded-sm px-2.5 py-0.5 font-display uppercase tracking-widest text-[12px] font-semibold; }
 .btn { @apply cursor-pointer select-none rounded-sm border-[1.5px] border-ink bg-white px-4 py-2.5 font-display uppercase tracking-wider text-[15px] font-semibold shadow-sm transition-all duration-150 hover:shadow active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50; }
-.btn-primary { @apply bg-work border-work text-white hover:brightness-105; }
+/* a touch deeper than the accent orange — white text reads at 4.9:1 (AA) */
+.btn-primary { @apply text-white hover:brightness-105; background-color: #C24A0A; border-color: #C24A0A; }
 .btn-ghost { @apply border-rule text-inksoft shadow-none hover:border-ink hover:text-ink; }
 .field { @apply w-full rounded-sm border border-rule bg-white px-3 py-3 text-base outline-none transition-colors duration-150 focus:border-ink focus:ring-2 focus:ring-ink/10; }
 .card { @apply rounded-sm border border-rule bg-card shadow-sm; }

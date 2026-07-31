@@ -240,7 +240,7 @@ create policy "docs read" on storage.objects for select
     )
   ));
 
--- ---------- from upgrade_speed.sql (indexes + once-per-query role checks) ----------
+-- ---------- from upgrade_speed.sql (indexes, once-per-query role checks, server helpers) ----------
 -- SPEED UPGRADE — safe to run any time, changes no behavior, only makes the
 -- database faster. Two parts:
 --
@@ -315,4 +315,46 @@ begin
       end;
     end if;
   end loop;
+end $$;
+
+-- 3) Two more indexes: deleting a release checks these tables for links
+create index if not exists schedule_days_release_idx on schedule_days(release_id);
+create index if not exists invoices_release_idx on invoices(release_id);
+
+-- 4) Server-side helpers so the phone stops downloading whole tables to
+--    answer tiny questions. Each one respects row security (security invoker),
+--    and the app falls back to the old way if a helper isn't installed yet.
+
+-- which releases on a contract have line items? (one small list instead of
+-- one downloaded row per line item)
+create or replace function public.releases_with_items(cid uuid)
+returns setof uuid language sql stable security invoker set search_path = public as
+$$ select distinct ri.release_id from release_items ri join releases r on r.id = ri.release_id where r.contract_id = cid $$;
+
+-- total logged hours per release (one number per release instead of the
+-- entire timesheet history)
+create or replace function public.logged_hours_by_release()
+returns table (release_id uuid, hours numeric) language sql stable security invoker set search_path = public as
+$$ select te.release_id, coalesce(sum(h.h), 0)
+   from timesheet_entries te cross join lateral unnest(te.hours) as h(h)
+   where te.release_id is not null group by te.release_id $$;
+
+-- set one day's hours atomically (one round trip, and two phones editing
+-- different days of the same worker can never overwrite each other)
+create or replace function public.set_day_hours(eid uuid, di int, val numeric)
+returns numeric[] language sql volatile security invoker set search_path = public as
+$$ update timesheet_entries set hours[di + 1] = val where id = eid returning hours $$;
+
+grant execute on function public.releases_with_items(uuid), public.logged_hours_by_release(), public.set_day_hours(uuid, int, numeric) to authenticated;
+
+-- 5) Slimmer audit rows: the release audit log kept full before/after copies
+--    including the attachments list — a bulk folder attach wrote megabytes of
+--    history. The heavy keys stay out; everything else is still recorded.
+create or replace function public.audit_releases() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  insert into audit_log (user_id, action, table_name, record_id, before, after)
+  values (auth.uid(), TG_OP, 'releases', coalesce(new.id, old.id),
+          to_jsonb(old) - 'attachments', to_jsonb(new) - 'attachments');
+  return coalesce(new, old);
 end $$;

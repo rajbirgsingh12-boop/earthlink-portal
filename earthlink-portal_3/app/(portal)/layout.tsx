@@ -71,8 +71,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
           </div>
         </div>
       </div>
-      <div className="sticky top-[57px] z-10 border-b-[1.5px] border-ink bg-card" data-navwrap
-        style={{ position: "relative" }} onMouseLeave={() => setMenu(null)}>
+      <div className="sticky top-[57px] z-10 border-b-[1.5px] border-ink bg-card" data-navwrap>
         <div className="overflow-x-auto">
           <div className="mx-auto flex max-w-5xl">
             {entries.map((e) => {
@@ -80,7 +79,8 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
                 const [, href, label] = e;
                 // hovering a plain tab closes any open menu, same as before
                 return (
-                  <Link key={href} href={href} prefetch={false} className={tabCls(path === href)} onMouseEnter={() => setMenu(null)}>
+                  <Link key={href} href={href} prefetch={false} className={tabCls(path === href)}
+                    onPointerEnter={(ev) => { if (ev.pointerType === "mouse") setMenu(null); }}>
                     {label}
                   </Link>
                 );
@@ -89,7 +89,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
               // a tap (phones have no hover) toggles the menu; hover opens it
               return (
                 <button key={g.key} type="button" className={tabCls(groupActive(g))}
-                  onMouseEnter={() => setMenu(g.key)}
+                  onPointerEnter={(ev) => { if (ev.pointerType === "mouse") setMenu(g.key); }}
                   onClick={() => setMenu((cur) => (cur === g.key ? null : g.key))}>
                   {g.label} ▾
                 </button>

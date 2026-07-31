@@ -26,9 +26,24 @@ export function parsePactPoText(raw: string): PactPoFields {
   // the ship-to block is the job site (the bill-to is the partner's office)
   const address = (partner && shipBlock.startsWith(partner) ? shipBlock.slice(partner.length) : shipBlock).trim();
   const contacts = [...t.matchAll(/([A-Z][a-z]+(?: [A-Z][a-z]+)?)\s*:?\s+((?:\d{3}[-.\s]?){2}\d{4})/g)].map((m) => `${m[1]} ${m[2]}`);
-  const seg = t.match(/Description\s+Qty\s+Unit Price\s+Total Cost(?:\s+Property)?(?:\s+Unit)?\s+(.*?)\s+Total\s+\$/i)?.[1] || "";
-  const rows = [...seg.matchAll(/(.+?)\s+(\d+(?:\.\d+)?)\s+\$\s*([\d,]+(?:\.\d+)?)\s+\$\s*([\d,]+(?:\.\d+)?)(?:\s+((?!\d+\.\d)[\w-]+))?(?:\s+((?!\$)[\w-]+))?(?=\s|$)/g)]
-    .map((m) => ({ description: m[1].trim(), qty: parseFloat(m[2]) || 1, unit_price: parseFloat(m[3].replace(/,/g, "")) || 0, property: m[5] || "", unit: m[6] || "" }));
+  // the Property/Unit columns are optional on these POs — only capture them when
+  // the header actually has them, so a two-line PO without them can't get its
+  // second row's description eaten by a greedy trailing capture
+  const segM = t.match(/Description\s+Qty\s+Unit Price\s+Total Cost((?:\s+Property)?(?:\s+Unit)?)\s+(.*?)\s+Total\s+\$/i);
+  const hasProp = /Property/i.test(segM?.[1] || "");
+  const hasUnit = /Unit/i.test(segM?.[1] || "");
+  const seg = segM?.[2] || "";
+  const rowRe = hasProp
+    ? /(.+?)\s+([\d,]+(?:\.\d+)?)\s+\$\s*([\d,]+(?:\.\d+)?)\s+\$\s*([\d,]+(?:\.\d+)?)(?:\s+((?!\d+\.\d)[\w-]+))?(?:\s+((?!\$)[\w-]+))?(?=\s|$)/g
+    : /(.+?)\s+([\d,]+(?:\.\d+)?)\s+\$\s*([\d,]+(?:\.\d+)?)\s+\$\s*([\d,]+(?:\.\d+)?)(?=\s|$)/g;
+  const rows = [...seg.matchAll(rowRe)]
+    .map((m) => ({
+      description: m[1].trim(),
+      qty: parseFloat(m[2].replace(/,/g, "")) || 1,
+      unit_price: parseFloat(m[3].replace(/,/g, "")) || 0,
+      property: hasProp ? m[5] || "" : "",
+      unit: hasUnit ? m[6] || "" : "",
+    }));
   const grand = [...t.matchAll(/Total\s+\$\s*([\d,]+\.\d{2})/g)].map((m) => parseFloat(m[1].replace(/,/g, "")));
   const amount = grand.length > 0 ? grand[grand.length - 1] : rows.reduce((s, r) => s + r.qty * r.unit_price, 0);
   const punit = rows[0]?.property

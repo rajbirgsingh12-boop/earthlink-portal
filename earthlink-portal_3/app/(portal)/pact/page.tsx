@@ -142,17 +142,21 @@ export default function Pact() {
     try {
       let fields: PactPoFields | null = null;
       let how = "";
-      // 1) server read
-      try {
-        const { data: { session } } = await sb().auth.getSession();
-        const res = await fetch("/api/parse-po", {
-          method: "POST",
-          headers: { "Content-Type": "application/pdf", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) },
-          body: file,
-        });
-        if (res.ok) fields = ((await res.json()) as { fields: PactPoFields }).fields;
-        else how = `server said ${res.status}: ${(await res.text().catch(() => "")).slice(0, 90)}`;
-      } catch { how = "server unreachable"; }
+      // 1) server read (Vercel caps request bodies ~4.5 MB — bigger scans go straight to the phone)
+      if (file.size <= 4 * 1024 * 1024) {
+        try {
+          const { data: { session } } = await sb().auth.getSession();
+          const res = await fetch("/api/parse-po", {
+            method: "POST",
+            headers: { "Content-Type": "application/pdf", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) },
+            body: file,
+          });
+          if (res.ok) fields = ((await res.json()) as { fields: PactPoFields }).fields;
+          else how = `server said ${res.status}: ${(await res.text().catch(() => "")).slice(0, 90)}`;
+        } catch { how = "server unreachable"; }
+      } else how = "file too big for the server — read on this device";
+      // the server answering with nothing usable counts as a miss too
+      if (fields && !fields.po && !fields.partner && !fields.desc) fields = null;
       // 2) browser fallback
       if (!fields) {
         try {
@@ -171,11 +175,32 @@ export default function Pact() {
       }
       const f = fields;
       const unreadable = !f.po && !f.partner && !f.desc;
-      const seed: Item[] = f.rows.length > 0
-        ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: unitFor(r.description), unit_price: r.unit_price }))
-        : f.desc ? [{ description: f.desc, qty: 1, unit: unitFor(f.desc), unit_price: 0 }] : [];
+      // this PO may already be a job — uploading it again must not make a second one
+      if (f.po) {
+        const { data: dupes } = await sb().from("pact_jobs").select("id,attachments").eq("po_number", f.po).limit(1);
+        const dupe = (dupes || [])[0] as Job | undefined;
+        if (dupe) {
+          const atts = dupe.attachments || [];
+          if (!atts.some((a) => a.name === file.name)) {
+            const dpath = `pact/${dupe.id}/${file.name}`;
+            const { error: de } = await sb().storage.from("docs").upload(dpath, file, { upsert: true });
+            if (!de) await sb().from("pact_jobs").update({ attachments: [...atts, { name: file.name, path: dpath }] }).eq("id", dupe.id);
+          }
+          setBusy(false);
+          await load();
+          setOpenId(dupe.id); setShowDetails(true);
+          flash(`PO ${f.po} is already here — opened it (nothing new was created)`);
+          return;
+        }
+      }
+      // an unreadable PDF must not smuggle in a dollar amount from a stray "Total $" hit
+      const amount = unreadable ? 0 : f.amount;
+      const seed: Item[] = unreadable ? []
+        : f.rows.length > 0
+          ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: unitFor(r.description), unit_price: r.unit_price }))
+          : f.desc ? [{ description: f.desc, qty: 1, unit: unitFor(f.desc), unit_price: 0 }] : [];
       const { data: job, error } = await sb().from("pact_jobs").insert({
-        partner: f.partner, development: "", job_number: f.po, description: f.desc, amount: f.amount,
+        partner: f.partner, development: "", job_number: f.po, description: f.desc, amount,
         po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,
         contact: f.contact, bill_to: f.billBlock, items: seed, invoice_number: f.po ? `${f.po}-1` : "",
       }).select().single();
@@ -189,9 +214,11 @@ export default function Pact() {
       // open the fresh job with its details showing so what was read is on screen
       setOpenId((job as Job).id);
       setShowDetails(true);
-      flash(unreadable
-        ? `PDF attached, but no text could be read (scanned copy?${how ? ` · ${how}` : ""}) — type the partner, address and description below`
-        : `PO ${f.po || "imported"} — check the details and work lines below`);
+      flash(ue
+        ? `Job created, but the PDF didn't attach (${/bucket/i.test(ue.message) ? "storage not set up — run supabase/upgrade_invoices_aging_docs.sql" : ue.message.slice(0, 80)}) — add it from the Documents button`
+        : unreadable
+          ? `PDF attached, but no text could be read (scanned copy?${how ? ` · ${how}` : ""}) — type the partner, address and description below`
+          : `PO ${f.po || "imported"} — check the details and work lines below`);
     } catch (err) {
       setBusy(false);
       flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
@@ -324,7 +351,12 @@ export default function Pact() {
       put("BILL TO", L, y, 7, bold, soft);
       put("JOB SITE", 330, y, 7, bold, soft);
       y -= 14;
-      const billLines = [j.partner, ...(j.bill_to || "").slice((j.partner || "").length).trim().split(/(?<=\d{5})\s|,\s*/).filter(Boolean)].filter(Boolean).slice(0, 4) as string[];
+      // strip the partner name off the bill-to block only when it really starts with it —
+      // a hand-edited partner otherwise chops the address at a random offset
+      const billRest = (j.bill_to || "").startsWith(j.partner || "") && j.partner
+        ? (j.bill_to || "").slice(j.partner.length)
+        : (j.bill_to || "");
+      const billLines = [j.partner, ...billRest.trim().split(/(?<=\d{5})\s|,\s*/).filter(Boolean)].filter(Boolean).slice(0, 4) as string[];
       const siteLines = [j.address || "", j.property_unit && `Unit ${j.property_unit}`].filter(Boolean) as string[];
       const startY = y;
       billLines.forEach((s, i) => put(String(s).slice(0, 48), L, startY - i * 12, 9.5, i === 0 ? bold : helv));

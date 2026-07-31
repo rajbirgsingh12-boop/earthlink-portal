@@ -122,7 +122,7 @@ export default function Releases() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [logged, setLogged] = useState<Record<string, number> | null>(null);
-  const [pending, setPending] = useState<{ items: Omit<Release, "id" | "contract_id">[]; guess: string } | null>(null);
+  const [pending, setPending] = useState<{ items: Omit<Release, "id" | "contract_id">[]; guess: string; omit?: string[] } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [pdfPending, setPdfPending] = useState<{
     contract: string; rel: string; date: string; location: string; address: string;
@@ -646,7 +646,17 @@ export default function Releases() {
             };
           })
           .filter((it) => it.rel_number || it.amount > 0);
-        setPending({ items, guess: gm ? gm[1] : "" });
+        // fields whose column isn't in this sheet — updates must leave them alone
+        const omit: string[] = [];
+        if (m.location < 0) omit.push("location");
+        if (m.buildings < 0) omit.push("buildings");
+        if (m.ticket < 0) omit.push("ticket");
+        if (m.pre < 0) omit.push("pre_check");
+        if (m.date < 0) omit.push("date_completed");
+        if (m.payroll < 0) omit.push("payroll_done");
+        if (m.received < 0) omit.push("received");
+        if (m.hours < 0) omit.push("labor_hours");
+        setPending({ items, guess: gm ? gm[1] : "", omit });
       } catch { flash("Couldn't read that file — save as .xlsx or .csv"); }
     };
     reader.readAsArrayBuffer(file);
@@ -690,9 +700,11 @@ export default function Releases() {
           if (!page || page.length < 1000) break;
         }
       }
+      // one normalizer for release numbers everywhere ("007" and "7" are the same release)
+      const relKey = (v: unknown) => String(v ?? "").trim().replace(/^0+(?=\d)/, "");
       const byNum = new Map<string, Release[]>();
       existing.forEach((r) => {
-        const k = String(r.rel_number).trim();
+        const k = relKey(r.rel_number);
         if (!k) return;
         if (!byNum.has(k)) byNum.set(k, []);
         byNum.get(k)!.push(r);
@@ -702,16 +714,23 @@ export default function Releases() {
       const matched = new Set<string>();
       const keeperByNum = new Map<string, Release>();
       const toUpdate: { id: string; patch: Record<string, unknown> }[] = [];
+      const sheetSeen = new Set<string>();
       for (const it of pending.items) {
-        const k = String(it.rel_number).trim();
+        const k = relKey(it.rel_number);
+        // the same number twice in one sheet must not become a second row
+        if (k && sheetSeen.has(k)) continue;
+        if (k) sheetSeen.add(k);
         const group = k ? byNum.get(k) : undefined;
-        if (group && group.length > 0 && !matched.has(k)) {
+        if (group && group.length > 0) {
           matched.add(k);
           // the received / invoiced / photographed one is the original — it gets
           // the sheet's update; any copies get merged away below
           const keeper = [...group].sort((a, b) => relScore(b) - relScore(a))[0];
           keeperByNum.set(k, keeper);
           const { assigned_to: _a, ...patch } = it;
+          // a column the sheet doesn't have says nothing — it must not blank or
+          // un-receive what's already stored
+          for (const key of pending.omit || []) delete (patch as Record<string, unknown>)[key];
           toUpdate.push({ id: keeper.id, patch });
         } else toInsert.push(it);
       }
@@ -740,9 +759,10 @@ export default function Releases() {
       const removeIds: string[] = [];
       const attachPatches: { id: string; attachments: { name: string; path: string }[] }[] = [];
       let keptReceived = 0;
+      const copyPairs: { copyId: string; keeperId: string }[] = [];
       for (const r of existing) {
         if (keepIds.has(r.id)) continue;
-        const k = String(r.rel_number).trim();
+        const k = relKey(r.rel_number);
         const keeper = keeperByNum.get(k);
         if (keeper) {
           // duplicate copy — its attachments move to the original before it goes
@@ -754,14 +774,43 @@ export default function Releases() {
             else attachPatches.push({ id: keeper.id, attachments: keeper.attachments });
           }
           removeIds.push(r.id);
+          copyPairs.push({ copyId: r.id, keeperId: keeper.id });
         } else if (r.received) {
           keptReceived += 1; // paid but missing from the sheet — never deleted
         } else {
           removeIds.push(r.id);
         }
       }
-      for (let i = 0; i < attachPatches.length; i += 500) {
-        await sb().from("releases").upsert(attachPatches.slice(i, i + 500));
+      // photos move with checked writes — an upsert here could silently fail
+      for (let i = 0; i < attachPatches.length; i += 10) {
+        const chunk = attachPatches.slice(i, i + 10);
+        const results = await Promise.all(chunk.map((pch) => sb().from("releases").update({ attachments: pch.attachments }).eq("id", pch.id)));
+        results.forEach((res, j) => {
+          if (res.error) {
+            // rescue failed — keep the copies pointing at this keeper so nothing is lost
+            const keeperId = chunk[j].id;
+            copyPairs.filter((cp) => cp.keeperId === keeperId).forEach((cp) => {
+              const at = removeIds.indexOf(cp.copyId);
+              if (at >= 0) removeIds.splice(at, 1);
+            });
+          }
+        });
+      }
+      // line items live on the copies too — deleting a copy cascades its items
+      // away, so they move to the original first (only when the original has none)
+      if (copyPairs.length > 0) {
+        const keeperIds = [...new Set(copyPairs.map((cp) => cp.keeperId))];
+        const hasItems = new Set<string>();
+        for (let i = 0; i < keeperIds.length; i += 200) {
+          const { data: its } = await sb().from("release_items").select("release_id").in("release_id", keeperIds.slice(i, i + 200));
+          ((its || []) as { release_id: string }[]).forEach((it) => hasItems.add(it.release_id));
+        }
+        for (const cp of copyPairs) {
+          if (!removeIds.includes(cp.copyId)) continue;
+          if (hasItems.has(cp.keeperId)) continue; // the original's items win
+          const { error: mv } = await sb().from("release_items").update({ release_id: cp.keeperId }).eq("release_id", cp.copyId);
+          if (!mv) hasItems.add(cp.keeperId); // only the first copy donates — never stack
+        }
       }
       let removed = 0, kept = 0;
       for (let i = 0; i < removeIds.length; i += 100) {
@@ -853,12 +902,13 @@ export default function Releases() {
       setFolderProgress(`Merging duplicate releases ${gi} of ${dupGroups.length}…`);
       const keep = [...g].sort((a, b) => relScore(b) - relScore(a))[0];
       const { data: keepItems } = await sb().from("release_items").select("id").eq("release_id", keep.id).limit(1);
-      const keeperHasItems = (keepItems || []).length > 0;
+      let keeperHasItems = (keepItems || []).length > 0;
       for (const dupe of g) {
         if (dupe.id === keep.id) continue;
         // the copy's paperwork moves to the original before the copy goes
         if (!keeperHasItems) {
-          await sb().from("release_items").update({ release_id: keep.id }).eq("release_id", dupe.id).then(() => null, () => null);
+          const { error: mvErr } = await sb().from("release_items").update({ release_id: keep.id }).eq("release_id", dupe.id);
+          if (!mvErr) keeperHasItems = true; // later copies must never stack more items on
         } else {
           await sb().from("release_items").delete().eq("release_id", dupe.id).then(() => null, () => null);
         }
@@ -1273,6 +1323,12 @@ export default function Releases() {
     let sosMade = 0, skipPaid = 0, skipHave = 0, noItems = 0;
     const pdfjs = pdfjsEarly;
     for (const [relId, group] of byRel) {
+      // a fresh release PDF for a canceled row means the release is live again
+      const relRow = madeRels.get(relId) || folderPlan.rels.find((x) => x.id === relId) || rows.find((x) => x.id === relId);
+      if (relRow?.canceled) {
+        const { error: unc } = await sb().from("releases").update({ canceled: false }).eq("id", relId);
+        if (!unc) { relRow.canceled = false; setRows((prev) => prev.map((x) => (x.id === relId ? { ...x, canceled: false } : x))); }
+      }
       const { data: cur } = await sb().from("releases").select("attachments").eq("id", relId).single();
       const existing = ((cur as { attachments?: { name: string; path: string }[] } | null)?.attachments) || [];
       const added: { name: string; path: string }[] = [];
@@ -1351,7 +1407,6 @@ export default function Releases() {
       }
       if (!filled && !rel.received) noItems += 1;
     }
-    setFolderProgress(""); setBusy(false);
     // if everything landed on one contract, show that contract — the folder may
     // well belong to a different one than was open when it was picked
     const touched = [...new Set([...byRel.keys()]
@@ -1370,6 +1425,7 @@ export default function Releases() {
       const res = await mergeDuplicatesCore(cur, allC2).catch(() => null);
       if (res) autoMerged += res.merged + res.contractsMerged;
     }
+    setFolderProgress(""); setBusy(false);
     if (target && target !== active) { await loadContracts(); setActive(target); }
     if (target) await loadRows(target, true); // lights up the SOS / Invoice buttons
     flash(

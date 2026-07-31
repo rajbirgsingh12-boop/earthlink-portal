@@ -71,6 +71,7 @@ export default function Payroll() {
   // crew phone numbers (used by the Schedule tab's tap-to-text)
   const [phoneBuf, setPhoneBuf] = useState<Record<string, string>>({});
   const checkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const makingWeek = useRef(false); // guards Make payroll against double-taps
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
   const num = useNumBuffer();
 
@@ -137,17 +138,31 @@ export default function Payroll() {
   // default), creating it first if needed — the latest week's crew comes over
   // automatically with hours reset to zero
   const makePayroll = async (forDate?: string) => {
+    if (makingWeek.current) return; // double-taps must not create the week twice
+    makingWeek.current = true;
+    try {
     const we = fridayOf(forDate || localISO());
     const existing = weeks.find((w) => w.week_ending === we);
     if (existing) { openW(existing); return; }
+    // the on-screen list can be stale (another phone may have just made it) — check the database
+    const { data: fresh } = await sb().from("timesheet_weeks").select("*").eq("week_ending", we).limit(1);
+    if (fresh && fresh[0]) { await load(); openW(fresh[0] as Week); return; }
     const { data, error } = await sb().from("timesheet_weeks").insert({ week_ending: we }).select().single();
     if (error || !data) { flash(error?.message || "Failed"); return; }
+    // if two devices raced past the check, the OLDEST copy wins — only the loser
+    // deletes its own; the winner sees itself first and keeps it
+    const { data: all } = await sb().from("timesheet_weeks").select("*").eq("week_ending", we).order("created_at");
+    if (all && all.length > 1 && (all[0] as Week).id !== (data as Week).id) {
+      await sb().from("timesheet_weeks").delete().eq("id", (data as Week).id);
+      await load(); openW(all[0] as Week); return;
+    }
     if (weeks[0]) {
       const { data: prev } = await sb().from("timesheet_entries").select("*").eq("week_id", weeks[0].id);
       // trade rides along so per-job classifications survive the weekly copy
       if (prev?.length) await sb().from("timesheet_entries").insert(prev.map((p: Entry) => ({ week_id: data.id, employee_id: p.employee_id, job_label: p.job_label, rate: p.rate, release_id: p.release_id, trade: p.trade, hours: [0, 0, 0, 0, 0, 0, 0] })));
     }
     await load(); openW(data as Week);
+    } finally { makingWeek.current = false; }
   };
   const missingTradeCol = /column|schema cache/i;
   const addEntry = async (empId: string, empObj?: Emp, rel?: { id: string | null; label: string }) => {
@@ -416,8 +431,10 @@ export default function Payroll() {
       ws["!rows"][0] = { hpt: 24 };
       headerRows.forEach((row) => (ws["!rows"]![row] = { hpt: 30 }));
       nameRows.forEach(({ row }) => (ws["!rows"]![row] = { hpt: 19 }));
-      let name = (c ? String(c.number) : "General").replace(/[\\/?*[\]:]/g, "-").slice(0, 31) || "General";
-      while (usedNames.has(name)) name = `${name}_`.slice(0, 31);
+      const base = (c ? String(c.number) : "General").replace(/[\\/?*[\]:]/g, "-").slice(0, 31) || "General";
+      let name = base;
+      let n = 2;
+      while (usedNames.has(name)) name = `${base.slice(0, 28)}~${n++}`; // suffix survives the 31-char cap
       usedNames.add(name);
       XLSX.utils.book_append_sheet(wb, ws, name);
     }

@@ -62,7 +62,7 @@ export default function Schedule() {
     if (error) { if (/relation|column|schema cache/i.test(error.message)) flash(upgradeMsg); return; }
     setRows((data || []) as Assign[]);
   };
-  useEffect(() => { setExtraRels([]); setAddFor(null); setAddQ(""); setDescBuf({}); loadDay(day); }, [day]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setExtraRels([]); setAddFor(null); setAddQ(""); setDescBuf({}); setAddrBuf({}); setMapFor(null); loadDay(day); }, [day]); // eslint-disable-line react-hooks/exhaustive-deps
   useLive(["schedule_days", "employees", "releases"], () => { load(); loadDay(day); }, { skipWhileTyping: true });
 
   const relLabel = (r: RelRow) => {
@@ -120,15 +120,21 @@ export default function Schedule() {
     );
     setSending(null);
     if (res.ok) {
-      await markAll();
+      // TEXTED only goes on rows whose number actually went through
+      const bad = new Set((res.failed || []).map((f) => f.to));
+      const okIds = targets.filter((t) => !bad.has(t.phone)).map((t) => t.row.id);
+      if (okIds.length > 0) {
+        setRows((prev) => prev.map((x) => (okIds.includes(x.id) ? { ...x, texted: true } : x)));
+        await sb().from("schedule_days").update({ texted: true }).in("id", okIds);
+      }
       const fails = res.failed || [];
       flash(fails.length === 0
         ? `Sent ${res.sent} text${res.sent === 1 ? "" : "s"} from the company number ✓`
         : `Sent ${res.sent}, but ${fails.length} didn't go through — check those numbers in Payroll → Crew`);
     } else if (res.status === 501) {
-      // no company number yet — group text from this phone instead
-      await markAll();
+      // no company number yet — group text from this phone; fire it first, then stamp
       window.location.href = `sms:${targets.map((t) => t.phone).join(",")}?&body=${encodeURIComponent(msgFor(rel, rel.id))}`;
+      await markAll();
     } else {
       flash(res.error || "Couldn't send — try again");
     }

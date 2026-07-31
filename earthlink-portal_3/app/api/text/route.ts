@@ -10,6 +10,10 @@
 //   (or TWILIO_MESSAGING_SERVICE_SID instead of TWILIO_FROM)
 import { NextResponse } from "next/server";
 
+// a full 100-message batch takes ~30s of sequential Twilio calls — don't let
+// the platform kill the function mid-loop
+export const maxDuration = 60;
+
 const env = (k: string) => process.env[k] || "";
 const configured = () =>
   !!(env("TWILIO_ACCOUNT_SID") && env("TWILIO_AUTH_TOKEN") && (env("TWILIO_FROM") || env("TWILIO_MESSAGING_SERVICE_SID")));
@@ -51,13 +55,29 @@ export async function POST(req: Request) {
   const role = profs[0]?.role || "";
   if (role !== "admin" && role !== "office") return NextResponse.json({ error: "Not allowed" }, { status: 403 });
 
-  let body: { messages?: { to?: string; body?: string }[] };
+  let body: { messages?: { to?: string; body?: string; id?: string }[]; skipTexted?: boolean };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Bad request" }, { status: 400 }); }
-  const messages = (body.messages || [])
-    .map((m) => ({ to: String(m.to || "").trim(), body: String(m.body || "").trim().slice(0, 1000) }))
+  let messages = (body.messages || [])
+    .map((m) => ({ to: String(m.to || "").trim(), body: String(m.body || "").trim().slice(0, 1000), id: String(m.id || "").trim() }))
     .filter((m) => /^\+\d{10,15}$/.test(m.to) && m.body);
   if (messages.length === 0 || messages.length > 100) {
     return NextResponse.json({ error: "Nothing to send (check the phone numbers)" }, { status: 400 });
+  }
+  // retry safety: rows already stamped TEXTED in the database are skipped, so a
+  // lost response (dead spot mid-send) never leads to double-texting the crew
+  const supaHeaders = { apikey: anon, Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  let skipped = 0;
+  if (body.skipTexted) {
+    const ids = messages.map((m) => m.id).filter(Boolean);
+    if (ids.length > 0) {
+      const tRes = await fetch(`${supaUrl}/rest/v1/schedule_days?id=in.(${ids.join(",")})&select=id,texted`, { headers: supaHeaders, cache: "no-store" });
+      if (tRes.ok) {
+        const done = new Set(((await tRes.json()) as { id: string; texted?: boolean }[]).filter((r) => r.texted).map((r) => r.id));
+        skipped = messages.filter((m) => m.id && done.has(m.id)).length;
+        messages = messages.filter((m) => !m.id || !done.has(m.id));
+      }
+    }
+    if (messages.length === 0) return NextResponse.json({ configured: true, sent: 0, skipped, failed: [] });
   }
   if (overLimit(user.id, messages.length)) {
     return NextResponse.json({ error: "Texting limit reached for this hour — try again later" }, { status: 429 });
@@ -78,8 +98,16 @@ export async function POST(req: Request) {
         headers: { Authorization: `Basic ${basic}`, "Content-Type": "application/x-www-form-urlencoded" },
         body: form.toString(),
       });
-      if (r.ok) sent += 1;
-      else {
+      if (r.ok) {
+        sent += 1;
+        // the database records the send right here — even if the phone never
+        // sees this response, a retry knows this worker was already texted
+        if (m.id) {
+          await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, {
+            method: "PATCH", headers: supaHeaders, body: JSON.stringify({ texted: true }),
+          }).catch(() => {});
+        }
+      } else {
         const j = (await r.json().catch(() => ({}))) as { message?: string };
         failed.push({ to: m.to, error: j.message || `Twilio error ${r.status}` });
       }
@@ -87,5 +115,5 @@ export async function POST(req: Request) {
       failed.push({ to: m.to, error: e instanceof Error ? e.message : "network error" });
     }
   }
-  return NextResponse.json({ configured: true, sent, failed });
+  return NextResponse.json({ configured: true, sent, skipped, failed });
 }

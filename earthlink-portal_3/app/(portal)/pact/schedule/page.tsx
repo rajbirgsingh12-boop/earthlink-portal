@@ -40,7 +40,9 @@ export default function PactSchedule() {
   const save = async (j: Job, patch: Partial<Job>) => {
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, ...patch } : x)));
     const { error } = await sb().from("pact_jobs").update(patch).eq("id", j.id);
-    if (error) flash(/column|schema cache/i.test(error.message) ? "Run supabase/upgrade_schedule.sql first" : error.message);
+    // on failure the optimistic date must snap back — a screen showing a saved
+    // date that never reached the database means a crew that never gets scheduled
+    if (error) { flash(/column|schema cache/i.test(error.message) ? "Run supabase/upgrade_schedule.sql first" : error.message); load(); }
   };
 
   const list = jobs.filter((j) => !q.trim() ||
@@ -85,7 +87,7 @@ export default function PactSchedule() {
           <div className="font-display text-2xl font-bold uppercase">PACT Schedule</div>
           <span className="text-xs text-inksoft">{scheduled.length} scheduled · {needsDates.length} need dates · {done.length} complete</span>
         </div>
-        <Link className="btn btn-ghost" href="/pact" prefetch={false}>📋 Jobs</Link>
+        <Link className="btn btn-ghost" href="/pact">📋 Jobs</Link>
       </div>
       <input className="field mb-3" placeholder="Search PO #, partner, address…" value={q} onChange={(e) => setQ(e.target.value)} />
 

@@ -2,7 +2,7 @@
 // Day-by-day crew schedule: pick a date, add a release, assign workers.
 // Assigning a worker with a saved number opens a prefilled text right away —
 // release location and work description already written, one tap to send.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { sb } from "@/lib/supabase";
 import { prettyDate, addDays, localISO } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
@@ -50,8 +50,13 @@ export default function Schedule() {
     }
     const { data: e } = await sb().from("employees").select("*").order("name");
     setEmps(((e || []) as Emp[]).filter((x) => x.active !== false));
-    const { data: r } = await sb().from("releases").select("*").eq("canceled", false);
-    setRels(((r || []) as RelRow[]).sort((x, y) => (parseFloat(x.rel_number) || 0) - (parseFloat(y.rel_number) || 0)));
+    const allR: RelRow[] = [];
+    for (let from = 0; ; from += 1000) { // paginated — an unranged select stops silently at 1000
+      const { data: r } = await sb().from("releases").select("*").eq("canceled", false).range(from, from + 999);
+      allR.push(...((r || []) as RelRow[]));
+      if (!r || r.length < 1000) break;
+    }
+    setRels(allR.sort((x, y) => (parseFloat(x.rel_number) || 0) - (parseFloat(y.rel_number) || 0)));
     const { data: c } = await sb().from("contracts").select("id,number,name").order("number");
     setContracts((c || []) as Contract[]);
   };
@@ -59,10 +64,12 @@ export default function Schedule() {
 
   const loadDay = async (d: string) => {
     const { data, error } = await sb().from("schedule_days").select("*").eq("day", d).order("created_at");
+    if (dayRef.current !== d) return; // switched days while this was in flight
     if (error) { if (/relation|column|schema cache/i.test(error.message)) flash(upgradeMsg); return; }
     setRows((data || []) as Assign[]);
   };
-  useEffect(() => { setExtraRels([]); setAddFor(null); setAddQ(""); setDescBuf({}); setAddrBuf({}); setMapFor(null); loadDay(day); }, [day]); // eslint-disable-line react-hooks/exhaustive-deps
+  const dayRef = useRef(day);
+  useEffect(() => { dayRef.current = day; setExtraRels([]); setAddFor(null); setAddQ(""); setDescBuf({}); setAddrBuf({}); setMapFor(null); loadDay(day); }, [day]); // eslint-disable-line react-hooks/exhaustive-deps
   useLive(["schedule_days", "employees", "releases"], () => { load(); loadDay(day); }, { skipWhileTyping: true });
 
   const relLabel = (r: RelRow) => {
@@ -84,7 +91,13 @@ export default function Schedule() {
   };
 
   // + Add worker just adds them to the day — no message goes out until Assign & text
+  const addingNow = useRef<Set<string>>(new Set()); // guards a double-tap on the same name
   const addWorker = async (rel: RelRow, emp: Emp) => {
+    const k = `${rel.id}:${emp.id}`;
+    if (addingNow.current.has(k)) return;
+    if (rows.some((x) => x.release_id === rel.id && x.employee_id === emp.id)) { flash(`${emp.name} is already on this release today`); return; }
+    addingNow.current.add(k);
+    setTimeout(() => addingNow.current.delete(k), 4000);
     const base = { day, release_id: rel.id, employee_id: emp.id, description: descOf(rel.id).trim() };
     let { data, error } = await sb().from("schedule_days").insert({ ...base, address: addrOf(rel.id).trim() }).select().single();
     if (error && /column|schema cache/i.test(error.message)) {
@@ -114,13 +127,17 @@ export default function Schedule() {
       await sb().from("schedule_days").update({ texted: true }).in("id", ids);
     };
     setSending(rel.id);
+    // row ids ride along so the server stamps TEXTED itself and a retry after a
+    // dead spot skips workers who were already texted — nobody gets doubled
     const res = await sendServerTexts(
-      targets.map((t) => ({ to: t.phone, body: msgFor(rel, rel.id, t.emp.name.split(" ")[0]) })),
-      (await sb().auth.getSession()).data.session?.access_token || null
+      targets.map((t) => ({ to: t.phone, body: msgFor(rel, rel.id, t.emp.name.split(" ")[0]), id: t.row.id })),
+      (await sb().auth.getSession()).data.session?.access_token || null,
+      { skipTexted: true }
     );
     setSending(null);
     if (res.ok) {
-      // TEXTED only goes on rows whose number actually went through
+      // TEXTED only goes on rows whose number actually went through (skipped
+      // rows are already stamped in the database)
       const bad = new Set((res.failed || []).map((f) => f.to));
       const okIds = targets.filter((t) => !bad.has(t.phone)).map((t) => t.row.id);
       if (okIds.length > 0) {
@@ -128,13 +145,18 @@ export default function Schedule() {
         await sb().from("schedule_days").update({ texted: true }).in("id", okIds);
       }
       const fails = res.failed || [];
+      const skippedNote = res.skipped ? ` (${res.skipped} already texted — skipped)` : "";
       flash(fails.length === 0
-        ? `Sent ${res.sent} text${res.sent === 1 ? "" : "s"} from the company number ✓`
+        ? `Sent ${res.sent} text${res.sent === 1 ? "" : "s"} from the company number ✓${skippedNote}`
         : `Sent ${res.sent}, but ${fails.length} didn't go through — check those numbers in Payroll → Crew`);
     } else if (res.status === 501) {
-      // no company number yet — group text from this phone; fire it first, then stamp
+      // no company number yet — group text from this phone. The stamp waits for
+      // the owner to confirm: the composer can be canceled (or never open right
+      // on some phones), and a false TEXTED ✓ means a crew that was never told.
       window.location.href = `sms:${targets.map((t) => t.phone).join(",")}?&body=${encodeURIComponent(msgFor(rel, rel.id))}`;
-      await markAll();
+      setTimeout(async () => {
+        if (window.confirm("Did the group text send? OK stamps the crew TEXTED ✓")) await markAll();
+      }, 600);
     } else {
       flash(res.error || "Couldn't send — try again");
     }
@@ -149,13 +171,17 @@ export default function Schedule() {
     await sb().from("schedule_days").update({ texted: true }).eq("id", id);
   };
   const saveDesc = async (relId: string) => {
-    const desc = (descBuf[relId] ?? "").trim();
+    // untouched field = nothing typed — saving here would blank the crew's
+    // saved description just for tapping in and out of the box
+    if (descBuf[relId] === undefined) return;
+    const desc = descBuf[relId].trim();
     const ids = rows.filter((x) => x.release_id === relId).map((x) => x.id);
     if (ids.length === 0) return;
     setRows((prev) => prev.map((x) => (x.release_id === relId ? { ...x, description: desc } : x)));
     await sb().from("schedule_days").update({ description: desc }).in("id", ids);
   };
   const saveAddr = async (relId: string, value?: string) => {
+    if (value === undefined && addrBuf[relId] === undefined) return; // untouched — see saveDesc
     const addr = (value ?? addrBuf[relId] ?? "").trim();
     if (value !== undefined) setAddrBuf((p) => ({ ...p, [relId]: addr }));
     const ids = rows.filter((x) => x.release_id === relId).map((x) => x.id);
@@ -257,25 +283,33 @@ export default function Schedule() {
               return (
                 <div key={row.id} className="flex flex-wrap items-center gap-2 border-t border-rulesoft py-2 first:border-t-0">
                   <b className="text-[14px]">{emp.name}</b>
-                  {row.texted && <Stamp label="TEXTED ✓" tone="ok" />}
+                  {row.texted && (canEdit
+                    // a stamp that landed without a text really going out (e.g. the
+                    // group message was never hit send on) can be tapped off
+                    ? <button title="Tap to clear if the text never actually went out" onClick={async () => {
+                        if (!window.confirm(`Clear the TEXTED mark for ${emp.name.split(" ")[0]}? Do this if the message never really went out.`)) return;
+                        setRows((prev) => prev.map((x) => (x.id === row.id ? { ...x, texted: false } : x)));
+                        await sb().from("schedule_days").update({ texted: false }).eq("id", row.id);
+                      }}><Stamp label="TEXTED ✓" tone="ok" /></button>
+                    : <Stamp label="TEXTED ✓" tone="ok" />)}
                   {!ok && <span className="text-[11px] text-inksoft">no number in the crew list</span>}
                   <span className="ml-auto flex items-center gap-2.5">
                     {ok && !machine && (
                       <a className="text-[11px] text-inksoft underline" title="Opens their text on this phone"
                         href={smsHref(emp.phone || "", msgFor(rel, rel.id, emp.name.split(" ")[0]))}
-                        onClick={() => markTexted(row.id)}>resend</a>
+                        onClick={() => setTimeout(() => { if (window.confirm(`Did the text to ${emp.name.split(" ")[0]} send? OK stamps TEXTED ✓`)) markTexted(row.id); }, 600)}>resend</a>
                     )}
                     {ok && machine && canEdit && (
                       <button className="text-[11px] text-inksoft underline" title="Resend from the company number"
                         onClick={async () => {
                           const res = await sendServerTexts(
-                            [{ to: cleanPhone(emp.phone || ""), body: msgFor(rel, rel.id, emp.name.split(" ")[0]) }],
+                            [{ to: cleanPhone(emp.phone || ""), body: msgFor(rel, rel.id, emp.name.split(" ")[0]), id: row.id }],
                             (await sb().auth.getSession()).data.session?.access_token || null);
                           if (res.ok && (res.failed || []).length === 0) { markTexted(row.id); flash(`Texted ${emp.name.split(" ")[0]} ✓`); }
                           else flash(res.failed?.[0]?.error || res.error || "Couldn't send");
                         }}>resend</button>
                     )}
-                    {canEdit && <button className="text-xs text-alert" title="Remove from this day" onClick={() => unassign(row.id)}>✕</button>}
+                    {canEdit && <button className="text-xs text-alert" title="Remove from this day" onClick={() => { if (row.texted && !window.confirm(`${emp.name.split(" ")[0]} was already texted about this job — remove them anyway? They won't be told automatically.`)) return; unassign(row.id); }}>✕</button>}
                   </span>
                 </div>
               );

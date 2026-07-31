@@ -91,8 +91,10 @@ export default function Proposals() {
     setQty({}); // never show the previous sheet's quantities while this one loads
     const m: Record<string, string> = {};
     Object.entries(p.qty_map || {}).forEach(([k, v]) => { if (Number(v) > 0) m[k] = String(v); });
-    if (Object.keys(m).length === 0) {
-      // resume older drafts saved before qty_map existed
+    // fall back to line items ONLY for drafts saved before qty_map existed —
+    // an empty {} map means the user cleared the sheet, and the old rows
+    // resurrecting their quantities would undo that on every reopen
+    if (Object.keys(m).length === 0 && p.qty_map == null) {
       const { data } = await sb().from("proposal_items").select("*").eq("proposal_id", p.id).order("sort");
       if (openDocId.current !== p.id) return; // user already opened a different sheet
       ((data || []) as NychaLineItem[]).forEach((it) => { if (Number(it.qty) > 0 && it.code) m[it.code] = String(it.qty); });
@@ -130,26 +132,31 @@ export default function Proposals() {
   const grand = billed.reduce((s, it) => s + it.qty * it.unit_price, 0);
 
   // autosave quantities (debounced) so a walkthrough can't be lost
+  const PENDING_KEY = "elgc-qty-pending";
   const pendingSave = useRef<(() => Promise<void>) | null>(null);
   const scheduleAutosave = (nextQty: Record<string, string>) => {
     if (!doc) return;
     setSaveState("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
     const docId = doc.id;
+    const map: Record<string, number> = {};
+    Object.entries(nextQty).forEach(([k, v]) => { const n = parseNum(v); if (n > 0) map[k] = n; });
+    const total = (catalog || []).reduce((s, ci) => s + (map[ci.code] || 0) * Number(ci.unit_price), 0);
+    // parked locally too — a page killed mid-save (screen off, app switch)
+    // gets pushed to the database on the next visit
+    try { localStorage.setItem(PENDING_KEY, JSON.stringify({ docId, map, total, ts: Date.now() })); } catch {}
     const run = async () => {
       pendingSave.current = null;
-      const map: Record<string, number> = {};
-      Object.entries(nextQty).forEach(([k, v]) => { const n = parseNum(v); if (n > 0) map[k] = n; });
-      const total = (catalog || []).reduce((s, ci) => s + (map[ci.code] || 0) * Number(ci.unit_price), 0);
       const { error } = await sb().from("proposals").update({ qty_map: map, total }).eq("id", docId);
       if (error) { setSaveState(""); flash(upgradeHint(error.message)); return; }
+      try { localStorage.removeItem(PENDING_KEY); } catch {}
       setSaveState("saved");
       setTimeout(() => setSaveState(""), 1500);
     };
     pendingSave.current = run;
     saveTimer.current = setTimeout(run, 700);
   };
-  // leaving the page (tab nav is a full reload) fires any pending autosave immediately
+  // leaving the page fires any pending autosave immediately
   useEffect(() => {
     const flushNow = () => {
       if (pendingSave.current) {
@@ -160,6 +167,18 @@ export default function Proposals() {
     window.addEventListener("pagehide", flushNow);
     document.addEventListener("visibilitychange", flushNow);
     return () => { window.removeEventListener("pagehide", flushNow); document.removeEventListener("visibilitychange", flushNow); };
+  }, []);
+  // recover an autosave the browser killed before it reached the database
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(PENDING_KEY);
+      if (!raw) return;
+      const p = JSON.parse(raw) as { docId?: string; map?: Record<string, number>; total?: number; ts?: number };
+      if (!p?.docId || !p.map || !p.ts || Date.now() - p.ts > 6 * 3600_000) { localStorage.removeItem(PENDING_KEY); return; }
+      sb().from("proposals").update({ qty_map: p.map, total: p.total || 0 }).eq("id", p.docId)
+        .then(({ error }) => { if (!error) { try { localStorage.removeItem(PENDING_KEY); } catch {} load(); } });
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const setLineQty = (code: string, v: string) => {
     const next = { ...qty, [code]: v };
@@ -227,10 +246,12 @@ export default function Proposals() {
           })
           .filter((r) => r.code && r.description && !/^total$/i.test(r.description));
         if (rows.length === 0) { flash("No item rows found in that sheet"); return; }
-        await sb().from("contract_items").delete().eq("contract_id", doc.contract_id!);
+        const { error: de } = await sb().from("contract_items").delete().eq("contract_id", doc.contract_id!);
+        if (de) { flash(upgradeHint(de.message)); return; }
         for (let i = 0; i < rows.length; i += 500) {
           const { error } = await sb().from("contract_items").insert(rows.slice(i, i + 500).map((r) => ({ ...r, contract_id: doc.contract_id })));
-          if (error) { flash(upgradeHint(error.message)); return; }
+          // the old book is already cleared — say so, or a half-loaded book looks complete
+          if (error) { flash(`Upload stopped partway (${upgradeHint(error.message)}) — upload the sheet again to finish the book`); return; }
         }
         const { data } = await sb().from("contract_items").select("*").eq("contract_id", doc.contract_id!).order("line");
         setCatalog((data || []) as ContractItem[]);
@@ -243,7 +264,7 @@ export default function Proposals() {
 
   // ---------- export: NYCHA walk-sheet layout, used lines only, bordered ----------
   const exportWalkSheet = async () => {
-    await ensureXLSX();
+    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine \u2014 check your signal and try again"); return; }
     if (!doc || !catalog) return;
     await materialize();
     const c = contracts.find((x) => x.id === doc.contract_id);
@@ -363,16 +384,20 @@ export default function Proposals() {
   // ---------- delete (works from the dashboard) ----------
   const deleteProposal = async (p: Proposal) => {
     if (!window.confirm(`Delete walk sheet ${p.number}? This can't be undone.`)) return;
-    // old-style invoices generated from this proposal block the delete (foreign
-    // key) — clear them and their line items first, then the proposal's lines
-    const { data: invs } = await sb().from("invoices").select("id").eq("proposal_id", p.id);
-    const invIds = ((invs || []) as { id: string }[]).map((i) => i.id);
-    if (invIds.length > 0) {
-      await sb().from("invoice_items").delete().in("invoice_id", invIds);
-      await sb().from("invoices").delete().in("id", invIds);
+    // try the proposal itself first — if that fails for any reason, nothing
+    // else has been touched. Old-style invoices block it via foreign key, so
+    // only then clear them (and their lines) and try once more.
+    let { error } = await sb().from("proposals").delete().eq("id", p.id);
+    if (error) {
+      const { data: invs } = await sb().from("invoices").select("id").eq("proposal_id", p.id);
+      const invIds = ((invs || []) as { id: string }[]).map((i) => i.id);
+      if (invIds.length > 0) {
+        await sb().from("invoice_items").delete().in("invoice_id", invIds);
+        await sb().from("invoices").delete().in("id", invIds);
+      }
+      await sb().from("proposal_items").delete().eq("proposal_id", p.id);
+      ({ error } = await sb().from("proposals").delete().eq("id", p.id));
     }
-    await sb().from("proposal_items").delete().eq("proposal_id", p.id);
-    const { error } = await sb().from("proposals").delete().eq("id", p.id);
     if (error) { flash(error.message); return; }
     if (doc && doc.id === p.id) setDoc(null);
     load(); flash("Walk sheet deleted");

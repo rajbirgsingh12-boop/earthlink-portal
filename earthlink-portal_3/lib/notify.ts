@@ -25,14 +25,15 @@ export const prettyPhone = (s: string): string => {
 // The company "text machine" (Twilio behind /api/text). Returns configured=false
 // with status 501 when the keys aren't in Vercel yet — callers fall back to sms: links.
 export async function sendServerTexts(
-  messages: { to: string; body: string }[],
-  token: string | null
-): Promise<{ ok: boolean; status: number; configured?: boolean; sent?: number; failed?: { to: string; error: string }[]; error?: string }> {
+  messages: { to: string; body: string; id?: string }[],
+  token: string | null,
+  opts?: { skipTexted?: boolean }
+): Promise<{ ok: boolean; status: number; configured?: boolean; sent?: number; skipped?: number; failed?: { to: string; error: string }[]; error?: string }> {
   try {
     const res = await fetch("/api/text", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({ messages }),
+      body: JSON.stringify({ messages, skipTexted: opts?.skipTexted }),
     });
     const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     return { ok: res.ok, status: res.status, ...j };

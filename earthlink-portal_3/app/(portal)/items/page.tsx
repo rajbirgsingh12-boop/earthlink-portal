@@ -103,11 +103,14 @@ export default function Items() {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = async (ev) => {
-      await ensureXLSX();
       try {
+        await ensureXLSX();
         const wb = XLSX.read(ev.target?.result, { type: "array" });
         const raw: string[][] = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "", raw: false });
-        const hIdx = raw.findIndex((r) => r.some((c) => /desc|item|scope/i.test(c)));
+        // a real header row has several labeled columns — a decorative title
+        // like "Price Items 2024" must not swallow the actual header below it
+        let hIdx = raw.findIndex((r) => r.filter((c) => String(c).trim() !== "").length >= 2 && r.some((c) => /desc|item|scope/i.test(c)));
+        if (hIdx < 0) hIdx = raw.findIndex((r) => r.some((c) => /desc|item|scope/i.test(c)));
         if (hIdx < 0) { flash("Need a header row with a Description/Item column"); return; }
         const headers = raw[hIdx].map((h) => String(h).toLowerCase().trim());
         const col = (re: RegExp) => headers.findIndex((h) => re.test(h));
@@ -134,12 +137,14 @@ export default function Items() {
         if (rows.length === 0) { flash("No item rows found"); return; }
         if (isContract) {
           // replace this contract's book so re-uploads never duplicate
-          await sb().from("contract_items").delete().eq("contract_id", sel);
+          const { error: de } = await sb().from("contract_items").delete().eq("contract_id", sel);
+          if (de) { flash(/relation/i.test(de.message) ? "Run supabase/upgrade_proposal_creator.sql first" : de.message); return; }
           for (let i = 0; i < rows.length; i += 500) {
             const { error } = await sb().from("contract_items").insert(rows.slice(i, i + 500).map((r) => ({
               contract_id: sel, line: r.line, code: r.code, category: r.category, description: r.description, uom: r.unit, unit_price: r.unit_price,
             })));
-            if (error) { flash(/relation/i.test(error.message) ? "Run supabase/upgrade_proposal_creator.sql first" : error.message); return; }
+            // the old book is already cleared — say so, or a half-loaded book looks complete
+            if (error) { flash(/relation/i.test(error.message) ? "Run supabase/upgrade_proposal_creator.sql first" : `Upload stopped partway (${error.message}) — upload the sheet again to finish the book`); return; }
           }
           const c = contracts.find((x) => x.id === sel);
           flash(`${rows.length} lines loaded into contract ${c?.number || ""}`);

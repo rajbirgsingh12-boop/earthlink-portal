@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the SOS export
 // the export engine is heavy — it loads on demand, never with the page itself
 let XLSX!: typeof import("xlsx-js-style");
@@ -118,6 +118,7 @@ export default function Releases() {
   const [rows, setRows] = useState<Release[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
   const [q, setQ] = useState("");
+  const dq = useDeferredValue(q); // heavy filtering runs on this, a beat behind the keystrokes
   const [limit, setLimit] = useState(100);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
@@ -224,13 +225,15 @@ export default function Releases() {
     }));
     const { data: props } = await sb().from("proposals").select("release_number,qty_map").eq("contract_id", cid);
     if (token !== loadSeq.current) return;
+    // "007" and "7" are the same release — compare with leading zeros stripped
+    const relNorm = (v: unknown) => String(v ?? "").trim().replace(/^0+(?=\d)/, "");
     const walkNums = new Set(
       ((props || []) as { release_number?: string; qty_map?: Record<string, number> | null }[])
         .filter((p) => p.release_number && p.qty_map && Object.keys(p.qty_map).length > 0)
-        .map((p) => String(p.release_number).trim())
+        .map((p) => relNorm(p.release_number))
     );
     const itemsSet = new Set(ready);
-    all.forEach((r) => { if (walkNums.has(String(r.rel_number).trim())) ready.add(r.id); });
+    all.forEach((r) => { if (walkNums.has(relNorm(r.rel_number))) ready.add(r.id); });
     setSosReady(ready);
     setStageData({ items: itemsSet, walks: walkNums });
   };
@@ -251,12 +254,19 @@ export default function Releases() {
   useEffect(() => { loadRows(active); }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // live: releases, their items, walk sheets, contracts AND payroll hours refresh this page
-  useLive(["releases", "release_items", "proposals", "contracts", "timesheet_entries"], () => { loadRows(active, true); loadContracts(); loadLogged(); }, { enabled: !!active, skipWhileTyping: true });
+  useLive(["releases", "release_items", "proposals", "contracts", "timesheet_entries"], () => { loadRows(active, true); loadContracts(); loadLogged(); }, { enabled: !!active && !busy, delay: 1500, skipWhileTyping: true });
 
   const loadLogged = async () => {
-    const { data } = await sb().from("timesheet_entries").select("release_id,hours");
+    // paginated — an unranged select silently stops at 1000 rows and the
+    // payroll-hours chips would quietly go wrong past that
+    const all: { release_id: string | null; hours: number[] }[] = [];
+    for (let from = 0; ; from += 1000) {
+      const { data } = await sb().from("timesheet_entries").select("release_id,hours").range(from, from + 999);
+      all.push(...((data || []) as typeof all));
+      if (!data || data.length < 1000) break;
+    }
     const agg: Record<string, number> = {};
-    (data || []).forEach((e: { release_id: string | null; hours: number[] }) => {
+    all.forEach((e) => {
       if (!e.release_id) return;
       agg[e.release_id] = (agg[e.release_id] || 0) + (e.hours || []).reduce((s2, h) => s2 + (Number(h) || 0), 0);
     });
@@ -281,8 +291,10 @@ export default function Releases() {
   if (filter === "payroll") list = prPend;
   if (filter === "received") list = receivedRows;
   if (filter === "canceled") list = canceledRows;
-  if (q) list = list.filter((r) => `${r.rel_number} ${r.location} ${r.buildings} ${r.ticket}`.toLowerCase().includes(q.toLowerCase()));
+  if (dq) list = list.filter((r) => `${r.rel_number} ${r.location} ${r.buildings} ${r.ticket}`.toLowerCase().includes(dq.toLowerCase()));
   const shown = list.slice(0, limit);
+  // the hours tab draws from this list — computed here so its Show more knows the full count
+  const hoursList = live.filter((r) => (Number(r.labor_hours) > 0 || (logged?.[r.id] || 0) > 0) && (!dq || `${r.rel_number} ${r.location} ${r.buildings} ${r.ticket}`.toLowerCase().includes(dq.toLowerCase())));
 
   const toggle = async (r: Release, patch: Partial<Release>) => {
     setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, ...patch } : x)));
@@ -346,9 +358,9 @@ export default function Releases() {
     if (d.rows.length === 0) { flash("No line items for this release — make a walk sheet for it, or import the release PDF"); return; }
     const today = localISO();
     if (!r.invoice_sent && !readOnly) {
-      // generating the invoice records the sent date (feeds the statement aging)
-      await sb().from("releases").update({ invoice_sent: today }).eq("id", r.id);
-      setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: today } : x)));
+      // generating the invoice records the sent date (feeds the statement aging);
+      // toggle() flashes on failure and knows the legacy-column fallback
+      await toggle(r, { invoice_sent: today });
     }
     setSosView(null); // one preview at a time — two would print as one concatenated PDF
     setInvPreview({ number: `${c?.number || ""}-${r.rel_number}`, date: today, cNumber: c?.number || "", relNum: r.rel_number, dev: d.dev, workOrder: r.ticket || "", rows: d.rows });
@@ -358,11 +370,16 @@ export default function Releases() {
   const genSOS = async (r: Release) => {
     setBusy(true);
     const c = contracts.find((x) => x.id === active);
-    // prefer the walk sheet (proposal) tied to this release number
+    // prefer the walk sheet (proposal) tied to this release number ("007" = "7")
+    const relNorm2 = (v: unknown) => String(v ?? "").trim().replace(/^0+(?=\d)/, "");
     const { data: props } = await sb().from("proposals").select("*")
-      .eq("contract_id", active).eq("release_number", r.rel_number)
-      .order("created_at", { ascending: false }).limit(1);
-    const prop = (props || [])[0] as { qty_map?: Record<string, number> | null; development?: string; address?: string; apt?: string; stairhall?: string } | undefined;
+      .eq("contract_id", active).not("release_number", "is", null)
+      .order("created_at", { ascending: false });
+    const matches = ((props || []) as { release_number?: string; qty_map?: Record<string, number> | null; development?: string; address?: string; apt?: string; stairhall?: string }[])
+      .filter((p) => relNorm2(p.release_number) === relNorm2(r.rel_number));
+    // the newest sheet WITH quantities wins — an empty duplicate draft on top
+    // must not hide a filled one underneath
+    const prop = matches.find((p) => p.qty_map && Object.keys(p.qty_map).length > 0) ?? matches[0];
     let rows: SosRow[] = [];
     if (prop && prop.qty_map && Object.keys(prop.qty_map).length > 0) {
       const { data: cat } = await sb().from("contract_items").select("*").eq("contract_id", active).order("line");
@@ -396,7 +413,7 @@ export default function Releases() {
   };
 
   const downloadSOS = async () => {
-    await ensureXLSX();
+    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine \u2014 check your signal and try again"); return; }
     if (!sosView) return;
     const { relNum, ticket, cNumber, dev, addr, stair, apt, rows, total } = sosView;
     const today = prettyDate(localISO());
@@ -517,6 +534,8 @@ export default function Releases() {
     if (!itemsRel || !relItems) return;
     setBusy(true);
     const rows = relItems.filter((it) => it.description.trim() || it.code.trim());
+    // hold the current rows — if the re-insert fails they go straight back
+    const { data: prevRows } = await sb().from("release_items").select("*").eq("release_id", itemsRel.id);
     const { error: de } = await sb().from("release_items").delete().eq("release_id", itemsRel.id);
     if (de) { flash(de.message); setBusy(false); return; }
     if (rows.length > 0) {
@@ -524,7 +543,11 @@ export default function Releases() {
         release_id: itemsRel.id, line: it.line || i + 1, code: it.code, description: it.description,
         qty: it.qty, uom: it.uom, unit_price: it.unit_price, amount: it.qty * it.unit_price,
       })));
-      if (error) { flash(error.message); setBusy(false); return; }
+      if (error) {
+        if (prevRows && prevRows.length > 0) await sb().from("release_items").insert(prevRows as Record<string, unknown>[]);
+        flash(`Couldn't save the new lines (${error.message}) — the old ones were kept`);
+        setBusy(false); return;
+      }
     }
     setBusy(false);
     setItemsRel(null); setRelItems(null);
@@ -577,10 +600,13 @@ export default function Releases() {
   };
 
   const removeAttachment = async (r: Release, path: string) => {
-    await sb().storage.from("docs").remove([path]);
-    const list = (r.attachments || []).filter((a) => a.path !== path);
+    // fresh list — another phone may have attached files since this render;
+    // and the row updates first, so a failed write never orphans the entry
+    const { data: cur } = await sb().from("releases").select("attachments").eq("id", r.id).single();
+    const list = (((cur as Release | null)?.attachments) || r.attachments || []).filter((a) => a.path !== path);
     const { error } = await sb().from("releases").update({ attachments: list }).eq("id", r.id);
     if (error) { flash(error.message); return; }
+    await sb().storage.from("docs").remove([path]);
     setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, attachments: list } : x)));
     setAttachRel((prev) => (prev && prev.id === r.id ? { ...prev, attachments: list } : prev));
   };
@@ -1682,7 +1708,7 @@ export default function Releases() {
   };
 
   const exportSheet = async () => {
-    await ensureXLSX();
+    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine \u2014 check your signal and try again"); return; }
     const c = contracts.find((x) => x.id === active);
     const out = rows.map((r) => ({
       Release: r.rel_number, Location: r.location, Buildings: r.buildings, "Ticket #": r.ticket,
@@ -1809,7 +1835,9 @@ export default function Releases() {
                         </div>
                         <div className="truncate text-[11px] text-inksoft">{r.why}</div>
                       </div>
-                      {picker(i, r)}
+                      {folderEdit.has(i)
+                        ? picker(i, r)
+                        : <button className="btn px-2.5 py-1 text-[12px]" onClick={() => setFolderEdit((prev) => new Set(prev).add(i))}>pick release</button>}
                     </div>
                   ))}
                   {needs.length > SHOWN && (
@@ -2036,7 +2064,7 @@ export default function Releases() {
             <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
               <th className="p-2.5">Rel</th><th className="p-2.5">Location</th><th className="p-2.5 text-right">Required hrs</th><th className="p-2.5 text-right">Logged hrs</th><th className="p-2.5 text-center">Check</th></tr></thead>
             <tbody>
-              {live.filter((r) => (Number(r.labor_hours) > 0 || (logged?.[r.id] || 0) > 0) && (!q || `${r.rel_number} ${r.location} ${r.buildings} ${r.ticket}`.toLowerCase().includes(q.toLowerCase()))).map((r) => {
+              {hoursList.slice(0, limit).map((r) => {
                 const got = logged?.[r.id] || 0;
                 const need = Number(r.labor_hours) || 0;
                 return (
@@ -2109,7 +2137,10 @@ export default function Releases() {
                 </td>
                 <td className="p-2.5 text-center">
                   {r.canceled ? <Stamp label="CANCELED" tone="mute" /> : readOnly ? <Stamp label={r.received ? "YES" : "NO"} tone={r.received ? "ok" : "work"} /> :
-                    <button onClick={() => toggle(r, { received: !r.received, paid_date: !r.received ? localISO() : null })}><Stamp label={r.received ? "YES" : "NO"} tone={r.received ? "ok" : "work"} /></button>}
+                    <button onClick={() => {
+                      if (r.received && !window.confirm(`Release ${r.rel_number} is marked received${r.paid_date ? ` (paid ${prettyDate(r.paid_date)})` : ""} — switch it back to NOT received? The paid date is cleared.`)) return;
+                      toggle(r, { received: !r.received, paid_date: !r.received ? localISO() : null });
+                    }}><Stamp label={r.received ? "YES" : "NO"} tone={r.received ? "ok" : "work"} /></button>}
                 </td>
                 <td className="p-2.5">
                   <div className="flex items-center justify-end gap-2 whitespace-nowrap">
@@ -2130,6 +2161,9 @@ export default function Releases() {
       </div>}
       {filter !== "hours" && list.length > limit && (
         <div className="mt-3 text-center"><button className="btn btn-ghost" onClick={() => setLimit(limit + 200)}>Show more ({list.length - limit} left)</button></div>
+      )}
+      {filter === "hours" && hoursList.length > limit && (
+        <div className="mt-3 text-center"><button className="btn btn-ghost" onClick={() => setLimit(limit + 200)}>Show more ({hoursList.length - limit} left)</button></div>
       )}
       {busy && <div className="mt-3 text-sm text-inksoft">Working…</div>}
 

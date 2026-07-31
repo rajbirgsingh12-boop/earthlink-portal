@@ -36,7 +36,9 @@ export default function Home() {
       const all: Row[] = [];
       let from = 0;
       for (;;) {
-        const { data } = await sb().from("releases").select("*").range(from, from + 999);
+        // ordered — pages of an unordered scan can overlap between requests,
+        // double-counting money in the totals
+        const { data } = await sb().from("releases").select("*").order("id").range(from, from + 999);
         if (!data || data.length === 0) break;
         all.push(...(data as Row[]));
         if (data.length < 1000) break;
@@ -52,8 +54,11 @@ export default function Home() {
         const needIds = need.map((r) => r.id);
         const ents: { release_id: string | null; employee_id: string; hours: number[]; trade?: string | null }[] = [];
         for (let i = 0; i < needIds.length; i += 200) {
-          const { data: chunk } = await sb().from("timesheet_entries").select("*").in("release_id", needIds.slice(i, i + 200));
-          ents.push(...((chunk || []) as typeof ents));
+          for (let f = 0; ; f += 1000) { // paginated — an unranged select stops silently at 1000
+            const { data: chunk } = await sb().from("timesheet_entries").select("*").in("release_id", needIds.slice(i, i + 200)).order("id").range(f, f + 999);
+            ents.push(...((chunk || []) as typeof ents));
+            if (!chunk || chunk.length < 1000) break;
+          }
         }
         const { data: allEmps } = await sb().from("employees").select("id,trade");
         const tradeById = new Map(((allEmps || []) as { id: string; trade: string }[]).map((e) => [e.id, canonTrade(e.trade)]));
@@ -72,9 +77,12 @@ export default function Home() {
       // has anyone entered hours for the current payroll week? (local Friday, not UTC)
       const fri = new Date(localISO() + "T00:00:00");
       fri.setDate(fri.getDate() + ((5 - fri.getDay() + 7) % 7));
-      const { data: wk } = await sb().from("timesheet_weeks").select("id").eq("week_ending", localISO(fri)).limit(1);
-      if (wk && wk[0]) {
-        const { data: es } = await sb().from("timesheet_entries").select("hours").eq("week_id", (wk[0] as { id: string }).id);
+      // all week rows for that Friday — with an accidental duplicate week the
+      // hours could live on either copy, and reading just one falsely nags
+      const { data: wk } = await sb().from("timesheet_weeks").select("id").eq("week_ending", localISO(fri));
+      if (wk && wk.length > 0) {
+        const ids = (wk as { id: string }[]).map((w) => w.id);
+        const { data: es } = await sb().from("timesheet_entries").select("hours").in("week_id", ids);
         setWeekHours(((es || []) as { hours: number[] }[]).reduce((s, e) => s + (e.hours || []).reduce((a, h) => a + (Number(h) || 0), 0), 0));
       } else setWeekHours(null);
       setLoading(false);
@@ -109,7 +117,7 @@ export default function Home() {
       <div className="mb-4 grid grid-cols-2 gap-2.5 md:grid-cols-4">
         {([["⏱", "Enter today's hours", "/payroll"], ["📋", "Fill out a walk sheet", "/proposals"],
            ["🧾", "Make an invoice", "/statements"], ["📄", "See the releases", "/releases"]] as [string, string, string][]).map(([icon, label, href]) => (
-          <Link key={href} href={href} prefetch={false} className="card flex items-center gap-2.5 p-3.5 transition-shadow hover:shadow">
+          <Link key={href} href={href} className="card flex items-center gap-2.5 p-3.5 transition-shadow hover:shadow">
             <span className="text-xl">{icon}</span>
             <span className="font-display text-[14px] font-semibold uppercase leading-tight tracking-wide">{label}</span>
           </Link>
@@ -118,12 +126,12 @@ export default function Home() {
       {loading ? <div className="text-sm text-inksoft">Opening the books…</div> : (
         <>
           {payrollNudge && (
-            <Link href="/payroll" prefetch={false} className="card mb-2.5 block border-alert p-3 text-[14px]">
+            <Link href="/payroll" className="card mb-2.5 block border-alert p-3 text-[14px]">
               ⏱ <b>No hours entered for this week yet.</b> Tap here, hit Make payroll, and punch them in before Friday.
             </Link>
           )}
           {stale.length > 0 && (
-            <Link href="/statements" prefetch={false} className="card mb-2.5 block border-work p-3 text-[14px]">
+            <Link href="/statements" className="card mb-2.5 block border-work p-3 text-[14px]">
               🧾 <b>{stale.length} invoice{stale.length === 1 ? "" : "s"} out over 45 days</b> — worth a call. Tap to see who owes what.
             </Link>
           )}
@@ -140,7 +148,7 @@ export default function Home() {
             <div className="card p-3.5">
               <div className="mb-2 flex items-baseline justify-between">
                 <div className="font-display text-sm font-bold uppercase">Chase these first</div>
-                <Link href="/statements" prefetch={false} className="text-xs text-inksoft underline">Statements →</Link>
+                <Link href="/statements" className="text-xs text-inksoft underline">Statements →</Link>
               </div>
               {oldest.map((r) => (
                 <div key={r.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
@@ -158,7 +166,7 @@ export default function Home() {
             <div className="card p-3.5">
               <div className="mb-2 flex items-baseline justify-between">
                 <div className="font-display text-sm font-bold uppercase">Walk sheets undelivered</div>
-                <Link href="/proposals" prefetch={false} className="text-xs text-inksoft underline">Proposals →</Link>
+                <Link href="/proposals" className="text-xs text-inksoft underline">Proposals →</Link>
               </div>
               {walks.slice(0, 5).map((p) => (
                 <div key={p.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
@@ -173,7 +181,7 @@ export default function Home() {
             <div className="card p-3.5">
               <div className="mb-2 flex items-baseline justify-between">
                 <div className="font-display text-sm font-bold uppercase">Payroll short</div>
-                <Link href="/payroll" prefetch={false} className="text-xs text-inksoft underline">Payroll →</Link>
+                <Link href="/payroll" className="text-xs text-inksoft underline">Payroll →</Link>
               </div>
               {shorts.map(({ r, missing }) => (
                 <div key={r.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
@@ -185,7 +193,7 @@ export default function Home() {
             </div>
           </div>
 
-          <Link href="/releases" prefetch={false} className="btn btn-primary mt-5 inline-block">Open releases →</Link>
+          <Link href="/releases" className="btn btn-primary mt-5 inline-block">Open releases →</Link>
         </>
       )}
     </div>

@@ -54,15 +54,18 @@ export default function Settings() {
 
   const renameContract = async (c: Contract, name: string) => {
     const clean = name.trim() || c.number; // blank = back to the number
-    const { error } = await sb().from("contracts").update({ name: clean }).eq("id", c.id);
-    flash(error ? error.message : "Contract name saved");
+    // .select confirms a row actually changed — a role-blocked update returns
+    // success with zero rows, which must not flash "Saved"
+    const { data, error } = await sb().from("contracts").update({ name: clean }).eq("id", c.id).select("id");
+    if (error || !data || data.length === 0) { flash(error ? error.message : "Didn't save — check your account's role"); return; }
+    flash("Contract name saved");
     setContracts((prev) => prev.map((x) => (x.id === c.id ? { ...x, name: clean } : x)));
   };
 
   const save = async (k: keyof Org, v: string) => {
     if (!org) return;
-    const { error } = await sb().from("org").update({ [k]: v }).eq("id", 1);
-    flash(error ? error.message : "Saved");
+    const { data, error } = await sb().from("org").update({ [k]: v }).eq("id", 1).select("id");
+    flash(error ? error.message : data && data.length > 0 ? "Saved" : "Didn't save — check your account's role");
   };
   const setRole = async (id: string, role: Role) => {
     const { error } = await sb().from("profiles").update({ role }).eq("id", id);
@@ -89,27 +92,36 @@ export default function Settings() {
       setAdding(false); flash("That email already has an account — change their role in the list below instead."); return;
     }
     const newId = data.user?.id;
+    let roleWarn = "";
     if (newId) {
       // the profile row is created automatically; set the display name and role
       const patch: { name?: string; role?: Role } = {};
       if (newUser.name.trim()) patch.name = newUser.name.trim();
       patch.role = newUser.role;
-      if (Object.keys(patch).length > 0) await sb().from("profiles").update(patch).eq("id", newId);
+      // only an admin account can set roles — confirm the update really landed
+      const { data: upd, error: pe } = await sb().from("profiles").update(patch).eq("id", newId).select("id");
+      if (pe || !upd || upd.length === 0) roleWarn = " ⚠ The role didn't apply — an admin needs to set it in the list below.";
     }
     setAdding(false); setAddOpen(false);
     setNewUser({ name: "", email: "", password: "", role: "office" });
-    flash(`Account created — they sign in with that email and password${data.session ? "" : " (if they can't log in yet, they may need to click the confirmation email, or turn off “Confirm email” in Supabase → Authentication → Providers)"}`);
+    flash(`Account created — they sign in with that email and password${roleWarn}${data.session ? "" : " (if they can't log in yet, they may need to click the confirmation email, or turn off “Confirm email” in Supabase → Authentication → Providers)"}`);
     loadUsers();
   };
 
   // ---------- system check: is every upgrade in place? ----------
   // ---------- full backup: the whole business in one workbook ----------
   const [backingUp, setBackingUp] = useState(false);
-  const allOf = async (table: string): Promise<Record<string, unknown>[]> => {
+  const allOf = async (table: string, optional = false): Promise<Record<string, unknown>[]> => {
     const out: Record<string, unknown>[] = [];
     let from = 0;
     for (;;) {
-      const { data } = await sb().from(table).select("*").range(from, from + 999);
+      // ordered — unordered pages can overlap; and an error must fail the
+      // backup loudly instead of downloading a silently short file
+      const { data, error } = await sb().from(table).select("*").order("id").range(from, from + 999);
+      if (error) {
+        if (optional && /relation|does not exist|schema cache/i.test(error.message)) return out;
+        throw new Error(`${table}: ${error.message}`);
+      }
       if (!data || data.length === 0) break;
       out.push(...(data as Record<string, unknown>[]));
       if (data.length < 1000) break;
@@ -118,12 +130,13 @@ export default function Settings() {
     return out;
   };
   const downloadBackup = async () => {
-    await ensureXLSX();
+    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine \u2014 check your signal and try again"); return; }
     setBackingUp(true);
     try {
-      const [cs, rels, emps, wks, ents, pact, props] = await Promise.all([
+      const [cs, rels, emps, wks, ents, pact, props, relItems, priceBook, cItems, sched] = await Promise.all([
         allOf("contracts"), allOf("releases"), allOf("employees"),
         allOf("timesheet_weeks"), allOf("timesheet_entries"), allOf("pact_jobs"), allOf("proposals"),
+        allOf("release_items", true), allOf("price_items", true), allOf("contract_items", true), allOf("schedule_days", true),
       ]);
       const cNum = new Map(cs.map((c) => [c.id, `${c.number}`]));
       const eName = new Map(emps.map((e) => [e.id, `${e.name}`]));
@@ -160,6 +173,33 @@ export default function Settings() {
         Number: p.number, Name: p.job || "", Contract: cNum.get(p.contract_id as string) || "",
         Development: p.development || "", "Release #": p.release_number || "", Status: p.status, Total: Number(p.total) || 0,
       })));
+      // who's been paid which week (the PAID stamps)
+      add("Paid marks", wks.flatMap((w) => Object.entries((w.paid_map as Record<string, string>) || {}).map(([eid, on]) => ({
+        "Week ending": `${w.week_ending}`, Worker: eName.get(eid) || "?", "Paid on": on,
+      }))).sort((a, b) => `${a["Week ending"]}${a.Worker}`.localeCompare(`${b["Week ending"]}${b.Worker}`)));
+      const relInfo = new Map(rels.map((r) => [r.id, r]));
+      add("Release items", relItems.map((it) => {
+        const r = relInfo.get(it.release_id as string);
+        return {
+          Contract: r ? cNum.get(r.contract_id as string) || "" : "", Release: r ? `${r.rel_number}` : "?",
+          Line: it.line, Code: it.code, Description: it.description, UOM: it.uom,
+          Qty: Number(it.qty) || 0, "Unit price": Number(it.unit_price) || 0, Amount: Number(it.amount) || 0,
+        };
+      }));
+      add("Price book", priceBook.map((it) => ({
+        Code: it.code, Category: it.category || "", Description: it.description, UOM: it.unit || it.uom || "", "Unit price": Number(it.unit_price) || 0,
+      })));
+      add("Contract books", cItems.map((it) => ({
+        Contract: cNum.get(it.contract_id as string) || "", Line: it.line, Code: it.code, Category: it.category || "",
+        Description: it.description, UOM: it.uom, "Unit price": Number(it.unit_price) || 0,
+      })));
+      add("Schedule", sched.map((s) => {
+        const r = relInfo.get(s.release_id as string);
+        return {
+          Day: `${s.day}`, Release: r ? `#${r.rel_number} — ${r.location}` : "", Worker: eName.get(s.employee_id as string) || "?",
+          Description: s.description || "", Address: s.address || "", Texted: s.texted ? "yes" : "",
+        };
+      }));
       const fname = askFileName(`earthlink_backup_${new Date().toISOString().slice(0, 10)}.xlsx`);
       if (fname) XLSX.writeFile(wb, fname);
     } catch (e) {

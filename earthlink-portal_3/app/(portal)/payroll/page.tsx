@@ -19,7 +19,7 @@ import { cleanPhone, prettyPhone } from "@/lib/notify";
 interface Emp { id: string; name: string; trade: string; base_rate: number; active: boolean; phone?: string | null; }
 interface Week { id: string; week_ending: string; paid_map?: Record<string, string> | null; }
 interface Entry { id?: string; week_id: string; employee_id: string; job_label: string; rate: number; hours: number[]; release_id: string | null; trade?: string | null; }
-interface RelRow { id: string; rel_number: string; location: string; contract_id: string; labor_hours: number; labor_breakdown: { cls: string; hours: number }[] | null; }
+interface RelRow { id: string; rel_number: string; location: string; contract_id: string; labor_hours: number; labor_breakdown: { cls: string; hours: number }[] | null; canceled?: boolean; }
 // the week runs Saturday → Friday, like the paper sheet; Sat & Sun are overtime days
 const DAYS = ["Sat", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri"];
 
@@ -74,6 +74,18 @@ export default function Payroll() {
   const makingWeek = useRef(false); // guards Make payroll against double-taps
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
   const num = useNumBuffer();
+  // the accountant can read everything here but the database won't accept their
+  // writes — show a view-only page instead of edits that silently don't save
+  const [role, setRole] = useState("");
+  const readOnly = role === "accountant";
+  useEffect(() => {
+    (async () => {
+      const { data: { user } } = await sb().auth.getUser();
+      if (!user) return;
+      const { data: prof } = await sb().from("profiles").select("role").eq("id", user.id).single();
+      setRole((prof as { role?: string } | null)?.role || "");
+    })();
+  }, []);
 
   const savePhone = async (empId: string, raw: string) => {
     const phone = cleanPhone(raw) || raw.trim();
@@ -89,8 +101,15 @@ export default function Payroll() {
     const { data: w } = await sb().from("timesheet_weeks").select("*").order("week_ending", { ascending: false });
     setWeeks((w || []) as Week[]);
     setOpenWeek((prev) => (prev ? { ...prev, ...(((w || []) as Week[]).find((x) => x.id === prev.id) || {}) } : prev));
-    const { data: r } = await sb().from("releases").select("id,rel_number,location,contract_id,labor_hours,labor_breakdown").eq("canceled", false);
-    setRels(((r || []) as RelRow[]).sort((x, y) => (parseFloat(x.rel_number) || 0) - (parseFloat(y.rel_number) || 0)));
+    const allR: RelRow[] = [];
+    for (let from = 0; ; from += 1000) { // paginated — an unranged select stops silently at 1000
+      // canceled releases stay in the list (flagged) so hours already punched on
+      // them keep their release name — the pickers below filter them out
+      const { data: r } = await sb().from("releases").select("id,rel_number,location,contract_id,labor_hours,labor_breakdown,canceled").order("id").range(from, from + 999);
+      allR.push(...((r || []) as RelRow[]));
+      if (!r || r.length < 1000) break;
+    }
+    setRels(allR.sort((x, y) => (parseFloat(x.rel_number) || 0) - (parseFloat(y.rel_number) || 0)));
     const { data: c } = await sb().from("contracts").select("id,number,name").order("number");
     setContracts((c || []) as Contract[]);
   };
@@ -110,13 +129,21 @@ export default function Payroll() {
   const loadWeekCheck = async (ents: Entry[]) => {
     const ids = [...new Set(ents.map((e) => e.release_id).filter(Boolean))] as string[];
     if (ids.length === 0) { setWeekCheck([]); return; }
-    // select * so the per-entry classification comes along once the column exists
-    const { data: allEnts } = await sb().from("timesheet_entries").select("*").in("release_id", ids);
+    // select * so the per-entry classification comes along once the column exists;
+    // typed classifications win, the worker's usual trade fills the blanks —
+    // the same rule the Releases and Home checks use for the same release
+    // (paginated — an unranged select stops silently at 1000 and undercounts)
+    const allEnts: { release_id: string | null; employee_id: string; hours: number[]; trade?: string | null }[] = [];
+    for (let f = 0; ; f += 1000) {
+      const { data: chunk } = await sb().from("timesheet_entries").select("*").in("release_id", ids).order("id").range(f, f + 999);
+      allEnts.push(...((chunk || []) as typeof allEnts));
+      if (!chunk || chunk.length < 1000) break;
+    }
     // only classifications the user actually typed count toward the release's minimums
-    const byRel = aggregateLogged((allEnts || []) as { release_id: string | null; employee_id: string; hours: number[]; trade?: string | null }[], new Map());
+    const byRel = aggregateLogged(allEnts, new Map(emps.map((e) => [e.id, canonTrade(e.trade)])));
     setWeekCheck(ids
       .map((id) => rels.find((r) => r.id === id))
-      .filter((r): r is RelRow => !!r)
+      .filter((r): r is RelRow => !!r && !r.canceled)
       .map((r) => ({ rel: r, result: checkLabor(r.labor_breakdown || [], Number(r.labor_hours) || 0, byRel[r.id] || {}) })));
   };
   useEffect(() => {
@@ -214,17 +241,23 @@ export default function Payroll() {
     setEmps((prev) => (prev.some((e) => e.id === emp.id) ? prev : [...prev, emp].sort((a, b) => a.name.localeCompare(b.name))));
     addEntry(emp.id, emp, rel);
   };
-  const saveEntry = async (en: Entry) => {
-    const base = { job_label: en.job_label, rate: Number(en.rate) || 0, hours: en.hours.map((h) => Number(h) || 0), release_id: en.release_id || null };
-    // only send trade when the entry actually carries one — a blank saves as null
-    // so it falls back to the worker's default everywhere, matching the display
-    const payload = typeof en.trade === "string" ? { ...base, trade: en.trade.trim() || null } : base;
-    const { error } = await sb().from("timesheet_entries").update(payload).eq("id", en.id!);
+  // each blur saves ONLY its own field — a whole-row save from this device's
+  // state could silently revert a day someone else just punched on another phone
+  const saveTrade = async (en: Entry) => {
+    // a blank saves as null so it falls back to the worker's default everywhere
+    const trade = (en.trade ?? "").trim() || null;
+    const { error } = await sb().from("timesheet_entries").update({ trade }).eq("id", en.id!);
     if (!error) return;
-    if ("trade" in payload && missingTradeCol.test(error.message)) {
-      const { error: e2 } = await sb().from("timesheet_entries").update(base).eq("id", en.id!);
-      flash(e2 ? e2.message : "Run supabase/upgrade_payroll_class.sql so classifications save");
-    } else flash(error.message);
+    flash(missingTradeCol.test(error.message) ? "Run supabase/upgrade_payroll_class.sql so classifications save" : error.message);
+  };
+  const saveDay = async (en: Entry, i: number, n: number) => {
+    // merge the one day onto the row as the database has it right now
+    const { data } = await sb().from("timesheet_entries").select("hours").eq("id", en.id!).single();
+    const hours = ((((data as { hours?: number[] } | null)?.hours) || en.hours) as number[]).map((h) => Number(h) || 0);
+    hours[i] = n;
+    setEntries((prev) => prev.map((x) => (x.id === en.id ? { ...x, hours } : x)));
+    const { error } = await sb().from("timesheet_entries").update({ hours }).eq("id", en.id!);
+    if (error) flash(error.message);
   };
   const delEntry = async (id: string) => {
     const { error } = await sb().from("timesheet_entries").delete().eq("id", id);
@@ -247,9 +280,13 @@ export default function Payroll() {
   // one PAID mark per worker per week — no more side spreadsheet
   const togglePaid = async (eid: string) => {
     if (!openWeek) return;
-    const map = { ...(openWeek.paid_map || {}) };
+    // start from the row as the database has it — writing this device's copy
+    // wholesale would erase a PAID mark just made on another phone. Local wins
+    // for keys it knows (a second quick click builds on the optimistic map).
+    const { data: fresh } = await sb().from("timesheet_weeks").select("paid_map").eq("id", openWeek.id).single();
+    const dbMap = ((fresh as { paid_map?: Record<string, string> | null } | null)?.paid_map) || {};
+    const map = { ...dbMap, ...(openWeek.paid_map || {}) };
     if (map[eid]) delete map[eid]; else map[eid] = localISO();
-    // update state first so a second quick click builds on this map, not the old one
     setOpenWeek({ ...openWeek, paid_map: map });
     const { error } = await sb().from("timesheet_weeks").update({ paid_map: map }).eq("id", openWeek.id);
     if (error) { flash(/column/i.test(error.message) ? "Run supabase/upgrade_payroll_paid.sql first" : error.message); load(); }
@@ -260,7 +297,7 @@ export default function Payroll() {
 
   // ---------- weekly sheet in the paper-template layout, one tab per contract ----------
   const exportTemplate = async () => {
-    await ensureXLSX();
+    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine \u2014 check your signal and try again"); return; }
     if (!openWeek || entries.length === 0) { flash("No hours this week yet"); return; }
     const relById = new Map(rels.map((r) => [r.id, r]));
     const groups = new Map<string, Entry[]>();
@@ -363,7 +400,10 @@ export default function Payroll() {
       for (const rid of relOrder) {
         const rel = relById.get(rid);
         bandRows.push(aoa.length);
-        aoa.push([rel ? `Release #${rel.rel_number} — ${rel.location}` : "No release (shop, misc…)"]);
+        // a canceled release is no longer in the picker list, but hours already
+        // punched on it keep its name on the sheet instead of melting into "No release"
+        const gone = rid ? byRel.get(rid)![0]?.job_label : "";
+        aoa.push([rel ? `Release #${rel.rel_number} — ${rel.location}${rel.canceled ? " (canceled)" : ""}` : gone ? `${gone} (deleted release)` : "No release (shop, misc…)"]);
         headerRows.push(aoa.length);
         aoa.push(["Worker", "", "", ...dayHeads, "Category", "Total Hrs"]);
         const by: Record<string, number[]> = {};
@@ -466,7 +506,7 @@ export default function Payroll() {
               // blur fires the focused field's save synchronously, then close right away
               (document.activeElement as HTMLElement | null)?.blur?.();
               setOpenWeek(null); load();
-            }}>Save & close</button>
+            }}>{readOnly ? "Close" : "Save & close"}</button>
           </div>
         </div>
 
@@ -474,12 +514,13 @@ export default function Payroll() {
         <div className="mb-3 grid gap-2 md:grid-cols-2">
           <ContractPicker contracts={contracts} value={linkContract} onChange={setLinkContract}
             extra={[{ id: "", label: "All contracts" }]} placeholder="Filter releases by contract…" />
-          <div className="relative">
+          {!readOnly && <div className="relative">
             <input className="field" placeholder="+ Add a release to this week — type release # or development…"
               value={relPickQ} onChange={(e) => setRelPickQ(e.target.value)} />
             {relPickQ.trim() && (
               <div className="card absolute inset-x-0 top-full z-10 max-h-56 overflow-y-auto shadow-lg">
                 {rels
+                  .filter((r) => !r.canceled)
                   .filter((r) => !linkContract || r.contract_id === linkContract)
                   .filter((r) => relLabel(r).toLowerCase().includes(relPickQ.trim().toLowerCase()))
                   .map((r) => (
@@ -495,7 +536,7 @@ export default function Payroll() {
                 </button>
               </div>
             )}
-          </div>
+          </div>}
         </div>
 
         {(() => {
@@ -545,7 +586,7 @@ export default function Payroll() {
               <div key={sec.key} className="card mb-3 p-3.5">
                 <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
                   <div className="min-w-0">
-                    <b className="font-mono text-[14px]">{rel ? `#${rel.rel_number}` : "No release"}</b>
+                    <b className="font-mono text-[14px]">{rel ? `#${rel.rel_number}${rel.canceled ? " (canceled)" : ""}` : "No release"}</b>
                     {rel && <span className="ml-2 text-[14px]">{rel.location}</span>}
                     {contract && <span className="ml-1.5 text-[11px] text-inksoft">· {contractLabel(contract)}</span>}
                   </div>
@@ -583,29 +624,29 @@ export default function Payroll() {
                         <b className="text-[14px]">{emp?.name || "?"}</b>
                         <div className="flex flex-wrap items-center gap-2">
                           {overDays.length > 0 && <Stamp label={`OVER 8H ${overDays.join(" ")}`} tone="alert" />}
-                          <input className="field w-40 px-2 py-1.5 text-[13px]" placeholder="Classification"
-                            value={en.trade ?? ""} onChange={(e) => set({ trade: e.target.value })} onBlur={() => saveEntry(en)} />
+                          <input className="field w-40 px-2 py-1.5 text-[13px]" placeholder="Classification" readOnly={readOnly}
+                            value={en.trade ?? ""} onChange={(e) => set({ trade: e.target.value })} onBlur={() => saveTrade(en)} />
                           {clsText !== "" && reqClasses.length > 0 && (fits ? <Stamp label={`✓ ${canon}`} tone="ok" /> : <Stamp label={`no ${canon} req`} tone="work" />)}
                           <span className="font-mono text-xs text-inksoft">{hrs}h</span>
-                          <button className="text-xs text-alert" title="Remove from this release" onClick={() => delEntry(en.id!)}>✕</button>
+                          {!readOnly && <button className="text-xs text-alert" title="Remove from this release" onClick={() => { if (hrs > 0 && !window.confirm(`Remove ${emp?.name || "this worker"} from this release? Their ${hrs}h here will be deleted.`)) return; delEntry(en.id!); }}>✕</button>}
                         </div>
                       </div>
                       <div className="grid grid-cols-7 gap-1.5">
                         {DAYS.map((d, i) => (
                           <div key={d}>
                             <div className={`text-center text-[10px] uppercase tracking-wide ${empDayTot[i] > 8 ? "font-semibold text-alert" : i < 2 ? "font-semibold text-work" : "text-inksoft"}`}>{d}{i < 2 ? "·OT" : ""}</div>
-                            <input className={`field px-1 py-2 text-center font-mono ${empDayTot[i] > 8 ? "bg-alert/10 ring-1 ring-alert" : i < 2 ? "bg-work/5" : ""}`} inputMode="decimal" placeholder="0"
+                            <input className={`field px-1 py-2 text-center font-mono ${empDayTot[i] > 8 ? "bg-alert/10 ring-1 ring-alert" : i < 2 ? "bg-work/5" : ""}`} inputMode="decimal" placeholder="0" readOnly={readOnly}
                               {...num(`${en.id}:h${i}`, Number(en.hours[i]) || 0,
                                 (n) => { const hours = [...en.hours]; hours[i] = n; set({ hours }); },
-                                (n) => { const hours = [...en.hours]; hours[i] = n; saveEntry({ ...en, hours }); })} />
+                                (n) => saveDay(en, i, n))} />
                           </div>
                         ))}
                       </div>
                     </div>
                   );
                 })}
-                {ents.length === 0 && <div className="py-2 text-[13px] text-inksoft">No workers yet — add the first one below.</div>}
-                {addFor === sec.key ? (
+                {ents.length === 0 && <div className="py-2 text-[13px] text-inksoft">{readOnly ? "No workers on this release yet." : "No workers yet — add the first one below."}</div>}
+                {readOnly ? null : addFor === sec.key ? (
                   <div className="relative mt-2">
                     <input className="field" autoFocus placeholder="Type a worker's name…" value={addQ}
                       onChange={(e) => setAddQ(e.target.value)}
@@ -650,7 +691,7 @@ export default function Payroll() {
                       <td className={`p-2.5 text-right font-mono ${x.ot > 0 ? "text-work" : ""}`}>{x.ot}</td>
                       <td className="p-2.5 text-right font-mono font-semibold">{x.hrs}h</td>
                       <td className="p-2.5 text-center">
-                        <button onClick={() => togglePaid(x.eid)} title={paidOn ? `Paid ${prettyDate(paidOn)}` : "Mark paid"}>
+                        <button disabled={readOnly} onClick={() => togglePaid(x.eid)} title={readOnly ? "" : paidOn ? `Paid ${prettyDate(paidOn)}` : "Mark paid"}>
                           <Stamp label={paidOn ? "PAID" : "NOT PAID"} tone={paidOn ? "ok" : "work"} />
                         </button>
                       </td>
@@ -672,11 +713,11 @@ export default function Payroll() {
     <div>
       <div className="mb-3 flex items-baseline justify-between">
         <div className="font-display text-2xl font-bold uppercase">Payroll</div>
-        <button className="btn btn-ghost" onClick={() => { const n = !showCrew; setShowCrew(n); if (n) seedCrew(); }}>Crew ({emps.filter((e) => e.active !== false).length})</button>
+        <button className="btn btn-ghost" onClick={() => { const n = !showCrew; setShowCrew(n); if (n && !readOnly) seedCrew(); }}>Crew ({emps.filter((e) => e.active !== false).length})</button>
       </div>
       {showCrew && (
         <div className="card mb-3 p-3.5">
-          <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+          {!readOnly && <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
             <input className="field" placeholder="Name" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
             <input className="field" placeholder="Usual classification (laborer…)" value={draft.trade} onChange={(e) => setDraft({ ...draft, trade: e.target.value })} />
             <input className="field" placeholder="Phone (for texts)" inputMode="tel" value={draft.phone} onChange={(e) => setDraft({ ...draft, phone: e.target.value })} />
@@ -693,7 +734,7 @@ export default function Payroll() {
               if (error) { flash(error.message); return; }
               setDraft({ name: "", trade: "", base_rate: "", phone: "" }); load();
             }}>Add</button>
-          </div>
+          </div>}
           <div className="mt-2 divide-y divide-rulesoft">
             {emps.filter((e) => e.active !== false).map((e) => {
               const buf = phoneBuf[e.id] ?? prettyPhone(e.phone || "");
@@ -701,10 +742,10 @@ export default function Payroll() {
                 <div key={e.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
                   <span className="min-w-0"><b>{e.name}</b></span>
                   <span className="flex items-center gap-2">
-                    <input className="field w-44 px-2 py-1.5 text-[13px]" placeholder="Phone number" inputMode="tel"
+                    <input className="field w-44 px-2 py-1.5 text-[13px]" placeholder="Phone number" inputMode="tel" readOnly={readOnly}
                       value={buf} onChange={(ev) => setPhoneBuf((p) => ({ ...p, [e.id]: ev.target.value }))}
                       onBlur={() => { if (cleanPhone(buf) !== cleanPhone(e.phone || "")) savePhone(e.id, buf); }} />
-                    <button className="text-xs text-alert" onClick={async () => { await sb().from("employees").update({ active: false }).eq("id", e.id); load(); }}>✕</button>
+                    {!readOnly && <button className="text-xs text-alert" onClick={async () => { await sb().from("employees").update({ active: false }).eq("id", e.id); load(); }}>✕</button>}
                   </span>
                 </div>
               );
@@ -713,7 +754,7 @@ export default function Payroll() {
         </div>
       )}
 
-      {(() => {
+      {!readOnly && (() => {
         const we = fridayOf(localISO());
         return (
           <div className="card mb-3 p-3.5">
@@ -737,7 +778,7 @@ export default function Payroll() {
               {weCounts[w.week_ending] > 1 && <span className="ml-2 rounded-[2px] border border-alert px-1 py-px font-mono text-[9px] font-semibold text-alert" title="Two payroll weeks cover the same dates — delete the one you don't need, its hours go with it">DUPLICATE</span>}
               <span className="ml-2 text-xs text-inksoft">open →</span>
             </button>
-            <button className="text-xs text-alert" title="Delete this week" onClick={() => deleteWeek(w)}>✕</button>
+            {!readOnly && <button className="text-xs text-alert" title="Delete this week" onClick={() => deleteWeek(w)}>✕</button>}
           </div>
         )); })()}
         {weeks.length === 0 && <div className="p-5 text-sm text-inksoft">No payroll weeks yet. Add the crew, start a week, punch hours, download the weekly sheet.</div>}

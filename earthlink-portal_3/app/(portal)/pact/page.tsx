@@ -118,10 +118,13 @@ export default function Pact() {
   const deleteJob = async (j: Job) => {
     const label = [j.po_number || j.job_number, j.partner].filter(Boolean).join(" — ");
     if (!window.confirm(`Delete PO ${label}? The job and its photos/documents disappear for good. This can't be undone.`)) return;
-    const paths = (j.attachments || []).map((a) => a.path);
-    if (paths.length > 0) await sb().storage.from("docs").remove(paths);
+    // the row goes first — if its delete fails the files are untouched; and the
+    // file list comes fresh from the database, not this device's possibly-stale copy
+    const { data: freshRow } = await sb().from("pact_jobs").select("attachments").eq("id", j.id).single();
+    const paths = (((freshRow as { attachments?: { path: string }[] } | null)?.attachments) || j.attachments || []).map((a) => a.path);
     const { error } = await sb().from("pact_jobs").delete().eq("id", j.id);
     if (error) { flash(upgradeHint(error.message)); return; }
+    if (paths.length > 0) await sb().storage.from("docs").remove(paths);
     if (openId === j.id) setOpenId(null);
     if (attachJob?.id === j.id) setAttachJob(null);
     if (invJob?.id === j.id) setInvJob(null);
@@ -175,9 +178,10 @@ export default function Pact() {
       }
       const f = fields;
       const unreadable = !f.po && !f.partner && !f.desc;
-      // this PO may already be a job — uploading it again must not make a second one
+      // this PO may already be a job — uploading it again must not make a second
+      // one (a hand-typed job carries the PO in job_number, so check both)
       if (f.po) {
-        const { data: dupes } = await sb().from("pact_jobs").select("id,attachments").eq("po_number", f.po).limit(1);
+        const { data: dupes } = await sb().from("pact_jobs").select("id,attachments").or(`po_number.eq.${f.po},job_number.eq.${f.po}`).limit(1);
         const dupe = (dupes || [])[0] as Job | undefined;
         if (dupe) {
           const atts = dupe.attachments || [];
@@ -307,7 +311,15 @@ export default function Pact() {
   // ---------- the submitted package: invoice + PO + before/after, one PDF ----------
   const buildPackage = async (j: Job) => {
     const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
-    if (!org) return;
+    // the letterhead needs the company details — if the one fetch at page-open
+    // failed (bad signal), try again now instead of being a dead button
+    let theOrg = org;
+    if (!theOrg) {
+      const { data } = await sb().from("org").select("*").single();
+      if (data) { theOrg = data as Org; setOrg(theOrg); }
+    }
+    if (!theOrg) { flash("Company details haven't loaded — check your signal and try again"); return; }
+    const org2 = theOrg;
     const items = itemsOf(j).filter((it) => Number(it.qty) > 0 && it.description.trim());
     if (items.length === 0) { flash("Fill in the invoice lines first (open the job → Invoice)"); return; }
     setBusy(true);
@@ -316,7 +328,7 @@ export default function Pact() {
       const helv = await pkg.embedFont(StandardFonts.Helvetica);
       const bold = await pkg.embedFont(StandardFonts.HelveticaBold);
       // --- invoice page: clean letterhead layout ---
-      const page = pkg.addPage([612, 792]);
+      let page = pkg.addPage([612, 792]);
       const L = 54, R = 558;
       let y = 736;
       const ink = rgb(0.09, 0.09, 0.08), soft = rgb(0.45, 0.44, 0.42);
@@ -329,12 +341,12 @@ export default function Pact() {
         page.drawLine({ start: { x: L, y: yy }, end: { x: R, y: yy }, thickness: w, color });
 
       // letterhead
-      put((org.company || "Earth Link General Construction, Inc.").toUpperCase(), L, y, 15, bold);
+      put((org2.company || "Earth Link General Construction, Inc.").toUpperCase(), L, y, 15, bold);
       putR("INVOICE", R, y - 3, 21, bold);
       y -= 15;
-      put([org.address1, org.address2].filter(Boolean).join(" · "), L, y, 8.5, helv, soft);
+      put([org2.address1, org2.address2].filter(Boolean).join(" · "), L, y, 8.5, helv, soft);
       y -= 11;
-      put([org.phone && `Phone ${org.phone}`, org.email, org.license && `License ${org.license}`].filter(Boolean).join(" · "), L, y, 8.5, helv, soft);
+      put([org2.phone && `Phone ${org2.phone}`, org2.email, org2.license && `License ${org2.license}`].filter(Boolean).join(" · "), L, y, 8.5, helv, soft);
       y -= 12;
       hr(y, 1.6, ink);
       y -= 24;
@@ -371,6 +383,18 @@ export default function Pact() {
       putR("UNIT PRICE", 500, y, 8, bold, soft);
       putR("AMOUNT", R - 6, y, 8, bold, soft);
       y -= 20;
+      // a long work list spills onto extra pages instead of running off the sheet
+      const newItemsPage = () => {
+        page = pkg.addPage([612, 792]);
+        y = 736;
+        page.drawRectangle({ x: L, y: y - 5, width: R - L, height: 18, color: fillC });
+        put("DESCRIPTION OF WORK (continued)", L + 6, y, 8, bold, soft);
+        putR("QTY", 388, y, 8, bold, soft);
+        put("UNIT", 400, y, 8, bold, soft);
+        putR("UNIT PRICE", 500, y, 8, bold, soft);
+        putR("AMOUNT", R - 6, y, 8, bold, soft);
+        y -= 20;
+      };
       let subtotal = 0;
       items.forEach((it) => {
         const amount = (Number(it.qty) || 0) * (Number(it.unit_price) || 0);
@@ -381,6 +405,7 @@ export default function Pact() {
         words.forEach((w) => { if ((cur + " " + w).trim().length > 52) { rowsTxt.push(cur.trim()); cur = w; } else cur += " " + w; });
         if (cur.trim()) rowsTxt.push(cur.trim());
         rowsTxt.forEach((rt, i2) => {
+          if (y < 96) newItemsPage();
           put(rt, L + 6, y);
           if (i2 === 0) {
             putR(String(it.qty), 388, y);
@@ -395,6 +420,7 @@ export default function Pact() {
       });
 
       // totals
+      if (y < 150) { page = pkg.addPage([612, 792]); y = 736; }
       y -= 8;
       const taxAmt = subtotal * taxRate(j) / 100;
       putR("Subtotal", 470, y, 9.5, helv, soft);
@@ -410,7 +436,7 @@ export default function Pact() {
 
       // footer
       hr(72, 0.6);
-      const foot = `Make all checks payable to ${(org.company || "").toUpperCase()} · Thank you for your business`;
+      const foot = `Make all checks payable to ${(org2.company || "").toUpperCase()} · Thank you for your business`;
       put(foot, (612 - helv.widthOfTextAtSize(foot, 8.5)) / 2, 58, 8.5, helv, soft);
       // --- the PO pdf(s) ---
       const atts = j.attachments || [];
@@ -448,7 +474,8 @@ export default function Pact() {
       const fname = askFileName(`package_PO${j.po_number || j.job_number || ""}.pdf`);
       if (!fname) { URL.revokeObjectURL(url); setBusy(false); return; }
       aEl.href = url; aEl.download = fname; aEl.click();
-      URL.revokeObjectURL(url);
+      // revoking right away can abort the download on iPhone — give it a minute
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
       if (!j.invoice_sent) patch(j, { invoice_sent: today() });
       flash("Package downloaded — invoice, PO, and photos in one PDF");
     } catch {
@@ -472,7 +499,7 @@ export default function Pact() {
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div className="font-display text-2xl font-bold uppercase">PACT</div>
         <div className="flex flex-wrap gap-2">
-          <Link className="btn btn-ghost" href="/pact/schedule" prefetch={false}>📅 Schedule</Link>
+          <Link className="btn btn-ghost" href="/pact/schedule">📅 Schedule</Link>
         </div>
       </div>
       <input ref={poRef} type="file" accept="application/pdf" className="hidden" onChange={handlePo} />
@@ -799,6 +826,29 @@ export default function Pact() {
                 </div>
               );
             })}
+            {(() => {
+              // images that came in through "Upload file" have no before/after
+              // prefix — they still need to be viewable (and deletable) here
+              const loose = (attachJob.attachments || []).filter((a) => isImg(a.name) && !/^(before|after)/i.test(a.name));
+              return loose.length > 0 ? (
+                <div className="mb-3">
+                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-widest text-inksoft">other photos ({loose.length})</div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {loose.map((a) => (
+                      <div key={a.path} className="relative">
+                        <button className="block w-full" onClick={() => openAttachment(a.path)} title={a.name}>
+                          {photoUrls[a.path]
+                            // eslint-disable-next-line @next/next/no-img-element
+                            ? <img src={photoUrls[a.path]} alt={a.name} className="h-24 w-full rounded-sm border border-rulesoft object-cover" />
+                            : <div className="grid h-24 w-full place-items-center rounded-sm border border-rulesoft text-xs text-inksoft">…</div>}
+                        </button>
+                        {canEdit && <button className="absolute right-1 top-1 rounded-sm bg-ink/70 px-1.5 text-xs text-paper" onClick={() => removeAttachment(attachJob, a.path)}>✕</button>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null;
+            })()}
             {(attachJob.attachments || []).filter((a) => !isImg(a.name)).map((a) => (
               <div key={a.path} className="mb-1.5 flex items-center gap-1">
                 <button className="block w-full rounded-sm border border-rulesoft p-2.5 text-left text-sm hover:border-work" onClick={() => openAttachment(a.path)}>📄 {a.name}</button>

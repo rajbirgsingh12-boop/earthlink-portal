@@ -10,14 +10,22 @@ import { prettyDate, type Org } from "./docs";
 export type DocRow = { line: number; code: string; category: string; description: string; uom: string; qty: number; unit_price: number };
 export interface ReleaseDocData { rows: DocRow[]; dev: string; addr: string; stair: string; apt: string; }
 
+// "007" and "7" are the same release — compare with leading zeros stripped
+const relNorm = (v: unknown) => String(v ?? "").trim().replace(/^0+(?=\d)/, "");
+
 export async function gatherReleaseDoc(
   contractId: string,
   rel: { id: string; rel_number: string; location?: string; address?: string; buildings?: string }
 ): Promise<ReleaseDocData> {
   const { data: props } = await sb().from("proposals").select("*")
-    .eq("contract_id", contractId).eq("release_number", rel.rel_number)
-    .order("created_at", { ascending: false }).limit(1);
-  const prop = (props || [])[0] as { qty_map?: Record<string, number> | null; development?: string; address?: string; apt?: string; stairhall?: string } | undefined;
+    .eq("contract_id", contractId).not("release_number", "is", null)
+    .order("created_at", { ascending: false });
+  const matches = ((props || []) as { release_number?: string; qty_map?: Record<string, number> | null; development?: string; address?: string; apt?: string; stairhall?: string }[])
+    .filter((p) => relNorm(p.release_number) === relNorm(rel.rel_number));
+  // quantities come from the newest matching sheet that actually HAS them —
+  // an empty duplicate draft on top must not hide a filled one underneath
+  const prop = matches.find((p) => p.qty_map && Object.keys(p.qty_map).length > 0) ?? matches[0];
+  const head = matches[0] ?? prop;
   let rows: DocRow[] = [];
   if (prop?.qty_map && Object.keys(prop.qty_map).length > 0) {
     const { data: cat } = await sb().from("contract_items").select("*").eq("contract_id", contractId).order("line");
@@ -44,10 +52,10 @@ export async function gatherReleaseDoc(
   }
   return {
     rows,
-    dev: rel.location || prop?.development || "",
-    addr: rel.address || rel.buildings || prop?.address || "",
-    stair: prop?.stairhall || "",
-    apt: prop?.apt || "",
+    dev: rel.location || head?.development || prop?.development || "",
+    addr: rel.address || rel.buildings || head?.address || prop?.address || "",
+    stair: head?.stairhall || prop?.stairhall || "",
+    apt: head?.apt || prop?.apt || "",
   };
 }
 
@@ -58,6 +66,7 @@ export async function buildInvoiceXlsx(a: {
   org: Org; cNumber: string; relNum: string; workOrder: string; dev: string;
   number: string; date: string; rows: DocRow[]; filename?: string;
 }) {
+  await ensureXLSX();
   const total = a.rows.reduce((s, it) => s + it.qty * it.unit_price, 0);
   // never numify values with leading zeros — NYCHA item codes like 062001351
   // must keep their zero on the form

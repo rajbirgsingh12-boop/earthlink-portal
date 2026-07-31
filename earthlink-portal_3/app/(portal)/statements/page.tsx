@@ -23,13 +23,19 @@ export default function Statements() {
   const [printOpen, setPrintOpen] = useState(false);
   const [invPreview, setInvPreview] = useState<{ number: string; date: string; cNumber: string; relNum: string; dev: string; workOrder: string; rows: DocRow[] } | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
+  const [msg, setMsg] = useState("");
+  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3000); };
+  // the accountant can read everything here but the database won't accept their
+  // writes — keep the dates view-only for them instead of edits that don't save
+  const [role, setRole] = useState("");
+  const readOnly = role === "accountant";
   const today = localISO();
 
   const genInvoice = async (r: Release) => {
     const c = contracts.find((x) => x.id === sel);
     const d = await gatherReleaseDoc(sel, r);
-    if (d.rows.length === 0) { return; }
-    if (!r.invoice_sent) {
+    if (d.rows.length === 0) { flash(`Release ${r.rel_number} has no line items yet — import its release PDF or fill a walk sheet first`); return; }
+    if (!r.invoice_sent && !readOnly) {
       await sb().from("releases").update({ invoice_sent: today }).eq("id", r.id);
       setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: today } : x)));
     }
@@ -39,12 +45,18 @@ export default function Statements() {
 
   useEffect(() => {
     (async () => {
+      const { data: { user } } = await sb().auth.getUser();
+      if (user) {
+        const { data: prof } = await sb().from("profiles").select("role").eq("id", user.id).single();
+        setRole((prof as { role?: string } | null)?.role || "");
+      }
       const { data } = await sb().from("contracts").select("id,number,name").order("number");
       const cs = (data || []) as Contract[];
       // only contracts with an active statement (something still owed)
+      // (ordered — pages of an unordered scan can overlap between requests)
       const rel: { contract_id: string; amount: number; received: boolean; canceled: boolean }[] = [];
       for (let from = 0; ; from += 1000) {
-        const { data: page } = await sb().from("releases").select("contract_id,amount,received,canceled").range(from, from + 999);
+        const { data: page } = await sb().from("releases").select("contract_id,amount,received,canceled").order("id").range(from, from + 999);
         rel.push(...((page || []) as typeof rel));
         if (!page || page.length < 1000) break;
       }
@@ -66,26 +78,36 @@ export default function Statements() {
   useEffect(() => {
     if (!sel) { setRows([]); return; }
     (async () => {
-      const { data } = await sb().from("releases").select("*").eq("contract_id", sel);
-      const all = ((data || []) as Release[]).filter((r) => !r.canceled && Number(r.amount) > 0 && !r.received);
+      const pages: Release[] = [];
+      for (let from = 0; ; from += 1000) { // paginated — an unranged select stops silently at 1000
+        const { data } = await sb().from("releases").select("*").eq("contract_id", sel).order("id").range(from, from + 999);
+        pages.push(...((data || []) as Release[]));
+        if (!data || data.length < 1000) break;
+      }
+      const all = pages.filter((r) => !r.canceled && Number(r.amount) > 0 && !r.received);
       // only releases with real release data connected — imported line items
       // or a walk sheet with quantities on the same release number
       const ready = new Set<string>();
       const ids = all.map((r) => r.id);
-      for (let i = 0; i < ids.length; i += 200) {
+      // chunks fetch together — serially this was seconds of dead time on big contracts
+      const chunks: string[][] = [];
+      for (let i = 0; i < ids.length; i += 200) chunks.push(ids.slice(i, i + 200));
+      await Promise.all(chunks.map(async (chunk) => {
         for (let f = 0; ; f += 1000) {
-          const { data: its } = await sb().from("release_items").select("release_id").in("release_id", ids.slice(i, i + 200)).range(f, f + 999);
+          const { data: its } = await sb().from("release_items").select("release_id").in("release_id", chunk).range(f, f + 999);
           ((its || []) as { release_id: string }[]).forEach((it) => ready.add(it.release_id));
           if (!its || its.length < 1000) break;
         }
-      }
+      }));
       const { data: props } = await sb().from("proposals").select("release_number,qty_map").eq("contract_id", sel);
+      // "007" and "7" are the same release — compare with leading zeros stripped
+      const relNorm = (v: unknown) => String(v ?? "").trim().replace(/^0+(?=\d)/, "");
       const walkNums = new Set(
         ((props || []) as { release_number?: string; qty_map?: Record<string, number> | null }[])
           .filter((p) => p.release_number && p.qty_map && Object.keys(p.qty_map).length > 0)
-          .map((p) => String(p.release_number).trim())
+          .map((p) => relNorm(p.release_number))
       );
-      const connected = all.filter((r) => ready.has(r.id) || walkNums.has(String(r.rel_number).trim()));
+      const connected = all.filter((r) => ready.has(r.id) || walkNums.has(relNorm(r.rel_number)));
       connected.sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
       setRows(connected);
     })();
@@ -104,7 +126,7 @@ export default function Statements() {
   const sorted = [...rows].sort((a, b) => (days(b) ?? -1) - (days(a) ?? -1));
 
   const downloadExcel = async () => {
-    await ensureXLSX();
+    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine \u2014 check your signal and try again"); return; }
     if (!contract) return;
     const aoa: (string | number)[][] = [];
     aoa.push(["STATEMENT OF ACCOUNT"]);
@@ -176,12 +198,15 @@ export default function Statements() {
                       <td className="p-2.5 font-mono text-[13px]">{r.rel_number}</td>
                       <td className="p-2.5">{r.location}<div className="max-w-[220px] truncate text-[11px] text-inksoft">{r.buildings}</div></td>
                       <td className="p-2.5">
-                        <input type="date" className="rounded-sm border border-rulesoft p-1 font-mono text-xs" defaultValue={r.invoice_sent || ""}
-                          onChange={async (e) => {
-                            const v = e.target.value || null;
-                            await sb().from("releases").update({ invoice_sent: v }).eq("id", r.id);
-                            setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: v } : x)));
-                          }} />
+                        {readOnly
+                          ? <span className="font-mono text-xs">{r.invoice_sent ? prettyDate(r.invoice_sent) : "—"}</span>
+                          : <input type="date" className="rounded-sm border border-rulesoft p-1 font-mono text-xs" defaultValue={r.invoice_sent || ""}
+                              onChange={async (e) => {
+                                const v = e.target.value || null;
+                                const { error } = await sb().from("releases").update({ invoice_sent: v }).eq("id", r.id);
+                                if (error) { flash(error.message); return; }
+                                setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: v } : x)));
+                              }} />}
                       </td>
                       <td className={`p-2.5 text-right font-mono ${d !== null && d > 60 ? "text-alert" : ""}`}>{d === null ? "—" : d}</td>
                       <td className="p-2.5 text-right font-mono font-semibold">{fmt(Number(r.amount))}</td>
@@ -272,6 +297,7 @@ export default function Statements() {
           close={() => setInvPreview(null)} />
       )}
       {contracts.length === 0 && <div className="text-sm text-inksoft">No active statements — nothing is currently owed on any contract. Releases you haven&apos;t been paid for show up here automatically.</div>}
+      {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
     </div>
   );
 }

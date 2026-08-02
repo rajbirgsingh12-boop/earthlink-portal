@@ -159,8 +159,7 @@ async function buildInvoiceWb(a: InvoiceArgs) {
   rowsArr[24] = { hpt: 10 }; // breathing room under the header block
 
   const hdr = 26, first = 27;
-  const emptyRow = first + a.rows.length; // the originals keep one blank ruled row
-  const totalRow = emptyRow + 2;
+  const emptyRow = first + a.rows.length; // blank ruled rows start here
   // header row (their exact spellings)
   put(`B${hdr}`, "LINE", { font: f11bu, alignment: mid, border: bd("medium", "thin", "medium", "thin") });
   put(`C${hdr}`, "Description", { font: f11bu, alignment: mid, border: bd("medium", "thin", "thin") });
@@ -191,7 +190,27 @@ async function buildInvoiceWb(a: InvoiceArgs) {
     rowsArr[r - 1] = { hpt: Math.max(30, lines * 13 + 12) };
   };
   a.rows.forEach((it, i) => itemRow(first + i, it, false));
-  itemRow(emptyRow, null, true);
+
+  // the ruled table runs to the bottom of the page, like a printed invoice
+  // pad — however many blank rows it takes for the sheet to fill one page
+  const colPts = INVOICE_TPL.cols.map((w) => (w * 7 + 5) * 0.75);
+  const sheetW = colPts.reduce((s, w) => s + w, 0);
+  // one letter page at the width-fit print scale, in sheet points
+  const pageSheetH = (792 - 36) / ((612 - 36) / sheetW);
+  const hUsed = (upto: number) => { let s = 0; for (let r = 1; r <= upto; r++) s += rowsArr[r - 1]?.hpt ?? 15; return s; };
+  const afterItems = hUsed(first + a.rows.length - 1);
+  const tailH = 8 + 16 + 15; // gap + total row + trailing row
+  const roomLeft = pageSheetH - afterItems - tailH;
+  const blanks = Math.max(1, Math.floor(roomLeft / 30));
+  let emptyEnd = emptyRow + blanks - 1;
+  for (let r = emptyRow; r <= emptyEnd; r++) {
+    itemRow(r, null, r === emptyEnd);
+    rowsArr[r - 1] = { hpt: 30 };
+  }
+  // the leftover that didn't make a whole row pads the last blank row
+  const rem = roomLeft - blanks * 30;
+  if (rem > 4) rowsArr[emptyEnd - 1] = { hpt: 30 + rem };
+  const totalRow = emptyEnd + 2;
 
   // 4) the Total price box, set off to the right like theirs
   put(`G${totalRow}`, "Total price", { font: f11b, alignment: mid, border: bd("thin", "thin", "thin") });
@@ -200,7 +219,7 @@ async function buildInvoiceWb(a: InvoiceArgs) {
   tc.z = '"$"#,##0.00';
   merges.push({ s: { r: totalRow - 1, c: 6 }, e: { r: totalRow - 1, c: 7 } });
   rowsArr[totalRow - 1] = { hpt: 16 };
-  rowsArr[emptyRow] = { hpt: 8 };
+  rowsArr[totalRow - 2] = { hpt: 8 };
 
   ws["!ref"] = `A1:I${totalRow + 1}`;
   // the writer pads character widths by ~0.83 — compensate so the sheet

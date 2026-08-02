@@ -81,10 +81,12 @@ export async function gatherReleaseDoc(
 import { INVOICE_TPL, type TplCell } from "./invoiceTemplateSpec";
 import { COMPANY } from "./company";
 
-export async function buildInvoiceXlsx(a: {
+export interface InvoiceArgs {
   org: Org; cNumber: string; relNum: string; workOrder: string; dev: string;
   number: string; date: string; rows: DocRow[]; filename?: string;
-}) {
+}
+
+async function buildInvoiceWb(a: InvoiceArgs) {
   await ensureXLSX();
   void a.workOrder; // the template has no work-order slot
   const total = a.rows.reduce((s, it) => s + it.qty * it.unit_price, 0);
@@ -181,5 +183,16 @@ export async function buildInvoiceXlsx(a: {
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws as never, "Sheet1");
+  return wb;
+}
+
+export async function buildInvoiceXlsx(a: InvoiceArgs) {
+  const wb = await buildInvoiceWb(a);
   XLSX.writeFile(wb, a.filename || `invoice_${a.cNumber}_rel${a.relNum}.xlsx`);
+}
+
+// same workbook as raw bytes — for zipping many invoices into one download
+export async function buildInvoiceBytes(a: InvoiceArgs): Promise<Uint8Array> {
+  const wb = await buildInvoiceWb(a);
+  return new Uint8Array(XLSX.write(wb, { type: "array", bookType: "xlsx" }) as ArrayBuffer);
 }

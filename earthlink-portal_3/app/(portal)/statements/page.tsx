@@ -12,7 +12,7 @@ import type { Contract, Release } from "@/lib/types";
 import ContractPicker from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
 import NychaInvoicePrint from "@/components/NychaInvoicePrint";
-import { gatherReleaseDoc, buildInvoiceXlsx, type DocRow } from "@/lib/releaseDoc";
+import { gatherReleaseDoc, buildInvoiceXlsx, buildInvoiceBytes, type DocRow } from "@/lib/releaseDoc";
 import PrintShell from "@/components/PrintShell";
 
 export default function Statements() {
@@ -149,6 +149,47 @@ export default function Statements() {
   const total = rows.reduce((s, r) => s + Number(r.amount), 0);
   const sorted = [...rows].sort((a, b) => (days(b) ?? -1) - (days(a) ?? -1));
 
+  // every outstanding release's invoice, regenerated in the template format,
+  // zipped into one download — for re-issuing paperwork made before the new look
+  const [zipBusy, setZipBusy] = useState(false);
+  const downloadAllInvoices = async () => {
+    if (!contract || sorted.length === 0 || zipBusy) return;
+    setZipBusy(true);
+    try {
+      const files: Record<string, Uint8Array> = {};
+      let done = 0;
+      for (const r of sorted) {
+        const d = await gatherReleaseDoc(sel, r);
+        if (d.rows.length === 0) continue;
+        const bytes = await buildInvoiceBytes({
+          org: org || ({} as Org), cNumber: contract.number, relNum: r.rel_number, workOrder: r.ticket || "",
+          dev: r.location || d.dev, number: `${contract.number}-${r.rel_number}`,
+          date: r.invoice_sent || today, rows: d.rows,
+        });
+        files[`invoice_${contract.number}_rel${r.rel_number}.xlsx`] = bytes;
+        done += 1;
+        flash(`Making invoices… ${done} of ${sorted.length}`);
+      }
+      if (done === 0) { flash("No releases with line items to invoice yet"); setZipBusy(false); return; }
+      const { zipSync } = await import("fflate");
+      const zipped = zipSync(files, { level: 6 });
+      const ab = new ArrayBuffer(zipped.byteLength);
+      new Uint8Array(ab).set(zipped);
+      const blob = new Blob([ab], { type: "application/zip" });
+      const fname = askFileName(`invoices_${contract.number}.zip`);
+      if (fname) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = fname; a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        flash(`${done} invoice${done === 1 ? "" : "s"} downloaded in one zip — all in the template format`);
+      }
+    } catch {
+      flash("Couldn't build the zip — check your signal and try again");
+    }
+    setZipBusy(false);
+  };
+
   const downloadExcel = async () => {
     try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine \u2014 check your signal and try again"); return; }
     if (!contract) return;
@@ -258,9 +299,12 @@ export default function Statements() {
                   </div>
                 ))}
               </div>
-              <div className="mt-3.5 flex gap-2">
+              <div className="mt-3.5 flex flex-wrap gap-2">
                 <button className="btn btn-primary" onClick={() => { setInvPreview(null); setPrintOpen(true); }}>Preview</button>
                 <button className="btn" onClick={downloadExcel}>Excel</button>
+                <button className="btn" onClick={downloadAllInvoices} disabled={zipBusy} title="Every outstanding invoice on this contract, regenerated in the template format, in one zip">
+                  {zipBusy ? "Making invoices…" : `⬇ All invoices (${sorted.length}) zip`}
+                </button>
               </div>
             </>
           )}

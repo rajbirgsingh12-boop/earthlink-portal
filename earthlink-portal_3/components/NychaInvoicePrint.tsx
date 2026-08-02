@@ -67,28 +67,38 @@ export default function NychaInvoicePrint(p: Props) {
               <div className="px-2 py-1">PERIOD FROM <span className="inline-block min-w-[90px] border-b border-ink/40 text-center">{p.periodFrom ? shortDate(p.periodFrom) : " "}</span> TO <span className="inline-block min-w-[90px] border-b border-ink/40 text-center">{p.periodTo ? shortDate(p.periodTo) : " "}</span></div>
             </div>
           </div>
-          {/* description band + items */}
-          <div className="border-y-2 border-ink px-2 py-1 text-center text-[17px] font-bold tracking-wide">DESCRIPTION</div>
-          <div className="min-h-[300px] px-2 py-2">
-            <table className="w-full text-[13px]">
-              <tbody>
-                {p.items.map((it, i) => (
-                  <tr key={i} className="align-top">
-                    <td className="py-0.5 pr-2">{`${it.code}  ${it.description}`.trim()}</td>
-                    <td className="py-0.5 pr-2 text-right font-mono">{it.qty}</td>
-                    <td className="py-0.5 pr-2 text-center font-mono">{it.unit}</td>
-                    <td className="py-0.5 pr-2 text-right font-mono">{fmt(Number(it.unit_price))}</td>
-                    <td className="py-0.5 text-right font-mono">{fmt((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
         </div>
-        {/* boxed total under the sheet, like the template */}
-        <div className="mt-1 flex items-center justify-end gap-3 text-[15px]">
-          <span>TOTAL DOLLAR AMOUNT</span>
-          <span className="min-w-[150px] border-2 border-ink px-2 py-1 text-right font-bold">{fmt(total)}</span>
+        {/* the boxed item table, exactly like the sent invoices */}
+        <table className="mt-4 w-full border-collapse border-2 border-ink text-[13px]">
+          <thead>
+            <tr>
+              {["LINE", "Description", "Quanity", "uom", "unit price", "Amount"].map((h, i) => (
+                <th key={h} className={`border border-ink px-2 py-1 font-bold underline ${i < 2 ? "text-center" : "text-left"}`}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {p.items.map((it, i) => (
+              <tr key={i}>
+                <td className="w-1/4 border border-ink px-2 py-2 text-center font-mono">{it.code}</td>
+                <td className="w-[28%] border border-ink px-2 py-2 text-center">{it.description}</td>
+                <td className="border border-ink px-2 py-2 text-center font-mono">{it.qty}</td>
+                <td className="border border-ink px-2 py-2 text-center">{it.unit}</td>
+                <td className="border border-ink px-2 py-2 text-center font-mono">{(Number(it.unit_price) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                <td className="border border-ink px-2 py-2 text-center font-mono font-bold">{fmt((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</td>
+              </tr>
+            ))}
+            <tr>{Array.from({ length: 6 }).map((_, i) => <td key={i} className="border border-ink px-2 py-3">&nbsp;</td>)}</tr>
+          </tbody>
+        </table>
+        {/* the Total price box, set off to the right like theirs */}
+        <div className="mt-2 flex justify-end">
+          <table className="border-collapse text-[13px]">
+            <tbody><tr>
+              <td className="border border-ink px-6 py-1 text-center font-bold">Total price</td>
+              <td className="min-w-[130px] border border-ink px-3 py-1 text-center font-mono font-bold">{fmt(total)}</td>
+            </tr></tbody>
+          </table>
         </div>
       </div>
       <div className="no-print mx-auto mt-3 flex max-w-4xl justify-end gap-2">

@@ -92,11 +92,6 @@ async function buildInvoiceWb(a: InvoiceArgs) {
   const total = a.rows.reduce((s, it) => s + it.qty * it.unit_price, 0);
   const shortDate = (iso: string) => { const m = (iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${Number(m[2])}/${Number(m[3])}/${m[1].slice(2)}` : iso; };
 
-  // items live in the description area (rows 27-48 = 22 lines in the template);
-  // a longer list stretches the box instead of spilling out of it
-  const extra = Math.max(0, a.rows.length - 22);
-  const totalRow = 49 + extra;
-
   const ws: Record<string, unknown> = {};
   type Style = Record<string, unknown>;
   const put = (coord: string, v: string | number | undefined, s: Style) => {
@@ -119,18 +114,12 @@ async function buildInvoiceWb(a: InvoiceArgs) {
     return s;
   };
 
-  // 1) replay the template - rows at/past the box bottom shift down by `extra`
+  // 1) replay the template header block (rows 1-24) — the line-item area below
+  //    is built fresh as the boxed LINE table the owner's real invoices use
   for (const [coord, tpl] of Object.entries(INVOICE_TPL.cells)) {
     const m = coord.match(/^([A-I])(\d+)$/);
-    if (!m) continue;
-    let r = Number(m[2]);
-    if (extra > 0 && r >= 48) r += extra;
-    put(`${m[1]}${r}`, tpl.v ?? "", styleOf(tpl));
-  }
-  // extra description rows keep the box's side walls
-  for (let r = 48; r < 48 + extra; r++) {
-    put(`B${r}`, "", { font: { name: "Calibri", sz: 16 }, border: { left: { style: "medium", color: { rgb: "000000" } } } });
-    put(`I${r}`, "", { font: { name: "Calibri", sz: 16 }, border: { right: { style: "medium", color: { rgb: "000000" } } } });
+    if (!m || Number(m[2]) > 24) continue;
+    put(coord, tpl.v ?? "", styleOf(tpl));
   }
 
   // 2) fill in this release's numbers (template fonts/borders stay)
@@ -151,35 +140,74 @@ async function buildInvoiceWb(a: InvoiceArgs) {
   withV("I15", (a.org.terms || "").toUpperCase());
   withV("E18", (a.dev || "").toUpperCase());
 
-  // 3) the line items, one per row from 27 down
-  a.rows.forEach((it, i) => {
-    const r = 27 + i;
-    // template borders on these cells (the box walls and the band's top edge) stay
-    const keep = (coord: string): Style => ((ws[coord] as { s?: Style } | undefined)?.s || {});
-    const font14 = { name: "Calibri", sz: 14 };
-    put(`B${r}`, `${it.code}  ${it.description}`.trim().slice(0, 60), { ...keep(`B${r}`), font: font14 });
-    put(`F${r}`, it.qty, { ...keep(`F${r}`), font: font14, alignment: { horizontal: "right" } });
-    put(`G${r}`, it.uom, { ...keep(`G${r}`), font: font14, alignment: { horizontal: "center" } });
-    put(`H${r}`, it.unit_price, { ...keep(`H${r}`), font: font14, alignment: { horizontal: "right" } }).z = "#,##0.00";
-    put(`I${r}`, Math.round(it.qty * it.unit_price * 100) / 100, { ...keep(`I${r}`), font: font14, alignment: { horizontal: "right" } }).z = "#,##0.00";
+  // 3) the boxed item table, exactly like the owner's sent invoices:
+  //    LINE | Description | Quanity | uom | unit price | Amount
+  const K = { rgb: "000000" };
+  const bd = (t?: string, b?: string, l?: string, r2?: string) => ({
+    ...(t ? { top: { style: t, color: K } } : {}), ...(b ? { bottom: { style: b, color: K } } : {}),
+    ...(l ? { left: { style: l, color: K } } : {}), ...(r2 ? { right: { style: r2, color: K } } : {}),
   });
+  const f11 = { name: "Calibri", sz: 11 };
+  const f11b = { ...f11, bold: true };
+  const f11bu = { ...f11, bold: true, underline: true };
+  const mid = { horizontal: "center", vertical: "center" };
+  const merges: { s: { r: number; c: number }; e: { r: number; c: number } }[] = [];
+  const rowsArr: ({ hpt: number } | undefined)[] = [];
+  for (const [r, h] of Object.entries(INVOICE_TPL.rows)) {
+    if (Number(r) <= 24) rowsArr[Number(r) - 1] = { hpt: h };
+  }
+  rowsArr[24] = { hpt: 10 }; // breathing room under the header block
 
-  // 4) the total
-  const totalCell = ws[`I${totalRow}`] as { v?: unknown; t?: string; z?: string } | undefined;
-  if (totalCell) { totalCell.v = Math.round(total * 100) / 100; totalCell.t = "n"; totalCell.z = '"$"#,##0.00'; }
+  const hdr = 26, first = 27;
+  const emptyRow = first + a.rows.length; // the originals keep one blank ruled row
+  const totalRow = emptyRow + 2;
+  // header row (their exact spellings)
+  put(`B${hdr}`, "LINE", { font: f11bu, alignment: mid, border: bd("medium", "thin", "medium", "thin") });
+  put(`C${hdr}`, "Description", { font: f11bu, alignment: mid, border: bd("medium", "thin", "thin") });
+  put(`D${hdr}`, "", { font: f11, border: bd("medium", "thin") });
+  put(`E${hdr}`, "", { font: f11, border: bd("medium", "thin", undefined, "thin") });
+  put(`F${hdr}`, "Quanity ", { font: f11bu, alignment: { vertical: "center" }, border: bd("medium", "thin", "thin", "thin") });
+  put(`G${hdr}`, "uom ", { font: f11bu, alignment: { vertical: "center" }, border: bd("medium", "thin", "thin", "thin") });
+  put(`H${hdr}`, "unit price ", { font: f11bu, alignment: { vertical: "center" }, border: bd("medium", "thin", "thin", "thin") });
+  put(`I${hdr}`, "Amount", { font: f11bu, alignment: { vertical: "center" }, border: bd("medium", "thin", "thin", "medium") });
+  merges.push({ s: { r: hdr - 1, c: 2 }, e: { r: hdr - 1, c: 4 } });
+  rowsArr[hdr - 1] = { hpt: 16 };
+
+  const itemRow = (r: number, it: DocRow | null, last: boolean) => {
+    const bB = last ? "medium" : "thin";
+    put(`B${r}`, it ? it.code : "", { font: f11, alignment: mid, border: bd("thin", bB, "medium", "thin") });
+    put(`C${r}`, it ? it.description : "", { font: f11, alignment: { ...mid, wrapText: true }, border: bd("thin", bB, "thin") });
+    put(`D${r}`, "", { font: f11, border: bd("thin", bB) });
+    put(`E${r}`, "", { font: f11, border: bd("thin", bB, undefined, "thin") });
+    put(`F${r}`, it ? it.qty : "", { font: f11, alignment: mid, border: bd("thin", bB, "thin", "thin") });
+    put(`G${r}`, it ? it.uom : "", { font: f11, alignment: mid, border: bd("thin", bB, "thin", "thin") });
+    const pc = put(`H${r}`, it ? it.unit_price : "", { font: f11, alignment: mid, border: bd("thin", bB, "thin", "thin") });
+    if (it) pc.z = "#,##0.00";
+    const ac = put(`I${r}`, it ? Math.round(it.qty * it.unit_price * 100) / 100 : "", { font: f11b, alignment: mid, border: bd("thin", bB, "thin", "medium") });
+    if (it) ac.z = '"$"#,##0.00';
+    merges.push({ s: { r: r - 1, c: 2 }, e: { r: r - 1, c: 4 } });
+    // rows grow with the wrapped description (~34 characters per line)
+    const lines = it ? Math.max(1, Math.ceil(it.description.length / 34)) : 1;
+    rowsArr[r - 1] = { hpt: Math.max(30, lines * 13 + 12) };
+  };
+  a.rows.forEach((it, i) => itemRow(first + i, it, false));
+  itemRow(emptyRow, null, true);
+
+  // 4) the Total price box, set off to the right like theirs
+  put(`G${totalRow}`, "Total price", { font: f11b, alignment: mid, border: bd("thin", "thin", "thin") });
+  put(`H${totalRow}`, "", { font: f11b, border: bd("thin", "thin", undefined, "thin") });
+  const tc = put(`I${totalRow}`, Math.round(total * 100) / 100, { font: f11b, alignment: mid, border: bd("thin", "thin", "thin", "thin") });
+  tc.z = '"$"#,##0.00';
+  merges.push({ s: { r: totalRow - 1, c: 6 }, e: { r: totalRow - 1, c: 7 } });
+  rowsArr[totalRow - 1] = { hpt: 16 };
+  rowsArr[emptyRow] = { hpt: 8 };
 
   ws["!ref"] = `A1:I${totalRow + 1}`;
   // the writer pads character widths by ~0.83 — compensate so the sheet
   // reopens with the template's exact column widths
   ws["!cols"] = INVOICE_TPL.cols.map((w) => ({ wch: Math.max(1, w - 0.83) }));
-  const rowsArr: ({ hpt: number } | undefined)[] = [];
-  for (const [r, h] of Object.entries(INVOICE_TPL.rows)) {
-    let rr = Number(r);
-    if (extra > 0 && rr >= 48) rr += extra;
-    rowsArr[rr - 1] = { hpt: h };
-  }
-  for (let r = 48; r < 48 + extra; r++) rowsArr[r - 1] = { hpt: 21 };
   ws["!rows"] = rowsArr;
+  ws["!merges"] = merges;
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws as never, "Sheet1");
@@ -231,12 +259,20 @@ export async function buildInvoicePdfBytes(a: InvoiceArgs): Promise<Uint8Array> 
     const s = Math.abs(v % 1) < 1e-9 && !z ? String(v) : v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     return z && z.includes('"$"') ? `$${s}` : s;
   };
+  // merged ranges: text draws once across the span, covered cells keep borders
+  const mergeSpan = new Map<string, number>(); // anchor coord -> end col
+  const mergeCovered = new Set<string>();
+  for (const m of (ws["!merges"] as { s: { r: number; c: number }; e: { r: number; c: number } }[] | undefined) || []) {
+    mergeSpan.set(`${"ABCDEFGHI"[m.s.c]}${m.s.r + 1}`, m.e.c);
+    for (let cc = m.s.c; cc <= m.e.c; cc++) if (cc !== m.s.c) mergeCovered.add(`${"ABCDEFGHI"[cc]}${m.s.r + 1}`);
+  }
   for (let r = 1; r <= endRow; r++) {
     for (let c = 0; c < 9; c++) {
       const coord = `${"ABCDEFGHI"[c]}${r}`;
-      const cell = ws[coord] as { v?: unknown; t?: string; z?: string; s?: { font?: { sz?: number; bold?: boolean }; border?: Record<string, { style?: string }>; alignment?: { horizontal?: string } } } | undefined;
+      const cell = ws[coord] as { v?: unknown; t?: string; z?: string; s?: { font?: { sz?: number; bold?: boolean; underline?: boolean }; border?: Record<string, { style?: string }>; alignment?: { horizontal?: string; wrapText?: boolean } } } | undefined;
       if (!cell) continue;
-      const xL = px(c), xR = px(c + 1), yT = py(rowY[r]), yB = py(rowY[r + 1]);
+      let xL = px(c), xR = px(c + 1);
+      const yT = py(rowY[r]), yB = py(rowY[r + 1]);
       const b = cell.s?.border || {};
       for (const [side, spec] of Object.entries(b)) {
         if (!spec?.style) continue;
@@ -247,16 +283,60 @@ export async function buildInvoicePdfBytes(a: InvoiceArgs): Promise<Uint8Array> 
         if (side === "right") page.drawLine({ start: { x: xR, y: yB }, end: { x: xR, y: yT }, thickness: t, color: black });
       }
       const raw = cell.v;
-      if (raw === undefined || raw === null || raw === "") continue;
+      if (raw === undefined || raw === null || raw === "" || mergeCovered.has(coord)) continue;
+      if (mergeSpan.has(coord)) xR = px(mergeSpan.get(coord)! + 1);
       const text = typeof raw === "number" ? fmtNum(raw, cell.z) : String(raw);
       const font = cell.s?.font?.bold ? helvB : helv;
       // calibri runs a touch narrower than helvetica — keep the fit
-      const size = (cell.s?.font?.sz ?? 16) * k * 0.92;
-      const tw = font.widthOfTextAtSize(text, size);
+      let size = (cell.s?.font?.sz ?? 16) * k * 0.92;
       const al = cell.s?.alignment?.horizontal || (typeof raw === "number" ? "right" : "left");
+      // wrapped cells (the item descriptions) draw as stacked centered lines
+      if (cell.s?.alignment?.wrapText) {
+        const words = text.split(/\s+/).filter(Boolean);
+        const roomW = xR - xL - 6 * k;
+        const lines: string[] = [];
+        let cur = "";
+        for (const w of words) {
+          const nx = cur ? `${cur} ${w}` : w;
+          if (font.widthOfTextAtSize(nx, size) > roomW && cur) { lines.push(cur); cur = w; }
+          else cur = nx;
+        }
+        if (cur) lines.push(cur);
+        const lh = size * 1.18;
+        let ly = (yT + yB) / 2 + (lines.length * lh) / 2 - size * 0.85;
+        for (const ln of lines) {
+          const lw = font.widthOfTextAtSize(ln, size);
+          const lx = al === "left" ? xL + 3 * k : al === "right" ? xR - 3 * k - lw : (xL + xR) / 2 - lw / 2;
+          page.drawText(ln, { x: lx, y: ly, size, font, color: black });
+          ly -= lh;
+        }
+        continue;
+      }
+      // like Excel, text may spill over EMPTY neighbors but never into a
+      // filled cell or past the sheet edge — shrink until it fits its room
+      const occupied = (cc: number) => {
+        const cel = ws[`${"ABCDEFGHI"[cc]}${r}`] as { v?: unknown } | undefined;
+        return !!cel && cel.v !== undefined && cel.v !== null && cel.v !== "";
+      };
+      let room = px(9) - (xL + 3 * k);
+      if (al === "right") {
+        let lo = 0;
+        for (let cc = c - 1; cc >= 0; cc--) if (occupied(cc)) { lo = px(cc + 1); break; }
+        room = xR - 3 * k - lo;
+      } else if (al === "center") {
+        let lo = 0, hi = px(9);
+        for (let cc = c - 1; cc >= 0; cc--) if (occupied(cc)) { lo = px(cc + 1); break; }
+        for (let cc = c + 1; cc < 9; cc++) if (occupied(cc)) { hi = px(cc); break; }
+        room = Math.min((xL + xR) / 2 - lo, hi - (xL + xR) / 2) * 2 - 4 * k;
+      } else {
+        for (let cc = c + 1; cc < 9; cc++) if (occupied(cc)) { room = px(cc) - (xL + 3 * k) - 2 * k; break; }
+      }
+      let tw = font.widthOfTextAtSize(text, size);
+      if (tw > room && room > 0) { size = Math.max(5, (size * room) / tw); tw = font.widthOfTextAtSize(text, size); }
       const tx = al === "right" ? xR - 3 * k - tw : al === "center" ? (xL + xR) / 2 - tw / 2 : xL + 3 * k;
       const ty = yB + ((yT - yB) - size * 0.7) / 2;
       page.drawText(text, { x: tx, y: ty, size, font, color: black });
+      if (cell.s?.font?.underline) page.drawLine({ start: { x: tx, y: ty - 1.6 * k }, end: { x: tx + tw, y: ty - 1.6 * k }, thickness: 0.7 * k, color: black });
     }
   }
   return doc.save();

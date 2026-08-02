@@ -3,7 +3,11 @@
 // items imported from the release PDF as fallback.
 // heavy export engine — loaded only when an invoice xlsx is actually built
 let XLSX!: typeof import("xlsx-js-style");
-const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
+const ensureXLSX = async () => {
+  if (XLSX) return;
+  const m = await import("xlsx-js-style");
+  XLSX = ((m as { default?: typeof import("xlsx-js-style") }).default ?? m) as typeof import("xlsx-js-style");
+};
 import { sb } from "./supabase";
 import { prettyDate, type Org } from "./docs";
 
@@ -71,86 +75,111 @@ export async function gatherReleaseDoc(
   };
 }
 
-// NYCHA "Standard Invoice" — same layout as Earth Link's paper template
-// (Original To / copy to on the left, FROM on the right, contract-release-
-// development-period block, item table), styled like the SOS export.
+// NYCHA "Standard Invoice" — replays the owner's own Excel template cell by
+// cell (captured in lib/invoiceTemplateSpec.ts) and fills in the release's
+// numbers, so every invoice looks exactly like the one they've always sent.
+import { INVOICE_TPL, type TplCell } from "./invoiceTemplateSpec";
+import { COMPANY } from "./company";
+
 export async function buildInvoiceXlsx(a: {
   org: Org; cNumber: string; relNum: string; workOrder: string; dev: string;
   number: string; date: string; rows: DocRow[]; filename?: string;
 }) {
   await ensureXLSX();
+  void a.workOrder; // the template has no work-order slot
   const total = a.rows.reduce((s, it) => s + it.qty * it.unit_price, 0);
-  // never numify values with leading zeros — NYCHA item codes like 062001351
-  // must keep their zero on the form
-  const asNum = (s: string) => (/^[1-9]\d*$/.test(s) ? Number(s) : s);
-  const aoa: (string | number)[][] = [];
-  aoa.push(["Standard Invoice"]);                                                               // r0
-  aoa.push([`Date: ${prettyDate(a.date)}`, "", "", "", `Invoice # ${a.number}`]);               // r1
-  aoa.push([]);                                                                                 // r2
-  aoa.push(["Original To:", "", "", "", "From:"]);                                              // r3
-  aoa.push(["NEW YORK CITY HOUSING AUTHORITY", "", "", "", `VENDOR NAME: ${(a.org.company || "").toUpperCase()}`]);
-  aoa.push(["ACCOUNTS PAYABLE", "", "", "", `ADDRESS: ${[a.org.address1, a.org.address2].filter(Boolean).join(", ")}`]);
-  aoa.push(["P.O. BOX 3636", "", "", "", `PHONE: ${a.org.phone || ""}${a.org.email ? ` · ${a.org.email}` : ""}`]);
-  aoa.push(["CHURCH STREET STATION", "", "", "", a.org.license ? `LICENSE: ${a.org.license}` : ""]);
-  aoa.push(["NEW YORK, NY 10008"]);                                                             // r8
-  aoa.push([]);                                                                                 // r9
-  aoa.push(["Copy To:", "", "", "", "Contract:", asNum(a.cNumber), "Release:", asNum(a.relNum)]);       // r10
-  aoa.push(["New York City Housing Authority", "", "", "", "Development:", a.dev]);             // r11
-  aoa.push(["90 CHURCH STREET", "", "", "", "Work order:", a.workOrder || ""]);                 // r12
-  aoa.push(["6TH FLOOR, NEW YORK, NY 10008", "", "", "", "Period from:", "", "Period to:", ""]); // r13
-  aoa.push(["ATTENTION: BOROUGH PAYMENT UNIT"]);                                                // r14
-  aoa.push([]);                                                                                 // r15
-  const headerRow = aoa.length;
-  aoa.push(["Line", "Item", "Category", "Description", "UOM", "Quantity Authorized", "Price", "Total Cost"]);
-  a.rows.forEach((it) => aoa.push([it.line, asNum(it.code), it.category, it.description, it.uom, it.qty, it.unit_price, it.qty * it.unit_price]));
-  const totalRow = aoa.length;
-  aoa.push(["", "", "", "", "", "Total", "", total]);
-  aoa.push([]);
-  aoa.push(["Mail to: NYCHA Disbursements, P.O. Box 3636, New York, NY 10008-3636 · Questions: Disbursements 212-306-6500"]);
+  const shortDate = (iso: string) => { const m = (iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${Number(m[2])}/${Number(m[3])}/${m[1].slice(2)}` : iso; };
 
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws["!cols"] = [{ wch: 12 }, { wch: 15 }, { wch: 38 }, { wch: 90 }, { wch: 18 }, { wch: 16 }, { wch: 14 }, { wch: 18 }];
-  ws["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: 7 } },
-    { s: { r: 1, c: 0 }, e: { r: 1, c: 2 } },                            // Date: … spans A:C
-    { s: { r: 1, c: 4 }, e: { r: 1, c: 7 } },                            // Invoice # … spans E:H
-    ...[4, 5, 6, 7].map((r) => ({ s: { r, c: 4 }, e: { r, c: 7 } })),   // FROM block values span E:H
-    { s: { r: 11, c: 5 }, e: { r: 11, c: 7 } },                          // development value
-    { s: { r: 12, c: 5 }, e: { r: 12, c: 7 } },                          // work order value
-    { s: { r: aoa.length - 1, c: 0 }, e: { r: aoa.length - 1, c: 7 } },
-  ];
-  const thin = { style: "thin", color: { rgb: "000000" } };
-  const box = { top: thin, bottom: thin, left: thin, right: thin };
-  const shade = { patternType: "solid", fgColor: { rgb: "E8E4DA" } };
-  const cellAt = (r: number, c: number) => ws[XLSX.utils.encode_cell({ r, c })] || (ws[XLSX.utils.encode_cell({ r, c })] = { t: "s", v: "" });
-  cellAt(0, 0).s = { font: { bold: true, sz: 14 }, alignment: { horizontal: "center", vertical: "center" }, fill: shade, border: { top: { style: "medium", color: { rgb: "000000" } }, bottom: thin, left: thin, right: thin } };
-  // Date / Invoice # line
-  cellAt(1, 0).s = { font: { bold: true } };
-  cellAt(1, 4).s = { font: { bold: true }, alignment: { horizontal: "right" } };
-  // section labels
-  for (const [r, c] of [[3, 0], [3, 4], [10, 0], [14, 0]] as [number, number][]) cellAt(r, c).s = { font: { bold: true }, fill: shade, border: box };
-  // contract / release / development / work order / period labels + boxed values
-  for (const [r, c] of [[10, 4], [10, 6], [11, 4], [12, 4], [13, 4], [13, 6]] as [number, number][]) cellAt(r, c).s = { font: { bold: true }, fill: shade, border: box };
-  for (const [r, c] of [[10, 5], [10, 7], [11, 5], [12, 5], [13, 5], [13, 7]] as [number, number][]) cellAt(r, c).s = { border: box, alignment: { horizontal: "left" } };
-  for (let r = headerRow; r <= totalRow; r++) {
-    for (let c = 0; c < 8; c++) {
-      const cell = cellAt(r, c);
-      const s: Record<string, unknown> = { border: box, alignment: { vertical: "center", wrapText: c === 3, horizontal: r === headerRow ? "center" : c >= 4 ? "right" : "left" } };
-      if (r === headerRow || r === totalRow) s.font = { bold: true };
-      if (r === headerRow) s.fill = shade;
-      cell.s = s;
-      if (r > headerRow && (c === 6 || c === 7) && typeof cell.v === "number") cell.z = "#,##0.00";
+  // items live in the description area (rows 27-48 = 22 lines in the template);
+  // a longer list stretches the box instead of spilling out of it
+  const extra = Math.max(0, a.rows.length - 22);
+  const totalRow = 49 + extra;
+
+  const ws: Record<string, unknown> = {};
+  type Style = Record<string, unknown>;
+  const put = (coord: string, v: string | number | undefined, s: Style) => {
+    const cell: Record<string, unknown> = { t: typeof v === "number" ? "n" : "s", v: v ?? "", s };
+    ws[coord] = cell;
+    return cell as { v?: unknown; t?: string; z?: string; s?: Style };
+  };
+  const styleOf = (t: TplCell): Style => {
+    const s: Style = {};
+    s.font = t.f ? { name: t.f.n || "Calibri", sz: t.f.sz, bold: !!t.f.b } : { name: "Calibri", sz: 16 };
+    if (t.brd) {
+      const b: Record<string, unknown> = {};
+      for (const [k, st] of Object.entries(t.brd)) {
+        const side = k === "t" ? "top" : k === "b" ? "bottom" : k === "l" ? "left" : "right";
+        b[side] = { style: st, color: { rgb: "000000" } };
+      }
+      s.border = b;
     }
+    if (t.al) s.alignment = { ...(t.al.h ? { horizontal: t.al.h } : {}), ...(t.al.v ? { vertical: t.al.v } : {}) };
+    return s;
+  };
+
+  // 1) replay the template - rows at/past the box bottom shift down by `extra`
+  for (const [coord, tpl] of Object.entries(INVOICE_TPL.cells)) {
+    const m = coord.match(/^([A-I])(\d+)$/);
+    if (!m) continue;
+    let r = Number(m[2]);
+    if (extra > 0 && r >= 48) r += extra;
+    put(`${m[1]}${r}`, tpl.v ?? "", styleOf(tpl));
   }
-  ws["!rows"] = [];
-  ws["!rows"][0] = { hpt: 26 };
-  ws["!rows"][headerRow] = { hpt: 24 };
-  ws["!rows"][totalRow] = { hpt: 22 };
-  for (const [r, c] of [[10, 4], [10, 5], [10, 6], [10, 7], [11, 4], [11, 5], [12, 4], [12, 5], [13, 4], [13, 5], [13, 6], [13, 7]] as [number, number][]) {
-    const cell = cellAt(r, c);
-    cell.s = { ...(cell.s as Record<string, unknown> || {}), alignment: { ...((cell.s as { alignment?: object })?.alignment || {}), vertical: "center" } };
+  // extra description rows keep the box's side walls
+  for (let r = 48; r < 48 + extra; r++) {
+    put(`B${r}`, "", { font: { name: "Calibri", sz: 16 }, border: { left: { style: "medium", color: { rgb: "000000" } } } });
+    put(`I${r}`, "", { font: { name: "Calibri", sz: 16 }, border: { right: { style: "medium", color: { rgb: "000000" } } } });
   }
+
+  // 2) fill in this release's numbers (template fonts/borders stay)
+  const withV = (coord: string, v: string | number) => {
+    const cell = ws[coord] as { v?: unknown; t?: string } | undefined;
+    if (cell) { cell.v = v; cell.t = typeof v === "number" ? "n" : "s"; }
+    else put(coord, v, { font: { name: "Calibri", sz: 16 } });
+  };
+  const asNum = (s: string) => (/^[1-9]\d*$/.test(s) ? Number(s) : s);
+  withV("B5", `DATE: ${shortDate(a.date)}`);
+  withV("E5", `INVOICE #: ${a.number}`);
+  withV("E8", `VENDOR NAME:  ${(a.org.company || COMPANY.legalName).toUpperCase()}`);
+  withV("E10", `ADDRESS: ${[a.org.address1, a.org.address2].filter(Boolean).join(" ").toUpperCase()}`);
+  withV("E13", `PHONE # ${a.org.phone || COMPANY.phone}`);
+  withV("H13", `FAX # ${COMPANY.fax}`);
+  withV("E15", asNum(a.cNumber));
+  withV("G15", asNum(a.relNum));
+  withV("I15", (a.org.terms || "").toUpperCase());
+  withV("E18", (a.dev || "").toUpperCase());
+
+  // 3) the line items, one per row from 27 down
+  a.rows.forEach((it, i) => {
+    const r = 27 + i;
+    // template borders on these cells (the box walls and the band's top edge) stay
+    const keep = (coord: string): Style => ((ws[coord] as { s?: Style } | undefined)?.s || {});
+    const font14 = { name: "Calibri", sz: 14 };
+    put(`B${r}`, `${it.code}  ${it.description}`.trim().slice(0, 60), { ...keep(`B${r}`), font: font14 });
+    put(`F${r}`, it.qty, { ...keep(`F${r}`), font: font14, alignment: { horizontal: "right" } });
+    put(`G${r}`, it.uom, { ...keep(`G${r}`), font: font14, alignment: { horizontal: "center" } });
+    put(`H${r}`, it.unit_price, { ...keep(`H${r}`), font: font14, alignment: { horizontal: "right" } }).z = "#,##0.00";
+    put(`I${r}`, Math.round(it.qty * it.unit_price * 100) / 100, { ...keep(`I${r}`), font: font14, alignment: { horizontal: "right" } }).z = "#,##0.00";
+  });
+
+  // 4) the total
+  const totalCell = ws[`I${totalRow}`] as { v?: unknown; t?: string; z?: string } | undefined;
+  if (totalCell) { totalCell.v = Math.round(total * 100) / 100; totalCell.t = "n"; totalCell.z = '"$"#,##0.00'; }
+
+  ws["!ref"] = `A1:I${totalRow + 1}`;
+  // the writer pads character widths by ~0.83 — compensate so the sheet
+  // reopens with the template's exact column widths
+  ws["!cols"] = INVOICE_TPL.cols.map((w) => ({ wch: Math.max(1, w - 0.83) }));
+  const rowsArr: ({ hpt: number } | undefined)[] = [];
+  for (const [r, h] of Object.entries(INVOICE_TPL.rows)) {
+    let rr = Number(r);
+    if (extra > 0 && rr >= 48) rr += extra;
+    rowsArr[rr - 1] = { hpt: h };
+  }
+  for (let r = 48; r < 48 + extra; r++) rowsArr[r - 1] = { hpt: 21 };
+  ws["!rows"] = rowsArr;
+
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Invoice");
+  XLSX.utils.book_append_sheet(wb, ws as never, "Sheet1");
   XLSX.writeFile(wb, a.filename || `invoice_${a.cNumber}_rel${a.relNum}.xlsx`);
 }

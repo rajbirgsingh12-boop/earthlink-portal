@@ -17,6 +17,8 @@ import ContractPicker from "@/components/ContractPicker";
 import NychaInvoicePrint from "@/components/NychaInvoicePrint";
 import { gatherReleaseDoc, buildInvoiceXlsx, type DocRow } from "@/lib/releaseDoc";
 import PrintShell from "@/components/PrintShell";
+import { downloadSosPdf, blankSosLine, type SosData, type SosLine } from "@/lib/sosForm";
+import { COMPANY } from "@/lib/company";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { planFolder, isReleaseFileName, parseReleaseFileName, contractKey, type FileMatch } from "@/lib/matchRelease";
@@ -157,7 +159,7 @@ export default function Releases() {
   const photoInputRef = useRef<HTMLInputElement>(null);
   const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
   const isImg = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n);
-  const [sosView, setSosView] = useState<{ relNum: string; ticket: string; cNumber: string; dev: string; addr: string; stair: string; apt: string; rows: SosRow[]; total: number } | null>(null);
+  const [sosEdit, setSosEdit] = useState<{ fileBase: string; data: SosData } | null>(null);
   const [sosReady, setSosReady] = useState<Set<string>>(new Set());
   const [stageData, setStageData] = useState<{ items: Set<string>; walks: Set<string> }>({ items: new Set(), walks: new Set() });
   const [invPreview, setInvPreview] = useState<{ number: string; date: string; cNumber: string; relNum: string; dev: string; workOrder: string; rows: DocRow[] } | null>(null);
@@ -388,7 +390,7 @@ export default function Releases() {
       // toggle() flashes on failure and knows the legacy-column fallback
       await toggle(r, { invoice_sent: today });
     }
-    setSosView(null); // one preview at a time — two would print as one concatenated PDF
+    setSosEdit(null); // one preview at a time — two would print as one concatenated PDF
     setInvPreview({ number: `${c?.number || ""}-${r.rel_number}`, date: today, cNumber: c?.number || "", relNum: r.rel_number, dev: d.dev, workOrder: r.ticket || "", rows: d.rows });
   };
 
@@ -442,122 +444,42 @@ export default function Releases() {
     setBusy(false);
     if (rows.length === 0) { flash("No line items for this release — make a walk sheet with quantities for it, or import the release PDF"); return; }
     setInvPreview(null); // one preview at a time
-    setSosView({
-      relNum: r.rel_number, ticket: r.ticket || "", cNumber: c?.number || "",
-      dev: r.location || prop?.development || "", addr: r.address || r.buildings || prop?.address || "",
-      stair: prop?.stairhall || "", apt: prop?.apt || "",
-      rows, total: rows.reduce((s, it) => s + it.qty * it.unit_price, 0),
+    const money2 = (n: number) => (Math.round(n * 100) / 100).toFixed(2);
+    const shortDate = (iso: string) => { const m = (iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${Number(m[2])}/${Number(m[3])}/${m[1].slice(2)}` : ""; };
+    // the official form fits 7 labor lines — extras combine into the last one
+    const labor: SosLine[] = rows.slice(0, rows.length > 7 ? 6 : 7).map((it) => ({
+      describe: it.code || it.description.slice(0, 30), qty: String(it.qty), uom: it.uom || "",
+      rate: money2(it.unit_price), total: money2(it.qty * it.unit_price),
+    }));
+    if (rows.length > 7) {
+      const rest = rows.slice(6);
+      labor.push({ describe: "ADDITIONAL CONTRACT LINE ITEMS", qty: "", uom: "", rate: "", total: money2(rest.reduce((s, it) => s + it.qty * it.unit_price, 0)) });
+    }
+    while (labor.length < 7) labor.push(blankSosLine());
+    const sosTotal = rows.reduce((s, it) => s + it.qty * it.unit_price, 0);
+    void prop;
+    setSosEdit({
+      fileBase: `SOS_${c?.number || ""}_rel${r.rel_number}`,
+      data: {
+        vendorName: (org?.company || COMPANY.legalName).toUpperCase(),
+        street: (org?.address1 || COMPANY.street).toUpperCase(),
+        cityStateZip: (org?.address2 || `${COMPANY.city} NY ${COMPANY.zip}`).toUpperCase().replace(/,/g, ""),
+        phone: org?.phone || COMPANY.phone,
+        email: (org?.email || COMPANY.email).toUpperCase(),
+        supplierNo: COMPANY.supplierNo, fedTaxId: COMPANY.fedTaxId,
+        poRelease: `${c?.number || ""}-${r.rel_number}`,
+        workOrder: r.ticket || "",
+        dateOfServices: shortDate(r.date_completed || ""),
+        description: "",
+        labor,
+        materials: [blankSosLine(), blankSosLine(), blankSosLine(), blankSosLine(), blankSosLine()],
+        overhead: "", profit: "", totalCost: money2(sosTotal),
+        vendorNameTitle: `${COMPANY.principal}    ${COMPANY.principalTitle}`,
+        dateSigned: shortDate(localISO()),
+      },
     });
   };
 
-  const downloadSOS = async () => {
-    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine \u2014 check your signal and try again"); return; }
-    if (!sosView) return;
-    const { relNum, ticket, cNumber, dev, addr, stair, apt, rows, total } = sosView;
-    const today = prettyDate(localISO());
-
-    const aoa: (string | number)[][] = [];
-    const merges: { s: { r: number; c: number }; e: { r: number; c: number } }[] = [];
-    const wide = (row: number, from = 0, to = 8) => merges.push({ s: { r: row, c: from }, e: { r: row, c: to } });
-    aoa.push(["NYCHA STATEMENT OF SERVICE"]); wide(0);
-    aoa.push(["Vendor:", "", (org?.company || "").toUpperCase()]);
-    aoa.push(["Address:", "", [org?.address1, org?.address2].filter(Boolean).join(", "), "", "", "Date:", today]);
-    aoa.push(["Telephone:", "", org?.phone || ""]);
-    aoa.push(["Email:", "", org?.email || ""]);
-    aoa.push([]);
-    aoa.push(["PO:", "", /^[1-9]\d*$/.test(cNumber) ? Number(cNumber) : cNumber]);
-    aoa.push(["Work order:", "", ticket]);
-    aoa.push(["Release:", "", /^[1-9]\d*$/.test(relNum) ? Number(relNum) : relNum]);
-    aoa.push(["Development:", "", dev]);
-    aoa.push(["Stairhall:", "", stair]);
-    aoa.push(["Apt:", "", apt]);
-    aoa.push(["Address:", "", addr]);
-    aoa.push([]);
-    const headerRow = aoa.length;
-    aoa.push(["Line", "Item", "Category", "Description", "UOM", "Quantity Authorized", "Price", "Total Cost"]);
-    // keep item codes as text — NYCHA codes carry a leading zero (062001351)
-    rows.forEach((it) => aoa.push([it.line, /^[1-9]\d*$/.test(it.code) ? Number(it.code) : it.code, it.category, it.description, it.uom, it.qty, it.unit_price, it.qty * it.unit_price]));
-    const totalRow = aoa.length;
-    aoa.push(["", "", "", "", "", "Total", "", total]);
-    aoa.push([]);
-    const matHeader = aoa.length;
-    aoa.push(["ITEMIZED LIST OF MATERIALS", "", "", "", "QTY", "UOM", "UNIT PRICE", "Cost Plus 10% Markup", "TOTAL COST"]);
-    for (let i = 1; i <= 10; i++) aoa.push([i]);
-    const matTotal = aoa.length;
-    aoa.push(["", "Total"]);
-    aoa.push(["", "Overhead", "$", "(not required for blanket agreements)"]);
-    aoa.push(["", "Profit", "$", "(not required for blanket agreements)"]);
-    aoa.push(["", "Total cost", "$"]);
-    aoa.push([]);
-    const ack1 = aoa.length;
-    aoa.push(["I acknowledge and understand that offering, giving and/or accepting bribes, gratuities and/or gifts is a criminal offense under federal and New York state law."]); wide(ack1);
-    const vendorSig = aoa.length;
-    aoa.push(["VENDOR SIGNATURE", "", "", "", "", "Date:"]);
-    aoa.push([]);
-    const internal = aoa.length;
-    aoa.push(["For NYCHA Internal Use Only:"]); wide(internal);
-    const cert = aoa.length;
-    aoa.push(["I hereby certify that the above-described work, labor, material, equipment, and/or services as referenced in accordance with the above referenced Purchase Order has been completed and inspected by me to my satisfaction."]); wide(cert);
-    const ack2 = aoa.length;
-    aoa.push(["I acknowledge and understand that offering, giving and/or accepting bribes, gratuities and/or gifts is a criminal offense under federal and New York state law."]); wide(ack2);
-    const inspSig = aoa.length;
-    aoa.push(["Inspected by Name and title", "", "", "", "Signature"]);
-    const cmSig = aoa.length;
-    aoa.push(["Contract Manager Signature"]);
-    aoa.push(["WO #", "", "", "Date:", "receipt"]);
-    aoa.push(["", "", "", "", "(for filing reference — fill in after the document is uploaded)"]);
-    aoa.push([]);
-    aoa.push(["NYCHA 042.726 (Rev. 04/05/24) v2"]);
-
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 9 }, { wch: 15 }, { wch: 38 }, { wch: 90 }, { wch: 16 }, { wch: 14 }, { wch: 14 }, { wch: 18 }, { wch: 16 }];
-    ws["!merges"] = merges;
-    const thin = { style: "thin", color: { rgb: "000000" } };
-    const box = { top: thin, bottom: thin, left: thin, right: thin };
-    const shade = { patternType: "solid", fgColor: { rgb: "E8E4DA" } };
-    const cellAt = (row: number, col: number) => ws[XLSX.utils.encode_cell({ r: row, c: col })];
-    const ensure = (row: number, col: number) => cellAt(row, col) || (ws[XLSX.utils.encode_cell({ r: row, c: col })] = { t: "s", v: "" });
-    const style = (row: number, col: number, s: Record<string, unknown>) => { const cell = cellAt(row, col); if (cell) cell.s = s; };
-    style(0, 0, { font: { bold: true, sz: 14 }, alignment: { horizontal: "center", vertical: "center" }, fill: shade, border: { top: { style: "medium", color: { rgb: "000000" } }, bottom: thin, left: thin, right: thin } });
-    // bordered vendor + job header blocks (labels shaded bold, values boxed)
-    for (const row of [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12]) {
-      for (const col of [0, 1]) { ensure(row, col); style(row, col, { font: { bold: true }, fill: shade, border: box, alignment: { vertical: "center" } }); }
-      ensure(row, 2); style(row, 2, { border: box, alignment: { vertical: "center" } });
-      if (row === 2) { style(row, 5, { font: { bold: true }, fill: shade, border: box, alignment: { vertical: "center" } }); ensure(row, 6); style(row, 6, { border: box, alignment: { horizontal: "center", vertical: "center" } }); }
-    }
-    for (let row = headerRow; row <= totalRow; row++) {
-      for (let col = 0; col < 8; col++) {
-        const cell = ensure(row, col);
-        const s: Record<string, unknown> = { border: box, alignment: { vertical: "center", wrapText: col === 3, horizontal: row === headerRow ? "center" : col >= 4 ? "right" : "left" } };
-        if (row === headerRow || row === totalRow) s.font = { bold: true };
-        if (row === headerRow) s.fill = shade;
-        cell.s = s;
-        if (row > headerRow && (col === 6 || col === 7) && typeof cell.v === "number") cell.z = "#,##0.00";
-      }
-    }
-    for (let row = matHeader; row <= matTotal; row++) {
-      for (let col = 0; col < 9; col++) {
-        const cell = cellAt(row, col) || (ws[XLSX.utils.encode_cell({ r: row, c: col })] = { t: "s", v: "" });
-        cell.s = { border: box, ...(row === matHeader ? { font: { bold: true }, fill: shade } : {}), ...(row === matTotal ? { font: { bold: true } } : {}) };
-      }
-    }
-    for (const [row, from, to] of [[vendorSig, 1, 4], [vendorSig, 6, 7], [inspSig, 1, 3], [inspSig, 5, 7], [cmSig, 2, 5]] as [number, number, number][]) {
-      for (let col = from; col <= to; col++) {
-        const cell = cellAt(row, col) || (ws[XLSX.utils.encode_cell({ r: row, c: col })] = { t: "s", v: "" });
-        cell.s = { border: { bottom: thin } };
-      }
-    }
-    for (const row of [vendorSig, inspSig, cmSig, internal]) style(row, 0, { font: { bold: true } });
-    for (const row of [ack1, cert, ack2]) style(row, 0, { font: { italic: true }, alignment: { wrapText: true, vertical: "top" } });
-    ws["!rows"] = []; ws["!rows"][ack1] = { hpt: 26 }; ws["!rows"][cert] = { hpt: 26 }; ws["!rows"][ack2] = { hpt: 26 };
-    ws["!rows"][0] = { hpt: 26 }; ws["!rows"][headerRow] = { hpt: 24 }; ws["!rows"][totalRow] = { hpt: 22 }; ws["!rows"][matHeader] = { hpt: 22 };
-    for (const row of [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12]) ws["!rows"][row] = { hpt: 19 };
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
-    const fname = askFileName(`SOS_${cNumber}_rel${relNum}.xlsx`);
-    if (!fname) return;
-    XLSX.writeFile(wb, fname);
-  };
 
   // ---------- line-item editor ----------
   const openItems = async (r: Release) => {
@@ -2315,69 +2237,70 @@ export default function Releases() {
           close={() => setInvPreview(null)} />
       )}
 
-      {sosView && (
-        <PrintShell>
-        <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
-          <div className="printable mx-auto max-w-4xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
-            <div className="border-2 border-ink bg-paper p-2 text-center font-display text-xl font-bold uppercase">NYCHA Statement of Service</div>
-            <div className="my-4 grid grid-cols-2 gap-x-8 gap-y-1.5 border border-rulesoft p-3 text-[13px]">
-              {([["Vendor", (org?.company || "").toUpperCase()], ["Date", prettyDate(localISO())],
-                ["Address", [org?.address1, org?.address2].filter(Boolean).join(", ")], ["PO", sosView.cNumber],
-                ["Telephone", org?.phone || ""], ["Work order", sosView.ticket], ["Email", org?.email || ""], ["Release", sosView.relNum],
-                ["Development", sosView.dev], ["Stairhall", sosView.stair], ["Apt", sosView.apt], ["Job address", sosView.addr]] as [string, string][]).map(([l, v]) => (
-                <div key={l} className="flex gap-2 border-b border-rulesoft py-0.5"><span className="w-28 shrink-0 text-[11px] font-semibold uppercase tracking-wider text-inksoft">{l}</span><span>{v || "—"}</span></div>
-              ))}
+      {sosEdit && (() => {
+        const d = sosEdit.data;
+        const set = (patch: Partial<SosData>) => setSosEdit({ ...sosEdit, data: { ...d, ...patch } });
+        const setL = (list: "labor" | "materials", i: number, k: keyof SosLine, v: string) => {
+          set({ [list]: d[list].map((x, y) => (y === i ? { ...x, [k]: v } : x)) } as Partial<SosData>);
+        };
+        const lineTable = (list: "labor" | "materials", title: string, note: string) => (
+          <div className="mt-3">
+            <div className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">{title}</div>
+            {note && <div className="mb-1 text-[10px] italic text-inksoft">{note}</div>}
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse" style={{ minWidth: 520 }}>
+                <thead><tr className="text-left text-[10px] uppercase tracking-widest text-inksoft">
+                  <th className="p-1">Description</th><th className="p-1">Qty</th><th className="p-1">UOM</th><th className="p-1">Unit price/rate</th><th className="p-1">Total line cost</th></tr></thead>
+                <tbody>
+                  {d[list].map((l, i) => (
+                    <tr key={i}>
+                      <td className="p-0.5"><input className="field px-2 py-1.5 text-[13px]" value={l.describe} onChange={(e) => setL(list, i, "describe", e.target.value)} /></td>
+                      <td className="p-0.5"><input className="field w-16 px-1.5 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" value={l.qty} onChange={(e) => setL(list, i, "qty", e.target.value)} /></td>
+                      <td className="p-0.5"><input className="field w-16 px-1.5 py-1.5 text-center font-mono text-[13px]" value={l.uom} onChange={(e) => setL(list, i, "uom", e.target.value)} /></td>
+                      <td className="p-0.5"><input className="field w-24 px-1.5 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" value={l.rate} onChange={(e) => setL(list, i, "rate", e.target.value)} /></td>
+                      <td className="p-0.5"><input className="field w-24 px-1.5 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" value={l.total} onChange={(e) => setL(list, i, "total", e.target.value)} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-            <table className="w-full border-collapse border border-ink text-[12px]">
-              <thead><tr className="bg-paper text-left font-display text-[10px] uppercase tracking-widest">
-                <th className="border border-ink p-1.5">Line</th><th className="border border-ink p-1.5">Item</th><th className="border border-ink p-1.5">Category</th>
-                <th className="border border-ink p-1.5">Description</th><th className="border border-ink p-1.5">UOM</th>
-                <th className="border border-ink p-1.5 text-right">Qty</th><th className="border border-ink p-1.5 text-right">Price</th><th className="border border-ink p-1.5 text-right">Total</th>
-              </tr></thead>
-              <tbody>
-                {sosView.rows.map((it, i) => (
-                  <tr key={i} className="align-top">
-                    <td className="border border-rulesoft p-1.5 font-mono">{it.line}</td>
-                    <td className="border border-rulesoft p-1.5 font-mono">{it.code}</td>
-                    <td className="border border-rulesoft p-1.5 text-[11px]">{it.category}</td>
-                    <td className="border border-rulesoft p-1.5">{it.description}</td>
-                    <td className="border border-rulesoft p-1.5 font-mono text-[11px]">{it.uom}</td>
-                    <td className="border border-rulesoft p-1.5 text-right font-mono">{it.qty}</td>
-                    <td className="border border-rulesoft p-1.5 text-right font-mono">{fmt(it.unit_price)}</td>
-                    <td className="border border-rulesoft p-1.5 text-right font-mono font-semibold">{fmt(it.qty * it.unit_price)}</td>
-                  </tr>
+          </div>
+        );
+        return (
+          <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
+            <div className="mx-auto max-w-3xl rounded-sm border-t-4 border-ink bg-white p-5 text-ink">
+              <div className="font-display text-lg font-bold uppercase">NYCHA Statement of Services</div>
+              <div className="mb-3 text-[12px] text-inksoft">This fills the official NYCHA form (042.726) exactly as filed — check the numbers, describe the work, download, sign, send.</div>
+              <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+                {([["poRelease", "PO Number / Release #"], ["workOrder", "Work Order #"], ["dateOfServices", "Date of services (M/D/YY)"]] as [keyof SosData, string][]).map(([k, l]) => (
+                  <label key={k} className="block"><span className="text-[10px] uppercase tracking-widest text-inksoft">{l}</span>
+                    <input className="field px-2 py-2 text-sm" value={String(d[k] ?? "")} onChange={(e) => set({ [k]: e.target.value } as Partial<SosData>)} /></label>
                 ))}
-                <tr><td colSpan={7} className="border border-ink p-1.5 text-right font-display font-bold uppercase">Total</td>
-                  <td className="border border-ink p-1.5 text-right font-mono text-base font-bold">{fmt(sosView.total)}</td></tr>
-              </tbody>
-            </table>
-            <div className="mt-4 text-[11px] italic text-inksoft">
-              I acknowledge and understand that offering, giving and/or accepting bribes, gratuities and/or gifts is a criminal offense under federal and New York state law.
-            </div>
-            <div className="mt-6 grid grid-cols-2 gap-10 text-[12px]">
-              <div><div className="border-t border-ink pt-1 font-semibold">Vendor signature</div></div>
-              <div><div className="border-t border-ink pt-1">Date</div></div>
-            </div>
-            <div className="mt-5 border-t-2 border-ink pt-2 text-[12px]">
-              <div className="font-semibold">For NYCHA Internal Use Only:</div>
-              <div className="mt-1 text-[11px] italic text-inksoft">I hereby certify that the above-described work, labor, material, equipment, and/or services as referenced in accordance with the above referenced Purchase Order has been completed and inspected by me to my satisfaction.</div>
-              <div className="mt-5 grid grid-cols-2 gap-10">
-                <div><div className="border-t border-ink pt-1">Inspected by — name and title</div></div>
-                <div><div className="border-t border-ink pt-1">Signature</div></div>
-                <div><div className="border-t border-ink pt-1">Contract Manager signature</div></div>
-                <div><div className="border-t border-ink pt-1">WO # / Date</div></div>
+              </div>
+              <label className="mt-2 block"><span className="text-[10px] uppercase tracking-widest text-inksoft">Services performed — describe the work</span>
+                <textarea className="field min-h-[70px] px-2 py-2 text-sm" placeholder="e.g. Repair apartment and basement doors and all related accessories"
+                  value={d.description} onChange={(e) => set({ description: e.target.value })} /></label>
+              {lineTable("labor", "Itemized labor (include all titles used)", "Prefilled from this release's contract line items — the form fits 7 lines.")}
+              {lineTable("materials", "Itemized list of materials", "")}
+              <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-3">
+                {([["overhead", "Overhead $"], ["profit", "Profit $"], ["totalCost", "Total cost $"], ["vendorNameTitle", "Vendor name & title"], ["dateSigned", "Date signed (M/D/YY)"]] as [keyof SosData, string][]).map(([k, l]) => (
+                  <label key={k} className="block"><span className="text-[10px] uppercase tracking-widest text-inksoft">{l}</span>
+                    <input className="field px-2 py-2 text-sm" value={String(d[k] ?? "")} onChange={(e) => set({ [k]: e.target.value } as Partial<SosData>)} /></label>
+                ))}
+              </div>
+              <div className="mt-4 flex flex-wrap justify-end gap-2">
+                <button className="btn btn-primary" onClick={async () => {
+                  const fname = askFileName(`${sosEdit.fileBase}.pdf`);
+                  if (!fname) return;
+                  try { await downloadSosPdf(d, fname); flash("Official SOS form downloaded — ready to sign and send"); }
+                  catch { flash("Couldn't build the form — check your signal and try again"); }
+                }}>⬇ Download SOS (official form)</button>
+                <button className="btn btn-ghost" onClick={() => setSosEdit(null)}>Close</button>
               </div>
             </div>
-            <div className="mt-4 text-[10px] text-inksoft">NYCHA 042.726 (Rev. 04/05/24) v2 · the Excel version includes the Itemized List of Materials section to fill in</div>
           </div>
-          <div className="no-print mx-auto mt-3 flex max-w-4xl justify-end gap-2">
-            <button className="btn bg-white" onClick={downloadSOS}>Download Excel</button>
-            <button className="btn bg-white" onClick={() => window.print()}>Print / Save as PDF</button>
-            <button className="btn btn-ghost bg-white" onClick={() => setSosView(null)}>Close</button>
-          </div>
-        </div>
-        </PrintShell>
-      )}
+        );
+      })()}
 
       {itemsRel && (() => {
         const COLS = "56px 96px minmax(170px,1fr) 60px 72px 88px 88px 22px";

@@ -12,6 +12,12 @@ export const COMPANY = {
   phoneHref: "+19177960479",
   email: "info@earthlink-gc.com",
   site: "www.earthlink-gc.com",
+  // filing details used on NYCHA paperwork (Statement of Services, invoices)
+  fax: "718-766-8010",
+  supplierNo: "104638",
+  fedTaxId: "11-3511520",
+  principal: "HARPINDER SINGH.",
+  principalTitle: "PRESIDENT",
   blurb:
     "General construction contractor serving New York City public and affordable housing — NYCHA and PACT/RAD partners. Painting, plastering, carpentry, tile, and full apartment restoration.",
 } as const;

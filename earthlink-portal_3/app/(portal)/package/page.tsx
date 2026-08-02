@@ -12,8 +12,8 @@ import type { Contract, Release } from "@/lib/types";
 import ContractPicker from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
 import NychaInvoicePrint from "@/components/NychaInvoicePrint";
-import { gatherReleaseDoc, buildInvoiceXlsx, buildInvoiceBytes, type DocRow } from "@/lib/releaseDoc";
-import { PKG_SLOTS, type PkgSlot, listPkgOverrides, uploadPkgOverride, removePkgOverride, buildPackageDocs } from "@/lib/packageDocs";
+import { gatherReleaseDoc, buildInvoiceXlsx, buildInvoiceBytes, buildInvoicePdfBytes, type DocRow } from "@/lib/releaseDoc";
+import { PKG_SLOTS, type PkgSlot, listPkgOverrides, uploadPkgOverride, removePkgOverride, buildPackagePdf, downloadPdf } from "@/lib/packageDocs";
 import PrintShell from "@/components/PrintShell";
 
 export default function InvoicePackage() {
@@ -168,29 +168,20 @@ export default function InvoicePackage() {
       const d = await gatherReleaseDoc(sel, r);
       if (d.rows.length === 0) { flash(`Release ${r.rel_number} has no line items yet — import its release PDF or fill a walk sheet first`); setPkgBusy(""); return; }
       flash("Building the package…");
-      const inv = await buildInvoiceBytes({
+      const invPdf = await buildInvoicePdfBytes({
         org: org || ({} as Org), cNumber: c.number, relNum: r.rel_number, workOrder: r.ticket || "",
         dev: r.location || d.dev, number: `${c.number}-${r.rel_number}`,
         date: r.invoice_sent || today, rows: d.rows,
       });
-      const docs = await buildPackageDocs(sel, c.number, r.rel_number);
-      const files: Record<string, Uint8Array> = { [`INVOICE_${c.number}_REL${r.rel_number}.xlsx`]: inv };
-      for (const doc of docs) files[doc.name] = doc.bytes;
-      const { zipSync } = await import("fflate");
-      const zipped = zipSync(files, { level: 6 });
-      const ab = new ArrayBuffer(zipped.byteLength);
-      new Uint8Array(ab).set(zipped);
-      const fname = askFileName(`package_${c.number}_rel${r.rel_number}.zip`);
+      const merged = await buildPackagePdf(sel, c.number, r.rel_number, invPdf);
+      const fname = askFileName(`package_${c.number}_rel${r.rel_number}.pdf`);
       if (fname) {
-        const url = URL.createObjectURL(new Blob([ab], { type: "application/zip" }));
-        const a = document.createElement("a");
-        a.href = url; a.download = fname; a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        downloadPdf(merged, fname);
         if (!r.invoice_sent && !readOnly) {
           await sb().from("releases").update({ invoice_sent: today }).eq("id", r.id);
           setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: today } : x)));
         }
-        flash(`Package for release ${r.rel_number} downloaded — invoice + ${docs.length} documents`);
+        flash(`Package for release ${r.rel_number} downloaded — one PDF: invoice + the 4 documents`);
       }
     } catch {
       flash("Couldn't build the package — check your signal and try again");

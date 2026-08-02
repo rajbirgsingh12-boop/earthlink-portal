@@ -196,3 +196,68 @@ export async function buildInvoiceBytes(a: InvoiceArgs): Promise<Uint8Array> {
   const wb = await buildInvoiceWb(a);
   return new Uint8Array(XLSX.write(wb, { type: "array", bookType: "xlsx" }) as ArrayBuffer);
 }
+
+// the same invoice as a one-page PDF — drawn straight from the filled
+// workbook cells, so the PDF always says exactly what the Excel says
+export async function buildInvoicePdfBytes(a: InvoiceArgs): Promise<Uint8Array> {
+  const wb = await buildInvoiceWb(a);
+  const ws = wb.Sheets.Sheet1 as unknown as Record<string, { v?: unknown; t?: string; z?: string; s?: Record<string, unknown> } | unknown>;
+  const pdf = await import("pdf-lib");
+  const doc = await pdf.PDFDocument.create();
+  const [helv, helvB] = await Promise.all([
+    doc.embedFont(pdf.StandardFonts.Helvetica), doc.embedFont(pdf.StandardFonts.HelveticaBold),
+  ]);
+  const endRow = Number((String(ws["!ref"] || "A1:I51").match(/(\d+)$/) || [0, 51])[1]);
+  // excel column chars -> points; row heights are points already
+  const colPts = INVOICE_TPL.cols.map((w) => (w * 7 + 5) * 0.75);
+  const rowsArr = (ws["!rows"] as ({ hpt: number } | undefined)[]) || [];
+  const rowPts: number[] = [];
+  for (let r = 1; r <= endRow; r++) rowPts[r] = rowsArr[r - 1]?.hpt ?? 15;
+  const W = colPts.reduce((s, w) => s + w, 0);
+  const H = rowPts.reduce((s, h) => s + (h || 0), 0);
+  const page = doc.addPage([612, 792]); // letter portrait, like the printed sheet
+  const k = Math.min((612 - 36) / W, (792 - 36) / H);
+  const x0 = (612 - W * k) / 2;
+  const y0 = 792 - (792 - H * k) / 2; // top edge
+  const colX: number[] = [0];
+  for (let c = 0; c < colPts.length; c++) colX[c + 1] = colX[c] + colPts[c];
+  const rowY: number[] = [0, 0]; // rowY[r] = distance from top to row r's top
+  for (let r = 1; r <= endRow; r++) rowY[r + 1] = rowY[r] + (rowPts[r] || 0);
+  const px = (c: number) => x0 + colX[c] * k;
+  const py = (rTop: number) => y0 - rTop * k; // sheet-top distance -> page y
+  const lineW: Record<string, number> = { hair: 0.4, thin: 0.75, medium: 1.5, thick: 2.25, dotted: 0.5, dashed: 0.5 };
+  const black = pdf.rgb(0, 0, 0);
+  const fmtNum = (v: number, z?: string) => {
+    const s = Math.abs(v % 1) < 1e-9 && !z ? String(v) : v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return z && z.includes('"$"') ? `$${s}` : s;
+  };
+  for (let r = 1; r <= endRow; r++) {
+    for (let c = 0; c < 9; c++) {
+      const coord = `${"ABCDEFGHI"[c]}${r}`;
+      const cell = ws[coord] as { v?: unknown; t?: string; z?: string; s?: { font?: { sz?: number; bold?: boolean }; border?: Record<string, { style?: string }>; alignment?: { horizontal?: string } } } | undefined;
+      if (!cell) continue;
+      const xL = px(c), xR = px(c + 1), yT = py(rowY[r]), yB = py(rowY[r + 1]);
+      const b = cell.s?.border || {};
+      for (const [side, spec] of Object.entries(b)) {
+        if (!spec?.style) continue;
+        const t = (lineW[spec.style] ?? 0.75) * k;
+        if (side === "top") page.drawLine({ start: { x: xL, y: yT }, end: { x: xR, y: yT }, thickness: t, color: black });
+        if (side === "bottom") page.drawLine({ start: { x: xL, y: yB }, end: { x: xR, y: yB }, thickness: t, color: black });
+        if (side === "left") page.drawLine({ start: { x: xL, y: yB }, end: { x: xL, y: yT }, thickness: t, color: black });
+        if (side === "right") page.drawLine({ start: { x: xR, y: yB }, end: { x: xR, y: yT }, thickness: t, color: black });
+      }
+      const raw = cell.v;
+      if (raw === undefined || raw === null || raw === "") continue;
+      const text = typeof raw === "number" ? fmtNum(raw, cell.z) : String(raw);
+      const font = cell.s?.font?.bold ? helvB : helv;
+      // calibri runs a touch narrower than helvetica — keep the fit
+      const size = (cell.s?.font?.sz ?? 16) * k * 0.92;
+      const tw = font.widthOfTextAtSize(text, size);
+      const al = cell.s?.alignment?.horizontal || (typeof raw === "number" ? "right" : "left");
+      const tx = al === "right" ? xR - 3 * k - tw : al === "center" ? (xL + xR) / 2 - tw / 2 : xL + 3 * k;
+      const ty = yB + ((yT - yB) - size * 0.7) / 2;
+      page.drawText(text, { x: tx, y: ty, size, font, color: black });
+    }
+  }
+  return doc.save();
+}

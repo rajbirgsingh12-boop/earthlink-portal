@@ -9,6 +9,7 @@ import { sb } from "@/lib/supabase";
 import { askFileName } from "@/lib/format";
 import type { Org } from "@/lib/docs";
 import type { Contract, Profile, Role } from "@/lib/types";
+import { PKG_DEFAULTS, type PkgInfo, loadPkgInfo, savePkgInfo } from "@/lib/packageDocs";
 
 // the two roles: Admin 1 sees everything; Admin 2 sees everything except
 // PACT invoices (internally these are the existing admin/office roles)
@@ -51,6 +52,33 @@ export default function Settings() {
     loadUsers();
     sb().from("contracts").select("id,number,name").order("number").then(({ data }) => setContracts((data || []) as Contract[]));
   }, { skipWhileTyping: true });
+
+  // ---- invoice-package wording per contract (stored with the package files) ----
+  const [pkgSel, setPkgSel] = useState("");
+  const [pkgInfo, setPkgInfo] = useState<PkgInfo>({});
+  const [pkgLoading, setPkgLoading] = useState(false);
+  const [pkgSaving, setPkgSaving] = useState(false);
+  useEffect(() => {
+    if (!pkgSel && contracts[0]) setPkgSel(contracts[0].id);
+  }, [contracts, pkgSel]);
+  useEffect(() => {
+    if (!pkgSel) return;
+    let stale = false;
+    setPkgLoading(true);
+    loadPkgInfo(pkgSel).then((info) => { if (!stale) { setPkgInfo(info); setPkgLoading(false); } });
+    return () => { stale = true; };
+  }, [pkgSel]);
+  const savePkgDetails = async () => {
+    if (!pkgSel) return;
+    setPkgSaving(true);
+    const clean: PkgInfo = {};
+    if (pkgInfo.development?.trim()) clean.development = pkgInfo.development.trim();
+    if (pkgInfo.amount?.trim()) clean.amount = pkgInfo.amount.trim();
+    if (pkgInfo.eoProject?.trim()) clean.eoProject = pkgInfo.eoProject.trim();
+    const err = await savePkgInfo(pkgSel, clean);
+    setPkgSaving(false);
+    flash(err || "Package details saved — every new package for this contract uses them");
+  };
 
   const renameContract = async (c: Contract, name: string) => {
     const clean = name.trim() || c.number; // blank = back to the number
@@ -277,6 +305,50 @@ export default function Settings() {
             ))}
           </div>
           <div className="mt-2 text-xs text-inksoft">Give contracts a name you recognize — dropdowns everywhere show the name instead of just the number. Leave blank to show the number.</div>
+        </>
+      )}
+
+      {contracts.length > 0 && me?.role !== "accountant" && (
+        <>
+          <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Invoice package details</div>
+          <div className="card p-4">
+            <div className="mb-3 text-xs text-inksoft">
+              What gets written onto the package documents (REP, Section 3 hiring summary, Equal Opportunity report)
+              for each contract. The contract number always fills in by itself — these are the parts that differ per
+              contract. Blank fields keep the standard wording. Saved changes apply to every package made after that.
+            </div>
+            <div className="mb-3">
+              <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Contract</div>
+              <select className="field max-w-sm" value={pkgSel} onChange={(e) => setPkgSel(e.target.value)}>
+                {contracts.map((c) => <option key={c.id} value={c.id}>{c.name && c.name !== c.number ? `${c.number} — ${c.name}` : c.number}</option>)}
+              </select>
+            </div>
+            {pkgLoading ? (
+              <div className="text-sm text-inksoft">Loading this contract&apos;s wording…</div>
+            ) : (
+              <div className="grid gap-3 md:grid-cols-2">
+                <div>
+                  <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Development / work description (REP + hiring summary)</div>
+                  <textarea className="field min-h-[56px]" placeholder={PKG_DEFAULTS.development}
+                    value={pkgInfo.development || ""} onChange={(e) => setPkgInfo({ ...pkgInfo, development: e.target.value })} />
+                </div>
+                <div>
+                  <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Contract amount (REP + hiring summary)</div>
+                  <input className="field" placeholder={PKG_DEFAULTS.amount}
+                    value={pkgInfo.amount || ""} onChange={(e) => setPkgInfo({ ...pkgInfo, amount: e.target.value })} />
+                </div>
+                <div className="md:col-span-2">
+                  <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Project name &amp; no. (Equal Opportunity report header)</div>
+                  <textarea className="field min-h-[56px]" placeholder={PKG_DEFAULTS.eoProject}
+                    value={pkgInfo.eoProject || ""} onChange={(e) => setPkgInfo({ ...pkgInfo, eoProject: e.target.value })} />
+                </div>
+              </div>
+            )}
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button className="btn btn-primary" onClick={savePkgDetails} disabled={pkgSaving || pkgLoading}>{pkgSaving ? "Saving…" : "Save package details"}</button>
+              <span className="text-xs text-inksoft">The affidavit and full replacement PDFs upload on the Invoice Package tab.</span>
+            </div>
+          </div>
         </>
       )}
 

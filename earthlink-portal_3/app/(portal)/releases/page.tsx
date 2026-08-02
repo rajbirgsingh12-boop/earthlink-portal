@@ -15,7 +15,8 @@ import { canonTrade, checkLabor, aggregateLogged } from "@/lib/labor";
 import { useLive } from "@/lib/useLive";
 import ContractPicker from "@/components/ContractPicker";
 import NychaInvoicePrint from "@/components/NychaInvoicePrint";
-import { gatherReleaseDoc, buildInvoiceXlsx, type DocRow } from "@/lib/releaseDoc";
+import { gatherReleaseDoc, buildInvoiceXlsx, buildInvoicePdfBytes, type DocRow } from "@/lib/releaseDoc";
+import { buildPackagePdf, downloadPdf } from "@/lib/packageDocs";
 import PrintShell from "@/components/PrintShell";
 import { downloadSosPdf, blankSosLine, type SosData, type SosLine } from "@/lib/sosForm";
 import { COMPANY } from "@/lib/company";
@@ -1730,6 +1731,30 @@ export default function Releases() {
     setPdfPending(null); setBusy(false);
     await loadContracts(); setActive(contract.id); await loadRows(contract.id);
     flash(`Release ${saved.rel} ${updated ? "updated" : "added"} — ${saved.items.length} line items`);
+    // the invoice package rides along automatically — invoice + affidavit +
+    // REP + hiring summary + equal opportunity report, ready to send
+    if (saved.items.length > 0) {
+      try {
+        flash(`Release ${saved.rel} saved — making its invoice package…`);
+        const { data: o } = await sb().from("org").select("*").single();
+        const rows: DocRow[] = saved.items
+          .filter((it) => Number(it.qty) > 0)
+          .map((it) => ({
+            line: it.line || 0, code: it.code, category: "", description: it.description,
+            uom: it.uom || "EA", qty: Number(it.qty),
+            unit_price: Number(it.unit_price) || (Number(it.qty) ? (Number(it.amount) || 0) / Number(it.qty) : 0),
+          }));
+        const invPdf = await buildInvoicePdfBytes({
+          org: (o || {}) as Org, cNumber: contract.number, relNum: saved.rel, workOrder: saved.ticket || "",
+          dev: saved.location, number: `${contract.number}-${saved.rel}`, date: localISO(), rows,
+        });
+        const merged = await buildPackagePdf(contract.id, contract.number, saved.rel, invPdf);
+        downloadPdf(merged, `package_${contract.number}_rel${saved.rel}.pdf`);
+        flash(`Release ${saved.rel} saved — invoice package downloaded (one PDF: invoice + 4 documents)`);
+      } catch {
+        flash(`Release ${saved.rel} saved — package couldn't be built right now, use 📦 Package on the Invoice Package tab`);
+      }
+    }
   };
 
   const exportSheet = async () => {

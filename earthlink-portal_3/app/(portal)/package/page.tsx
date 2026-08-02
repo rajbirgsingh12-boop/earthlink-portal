@@ -150,9 +150,6 @@ export default function InvoicePackage() {
   const total = rows.reduce((s, r) => s + Number(r.amount), 0);
   // release-number order, everywhere on this page
   const sorted = [...rows].sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
-  // two piles: still needs its invoice sent, and sent but not paid yet
-  const toInvoice = sorted.filter((r) => !r.invoice_sent);
-  const waiting = sorted.filter((r) => !!r.invoice_sent);
 
   // ---- the invoice package: invoice + affidavit + REP + hiring + EO in one zip ----
   const [pkgBusy, setPkgBusy] = useState(""); // release id being packaged
@@ -366,12 +363,7 @@ export default function InvoicePackage() {
               <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
                 <th className="p-2.5">Release</th><th className="p-2.5">Location</th><th className="p-2.5">Invoiced</th><th className="p-2.5 text-right">Days out</th><th className="p-2.5 text-right">Balance</th><th className="p-2.5"></th></tr></thead>
               <tbody>
-                {([["To invoice", toInvoice], ["Waiting to be received", waiting]] as [string, Release[]][]).map(([label, list]) => {
-                  const shown = list.filter((r) => !tq.trim() || `${r.rel_number} ${r.location} ${r.buildings}`.toLowerCase().includes(tq.trim().toLowerCase()));
-                  if (shown.length === 0) return null;
-                  return [
-                    <tr key={label}><td colSpan={6} className="border-b border-rulesoft bg-paper p-2 font-display text-[11px] font-semibold uppercase tracking-widest text-inksoft">{label} ({shown.length})</td></tr>,
-                    ...shown.map((r) => {
+                {sorted.filter((r) => !tq.trim() || `${r.rel_number} ${r.location} ${r.buildings}`.toLowerCase().includes(tq.trim().toLowerCase())).map((r) => {
                   const d = days(r);
                   return (
                     <tr key={r.id} className="border-b border-rulesoft">
@@ -400,8 +392,6 @@ export default function InvoicePackage() {
                       </td>
                     </tr>
                   );
-                  }),
-                  ];
                 })}
                 {sorted.length === 0 && <tr><td colSpan={6} className="p-4 text-inksoft">{stubs.length > 0
                   ? `${stubs.length} open release${stubs.length === 1 ? "" : "s"} totaling ${fmt(stubs.reduce((s, r) => s + Number(r.amount), 0))} ${stubs.length === 1 ? "is" : "are"} waiting on release data — import the release PDF or fill a walk sheet to put ${stubs.length === 1 ? "it" : "them"} on the statement.`

@@ -148,7 +148,11 @@ export default function InvoicePackage() {
     else if (d <= 30) buckets[0][1] += v; else if (d <= 60) buckets[1][1] += v; else if (d <= 90) buckets[2][1] += v; else buckets[3][1] += v;
   });
   const total = rows.reduce((s, r) => s + Number(r.amount), 0);
-  const sorted = [...rows].sort((a, b) => (days(b) ?? -1) - (days(a) ?? -1));
+  // release-number order, everywhere on this page
+  const sorted = [...rows].sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
+  // two piles: still needs its invoice sent, and sent but not paid yet
+  const toInvoice = sorted.filter((r) => !r.invoice_sent);
+  const waiting = sorted.filter((r) => !!r.invoice_sent);
 
   // ---- the invoice package: invoice + affidavit + REP + hiring + EO in one zip ----
   const [pkgBusy, setPkgBusy] = useState(""); // release id being packaged
@@ -206,6 +210,52 @@ export default function InvoicePackage() {
     if (err) { flash(err); return; }
     setOverrides((prev) => { const n = new Set(prev); n.delete(slot.file); return n; });
     flash(`${slot.label} back to the standard copy`);
+  };
+
+  // every outstanding release's full package, regenerated as merged PDFs and
+  // zipped — for re-sending paperwork after the documents changed
+  const [allPkgBusy, setAllPkgBusy] = useState(false);
+  const downloadAllPackages = async () => {
+    if (!contract || sorted.length === 0 || allPkgBusy) return;
+    setAllPkgBusy(true);
+    try {
+      const files: Record<string, Uint8Array> = {};
+      const stampIds: string[] = [];
+      let done = 0;
+      for (const r of sorted) {
+        const d = await gatherReleaseDoc(sel, r);
+        if (d.rows.length === 0) continue;
+        const invPdf = await buildInvoicePdfBytes({
+          org: org || ({} as Org), cNumber: contract.number, relNum: r.rel_number, workOrder: r.ticket || "",
+          dev: r.location || d.dev, number: `${contract.number}-${r.rel_number}`,
+          date: r.invoice_sent || today, rows: d.rows,
+        });
+        files[`package_${contract.number}_rel${r.rel_number}.pdf`] = await buildPackagePdf(sel, contract.number, r.rel_number, invPdf);
+        if (!r.invoice_sent) stampIds.push(r.id);
+        done += 1;
+        flash(`Making packages… ${done} of ${sorted.length}`);
+      }
+      if (done === 0) { flash("No releases with line items to package yet"); setAllPkgBusy(false); return; }
+      const { zipSync } = await import("fflate");
+      const zipped = zipSync(files, { level: 1 }); // PDFs barely compress — keep it quick
+      const ab = new ArrayBuffer(zipped.byteLength);
+      new Uint8Array(ab).set(zipped);
+      const fname = askFileName(`packages_${contract.number}.zip`);
+      if (fname) {
+        const url = URL.createObjectURL(new Blob([ab], { type: "application/zip" }));
+        const a = document.createElement("a");
+        a.href = url; a.download = fname; a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        if (stampIds.length > 0 && !readOnly) {
+          await sb().from("releases").update({ invoice_sent: today }).in("id", stampIds);
+          setRows((prev) => prev.map((x) => (stampIds.includes(x.id) ? { ...x, invoice_sent: today } : x)));
+        }
+        flash(`${done} package${done === 1 ? "" : "s"} downloaded — each one PDF: invoice + the 4 documents`);
+      }
+    } catch {
+      flash("Couldn't build the packages — check your signal and try again");
+    }
+    setAllPkgBusy(false);
   };
 
   // every outstanding release's invoice, regenerated in the template format,
@@ -316,7 +366,12 @@ export default function InvoicePackage() {
               <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
                 <th className="p-2.5">Release</th><th className="p-2.5">Location</th><th className="p-2.5">Invoiced</th><th className="p-2.5 text-right">Days out</th><th className="p-2.5 text-right">Balance</th><th className="p-2.5"></th></tr></thead>
               <tbody>
-                {sorted.filter((r) => !tq.trim() || `${r.rel_number} ${r.location} ${r.buildings}`.toLowerCase().includes(tq.trim().toLowerCase())).map((r) => {
+                {([["To invoice", toInvoice], ["Waiting to be received", waiting]] as [string, Release[]][]).map(([label, list]) => {
+                  const shown = list.filter((r) => !tq.trim() || `${r.rel_number} ${r.location} ${r.buildings}`.toLowerCase().includes(tq.trim().toLowerCase()));
+                  if (shown.length === 0) return null;
+                  return [
+                    <tr key={label}><td colSpan={6} className="border-b border-rulesoft bg-paper p-2 font-display text-[11px] font-semibold uppercase tracking-widest text-inksoft">{label} ({shown.length})</td></tr>,
+                    ...shown.map((r) => {
                   const d = days(r);
                   return (
                     <tr key={r.id} className="border-b border-rulesoft">
@@ -339,12 +394,14 @@ export default function InvoicePackage() {
                         <div className="flex justify-end gap-2.5 whitespace-nowrap">
                           <button className="font-mono text-xs font-semibold text-work underline" title="Make the NYCHA invoice" onClick={() => genInvoice(r)}>Invoice</button>
                           <button className="font-mono text-xs font-semibold text-ok underline disabled:opacity-50" disabled={!!pkgBusy}
-                            title="Invoice + affidavit + REP + hiring summary + equal opportunity report, one zip"
+                            title="Invoice + affidavit + REP + hiring summary + equal opportunity report, one PDF"
                             onClick={() => downloadPackage(r)}>{pkgBusy === r.id ? "Making…" : "📦 Package"}</button>
                         </div>
                       </td>
                     </tr>
                   );
+                  }),
+                  ];
                 })}
                 {sorted.length === 0 && <tr><td colSpan={6} className="p-4 text-inksoft">{stubs.length > 0
                   ? `${stubs.length} open release${stubs.length === 1 ? "" : "s"} totaling ${fmt(stubs.reduce((s, r) => s + Number(r.amount), 0))} ${stubs.length === 1 ? "is" : "are"} waiting on release data — import the release PDF or fill a walk sheet to put ${stubs.length === 1 ? "it" : "them"} on the statement.`
@@ -367,7 +424,10 @@ export default function InvoicePackage() {
                 ))}
               </div>
               <div className="mt-3.5 flex flex-wrap gap-2">
-                <button className="btn btn-primary" onClick={() => { setInvPreview(null); setPrintOpen(true); }}>Preview statement</button>
+                <button className="btn btn-primary" onClick={downloadAllPackages} disabled={allPkgBusy} title="Every outstanding release's full package — invoice + the 4 documents merged into one PDF each — in one zip">
+                  {allPkgBusy ? "Making packages…" : `⬇ All packages (${sorted.length}) zip`}
+                </button>
+                <button className="btn" onClick={() => { setInvPreview(null); setPrintOpen(true); }}>Preview statement</button>
                 <button className="btn" onClick={downloadExcel}>Statement Excel</button>
                 <button className="btn" onClick={downloadAllInvoices} disabled={zipBusy} title="Every outstanding invoice on this contract, regenerated in the template format, in one zip">
                   {zipBusy ? "Making invoices…" : `⬇ All invoices (${sorted.length}) zip`}
@@ -379,8 +439,9 @@ export default function InvoicePackage() {
           <div className="card mt-4 p-3.5">
             <div className="mb-1 font-display text-sm font-semibold uppercase tracking-wide">Package documents — contract {contract.number}</div>
             <div className="mb-2.5 text-xs text-inksoft">
-              Every 📦 Package download bundles the invoice with these four. The standard copies carry this
-              contract&apos;s number automatically — upload a PDF to use this contract&apos;s own copy instead.
+              Every 📦 Package download is one PDF: the invoice plus these four. Contracts 2536683, 2536686,
+              2215867 and 2442583 use their own signed copies built in; anything else gets the standard copies
+              with the contract number filled in. Upload a PDF here to replace a document for this contract.
             </div>
             <div className="grid gap-2">
               {PKG_SLOTS.map((s) => {

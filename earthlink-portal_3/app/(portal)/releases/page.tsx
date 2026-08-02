@@ -1750,6 +1750,8 @@ export default function Releases() {
         });
         const merged = await buildPackagePdf(contract.id, contract.number, saved.rel, invPdf);
         downloadPdf(merged, `package_${contract.number}_rel${saved.rel}.pdf`);
+        // its invoice just went out the door — date the release as invoiced
+        await sb().from("releases").update({ invoice_sent: localISO() }).eq("id", relId).then(() => loadRows(contract.id));
         flash(`Release ${saved.rel} saved — invoice package downloaded (one PDF: invoice + 4 documents)`);
       } catch {
         flash(`Release ${saved.rel} saved — package couldn't be built right now, use 📦 Package on the Invoice Package tab`);

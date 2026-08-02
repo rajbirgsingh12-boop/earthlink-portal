@@ -16,8 +16,25 @@ export const PKG_SLOTS = [
 ] as const;
 export type PkgSlot = (typeof PKG_SLOTS)[number];
 
-// the contract number baked into the shipped template PDFs
+// the contract number baked into the generic template PDFs
 const TPL_NUM = "2536683";
+
+// contracts whose own signed documents ship with the app (public/pkg/<number>/)
+// — extracted from the owner's real invoice packages, used verbatim.
+// 2215867 has no hiring entry: its copy had a release number baked in, so that
+// contract uses the fillable form plus its own wording below.
+const CONTRACT_DOCS: Record<string, string[]> = {
+  "2536683": ["affidavit.pdf", "rep.pdf", "hiring.pdf", "eo.pdf"],
+  "2536686": ["affidavit.pdf", "rep.pdf", "hiring.pdf", "eo.pdf"],
+  "2215867": ["affidavit.pdf", "rep.pdf", "eo.pdf"],
+  "2442583": ["affidavit.pdf", "rep.pdf", "hiring.pdf", "eo.pdf"],
+};
+
+// wording read off the owner's own packages — the fallback when nothing is
+// saved in Settings for the contract
+const CONTRACT_INFO: Record<string, PkgInfo> = {
+  "2215867": { development: "Manhattan loa package repair& replacement apt entrance and basement doors", amount: "$7,005,440.42" },
+};
 
 // what the shipped templates say — used as placeholders and fallbacks
 export const PKG_DEFAULTS = {
@@ -226,19 +243,30 @@ async function buildHiring(bytes: ArrayBuffer, cNumber: string, relNumber: strin
 
 export interface PkgDoc { name: string; bytes: Uint8Array }
 
-// the four supporting documents for one release's invoice package
+// the four supporting documents for one release's invoice package.
+// Per document, first match wins: the contract's uploaded copy in storage →
+// the contract's own signed copy shipped with the app → the generic template
+// (which gets the contract number swapped in).
 export async function buildPackageDocs(contractId: string, cNumber: string, relNumber: string): Promise<PkgDoc[]> {
-  const [custom, info] = await Promise.all([listPkgOverrides(contractId), loadPkgInfo(contractId)]);
-  const get = async (file: string) =>
-    custom.has(file) ? ((await fetchOverride(contractId, file)) ?? fetchTemplate(file)) : fetchTemplate(file);
+  const [custom, savedInfo] = await Promise.all([listPkgOverrides(contractId), loadPkgInfo(contractId)]);
+  const info: PkgInfo = { ...CONTRACT_INFO[cNumber], ...savedInfo };
+  const own = CONTRACT_DOCS[cNumber] || [];
+  // verbatim = the file already carries this contract's numbers and wording
+  const verbatim = (file: string) => custom.has(file) || own.includes(file);
+  const get = async (file: string) => {
+    if (custom.has(file)) return (await fetchOverride(contractId, file)) ?? fetchTemplate(file);
+    if (own.includes(file)) return fetchTemplate(`${cNumber}/${file}`);
+    return fetchTemplate(file);
+  };
   const [affB, repB, hirB, eoB] = await Promise.all([
     get("affidavit.pdf"), get("rep.pdf"), get("hiring.pdf"), get("eo.pdf"),
   ]);
   const rel = String(relNumber || "").trim();
   const [rep, hir, eo] = await Promise.all([
-    custom.has("rep.pdf") ? Promise.resolve(new Uint8Array(repB)) : buildRep(repB, cNumber, info),
-    buildHiring(hirB, cNumber, rel, info),
-    custom.has("eo.pdf") ? Promise.resolve(new Uint8Array(eoB)) : buildEo(eoB, cNumber, info),
+    verbatim("rep.pdf") ? Promise.resolve(new Uint8Array(repB)) : buildRep(repB, cNumber, info),
+    // the hiring form stays fillable everywhere — contract + release fill fresh
+    buildHiring(hirB, cNumber, rel, verbatim("hiring.pdf") ? {} : info),
+    verbatim("eo.pdf") ? Promise.resolve(new Uint8Array(eoB)) : buildEo(eoB, cNumber, info),
   ]);
   return [
     { name: `AFFIDAVIT_${cNumber}.pdf`, bytes: new Uint8Array(affB) },

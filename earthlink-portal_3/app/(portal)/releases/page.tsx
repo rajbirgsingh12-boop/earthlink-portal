@@ -81,37 +81,50 @@ function isRedHex(rgb: string | null): boolean {
   const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
   return r >= 0xc0 && g <= 0x50 && b <= 0x50;
 }
-async function detectRedRows(buf: ArrayBuffer): Promise<Set<number>> {
-  const red = new Set<number>();
+function isGreenHex(rgb: string | null): boolean {
+  if (!rgb) return false;
+  const h = rgb.slice(-6);
+  const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+  // clearly green fills (Excel's 92D050 / 00B050 / C6EFCE…), not yellow or teal
+  return g >= 0xa0 && r < g && b < g && g - Math.max(r, b) >= 0x20;
+}
+async function detectRowFills(buf: ArrayBuffer): Promise<{ red: Set<number>; green: Set<number> }> {
+  const red = new Set<number>(); const green = new Set<number>();
   try {
     const files = await unzipEntries(buf, ["xl/styles.xml", "xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml"]);
     const styles = files["xl/styles.xml"]; const sheet = files["xl/worksheets/sheet1.xml"] || files["xl/worksheets/sheet2.xml"];
-    if (!styles || !sheet) return red;
+    if (!styles || !sheet) return { red, green };
     const dp = new DOMParser();
     const sd = dp.parseFromString(styles, "application/xml");
-    const redFills = new Set<number>(); const redFonts = new Set<number>();
+    const redFills = new Set<number>(); const redFonts = new Set<number>(); const greenFills = new Set<number>();
     Array.from(sd.getElementsByTagName("fills")[0]?.getElementsByTagName("fill") || []).forEach((f, i) => {
       const c = f.getElementsByTagName("fgColor")[0];
       if (c && isRedHex(c.getAttribute("rgb"))) redFills.add(i);
+      if (c && isGreenHex(c.getAttribute("rgb"))) greenFills.add(i);
     });
     Array.from(sd.getElementsByTagName("fonts")[0]?.getElementsByTagName("font") || []).forEach((f, i) => {
       const c = f.getElementsByTagName("color")[0];
       if (c && isRedHex(c.getAttribute("rgb"))) redFonts.add(i);
     });
-    const redXf = new Set<number>();
+    const redXf = new Set<number>(); const greenXf = new Set<number>();
     const cellXfs = sd.getElementsByTagName("cellXfs")[0];
     Array.from(cellXfs?.getElementsByTagName("xf") || []).forEach((xf, i) => {
       if (redFills.has(Number(xf.getAttribute("fillId"))) || redFonts.has(Number(xf.getAttribute("fontId")))) redXf.add(i);
+      if (greenFills.has(Number(xf.getAttribute("fillId")))) greenXf.add(i);
     });
-    if (redXf.size === 0) return red;
+    if (redXf.size === 0 && greenXf.size === 0) return { red, green };
     const wd = dp.parseFromString(sheet, "application/xml");
     Array.from(wd.getElementsByTagName("row")).forEach((row) => {
       const n = Number(row.getAttribute("r"));
-      const hit = Array.from(row.getElementsByTagName("c")).some((c) => redXf.has(Number(c.getAttribute("s"))));
-      if (hit && n) red.add(n);
+      if (!n) return;
+      const cells = Array.from(row.getElementsByTagName("c"));
+      if (cells.some((c) => redXf.has(Number(c.getAttribute("s"))))) red.add(n);
+      // one stray green cell isn't a signal — the whole row has to be painted
+      const gc = cells.filter((c) => greenXf.has(Number(c.getAttribute("s")))).length;
+      if (gc > 0 && gc >= Math.min(4, cells.length)) green.add(n);
     });
   } catch { /* not a zip (csv) or unreadable styles — fall back to text flags */ }
-  return red;
+  return { red, green };
 }
 
 
@@ -126,7 +139,7 @@ export default function Releases() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [logged, setLogged] = useState<Record<string, number> | null>(null);
-  const [pending, setPending] = useState<{ items: Omit<Release, "id" | "contract_id">[]; guess: string; omit?: string[] } | null>(null);
+  const [pending, setPending] = useState<{ items: Omit<Release, "id" | "contract_id">[]; guess: string; omit?: string[]; greenDone?: number } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [pdfPending, setPdfPending] = useState<{
     contract: string; rel: string; date: string; location: string; address: string;
@@ -603,7 +616,7 @@ export default function Releases() {
       try {
         const buf = ev.target?.result as ArrayBuffer;
         await ensureXLSX();
-        const redRows = await detectRedRows(buf);
+        const { red: redRows, green: greenRows } = await detectRowFills(buf);
         const wb = XLSX.read(buf, { type: "array" });
         const sheet = wb.Sheets[wb.SheetNames[0]];
         const raw: string[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false, blankrows: true });
@@ -616,6 +629,7 @@ export default function Releases() {
         const m = { rel: col(/^release/), location: col(/location/), buildings: col(/building/), ticket: col(/ticket/), amount: col(/amount/), adjusted: col(/adjust/), pre: col(/pre/), date: col(/date|complet/), payroll: col(/payroll/), received: col(/receiv/), status: col(/status/), hours: col(/hour|labor/) };
         const pre = raw.slice(0, hIdx).flat().join(" ");
         const gm = pre.match(/contract\s*#?\s*([A-Za-z0-9-]+)/i) || fname.match(/(\d{5,})/);
+        let greenFilled = 0; // rows where only the highlight said "done"
         const items = raw.slice(hIdx + 1)
           .map((r, k) => ({ r, sheetRow: rangeBase + hIdx + 2 + k }))
           .filter(({ r }) => r.some((c) => String(c).trim() !== ""))
@@ -624,10 +638,16 @@ export default function Releases() {
             const rowText = r.join(" ");
             // an Adjusted value is NYCHA's corrected amount — it wins over Amount
             const adjV = m.adjusted >= 0 ? parseNum(r[m.adjusted]) : 0;
+            // a row painted green means done+paid — but only where the cell is
+            // blank; typed text ("need to receive", "waiting on payroll", "?")
+            // always wins over the highlight
+            const rowGreen = greenRows.has(sheetRow) && !redRows.has(sheetRow);
+            const payTxt = g(m.payroll), recvTxt = g(m.received);
+            if (rowGreen && recvTxt === "") greenFilled += 1;
             return {
               rel_number: g(m.rel), location: g(m.location), buildings: g(m.buildings), ticket: g(m.ticket),
               amount: adjV > 0 ? adjV : m.amount >= 0 ? parseNum(r[m.amount]) : 0, pre_check: g(m.pre), date_completed: g(m.date),
-              payroll_done: /^d/i.test(g(m.payroll)), received: /^y/i.test(g(m.received)),
+              payroll_done: /^d/i.test(payTxt) || (rowGreen && payTxt === ""), received: /^y/i.test(recvTxt) || (rowGreen && recvTxt === ""),
               canceled: redRows.has(sheetRow) || /cancel|void/i.test(g(m.status) || rowText), labor_hours: m.hours >= 0 ? parseNum(r[m.hours]) : 0, assigned_to: null,
             };
           })
@@ -639,10 +659,11 @@ export default function Releases() {
         if (m.ticket < 0) omit.push("ticket");
         if (m.pre < 0) omit.push("pre_check");
         if (m.date < 0) omit.push("date_completed");
-        if (m.payroll < 0) omit.push("payroll_done");
-        if (m.received < 0) omit.push("received");
+        // green-painted rows carry done/paid info even without the column
+        if (m.payroll < 0 && greenRows.size === 0) omit.push("payroll_done");
+        if (m.received < 0 && greenRows.size === 0) omit.push("received");
         if (m.hours < 0) omit.push("labor_hours");
-        setPending({ items, guess: gm ? gm[1] : "", omit });
+        setPending({ items, guess: gm ? gm[1] : "", omit, greenDone: greenFilled });
       } catch { flash("Couldn't read that file — save as .xlsx or .csv"); }
     };
     reader.readAsArrayBuffer(file);
@@ -1900,7 +1921,7 @@ export default function Releases() {
           <label className="text-[11px] uppercase tracking-widest text-inksoft">Contract number</label>
           <input className="field mb-2 mt-1" value={pending.guess} onChange={(e) => setPending({ ...pending, guess: e.target.value })} />
           <div className="mb-3 font-mono text-xs text-inksoft">
-            Total {fmt(pending.items.reduce((s, i) => s + i.amount, 0))} · canceled flagged: {pending.items.filter((i) => i.canceled).length}
+            Total {fmt(pending.items.reduce((s, i) => s + i.amount, 0))} · canceled flagged: {pending.items.filter((i) => i.canceled).length}{(pending.greenDone || 0) > 0 ? ` · counted done from green highlight: ${pending.greenDone}` : ""}
           </div>
           <div className="flex flex-wrap gap-2">
             <button className="btn btn-primary" onClick={() => runImport("replace")} disabled={busy}>Load</button>

@@ -47,7 +47,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
   const role = profile?.role;
   const NYCHA: Group = {
     key: "nycha", label: "NYCHA",
-    items: [["/releases", "Releases", "📄"], ["/items", "Price Book", "📗"], ["/proposals", "Proposals", "📋"], ["/statements", "Invoices & Statements", "🧾"]],
+    items: [["/releases", "Releases", "📄"], ["/items", "Price Book", "📗"], ["/proposals", "Proposals", "📋"], ["/package", "Invoice Package", "🧾"]],
   };
   const PACT: Group = { key: "pact", label: "PACT", items: [["/pact", "Jobs", "🏢"], ["/pact/schedule", "Schedule", "📅"]] };
   // entries render in order: plain links and group menus mixed
@@ -55,7 +55,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
   if (role === "admin" || role === "office") {
     entries.push(["group", NYCHA], ["group", PACT], ["link", "/schedule", "Schedule"], ["link", "/payroll", "Payroll"], ["link", "/settings", "Settings"]);
   } else if (role === "accountant") {
-    entries.push(["link", "/releases", "Releases"], ["link", "/pact", "PACT"], ["link", "/payroll", "Payroll"], ["link", "/statements", "Invoices & Statements"]);
+    entries.push(["link", "/releases", "Releases"], ["link", "/pact", "PACT"], ["link", "/payroll", "Payroll"], ["link", "/package", "Invoice Package"]);
   } else {
     entries.push(["link", "/releases", "Releases"]);
   }

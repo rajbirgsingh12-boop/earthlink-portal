@@ -127,7 +127,7 @@ export default function Home() {
       {/* plain-language launcher — jump straight to the everyday jobs */}
       <div className="mb-4 grid grid-cols-2 gap-2.5 md:grid-cols-4">
         {([["⏱", "Enter today's hours", "/payroll"], ["📋", "Fill out a walk sheet", "/proposals"],
-           ["🧾", "Make an invoice", "/statements"], ["📄", "See the releases", "/releases"]] as [string, string, string][]).map(([icon, label, href]) => (
+           ["🧾", "Make an invoice", "/package"], ["📄", "See the releases", "/releases"]] as [string, string, string][]).map(([icon, label, href]) => (
           <Link key={href} href={href} className="card flex items-center gap-2.5 p-3.5 transition-shadow hover:shadow">
             <span className="text-xl">{icon}</span>
             <span className="font-display text-[14px] font-semibold uppercase leading-tight tracking-wide">{label}</span>
@@ -161,7 +161,7 @@ export default function Home() {
             </Link>
           )}
           {stale.length > 0 && (
-            <Link href="/statements" className="card mb-2.5 block border-work p-3 text-[14px]">
+            <Link href="/package" className="card mb-2.5 block border-work p-3 text-[14px]">
               🧾 <b>{stale.length} invoice{stale.length === 1 ? "" : "s"} out over 45 days</b> — worth a call. Tap to see who owes what.
             </Link>
           )}
@@ -178,7 +178,7 @@ export default function Home() {
             <div className="card p-3.5">
               <div className="mb-2 flex items-baseline justify-between">
                 <div className="font-display text-sm font-bold uppercase">Chase these first</div>
-                <Link href="/statements" className="text-xs text-inksoft underline">Statements →</Link>
+                <Link href="/package" className="text-xs text-inksoft underline">Invoice Package →</Link>
               </div>
               {oldest.map((r) => (
                 <div key={r.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">

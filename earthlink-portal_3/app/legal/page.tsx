@@ -37,12 +37,21 @@ export default function Legal() {
         Monday at 123 Example Ave (Release #1234). Work: patch and paint apartment 4B.”
       </P>
 
-      <H>How employees are added and how they consent</H>
+      <H>How employees are added and how they consent (SMS consent)</H>
       <P>
-        An employee&apos;s mobile number is entered in our office system only after the employee gives
-        it to us directly for this purpose, as part of being hired or assigned to crews. Providing the
-        number to the office is the employee&apos;s consent to receive work-assignment messages. No
-        number is bought, rented, or obtained from any third party.
+        Employees do not opt in by texting us, and there is no public sign-up, web form, keyword, or
+        advertised number. Consent is collected in person at the time of hire: office staff ask each
+        new employee, verbatim —
+      </P>
+      <P>
+        <i>&ldquo;Do you agree to receive text messages from {COMPANY.legalName} about your daily work
+        schedule? It&apos;s about one message per workday. Message and data rates may apply, and you
+        can stop them any time by replying STOP or telling the office.&rdquo;</i>
+      </P>
+      <P>
+        Only employees who expressly agree are added, and their number is entered into our internal
+        scheduling system by office staff. Agreeing to schedule texts is separate from — and never a
+        condition of — employment. No number is bought, rented, or obtained from any third party.
       </P>
 
       <H>Message frequency, cost, and support</H>

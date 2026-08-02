@@ -1,7 +1,21 @@
 -- ============================================================
--- RUN_ME.sql — every upgrade in one paste, in the right order.
--- Supabase → SQL Editor → New query → paste ALL of this → Run.
--- Safe to run as many times as you like.
+-- RUN_ME.sql — FINAL UPDATE (Aug 2026)
+-- Every upgrade in one paste, in the right order.
+--
+-- HOW TO RUN:
+--   Supabase → SQL Editor → New query → paste ALL of this → Run.
+--
+-- Safe to run as many times as you like — every step checks
+-- whether it's already done. Running it again never hurts.
+--
+-- What's in here: release line items + document storage,
+-- walk-sheet / proposal fields, PACT jobs, day schedule,
+-- worker phone numbers, live-update wiring, the storage
+-- meter, the foreman document-read fix, 12 speed indexes,
+-- once-per-query role checks, three server helpers the app
+-- uses to load faster on phones, and the slimmer release
+-- audit log. This file also REPAIRS the release audit
+-- trigger if an older copy of upgrade_speed.sql was ever run.
 -- ============================================================
 
 -- ---------- from upgrade_invoices_aging_docs.sql ----------

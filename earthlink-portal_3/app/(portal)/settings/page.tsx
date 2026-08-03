@@ -10,6 +10,7 @@ import { askFileName } from "@/lib/format";
 import type { Org } from "@/lib/docs";
 import type { Contract, Profile, Role } from "@/lib/types";
 import { PKG_DEFAULTS, type PkgInfo, loadPkgInfo, savePkgInfo } from "@/lib/packageDocs";
+import { cleanPhone, prettyPhone } from "@/lib/notify";
 
 // the two roles: Admin 1 sees everything; Admin 2 sees everything except
 // PACT invoices (internally these are the existing admin/office roles)
@@ -52,6 +53,36 @@ export default function Settings() {
     loadUsers();
     sb().from("contracts").select("id,number,name").order("number").then(({ data }) => setContracts((data || []) as Contract[]));
   }, { skipWhileTyping: true });
+
+  // ---- crew phone numbers (used by the Schedule tab's tap-to-text) ----
+  type Emp = { id: string; name: string; trade: string; active: boolean; phone?: string | null };
+  const [emps, setEmps] = useState<Emp[]>([]);
+  const [phoneBuf, setPhoneBuf] = useState<Record<string, string>>({});
+  const [crewDraft, setCrewDraft] = useState({ name: "", trade: "", phone: "" });
+  const loadEmps = () => sb().from("employees").select("id,name,trade,active,phone").order("name")
+    .then(({ data }) => setEmps((data || []) as Emp[]));
+  useEffect(() => { loadEmps(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useLive(["employees"], loadEmps, { skipWhileTyping: true });
+  const savePhone = async (empId: string, raw: string) => {
+    const phone = cleanPhone(raw) || raw.trim();
+    const { error } = await sb().from("employees").update({ phone }).eq("id", empId);
+    if (error) { flash(/column|schema cache/i.test(error.message) ? "Run supabase/RUN_ME.sql so phone numbers save" : error.message); return; }
+    setEmps((prev) => prev.map((e) => (e.id === empId ? { ...e, phone } : e)));
+    flash("Number saved");
+  };
+  const addWorker = async () => {
+    if (!crewDraft.name) return;
+    const row: Record<string, unknown> = { name: crewDraft.name, trade: crewDraft.trade, base_rate: 0 };
+    if (crewDraft.phone.trim()) row.phone = cleanPhone(crewDraft.phone) || crewDraft.phone.trim();
+    let { error } = await sb().from("employees").insert(row);
+    if (error && "phone" in row && /column|schema cache/i.test(error.message)) {
+      delete row.phone;
+      ({ error } = await sb().from("employees").insert(row));
+      if (!error) flash("Run supabase/RUN_ME.sql so phone numbers save");
+    }
+    if (error) { flash(error.message); return; }
+    setCrewDraft({ name: "", trade: "", phone: "" }); loadEmps();
+  };
 
   // ---- invoice-package wording per contract (stored with the package files) ----
   const [pkgSel, setPkgSel] = useState("");
@@ -307,6 +338,36 @@ export default function Settings() {
           <div className="mt-2 text-xs text-inksoft">Give contracts a name you recognize — dropdowns everywhere show the name instead of just the number. Leave blank to show the number.</div>
         </>
       )}
+
+      <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Crew phone numbers</div>
+      <div className="card p-3.5">
+        <div className="mb-2 text-xs text-inksoft">The numbers the Schedule tab texts. Numbers save when you tap out of the field.</div>
+        {me?.role !== "accountant" && (
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+            <input className="field" placeholder="Name" value={crewDraft.name} onChange={(e) => setCrewDraft({ ...crewDraft, name: e.target.value })} />
+            <input className="field" placeholder="Usual classification (laborer…)" value={crewDraft.trade} onChange={(e) => setCrewDraft({ ...crewDraft, trade: e.target.value })} />
+            <input className="field" placeholder="Phone (for texts)" inputMode="tel" value={crewDraft.phone} onChange={(e) => setCrewDraft({ ...crewDraft, phone: e.target.value })} />
+            <button className="btn btn-primary" onClick={addWorker}>Add</button>
+          </div>
+        )}
+        <div className="mt-2 divide-y divide-rulesoft">
+          {emps.filter((e) => e.active !== false).map((e) => {
+            const buf = phoneBuf[e.id] ?? prettyPhone(e.phone || "");
+            return (
+              <div key={e.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
+                <span className="min-w-0"><b>{e.name}</b>{e.trade ? <span className="ml-2 text-xs text-inksoft">{e.trade}</span> : null}</span>
+                <span className="flex items-center gap-2">
+                  <input className="field w-44 px-2 py-1.5 text-[13px]" placeholder="Phone number" inputMode="tel" readOnly={me?.role === "accountant"}
+                    value={buf} onChange={(ev) => setPhoneBuf((p) => ({ ...p, [e.id]: ev.target.value }))}
+                    onBlur={() => { if (cleanPhone(buf) !== cleanPhone(e.phone || "")) savePhone(e.id, buf); }} />
+                  {me?.role !== "accountant" && <button className="text-xs text-alert" title="Remove from the crew list" onClick={async () => { await sb().from("employees").update({ active: false }).eq("id", e.id); loadEmps(); }}>✕</button>}
+                </span>
+              </div>
+            );
+          })}
+          {emps.filter((e) => e.active !== false).length === 0 && <div className="py-3 text-sm text-inksoft">No crew yet — add workers above.</div>}
+        </div>
+      </div>
 
       {contracts.length > 0 && me?.role !== "accountant" && (
         <>

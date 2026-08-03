@@ -16,7 +16,6 @@ import { useLive } from "@/lib/useLive";
 import type { Contract } from "@/lib/types";
 import { TEMPLATE_CREW } from "@/lib/crew";
 import { useNumBuffer } from "@/lib/numBuffer";
-import { cleanPhone, prettyPhone } from "@/lib/notify";
 
 interface Emp { id: string; name: string; trade: string; base_rate: number; active: boolean; phone?: string | null; }
 interface Week { id: string; week_ending: string; paid_map?: Record<string, string> | null; }
@@ -56,8 +55,6 @@ export default function Payroll() {
   const [weeks, setWeeks] = useState<Week[]>([]);
   const [openWeek, setOpenWeek] = useState<Week | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
-  const [showCrew, setShowCrew] = useState(false);
-  const [draft, setDraft] = useState({ name: "", trade: "", base_rate: "", phone: "" });
   const [rels, setRels] = useState<RelRow[]>([]);
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [linkContract, setLinkContract] = useState("");
@@ -70,8 +67,6 @@ export default function Payroll() {
   const [relPickQ, setRelPickQ] = useState(""); // the "+ Add a release" search
   const [addFor, setAddFor] = useState<string | null>(null); // section currently adding a worker
   const [addQ, setAddQ] = useState("");
-  // crew phone numbers (used by the Schedule tab's tap-to-text)
-  const [phoneBuf, setPhoneBuf] = useState<Record<string, string>>({});
   const checkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const makingWeek = useRef(false); // guards Make payroll against double-taps
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
@@ -83,13 +78,6 @@ export default function Payroll() {
   useEffect(() => {
     myProfile().then((p) => setRole(p?.role || ""));
   }, []);
-
-  const savePhone = async (empId: string, raw: string) => {
-    const phone = cleanPhone(raw) || raw.trim();
-    const { error } = await sb().from("employees").update({ phone }).eq("id", empId);
-    if (error) { flash(/column|schema cache/i.test(error.message) ? "Run supabase/upgrade_worker_phone.sql first" : error.message); return; }
-    setEmps((prev) => prev.map((e) => (e.id === empId ? { ...e, phone } : e)));
-  };
 
   const load = async (only?: string[]) => {
     // the four reads don't depend on each other — they go out together; a
@@ -212,15 +200,6 @@ export default function Payroll() {
     const { data, error } = await sb().from("timesheet_entries").insert(base).select().single();
     if (error) { flash(error.message); return; }
     if (data) setEntries((prev) => (prev.some((x) => x.id === (data as Entry).id) ? prev : [...prev, { ...(data as Entry), hours: ((data as Entry).hours || []).map(Number) }]));
-  };
-  // make sure everyone from the payroll template shows in the crew list
-  const seedCrew = async () => {
-    const { data: allEmps } = await sb().from("employees").select("id,name");
-    const have = new Set(((allEmps || []) as { name: string }[]).map((e) => e.name.trim().toLowerCase()));
-    const missing = TEMPLATE_CREW.filter((t) => !have.has(t.name.toLowerCase()));
-    if (missing.length === 0) return;
-    const { error } = await sb().from("employees").insert(missing.map((t) => ({ name: t.name, trade: t.trade, base_rate: 0 })));
-    if (!error) load();
   };
   // picking a template name adds that worker to the crew on the spot, then to the week
   const addFromTemplate = async (idx: number, rel?: { id: string | null; label: string }) => {
@@ -747,47 +726,9 @@ export default function Payroll() {
         <div className="font-display text-2xl font-bold uppercase">Payroll</div>
         <div className="flex flex-wrap justify-end gap-2">
           <Link className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" href="/payroll/certified" title="Turn certified payroll PDFs into a CSV for eComply">📄 eComply CSV</Link>
-          <button className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" onClick={() => { const n = !showCrew; setShowCrew(n); if (n && !readOnly) seedCrew(); }}>Crew ({emps.filter((e) => e.active !== false).length})</button>
+          <Link className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" href="/settings" title="Crew list and phone numbers now live in Settings">Crew ({emps.filter((e) => e.active !== false).length}) →</Link>
         </div>
       </div>
-      {showCrew && (
-        <div className="card mb-3 p-3.5">
-          {!readOnly && <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-            <input className="field" placeholder="Name" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
-            <input className="field" placeholder="Usual classification (laborer…)" value={draft.trade} onChange={(e) => setDraft({ ...draft, trade: e.target.value })} />
-            <input className="field" placeholder="Phone (for texts)" inputMode="tel" value={draft.phone} onChange={(e) => setDraft({ ...draft, phone: e.target.value })} />
-            <button className="btn btn-primary" onClick={async () => {
-              if (!draft.name) return;
-              const row: Record<string, unknown> = { name: draft.name, trade: draft.trade, base_rate: 0 };
-              if (draft.phone.trim()) row.phone = cleanPhone(draft.phone) || draft.phone.trim();
-              let { error } = await sb().from("employees").insert(row);
-              if (error && "phone" in row && /column|schema cache/i.test(error.message)) {
-                delete row.phone;
-                ({ error } = await sb().from("employees").insert(row));
-                if (!error) flash("Run supabase/upgrade_worker_phone.sql so phone numbers save");
-              }
-              if (error) { flash(error.message); return; }
-              setDraft({ name: "", trade: "", base_rate: "", phone: "" }); load();
-            }}>Add</button>
-          </div>}
-          <div className="mt-2 divide-y divide-rulesoft">
-            {emps.filter((e) => e.active !== false).map((e) => {
-              const buf = phoneBuf[e.id] ?? prettyPhone(e.phone || "");
-              return (
-                <div key={e.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
-                  <span className="min-w-0"><b>{e.name}</b></span>
-                  <span className="flex items-center gap-2">
-                    <input className="field w-44 px-2 py-1.5 text-[13px]" placeholder="Phone number" inputMode="tel" readOnly={readOnly}
-                      value={buf} onChange={(ev) => setPhoneBuf((p) => ({ ...p, [e.id]: ev.target.value }))}
-                      onBlur={() => { if (cleanPhone(buf) !== cleanPhone(e.phone || "")) savePhone(e.id, buf); }} />
-                    {!readOnly && <button className="text-xs text-alert" onClick={async () => { await sb().from("employees").update({ active: false }).eq("id", e.id); load(); }}>✕</button>}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       {!readOnly && (() => {
         const we = fridayOf(localISO());

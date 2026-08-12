@@ -6,7 +6,7 @@
 // portal's database.
 import { useRef, useState } from "react";
 import Link from "next/link";
-import { parseCertifiedPayroll, buildCsv, blankRow, dayLabels, type CpReport, type CpRow, type CpLine, type Cell } from "@/lib/certifiedPayroll";
+import { parseCertifiedPayroll, buildCsv, lcmWarnings, blankRow, dayLabels, type CpReport, type CpRow, type CpLine, type Cell } from "@/lib/certifiedPayroll";
 import { askFileName } from "@/lib/format";
 
 interface PdfDocLite { destroy?: () => Promise<void> }
@@ -91,11 +91,42 @@ export default function CertifiedPayroll() {
       }) };
     }));
 
+  // anything their upload would bounce gets shown BEFORE the file downloads
+  const confirmWarnings = (reps: CpReport[]): boolean => {
+    const warns = lcmWarnings(reps);
+    if (warns.length === 0) return true;
+    return window.confirm(`Their upload may reject this file:\n\n• ${warns.slice(0, 10).join("\n• ")}${warns.length > 10 ? `\n…and ${warns.length - 10} more` : ""}\n\nDownload anyway?`);
+  };
+
   const download = (reps: CpReport[], name: string) => {
+    if (!confirmWarnings(reps)) return;
     const fname = askFileName(name);
     if (!fname) return;
     const blob = new Blob([buildCsv(reps)], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = fname; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  };
+
+  // their upload takes ONE week per file — many weeks = one CSV each, zipped
+  const downloadAllZip = async () => {
+    if (!confirmWarnings(reports)) return;
+    const fname = askFileName("cpr_uploads.zip");
+    if (!fname) return;
+    const { zipSync, strToU8 } = await import("fflate");
+    const files: Record<string, Uint8Array> = {};
+    reports.forEach((rep, i) => {
+      // safe file names, and no week may silently overwrite another
+      let base = `cpr_${(rep.payrollNo || String(i + 1))}_${rep.weekEnding.replace(/\//g, "-") || "week"}`.replace(/[\\/:*?"<>|]/g, "-");
+      let name = `${base}.csv`;
+      for (let n = 2; files[name]; n++) name = `${base}_${n}.csv`;
+      files[name] = strToU8(buildCsv([rep]));
+    });
+    const zipped = zipSync(files, { level: 6 });
+    const ab = new ArrayBuffer(zipped.byteLength);
+    new Uint8Array(ab).set(zipped);
+    const url = URL.createObjectURL(new Blob([ab], { type: "application/zip" }));
     const a = document.createElement("a");
     a.href = url; a.download = fname; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
@@ -161,8 +192,8 @@ export default function CertifiedPayroll() {
               <table className="w-full border-collapse text-[13px]" style={{ minWidth: 1180 }}>
                 <thead>
                   <tr className="border-b-[1.5px] border-ink text-left font-display text-[10px] uppercase tracking-widest text-inksoft">
-                    <th className="min-w-[150px] p-2">Worker</th>
-                    <th className="p-2">SSN last 4</th>
+                    <th className="min-w-[210px] p-2">Worker</th>
+                    <th className="p-2">SSN<div className="font-normal">last 4 or full</div></th>
                     <th className="min-w-[120px] p-2">Classification</th>
                     {days.map((d, i) => <th key={i} className="p-2 text-center">{d}<div className="font-normal">ST / OT</div></th>)}
                     <th className="p-2 text-right">Hours</th>
@@ -178,9 +209,32 @@ export default function CertifiedPayroll() {
                       <tr key={wi} className="border-b border-rulesoft align-top">
                         <td className="p-1.5">
                           <input className="field px-2 py-1.5 text-[13px]" placeholder="Last, First" value={w.name} onChange={(e) => setRow(ri, wi, { name: e.target.value })} />
-                          <input className="field mt-1 px-2 py-1.5 text-[12px]" placeholder="Address (optional)" value={w.address} onChange={(e) => setRow(ri, wi, { address: e.target.value })} />
+                          <input className="field mt-1 px-2 py-1.5 text-[12px]" placeholder="Street address" value={w.address} onChange={(e) => setRow(ri, wi, { address: e.target.value })} />
+                          <div className="mt-1 grid grid-cols-3 gap-1">
+                            <input className="field px-1.5 py-1 text-[11px]" placeholder="City" value={w.city} onChange={(e) => setRow(ri, wi, { city: e.target.value })} />
+                            <input className="field px-1.5 py-1 text-[11px]" placeholder="NY" maxLength={2} title="State (blank = read from the address, else NY)" value={w.state} onChange={(e) => setRow(ri, wi, { state: e.target.value.toUpperCase() })} />
+                            <input className="field px-1.5 py-1 text-[11px]" placeholder="Zip" value={w.zip} onChange={(e) => setRow(ri, wi, { zip: e.target.value })} />
+                          </div>
+                          <div className="mt-1 flex gap-1">
+                            <select className="field px-1 py-1 text-[11px]" title="Marital status" value={w.marital} onChange={(e) => setRow(ri, wi, { marital: e.target.value })}>
+                              <option value="S">Single</option><option value="M">Married</option>
+                            </select>
+                            <select className="field px-1 py-1 text-[11px]" title="Gender" value={w.gender} onChange={(e) => setRow(ri, wi, { gender: e.target.value })}>
+                              <option value="">—</option><option value="M">M</option><option value="F">F</option>
+                            </select>
+                            <select className="field px-1 py-1 text-[11px]" title="Journeyman or Apprentice" value={w.trade} onChange={(e) => setRow(ri, wi, { trade: e.target.value })}>
+                              <option value="J">Journeyman</option><option value="A">Apprentice</option>
+                            </select>
+                            <select className="field px-1 py-1 text-[11px]" title="Ethnicity code (their upload wants it)" value={w.ethnicity} onChange={(e) => setRow(ri, wi, { ethnicity: e.target.value })}>
+                              <option value="">Ethn.—</option><option value="1">1 Caucasian</option><option value="2">2 African American</option>
+                              <option value="3">3 Hispanic</option><option value="4">4 Native Am./Alaskan</option>
+                              <option value="5">5 Asian/Pac. Isl.</option><option value="6">6 Other</option>
+                            </select>
+                            <input className="field w-12 px-1 py-1 text-center text-[11px]" title="Tax exemptions claimed (0-99)" inputMode="numeric" maxLength={2}
+                              value={String(w.exemption ?? "")} onChange={(e) => setRow(ri, wi, { exemption: e.target.value.replace(/\D/g, "") })} />
+                          </div>
                         </td>
-                        <td className="p-1.5"><input className="field w-16 px-2 py-1.5 text-center font-mono text-[13px]" maxLength={4} inputMode="numeric" value={w.ssn4} onChange={(e) => setRow(ri, wi, { ssn4: e.target.value.replace(/\D/g, "") })} /></td>
+                        <td className="p-1.5"><input className="field w-24 px-2 py-1.5 text-center font-mono text-[13px]" maxLength={11} inputMode="numeric" title="Last 4 (goes out as 000-00-1234) or the full 9 digits" value={w.ssn4} onChange={(e) => setRow(ri, wi, { ssn4: e.target.value.replace(/[^\d-]/g, "") })} /></td>
                         <td className="p-1.5"><input className="field px-2 py-1.5 text-[13px]" placeholder="Laborer…" value={w.classification} onChange={(e) => setRow(ri, wi, { classification: e.target.value })} /></td>
                         {days.map((_, di) => (
                           <td key={di} className="p-1">
@@ -205,7 +259,7 @@ export default function CertifiedPayroll() {
       })}
 
       {reports.length > 1 && (
-        <button className="btn btn-primary" onClick={() => download(reports, `ecomply_all_weeks.csv`)}>⬇ Download all {reports.length} weeks in one CSV</button>
+        <button className="btn btn-primary" onClick={downloadAllZip}>⬇ All {reports.length} weeks — one CSV each, zipped</button>
       )}
       {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
     </div>

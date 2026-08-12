@@ -7,11 +7,13 @@
 // editable grid before the CSV is made. NOTHING here is saved to the database:
 // wages exist only inside the file the user downloads.
 
+import { COMPANY } from "./company";
+
 // cells hold whatever the user types; numbers are coerced when the CSV is built
 export type Cell = number | string;
 export interface CpRow {
   name: string;
-  ssn4: string;
+  ssn4: string; // last 4, or the full 9 digits when known
   address: string;
   classification: string;
   st: Cell[];   // straight-time hours, 7 days (day 1 = six days before week ending)
@@ -26,6 +28,15 @@ export interface CpRow {
   cityTax: Cell;
   otherDed: Cell;
   net: Cell;
+  // worker details the LCM upload wants (defaults are editable in the grid)
+  marital: string;    // S or M
+  exemption: Cell;    // 0-99
+  ethnicity: string;  // 1 Caucasian · 2 African American · 3 Hispanic · 4 Native American/Alaskan · 5 Asian/Pacific Islander · 6 Other
+  gender: string;     // M or F (blank allowed)
+  city: string;
+  state: string;
+  zip: string;
+  trade: string;      // J journeyman / A apprentice
 }
 
 export interface CpReport {
@@ -44,6 +55,7 @@ export const blankRow = (): CpRow => ({
   st: ["", "", "", "", "", "", ""], ot: ["", "", "", "", "", "", ""],
   stRate: "", otRate: "", grossProject: "", grossTotal: "",
   fica: "", fedTax: "", stateTax: "", cityTax: "", otherDed: "", net: "",
+  marital: "S", exemption: "0", ethnicity: "", gender: "", city: "", state: "", zip: "", trade: "J",
 });
 
 const num = (s: string): number => parseFloat(s.replace(/[$,]/g, ""));
@@ -172,31 +184,147 @@ export const dayLabels = (weekEnding: string): string[] => {
   });
 };
 
+// ---- the LCM CPR import format (eComply) ----
+// The header below is copied verbatim from their own 2.0_CPR_upload sample \u2014
+// 133 columns; a row must line up with it position by position.
+const LCM_HEADER =
+  "payrollnumber,weekenddate,assignedempid,titlecourtesy,firstname,middleinitial,lastname,suffix,title,birthdate,ssn," +
+  "maritalstatus,exemption,ethnicity,gender,address,city,state,zip,country,contactno,officeno,unionname,hiredate," +
+  "federalid,alienno,apprenticeshipno,fica,fedwh,stwh,grosspayallprojects,netpay,checknumber," +
+  "otherdeduction1,value1,otherdeduction2,value2,otherdeduction3,value3,classification,trade,grosspaythisproject," +
+  "otherprojectsrthrs,otherprojectsothrs,benefitspaidtounion,benefitspaidtoemployee,benefitspaidtoother," +
+  "benefitspaidto1,benefitspaidto2,benefitspaidto3,isfridaymakeupday,issaturdaymakeupday,issundaymakeupday," +
+  "rt1,rt2,rt3,rt4,rt5,rt6,rt7,rtrate,rtbenefit,st1,st2,st3,st4,st5,st6,st7,strate,stbenefit," +
+  "ot1,ot2,ot3,ot4,ot5,ot6,ot7,otrate,otbenefit,gt1,gt2,gt3,gt4,gt5,gt6,gt7,gtrate,gtbenefit," +
+  "dt1,dt2,dt3,dt4,dt5,dt6,dt7,dtrate,dtbenefit,tt1,tt2,tt3,tt4,tt5,tt6,tt7,ttrate,ttbenefit," +
+  "ph1,ph2,ph3,ph4,ph5,ph6,ph7,contractno,schoolcode,taxpayerid,sdi,etax," +
+  "otherdeduction4,value4,otherdeduction5,value5," +
+  "OtherPayment1,OtherPaymentAmount1,NotInGrossPay1,OtherPayment2,OtherPaymentAmount2,NotInGrossPay2," +
+  "OtherPayment3,OtherPaymentAmount3,NotInGrossPay3,Dues";
+const LCM_COLS = LCM_HEADER.split(",").length;
+
+// "Last, First M", "First M Last", with an optional Jr/Sr/II/III/IV tail
+export function splitName(name: string): { first: string; mi: string; last: string; suffix: string } {
+  let s = (name || "").trim().replace(/\s{2,}/g, " ");
+  let suffix = "";
+  const sufM = s.match(/[,\s]+(JR\.?|SR\.?|II|III|IV)\.?$/i);
+  if (sufM) { suffix = sufM[1].replace(/\.$/, ""); s = s.slice(0, sufM.index).trim(); }
+  if (!s) return { first: "", mi: "", last: "", suffix };
+  if (s.includes(",")) {
+    const [last, rest] = [s.slice(0, s.indexOf(",")).trim(), s.slice(s.indexOf(",") + 1).trim()];
+    const parts = rest.split(/\s+/);
+    const mi = parts[1] && parts[1].replace(/\./g, "").length === 1 ? parts[1].replace(/\./g, "") : "";
+    // a multi-letter middle token stays with the given name (never dropped)
+    const first = mi ? parts[0] || "" : parts.join(" ");
+    return { first, mi, last, suffix };
+  }
+  const parts = s.split(/\s+/);
+  if (parts.length === 1) return { first: parts[0], mi: "", last: "", suffix };
+  const mi = parts.length >= 3 && parts[1].replace(/\./g, "").length === 1 ? parts[1].replace(/\./g, "") : "";
+  const first = parts.length >= 3 && !mi ? parts.slice(0, -1).join(" ") : parts[0];
+  return { first, mi, last: parts[parts.length - 1], suffix };
+}
+
+// "117-01 Atlantic Ave Richmond Hill NY 11418" -> street / city / state / zip
+function splitAddress(addr: string): { street: string; city: string; state: string; zip: string } {
+  const s = (addr || "").trim();
+  const tail = s.match(/[,\s]+([A-Z]{2})[,\s]+(\d{5}(?:-\d{4})?)$/);
+  if (!tail || tail.index === undefined) return { street: s, city: "", state: "", zip: "" };
+  const front = s.slice(0, tail.index).trim();
+  const state = tail[1], zip = tail[2];
+  // commas make it easy: "street, city"
+  const cm = front.match(/^(.*?),\s*([A-Za-z .'-]+)$/);
+  if (cm) return { street: cm[1].trim(), city: cm[2].trim(), state, zip };
+  // otherwise the street usually ends in Ave/St/Blvd/… — the rest is the city
+  // (greedy prefix: the LAST suffix word wins, so "117 St Nicholas Ave …" splits after Ave)
+  const sm = front.match(/^(.*\b(?:avenue|ave|street|st|boulevard|blvd|road|rd|drive|dr|place|pl|court|ct|lane|ln|way|pkwy|parkway|terrace|ter|broadway|concourse|plaza)\.?)\s+(.+)$/i);
+  if (sm) return { street: sm[1].trim(), city: sm[2].trim(), state, zip };
+  // last resort: everything is the street
+  return { street: front, city: "", state, zip };
+}
+
+const lcmSsn = (raw: string): string => {
+  const d = (raw || "").replace(/\D/g, "");
+  if (d.length === 9) return `${d.slice(0, 3)}-${d.slice(3, 5)}-${d.slice(5)}`;
+  if (d.length === 4) return `000-00-${d}`; // the spec allows 000-00-1234 when only the tail is known
+  return "";
+};
+
 export function buildCsv(reports: CpReport[]): string {
-  const head = [
-    "Payroll No", "Week Ending", "Contractor", "Project", "Contract No",
-    "Employee Name", "SSN Last 4", "Address", "Work Classification",
-    "ST Hours Day 1", "ST Hours Day 2", "ST Hours Day 3", "ST Hours Day 4", "ST Hours Day 5", "ST Hours Day 6", "ST Hours Day 7",
-    "OT Hours Day 1", "OT Hours Day 2", "OT Hours Day 3", "OT Hours Day 4", "OT Hours Day 5", "OT Hours Day 6", "OT Hours Day 7",
-    "Total ST Hours", "Total OT Hours", "ST Rate", "OT Rate",
-    "Gross This Project", "Gross All Projects",
-    "FICA", "Federal Tax", "State Tax", "City Tax", "Other Deductions", "Total Deductions", "Net Pay",
-  ];
-  const lines = [head.map(esc).join(",")];
+  // numbers go out bare \u2014 no $ or thousands separators, per the spec
+  const money = (v: Cell, dflt = ""): string => {
+    const s = String(v ?? "").replace(/[$,\s]/g, "");
+    if (s === "") return dflt;
+    const x = Number(s);
+    return Number.isFinite(x) ? String(Math.round(x * 100) / 100) : dflt;
+  };
+  const lines = [LCM_HEADER];
   for (const rep of reports) {
     for (const r of rep.rows) {
-      const stT = r.st.reduce<number>((s, h) => s + (Number(h) || 0), 0);
-      const otT = r.ot.reduce<number>((s, h) => s + (Number(h) || 0), 0);
-      const dedT = [r.fica, r.fedTax, r.stateTax, r.cityTax, r.otherDed].reduce<number>((s, d) => s + (Number(d) || 0), 0);
-      lines.push([
-        rep.payrollNo, rep.weekEnding, rep.contractor, rep.project, rep.contractNo,
-        r.name, r.ssn4, r.address, r.classification,
-        ...r.st, ...r.ot,
-        stT || "", otT || "", r.stRate, r.otRate,
-        r.grossProject, r.grossTotal || r.grossProject,
-        r.fica, r.fedTax, r.stateTax, r.cityTax, r.otherDed, dedT || "", r.net,
-      ].map(esc).join(","));
+      const f: (string | number)[] = new Array(LCM_COLS).fill("");
+      const nm = splitName(r.name);
+      const ad = splitAddress(r.address);
+      f[0] = rep.payrollNo;              // payrollnumber
+      f[1] = rep.weekEnding;             // weekenddate mm/dd/yyyy
+      f[4] = nm.first; f[5] = nm.mi; f[6] = nm.last; f[7] = nm.suffix;
+      f[8] = r.classification;           // title = craft
+      f[10] = lcmSsn(r.ssn4);
+      f[11] = r.marital || "S";
+      f[12] = money(r.exemption, "0");
+      f[13] = r.ethnicity || "";
+      f[14] = r.gender || "";
+      f[15] = ad.street;
+      f[16] = r.city || ad.city;
+      f[17] = r.state || ad.state || "NY";
+      f[18] = r.zip || ad.zip;
+      f[19] = "USA";
+      f[27] = money(r.fica, "0");        // fica
+      f[28] = money(r.fedTax, "0");      // fedwh
+      f[29] = money(r.stateTax, "0");    // stwh
+      f[30] = money(r.grossTotal) || money(r.grossProject, "0"); // grosspayallprojects
+      f[31] = money(r.net, "0");         // netpay
+      // city tax and "other" have no columns of their own \u2014 they ride as named deductions
+      const deds: [string, string][] = [];
+      if (money(r.cityTax)) deds.push(["City Income Tax", money(r.cityTax)]);
+      if (money(r.otherDed)) deds.push(["Miscellaneous", money(r.otherDed)]);
+      if (deds[0]) { f[33] = deds[0][0]; f[34] = deds[0][1]; }
+      if (deds[1]) { f[35] = deds[1][0]; f[36] = deds[1][1]; }
+      f[39] = r.classification;          // classification
+      f[40] = (r.trade || "J").toUpperCase(); // trade J/A
+      f[41] = money(r.grossProject, "0"); // grosspaythisproject
+      f[42] = "0"; f[43] = "0";          // other-project hours
+      f[44] = "N"; f[45] = "N"; f[46] = "N"; // benefits paid to union/employee/other
+      f[50] = "N"; f[51] = "N"; f[52] = "N"; // make-up days
+      r.st.forEach((h, i) => { if (i < 7) f[53 + i] = money(h, "0"); }); // rt1..rt7
+      f[60] = money(r.stRate, "0");      // rtrate (required even when 0)
+      r.ot.forEach((h, i) => { if (i < 7) f[71 + i] = money(h, "0"); }); // ot1..ot7
+      f[78] = money(r.otRate);           // otrate
+      f[114] = rep.contractNo;           // contractno
+      f[116] = COMPANY.fedTaxId;         // taxpayerid
+      f[117] = "0";                      // sdi
+      f[118] = "0";                      // etax (KCMO only)
+      lines.push(f.map(esc).join(","));
     }
   }
-  return "\uFEFF" + lines.join("\r\n") + "\r\n"; // BOM so Excel opens it clean
+  // no BOM: their sample file starts with the bare header, and a byte-exact
+  // header is what the importer matches on
+  return lines.join("\r\n") + "\r\n";
+}
+
+// problems worth flagging before the file goes out the door
+export function lcmWarnings(reports: CpReport[]): string[] {
+  const out: string[] = [];
+  for (const rep of reports) {
+    const wk = rep.weekEnding || "?";
+    if (!/^\d{2}\/\d{2}\/\d{4}$/.test(rep.weekEnding || ""))
+      out.push(`Week "${wk}": the week-ending date must look like 08/01/2026 (MM/DD/YYYY).`);
+    rep.rows.forEach((r, i) => {
+      const who = r.name || `worker ${i + 1}`;
+      if (r.ssn4.trim() && !lcmSsn(r.ssn4)) out.push(`Week ${wk} \u00B7 ${who}: SSN "${r.ssn4}" isn't 4 or 9 digits \u2014 it would go out blank.`);
+      if (!r.ssn4.trim()) out.push(`Week ${wk} \u00B7 ${who}: no SSN \u2014 their upload requires one (last 4 is enough).`);
+      if (!r.ethnicity) out.push(`Week ${wk} \u00B7 ${who}: no ethnicity code \u2014 their upload requires one (pick it in the worker's row).`);
+      if (!splitName(r.name).last) out.push(`Week ${wk} \u00B7 ${who}: needs a first AND last name.`);
+    });
+  }
+  return out;
 }

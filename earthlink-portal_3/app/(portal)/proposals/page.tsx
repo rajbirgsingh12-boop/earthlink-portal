@@ -24,6 +24,10 @@ interface ContractItem { id: string; line: number; code: string; category: strin
 type NychaLineItem = LineItem & { category?: string; line?: number };
 
 const tone = (s: string) => (s === "approved" ? "work" : s === "sent" ? "carbon" : s === "invoiced" ? "mute" : s === "declined" ? "alert" : "mute");
+// how a sheet is named everywhere: the location, then what the work is for
+const sheetName = (p: { development?: string; address?: string; job?: string; number?: string }) =>
+  [p.development || p.address, p.job].filter(Boolean).join(" — ") || p.number || "proposal";
+const fileSafe = (s: string) => s.replace(/[\\/:*?"<>|]/g, "-").slice(0, 120);
 const HEAD_FIELDS = [
   ["development", "Development"], ["address", "Address"], ["apt", "Apt"], ["stairhall", "Stairhall"],
   ["nycha_staff", "NYCHA staff"], ["vendor_staff", "Vendor staff"], ["walk_date", "Walk date"],
@@ -350,7 +354,7 @@ export default function Proposals() {
     ws["!rows"][totalRow] = { hpt: 22 };
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
-    const fname = askFileName(`proposal_sheet_${c?.number || ""}${doc.release_number ? `_rel${doc.release_number}` : ""}.xlsx`);
+    const fname = askFileName(`${fileSafe(sheetName(doc))}.xlsx`);
     if (!fname) return;
     XLSX.writeFile(wb, fname);
   };
@@ -553,7 +557,7 @@ export default function Proposals() {
         </div>
 
         {printOpen && (
-          <PrintShell>
+          <PrintShell title={fileSafe(sheetName(doc))}>
           <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
             <div className="printable mx-auto max-w-4xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
               <Letterhead />
@@ -678,13 +682,13 @@ export default function Proposals() {
             <button className="flex w-full items-center justify-between gap-2 text-left" onClick={() => openEditor(p)}>
               <div className="min-w-0">
                 <div className="text-[14px] font-semibold">
-                  {p.job
-                    ? <>{p.job}<span className="ml-1.5 font-mono text-[11px] font-normal text-inksoft">{p.number}</span></>
+                  {(p.development || p.address || p.job)
+                    ? <>{sheetName(p)}<span className="ml-1.5 font-mono text-[11px] font-normal text-inksoft">{p.number}</span></>
                     : <span className="font-mono">{p.number}</span>}
                 </div>
                 <div className="truncate text-[13px] text-inksoft">
                   {p.contract_id
-                    ? [p.development || (p.job ? "" : "NYCHA walk"), p.address, p.apt && `Apt ${p.apt}`, p.stairhall && `Stair ${p.stairhall}`, p.release_number && `Rel ${p.release_number}`].filter(Boolean).join(" · ")
+                    ? [p.development && p.address, p.apt && `Apt ${p.apt}`, p.stairhall && `Stair ${p.stairhall}`, p.release_number && `Rel ${p.release_number}`].filter(Boolean).join(" · ") || (p.development || p.address ? "" : "NYCHA walk")
                     : p.client_name || "No client"}
                 </div>
               </div>

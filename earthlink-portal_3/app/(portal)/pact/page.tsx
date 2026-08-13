@@ -145,8 +145,31 @@ export default function Pact() {
     try {
       let fields: PactPoFields | null = null;
       let how = "";
+      let taxFromDoc: number | undefined;
+      // our own proposal letters (.docx) read right here on the device
+      const isDocx = /\.docx$/i.test(file.name);
+      if (isDocx) {
+        try {
+          const { parsePactProposalDocx } = await import("@/lib/parsePactProposal");
+          const parsed = parsePactProposalDocx(await file.arrayBuffer());
+          taxFromDoc = parsed.taxPct;
+          fields = parsed;
+          // the letter names the person, not the partner company — borrow the
+          // partner from an earlier job billed to the same office
+          if (!fields.partner && fields.billBlock) {
+            const street = fields.billBlock.match(/\d+\s+[A-Za-z .]+/)?.[0] || "";
+            if (street) {
+              const { data: prior } = await sb().from("pact_jobs").select("partner,bill_to").not("partner", "eq", "").limit(200);
+              // whole-number match — "10 Bank Street" must not hit "110 Bank Street"
+              const re = new RegExp(`(^|[^0-9])${street.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i");
+              const hit = ((prior || []) as { partner: string; bill_to?: string }[]).find((p) => re.test(p.bill_to || ""));
+              if (hit) fields.partner = hit.partner;
+            }
+          }
+        } catch { fields = null; }
+      }
       // 1) server read (Vercel caps request bodies ~4.5 MB — bigger scans go straight to the phone)
-      if (file.size <= 4 * 1024 * 1024) {
+      if (!isDocx && file.size <= 4 * 1024 * 1024) {
         try {
           const { data: { session } } = await sb().auth.getSession();
           const res = await fetch("/api/parse-po", {
@@ -159,8 +182,9 @@ export default function Pact() {
         } catch { how = "server unreachable"; }
       } else how = "file too big for the server — read on this device";
       // the server answering with nothing usable counts as a miss too
-      if (fields && !fields.po && !fields.partner && !fields.desc) fields = null;
+      if (!isDocx && fields && !fields.po && !fields.partner && !fields.desc) fields = null;
       // 2) browser fallback
+      if (!fields && isDocx) fields = { po: "", poDate: "", desc: "", partner: "", address: "", billBlock: "", contact: "", punit: "", amount: 0, rows: [], readable: false };
       if (!fields) {
         try {
           const pdfjs = await import("pdfjs-dist");
@@ -207,6 +231,7 @@ export default function Pact() {
         partner: f.partner, development: "", job_number: f.po, description: f.desc, amount,
         po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,
         contact: f.contact, bill_to: f.billBlock, items: seed, invoice_number: f.po ? `${f.po}-1` : "",
+        ...(taxFromDoc !== undefined ? { tax_pct: taxFromDoc } : {}),
       }).select().single();
       if (error || !job) { setBusy(false); flash(upgradeHint(error?.message || "Save failed")); return; }
       // attach the PO itself
@@ -221,7 +246,9 @@ export default function Pact() {
       flash(ue
         ? `Job created, but the PDF didn't attach (${/bucket/i.test(ue.message) ? "storage not set up — run supabase/upgrade_invoices_aging_docs.sql" : ue.message.slice(0, 80)}) — add it from the Documents button`
         : unreadable
-          ? `PDF attached, but no text could be read (scanned copy?${how ? ` · ${how}` : ""}) — type the partner, address and description below`
+          ? isDocx
+            ? "File attached, but the proposal couldn't be read — type the partner, address and description below"
+            : `PDF attached, but no text could be read (scanned copy?${how ? ` · ${how}` : ""}) — type the partner, address and description below`
           : `PO ${f.po || "imported"} — check the details and work lines below`);
     } catch (err) {
       setBusy(false);
@@ -502,7 +529,7 @@ export default function Pact() {
           <Link className="btn btn-ghost" href="/pact/schedule">📅 Schedule</Link>
         </div>
       </div>
-      <input ref={poRef} type="file" accept="application/pdf" className="hidden" onChange={handlePo} />
+      <input ref={poRef} type="file" accept="application/pdf,.pdf,.docx" className="hidden" onChange={handlePo} />
 
       {addOpen && (
         <div className="card mb-3 border-work p-3.5">
@@ -544,7 +571,7 @@ export default function Pact() {
             <span className="text-inksoft">Upload the PDF — the job builds itself with the address, contacts, work lines and amount.</span>
           </div>
           <div className="flex shrink-0 gap-2">
-            <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy}>📄 Upload PO (PDF)</button>
+            <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy} title="A partner PO (PDF) or one of our proposal letters (Word)">📄 Upload PO / proposal</button>
             <button className="btn btn-ghost" onClick={() => setAddOpen(!addOpen)}>+ Manual</button>
           </div>
         </div>

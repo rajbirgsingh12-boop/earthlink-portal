@@ -510,9 +510,9 @@ export default function Pact() {
       const blob = new Blob([out.buffer as ArrayBuffer], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
       const aEl = document.createElement("a");
-      // "invoice # <PO> <address>" — easy to spot in a folder of downloads
+      // "invoice # <invoice number> PO <PO number> <address>" — easy to spot in downloads
       const fname = askFileName(
-        `invoice # ${j.po_number || j.job_number || ""} ${[j.address, j.property_unit && `Apt ${j.property_unit}`].filter(Boolean).join(" ")}`
+        `invoice # ${j.invoice_number || ""} PO ${j.po_number || j.job_number || ""} ${[j.address, j.property_unit && `Apt ${j.property_unit}`].filter(Boolean).join(" ")}`
           .trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\s{2,}/g, " ").slice(0, 120) + ".pdf"
       );
       if (!fname) { URL.revokeObjectURL(url); setBusy(false); return; }

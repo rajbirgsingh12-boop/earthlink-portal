@@ -558,11 +558,10 @@ export default function Proposals() {
             <div className="printable mx-auto max-w-4xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
               <Letterhead />
               <div className="border-2 border-ink bg-paper p-2 text-center font-display text-xl font-bold uppercase">Proposal — NYCHA Walk Sheet</div>
-              <div className="my-4 grid grid-cols-2 gap-x-8 gap-y-1.5 border border-rulesoft p-3 text-[13px]">
-                {([["PO", c?.number || ""], ["NYCHA Staff", doc.nycha_staff], ["Vendor", (org?.company || "").toUpperCase()], ["Vendor Staff", doc.vendor_staff],
-                  ["Development", doc.development], ["Walk Date", doc.walk_date], ["Stairhall", doc.stairhall], ["Release #", doc.release_number],
-                  ["Apt", doc.apt], ["Start Date", doc.start_date], ["Address", doc.address], ["Finish Date", doc.finish_date]] as [string, string | undefined][]).map(([l, v]) => (
-                  <div key={l} className="flex gap-2 border-b border-rulesoft py-0.5"><span className="w-28 shrink-0 font-semibold uppercase text-[11px] tracking-wider text-inksoft">{l}</span><span>{v || "—"}</span></div>
+              <div className="my-4 grid gap-y-1.5 border border-rulesoft p-3 text-[14px]">
+                {([["Development", doc.development], ["Address", [doc.address, doc.apt && `Apt ${doc.apt}`].filter(Boolean).join(" · ")],
+                  ["For", doc.job]] as [string, string | undefined][]).map(([l, v]) => (
+                  <div key={l} className="flex gap-3 border-b border-rulesoft py-1"><span className="w-28 shrink-0 font-semibold uppercase text-[11px] tracking-wider text-inksoft">{l}</span><span>{v || "—"}</span></div>
                 ))}
               </div>
               <table className="w-full border-collapse border border-ink text-[12px]">

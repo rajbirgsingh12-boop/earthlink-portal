@@ -8,6 +8,7 @@ import { fmt, parseNum, askFileName } from "@/lib/format";
 import { prettyDate, localISO, type Org } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
 import { useLive } from "@/lib/useLive";
+import { COMPANY } from "@/lib/company";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
@@ -367,13 +368,24 @@ export default function Pact() {
       const hr = (yy: number, w = 0.6, color = ruleC) =>
         page.drawLine({ start: { x: L, y: yy }, end: { x: R, y: yy }, thickness: w, color });
 
-      // letterhead
-      put((org2.company || "Earth Link General Construction, Inc.").toUpperCase(), L, y, 15, bold);
+      // letterhead: the logo with the company block beside it, same as the proposal
+      void org2;
+      let lx = L;
+      try {
+        const logoBytes = await fetch("/logo.png").then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error("no logo"))));
+        const logo = await pkg.embedPng(logoBytes);
+        const lh2 = 60, lw2 = (logo.width / logo.height) * lh2;
+        page.drawImage(logo, { x: L, y: y - lh2 + 13, width: lw2, height: lh2 });
+        lx = L + lw2 + 12;
+      } catch { /* logo unavailable — text-only letterhead */ }
+      put(COMPANY.letterhead.name, lx, y, 14, bold);
       putR("INVOICE", R, y - 3, 21, bold);
-      y -= 15;
-      put([org2.address1, org2.address2].filter(Boolean).join(" · "), L, y, 8.5, helv, soft);
+      y -= 14;
+      put(COMPANY.letterhead.address, lx, y, 8.5, helv, soft);
       y -= 11;
-      put([org2.phone && `Phone ${org2.phone}`, org2.email, org2.license && `License ${org2.license}`].filter(Boolean).join(" · "), L, y, 8.5, helv, soft);
+      put(COMPANY.letterhead.phones, lx, y, 8.5, helv, soft);
+      y -= 11;
+      put(COMPANY.letterhead.emails, lx, y, 8.5, helv, soft);
       y -= 12;
       hr(y, 1.6, ink);
       y -= 24;

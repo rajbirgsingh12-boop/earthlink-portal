@@ -104,6 +104,16 @@ export default function Pact() {
   // live: PACT jobs changing anywhere refresh the list without a reload
   useLive(["pact_jobs"], () => load(), { skipWhileTyping: true });
 
+  // invoice numbers count up: 569, 570, 571… — the highest plain number wins,
+  // so old "8300-1"-style numbers never skew the sequence
+  const nextInvoiceNo = async (): Promise<string> => {
+    const { data } = await sb().from("pact_jobs").select("invoice_number");
+    const nums = ((data || []) as { invoice_number?: string }[])
+      .map((r) => (/^\d+$/.test(String(r.invoice_number || "").trim()) ? parseInt(String(r.invoice_number).trim(), 10) : NaN))
+      .filter((n) => Number.isFinite(n));
+    return String(Math.max(568, ...nums) + 1);
+  };
+
   const patch = async (j: Job, p: Partial<Job>) => {
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, ...p } : x)));
     setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, ...p } : prev));
@@ -231,7 +241,7 @@ export default function Pact() {
       const { data: job, error } = await sb().from("pact_jobs").insert({
         partner: f.partner, development: "", job_number: f.po, description: f.desc, amount,
         po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,
-        contact: f.contact, bill_to: f.billBlock, items: seed, invoice_number: f.po ? `${f.po}-1` : "",
+        contact: f.contact, bill_to: f.billBlock, items: seed, invoice_number: await nextInvoiceNo(),
         ...(taxFromDoc !== undefined ? { tax_pct: taxFromDoc } : {}),
       }).select().single();
       if (error || !job) { setBusy(false); flash(upgradeHint(error?.message || "Save failed")); return; }
@@ -262,6 +272,7 @@ export default function Pact() {
     const { error } = await sb().from("pact_jobs").insert({
       partner: draft.partner.trim(), development: draft.development.trim(), job_number: draft.job_number.trim(),
       description: draft.description.trim(), amount: parseNum(draft.amount),
+      invoice_number: await nextInvoiceNo(),
     });
     if (error) { flash(upgradeHint(error.message)); return; }
     setDraft({ ...BLANK }); setAddOpen(false); load();

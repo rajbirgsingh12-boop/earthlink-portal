@@ -12,6 +12,7 @@ import type { Contract } from "@/lib/types";
 import ContractPicker from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
 import PrintShell from "@/components/PrintShell";
+import Letterhead from "@/components/Letterhead";
 
 interface Proposal {
   id: string; number: string; client_name: string; job: string; date: string; tax_pct: number; status: string; notes: string;
@@ -555,6 +556,7 @@ export default function Proposals() {
           <PrintShell>
           <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
             <div className="printable mx-auto max-w-4xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
+              <Letterhead />
               <div className="border-2 border-ink bg-paper p-2 text-center font-display text-xl font-bold uppercase">Proposal — NYCHA Walk Sheet</div>
               <div className="my-4 grid grid-cols-2 gap-x-8 gap-y-1.5 border border-rulesoft p-3 text-[13px]">
                 {([["PO", c?.number || ""], ["NYCHA Staff", doc.nycha_staff], ["Vendor", (org?.company || "").toUpperCase()], ["Vendor Staff", doc.vendor_staff],

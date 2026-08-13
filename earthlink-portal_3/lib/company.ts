@@ -12,6 +12,13 @@ export const COMPANY = {
   phoneHref: "+19177960479",
   email: "info@earthlink-gc.com",
   site: "www.earthlink-gc.com",
+  // the letterhead block, exactly as the owner's Word template prints it
+  letterhead: {
+    name: "Earth Link General Construction, Inc.",
+    address: "117-01 Atlantic Avenue, Richmond Hill, NY 11418",
+    phones: "Phone: (917) 509-6427 | Office: (718) 316-9098",
+    emails: "Email: earthlink99@gmail.com | Office Email: info@earthlinkgc.com",
+  },
   // filing details used on NYCHA paperwork (Statement of Services, invoices)
   fax: "718-766-8010",
   supplierNo: "104638",

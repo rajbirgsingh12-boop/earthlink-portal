@@ -559,7 +559,8 @@ export default function Proposals() {
               <Letterhead />
               <div className="border-2 border-ink bg-paper p-2 text-center font-display text-xl font-bold uppercase">Proposal — NYCHA Walk Sheet</div>
               <div className="my-4 grid gap-y-1.5 border border-rulesoft p-3 text-[14px]">
-                {([["Development", doc.development], ["Address", [doc.address, doc.apt && `Apt ${doc.apt}`].filter(Boolean).join(" · ")],
+                {([["Contract #", c?.number], ["Development", doc.development],
+                  ["Address", [doc.address, doc.apt && `Apt ${doc.apt}`].filter(Boolean).join(" · ")],
                   ["For", doc.job]] as [string, string | undefined][]).map(([l, v]) => (
                   <div key={l} className="flex gap-3 border-b border-rulesoft py-1"><span className="w-28 shrink-0 font-semibold uppercase text-[11px] tracking-wider text-inksoft">{l}</span><span>{v || "—"}</span></div>
                 ))}

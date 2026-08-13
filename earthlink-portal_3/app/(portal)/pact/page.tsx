@@ -510,7 +510,11 @@ export default function Pact() {
       const blob = new Blob([out.buffer as ArrayBuffer], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
       const aEl = document.createElement("a");
-      const fname = askFileName(`package_PO${j.po_number || j.job_number || ""}.pdf`);
+      // "invoice # <PO> <address>" — easy to spot in a folder of downloads
+      const fname = askFileName(
+        `invoice # ${j.po_number || j.job_number || ""} ${[j.address, j.property_unit && `Apt ${j.property_unit}`].filter(Boolean).join(" ")}`
+          .trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\s{2,}/g, " ").slice(0, 120) + ".pdf"
+      );
       if (!fname) { URL.revokeObjectURL(url); setBusy(false); return; }
       aEl.href = url; aEl.download = fname; aEl.click();
       // revoking right away can abort the download on iPhone — give it a minute

@@ -122,29 +122,37 @@ export default function CertifiedPayroll() {
   // crew worked that week. The money stays exactly as the payroll report says —
   // only the HOURS split, using the portal's own timesheets (which never hold
   // wages) to see who was on which release.
-  const downloadByRelease = async (rep: CpReport) => {
+  const downloadByRelease = async (ri: number, rep: CpReport) => {
     const m = rep.weekEnding.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
     if (!m) { flash("Type the week-ending date (MM/DD/YYYY) first — the split looks up that week's timesheet."); return; }
+    // "8/7/2026" becomes "08/07/2026" everywhere — the grid, the CSV, the file names
+    const pretty = `${m[1].padStart(2, "0")}/${m[2].padStart(2, "0")}/${m[3]}`;
+    if (pretty !== rep.weekEnding) { rep = { ...rep, weekEnding: pretty }; setRep(ri, { weekEnding: pretty }); }
     const iso = `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
     setBusy(true);
     try {
-      const { data: wks } = await sb().from("timesheet_weeks").select("id").eq("week_ending", iso);
+      const { data: wks, error: wkErr } = await sb().from("timesheet_weeks").select("id").eq("week_ending", iso);
+      if (wkErr) { flash(`Couldn't reach the portal (${wkErr.message}) — try again.`); return; }
       if (!wks?.length) { flash(`No payroll week ending ${rep.weekEnding} in the portal — enter that week's hours on the Payroll tab first.`); return; }
-      const [{ data: ents }, { data: emps }] = await Promise.all([
+      const [entsRes, empsRes] = await Promise.all([
         sb().from("timesheet_entries").select("employee_id,release_id,hours").in("week_id", wks.map((w: { id: string }) => w.id)),
         sb().from("employees").select("id,name"),
       ]);
+      if (entsRes.error || empsRes.error) { flash(`Couldn't reach the portal (${(entsRes.error || empsRes.error)!.message}) — try again.`); return; }
+      const ents = entsRes.data, emps = empsRes.data;
       const relIds = [...new Set((ents || []).map((e: { release_id: string | null }) => e.release_id).filter(Boolean))] as string[];
-      const { data: rels } = relIds.length
+      const relsRes = relIds.length
         ? await sb().from("releases").select("id,rel_number").in("id", relIds)
-        : { data: [] as { id: string; rel_number: string }[] };
-      const relNumById = new Map((rels || []).map((r: { id: string; rel_number: string }) => [r.id, String(r.rel_number)]));
+        : { data: [] as { id: string; rel_number: string }[], error: null };
+      if (relsRes.error) { flash(`Couldn't reach the portal (${relsRes.error.message}) — try again.`); return; }
+      const relNumById = new Map((relsRes.data || []).map((r: { id: string; rel_number: string | null }) => [r.id, String(r.rel_number ?? "")]));
       const nameById = new Map((emps || []).map((e: { id: string; name: string }) => [e.id, e.name]));
       // hours by release → by worker (7 days, Sat…Fri — same order as the CSV grid)
       const byRel: Record<string, ReleaseHours> = {};
       for (const en of (ents || []) as { employee_id: string; release_id: string | null; hours: (number | string)[] }[]) {
-        const rel = en.release_id ? relNumById.get(en.release_id) : undefined;
-        if (!rel) continue; // shop/misc hours belong to no release
+        let rel = en.release_id ? relNumById.get(en.release_id) : undefined;
+        if (rel === undefined) continue; // shop/misc hours belong to no release
+        if (!rel.trim()) rel = "unnumbered"; // a release saved without a number still counts
         const k = workerKey(nameById.get(en.employee_id) || "");
         if (!k) continue;
         const g = (byRel[rel] ||= { rel, byWorker: {} });
@@ -178,7 +186,7 @@ export default function CertifiedPayroll() {
       groups.forEach((g) => put(`cpr_rel${g.rel}_${week}`, g.report));
       if (unmatched) put(`cpr_NO_RELEASE_FOUND_${week}`, unmatched);
       saveBlob(zipSync(files, { level: 6 }), "application/zip", fname);
-      const skipped = unmatched ? ` · no portal hours found for: ${unmatched.rows.map((r) => r.name || "?").join(", ")}` : "";
+      const skipped = unmatched ? ` · not split (see the NO_RELEASE_FOUND file): ${unmatched.rows.map((r) => r.name || "?").join(", ")}` : "";
       flash(`Split into ${groups.length} releases (${groups.map((g) => `#${g.rel}`).join(", ")}) — one CSV each${skipped}`);
     } finally {
       setBusy(false);
@@ -242,7 +250,7 @@ export default function CertifiedPayroll() {
             <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
               <div className="font-display text-base font-bold uppercase">Week {rep.weekEnding || "?"} <span className="ml-1 text-[11px] font-normal normal-case text-inksoft">from {rep.fileName}</span></div>
               <div className="flex gap-2">
-                <button className="btn btn-ghost px-3 py-1.5 text-[13px]" title="One CSV per release, hours split from the portal's timesheets — how NYCHA wants it" onClick={() => downloadByRelease(rep)} disabled={busy}>⬇ CSV per release</button>
+                <button className="btn btn-ghost px-3 py-1.5 text-[13px]" title="One CSV per release, hours split from the portal's timesheets — how NYCHA wants it" onClick={() => downloadByRelease(ri, rep)} disabled={busy}>⬇ CSV per release</button>
                 <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => download([rep], `ecomply_${(rep.payrollNo || "payroll")}_${rep.weekEnding.replace(/\//g, "-") || "week"}.csv`)}>⬇ CSV for this week</button>
                 <button className="text-xs text-alert" title="Remove this report" onClick={() => { if (window.confirm("Remove this report from the page? (Nothing was saved anywhere.)")) setReports((p) => p.filter((_, x) => x !== ri)); }}>✕</button>
               </div>

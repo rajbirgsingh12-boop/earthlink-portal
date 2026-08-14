@@ -335,11 +335,17 @@ const moneyN = (v: Cell): number => {
 export function splitReportByRelease(rep: CpReport, releases: ReleaseHours[]): { groups: { rel: string; report: CpReport }[]; unmatched: CpReport | null } {
   const daySum = (days: number[], weekend: boolean) =>
     days.reduce((s, h, i) => (i < 2) === weekend ? s + (Number(h) || 0) : s, 0);
-  // which releases each payroll worker shows up on, and their total hours
+  // which releases each payroll worker shows up on, and their total hours.
+  // Two payroll rows can share one name (a worker paid under two
+  // classifications, or a father & son) — the timesheet can't be attributed
+  // twice, so those rows are NOT split; they go out in the unmatched file.
+  const keyCount: Record<string, number> = {};
+  for (const row of rep.rows) { const k = workerKey(row.name); if (k) keyCount[k] = (keyCount[k] || 0) + 1; }
   const rowsByRel: Record<string, CpRow[]> = {};
   const matched = new Set<string>();
   for (const row of rep.rows) {
     const k = workerKey(row.name);
+    if (k && keyCount[k] > 1) continue;
     const mine = releases
       .map((rh) => ({ rel: rh.rel, days: rh.byWorker[k] }))
       .filter((x): x is { rel: string; days: number[] } => !!k && !!x.days && x.days.some((h) => Number(h) > 0));
@@ -362,6 +368,9 @@ export function splitReportByRelease(rep: CpReport, releases: ReleaseHours[]): {
         st: m.days.map((h, di) => (di < 2 ? 0 : Number(h) || 0)),
         ot: m.days.map((h, di) => (di < 2 ? Number(h) || 0 : 0)), // Sat/Sun ride as overtime
         grossProject: gross ? share : row.grossProject,
+        // the all-projects gross stays the WHOLE week even when only
+        // "Gross (this job)" was filled in on the grid
+        grossTotal: moneyN(row.grossTotal) ? row.grossTotal : (gross || row.grossTotal),
         otherRt: Math.round((totWk - relWk) * 100) / 100,
         otherOt: Math.round((totWe - relWe) * 100) / 100,
       });
@@ -371,7 +380,11 @@ export function splitReportByRelease(rep: CpReport, releases: ReleaseHours[]): {
     .sort(([a], [b]) => (parseFloat(a) || 0) - (parseFloat(b) || 0))
     .map(([rel, rows]) => ({ rel, report: { ...rep, contractNo: rel, rows } }));
   const un = rep.rows.filter((row) => !matched.has(workerKey(row.name)));
-  return { groups, unmatched: un.length > 0 ? { ...rep, rows: un } : null };
+  const dupNames = [...new Set(rep.rows.filter((r) => keyCount[workerKey(r.name)] > 1).map((r) => r.name))];
+  const unNotes = dupNames.length
+    ? [`${dupNames.join(", ")}: listed more than once on the payroll — the portal can't tell which hours go with which row, so split these by hand.`]
+    : [];
+  return { groups, unmatched: un.length > 0 ? { ...rep, rows: un, notes: unNotes } : null };
 }
 
 // problems worth flagging before the file goes out the door

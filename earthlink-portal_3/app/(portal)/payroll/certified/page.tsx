@@ -6,8 +6,9 @@
 // portal's database.
 import { useRef, useState } from "react";
 import Link from "next/link";
-import { parseCertifiedPayroll, buildCsv, lcmWarnings, blankRow, dayLabels, type CpReport, type CpRow, type CpLine, type Cell } from "@/lib/certifiedPayroll";
+import { parseCertifiedPayroll, buildCsv, lcmWarnings, blankRow, dayLabels, splitReportByRelease, workerKey, type ReleaseHours, type CpReport, type CpRow, type CpLine, type Cell } from "@/lib/certifiedPayroll";
 import { askFileName } from "@/lib/format";
+import { sb } from "@/lib/supabase";
 
 interface PdfDocLite { destroy?: () => Promise<void> }
 
@@ -102,11 +103,86 @@ export default function CertifiedPayroll() {
     if (!confirmWarnings(reps)) return;
     const fname = askFileName(name);
     if (!fname) return;
-    const blob = new Blob([buildCsv(reps)], { type: "text/csv;charset=utf-8" });
+    saveBlob(buildCsv(reps), "text/csv;charset=utf-8", fname);
+  };
+
+  const saveBlob = (bytes: Uint8Array | string, type: string, fname: string) => {
+    const blob = typeof bytes === "string" ? new Blob([bytes], { type }) : (() => {
+      const ab = new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(ab).set(bytes);
+      return new Blob([ab], { type });
+    })();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = fname; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  };
+
+  // NYCHA takes certified payroll per RELEASE: one CSV for each release the
+  // crew worked that week. The money stays exactly as the payroll report says —
+  // only the HOURS split, using the portal's own timesheets (which never hold
+  // wages) to see who was on which release.
+  const downloadByRelease = async (rep: CpReport) => {
+    const m = rep.weekEnding.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (!m) { flash("Type the week-ending date (MM/DD/YYYY) first — the split looks up that week's timesheet."); return; }
+    const iso = `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
+    setBusy(true);
+    try {
+      const { data: wks } = await sb().from("timesheet_weeks").select("id").eq("week_ending", iso);
+      if (!wks?.length) { flash(`No payroll week ending ${rep.weekEnding} in the portal — enter that week's hours on the Payroll tab first.`); return; }
+      const [{ data: ents }, { data: emps }] = await Promise.all([
+        sb().from("timesheet_entries").select("employee_id,release_id,hours").in("week_id", wks.map((w: { id: string }) => w.id)),
+        sb().from("employees").select("id,name"),
+      ]);
+      const relIds = [...new Set((ents || []).map((e: { release_id: string | null }) => e.release_id).filter(Boolean))] as string[];
+      const { data: rels } = relIds.length
+        ? await sb().from("releases").select("id,rel_number").in("id", relIds)
+        : { data: [] as { id: string; rel_number: string }[] };
+      const relNumById = new Map((rels || []).map((r: { id: string; rel_number: string }) => [r.id, String(r.rel_number)]));
+      const nameById = new Map((emps || []).map((e: { id: string; name: string }) => [e.id, e.name]));
+      // hours by release → by worker (7 days, Sat…Fri — same order as the CSV grid)
+      const byRel: Record<string, ReleaseHours> = {};
+      for (const en of (ents || []) as { employee_id: string; release_id: string | null; hours: (number | string)[] }[]) {
+        const rel = en.release_id ? relNumById.get(en.release_id) : undefined;
+        if (!rel) continue; // shop/misc hours belong to no release
+        const k = workerKey(nameById.get(en.employee_id) || "");
+        if (!k) continue;
+        const g = (byRel[rel] ||= { rel, byWorker: {} });
+        const arr = (g.byWorker[k] ||= [0, 0, 0, 0, 0, 0, 0]);
+        (en.hours || []).forEach((h, i) => { if (i < 7) arr[i] += Number(h) || 0; });
+      }
+      const { groups, unmatched } = splitReportByRelease(rep, Object.values(byRel));
+      if (groups.length === 0) {
+        flash("Nobody on this report has release hours that week in the portal — check the names match the crew list in Settings.");
+        return;
+      }
+      const week = rep.weekEnding.replace(/\//g, "-");
+      const allReps = [...groups.map((g) => g.report), ...(unmatched ? [unmatched] : [])];
+      if (!confirmWarnings(allReps)) return;
+      if (groups.length === 1 && !unmatched) {
+        const fname = askFileName(`cpr_rel${groups[0].rel}_${week}.csv`);
+        if (!fname) return;
+        saveBlob(buildCsv([groups[0].report]), "text/csv;charset=utf-8", fname);
+        flash(`Whole week was release #${groups[0].rel} — one CSV made.`);
+        return;
+      }
+      const fname = askFileName(`cpr_by_release_${week}.zip`);
+      if (!fname) return;
+      const { zipSync, strToU8 } = await import("fflate");
+      const files: Record<string, Uint8Array> = {};
+      const put = (base: string, rep2: CpReport) => {
+        let name = `${base.replace(/[\\/:*?"<>|]/g, "-")}.csv`;
+        for (let n = 2; files[name]; n++) name = `${base.replace(/[\\/:*?"<>|]/g, "-")}_${n}.csv`;
+        files[name] = strToU8(buildCsv([rep2]));
+      };
+      groups.forEach((g) => put(`cpr_rel${g.rel}_${week}`, g.report));
+      if (unmatched) put(`cpr_NO_RELEASE_FOUND_${week}`, unmatched);
+      saveBlob(zipSync(files, { level: 6 }), "application/zip", fname);
+      const skipped = unmatched ? ` · no portal hours found for: ${unmatched.rows.map((r) => r.name || "?").join(", ")}` : "";
+      flash(`Split into ${groups.length} releases (${groups.map((g) => `#${g.rel}`).join(", ")}) — one CSV each${skipped}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   // their upload takes ONE week per file — many weeks = one CSV each, zipped
@@ -123,13 +199,7 @@ export default function CertifiedPayroll() {
       for (let n = 2; files[name]; n++) name = `${base}_${n}.csv`;
       files[name] = strToU8(buildCsv([rep]));
     });
-    const zipped = zipSync(files, { level: 6 });
-    const ab = new ArrayBuffer(zipped.byteLength);
-    new Uint8Array(ab).set(zipped);
-    const url = URL.createObjectURL(new Blob([ab], { type: "application/zip" }));
-    const a = document.createElement("a");
-    a.href = url; a.download = fname; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    saveBlob(zipSync(files, { level: 6 }), "application/zip", fname);
   };
 
   const moneyFields: [keyof CpRow, string][] = [
@@ -159,7 +229,9 @@ export default function CertifiedPayroll() {
           Upload the certified payroll PDF(s) from your payroll company — one per week. The reader pulls out each worker&apos;s
           name, classification, day-by-day hours, rates, gross, deductions and net, shows it all in a grid you can correct,
           then makes a CSV file for eComply. If a PDF reads badly, fix the cells by hand — and send that PDF over so the
-          reader can learn its layout.
+          reader can learn its layout. <b>⬇ CSV per release</b> splits a week into one CSV per release — the hours come
+          from the week you filled in on the Payroll tab, the money stays from the payroll report — which is how NYCHA
+          wants certified payroll turned in.
         </div>
       )}
 
@@ -170,6 +242,7 @@ export default function CertifiedPayroll() {
             <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
               <div className="font-display text-base font-bold uppercase">Week {rep.weekEnding || "?"} <span className="ml-1 text-[11px] font-normal normal-case text-inksoft">from {rep.fileName}</span></div>
               <div className="flex gap-2">
+                <button className="btn btn-ghost px-3 py-1.5 text-[13px]" title="One CSV per release, hours split from the portal's timesheets — how NYCHA wants it" onClick={() => downloadByRelease(rep)} disabled={busy}>⬇ CSV per release</button>
                 <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => download([rep], `ecomply_${(rep.payrollNo || "payroll")}_${rep.weekEnding.replace(/\//g, "-") || "week"}.csv`)}>⬇ CSV for this week</button>
                 <button className="text-xs text-alert" title="Remove this report" onClick={() => { if (window.confirm("Remove this report from the page? (Nothing was saved anywhere.)")) setReports((p) => p.filter((_, x) => x !== ri)); }}>✕</button>
               </div>

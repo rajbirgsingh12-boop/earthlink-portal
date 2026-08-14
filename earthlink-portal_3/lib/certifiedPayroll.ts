@@ -37,6 +37,9 @@ export interface CpRow {
   state: string;
   zip: string;
   trade: string;      // J journeyman / A apprentice
+  // set on per-release rows: this worker's hours on the OTHER releases that week
+  otherRt?: Cell;
+  otherOt?: Cell;
 }
 
 export interface CpReport {
@@ -252,7 +255,7 @@ const lcmSsn = (raw: string): string => {
 
 export function buildCsv(reports: CpReport[]): string {
   // numbers go out bare \u2014 no $ or thousands separators, per the spec
-  const money = (v: Cell, dflt = ""): string => {
+  const money = (v: Cell | undefined, dflt = ""): string => {
     const s = String(v ?? "").replace(/[$,\s]/g, "");
     if (s === "") return dflt;
     const x = Number(s);
@@ -292,7 +295,7 @@ export function buildCsv(reports: CpReport[]): string {
       f[39] = r.classification;          // classification
       f[40] = (r.trade || "J").toUpperCase(); // trade J/A
       f[41] = money(r.grossProject, "0"); // grosspaythisproject
-      f[42] = "0"; f[43] = "0";          // other-project hours
+      f[42] = money(r.otherRt, "0"); f[43] = money(r.otherOt, "0"); // other-project hours
       f[44] = "N"; f[45] = "N"; f[46] = "N"; // benefits paid to union/employee/other
       f[50] = "N"; f[51] = "N"; f[52] = "N"; // make-up days
       r.st.forEach((h, i) => { if (i < 7) f[53 + i] = money(h, "0"); }); // rt1..rt7
@@ -309,6 +312,66 @@ export function buildCsv(reports: CpReport[]): string {
   // no BOM: their sample file starts with the bare header, and a byte-exact
   // header is what the importer matches on
   return lines.join("\r\n") + "\r\n";
+}
+
+// ---- NYCHA takes certified payroll per RELEASE: the money stays from the
+// payroll report; the hour split per release comes from the portal's own
+// timesheets (which hold hours only, never wages) ----
+export interface ReleaseHours { rel: string; byWorker: Record<string, number[]> } // 7 day-hours, Sat..Fri
+
+// name matching between the payroll PDF and the portal crew list:
+// sorted word-set, "Last, First M" == "First Last"
+export const workerKey = (name: string): string => {
+  const s = (name || "").toLowerCase().replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
+  const toks = s.split(" ").filter((w) => w.length > 1);
+  return [...new Set(toks)].sort().join(" ");
+};
+
+const moneyN = (v: Cell): number => {
+  const x = Number(String(v ?? "").replace(/[$,\s]/g, ""));
+  return Number.isFinite(x) ? x : 0;
+};
+
+export function splitReportByRelease(rep: CpReport, releases: ReleaseHours[]): { groups: { rel: string; report: CpReport }[]; unmatched: CpReport | null } {
+  const daySum = (days: number[], weekend: boolean) =>
+    days.reduce((s, h, i) => (i < 2) === weekend ? s + (Number(h) || 0) : s, 0);
+  // which releases each payroll worker shows up on, and their total hours
+  const rowsByRel: Record<string, CpRow[]> = {};
+  const matched = new Set<string>();
+  for (const row of rep.rows) {
+    const k = workerKey(row.name);
+    const mine = releases
+      .map((rh) => ({ rel: rh.rel, days: rh.byWorker[k] }))
+      .filter((x): x is { rel: string; days: number[] } => !!k && !!x.days && x.days.some((h) => Number(h) > 0));
+    if (mine.length === 0) continue;
+    matched.add(k);
+    const totWk = mine.reduce((s, m) => s + daySum(m.days, false), 0);
+    const totWe = mine.reduce((s, m) => s + daySum(m.days, true), 0);
+    const totAll = totWk + totWe;
+    const gross = moneyN(row.grossTotal) || moneyN(row.grossProject);
+    let allocated = 0;
+    mine.forEach((m, i) => {
+      const relWk = daySum(m.days, false), relWe = daySum(m.days, true);
+      // shares add back to the exact gross — the last release takes the remainder
+      const share = i === mine.length - 1
+        ? Math.round((gross - allocated) * 100) / 100
+        : Math.round(gross * ((relWk + relWe) / (totAll || 1)) * 100) / 100;
+      allocated = Math.round((allocated + share) * 100) / 100;
+      (rowsByRel[m.rel] ||= []).push({
+        ...row,
+        st: m.days.map((h, di) => (di < 2 ? 0 : Number(h) || 0)),
+        ot: m.days.map((h, di) => (di < 2 ? Number(h) || 0 : 0)), // Sat/Sun ride as overtime
+        grossProject: gross ? share : row.grossProject,
+        otherRt: Math.round((totWk - relWk) * 100) / 100,
+        otherOt: Math.round((totWe - relWe) * 100) / 100,
+      });
+    });
+  }
+  const groups = Object.entries(rowsByRel)
+    .sort(([a], [b]) => (parseFloat(a) || 0) - (parseFloat(b) || 0))
+    .map(([rel, rows]) => ({ rel, report: { ...rep, contractNo: rel, rows } }));
+  const un = rep.rows.filter((row) => !matched.has(workerKey(row.name)));
+  return { groups, unmatched: un.length > 0 ? { ...rep, rows: un } : null };
 }
 
 // problems worth flagging before the file goes out the door

@@ -347,22 +347,114 @@ export default function Pact() {
     });
   }, [attachJob]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ---------- the submitted package: invoice + PO + before/after, one PDF ----------
-  const buildPackage = async (j: Job) => {
-    const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
-    // the letterhead needs the company details — if the one fetch at page-open
-    // failed (bad signal), try again now instead of being a dead button
+  // ---------- a whole folder of proposals in, all their invoices out ----------
+  const folderRef = useRef<HTMLInputElement>(null);
+  const [folderResult, setFolderResult] = useState<{ made: Job[]; skipped: number; failed: number } | null>(null);
+  const handleProposalFolder = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []).filter((f) => /\.docx$/i.test(f.name));
+    e.target.value = "";
+    if (files.length === 0) { flash("No Word proposals (.docx) in that folder"); return; }
+    setBusy(true);
+    try {
+      const { parsePactProposalDocx } = await import("@/lib/parsePactProposal");
+      // one read up front: dupes, partner lookup, and the invoice number sequence
+      const { data: priorRows } = await sb().from("pact_jobs").select("partner,bill_to,po_number,job_number,invoice_number");
+      const prior = (priorRows || []) as { partner: string; bill_to?: string; po_number?: string; job_number?: string; invoice_number?: string }[];
+      let seq = Math.max(568, ...prior
+        .map((p) => (/^\d+$/.test(String(p.invoice_number || "").trim()) ? parseInt(String(p.invoice_number).trim(), 10) : NaN))
+        .filter((n) => Number.isFinite(n)));
+      const made: Job[] = [];
+      let skipped = 0, failed = 0, done = 0;
+      for (const f of files) {
+        done += 1;
+        flash(`Reading proposals… ${done} of ${files.length}`);
+        try {
+          const parsed = parsePactProposalDocx(await f.arrayBuffer());
+          if (!parsed.readable || parsed.rows.length === 0) { failed += 1; continue; }
+          const dupe = parsed.po && (
+            prior.some((p) => p.po_number === parsed.po || p.job_number === parsed.po) ||
+            made.some((m) => m.po_number === parsed.po)
+          );
+          if (dupe) { skipped += 1; continue; }
+          let partner = "";
+          const street = parsed.billBlock.match(/\d+\s+[A-Za-z .]+/)?.[0] || "";
+          if (street) {
+            const re = new RegExp(`(^|[^0-9])${street.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i");
+            const hit = prior.find((p) => re.test(p.bill_to || ""));
+            if (hit) partner = hit.partner;
+          }
+          seq += 1;
+          const seed: Item[] = parsed.rows.map((r) => ({ description: r.description, qty: r.qty, unit: unitFor(r.description), unit_price: r.unit_price }));
+          const { data: job, error } = await sb().from("pact_jobs").insert({
+            partner, development: "", job_number: parsed.po, description: parsed.desc, amount: parsed.amount,
+            po_number: parsed.po, po_date: parsed.poDate, address: parsed.address, property_unit: parsed.punit,
+            contact: parsed.contact, bill_to: parsed.billBlock, items: seed, invoice_number: String(seq),
+            ...(parsed.taxPct !== undefined ? { tax_pct: parsed.taxPct } : {}),
+          }).select().single();
+          if (error || !job) { failed += 1; seq -= 1; continue; }
+          const path = `pact/${(job as Job).id}/${f.name}`;
+          const { error: ue } = await sb().storage.from("docs").upload(path, f, { upsert: true });
+          if (!ue) await sb().from("pact_jobs").update({ attachments: [{ name: f.name, path }] }).eq("id", (job as Job).id);
+          made.push({ ...(job as Job), attachments: ue ? [] : [{ name: f.name, path }] });
+        } catch { failed += 1; }
+      }
+      await load();
+      setFolderResult({ made, skipped, failed });
+      flash(`${made.length} proposal${made.length === 1 ? "" : "s"} added${skipped ? `, ${skipped} already here` : ""}${failed ? `, ${failed} couldn't be read` : ""}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const downloadFolderInvoices = async () => {
+    if (!folderResult || folderResult.made.length === 0 || busy) return;
     let theOrg = org;
     if (!theOrg) {
       const { data } = await sb().from("org").select("*").single();
       if (data) { theOrg = data as Org; setOrg(theOrg); }
     }
     if (!theOrg) { flash("Company details haven't loaded — check your signal and try again"); return; }
-    const org2 = theOrg;
-    const items = itemsOf(j).filter((it) => Number(it.qty) > 0 && it.description.trim());
-    if (items.length === 0) { flash("Fill in the invoice lines first (open the job → Invoice)"); return; }
     setBusy(true);
     try {
+      const files: Record<string, Uint8Array> = {};
+      let done = 0;
+      for (const j of folderResult.made) {
+        flash(`Making invoices… ${++done} of ${folderResult.made.length}`);
+        const bytes = await buildPackageBytes(j, theOrg);
+        if (!bytes) continue;
+        let base = `invoice # ${j.invoice_number || ""} PO ${j.po_number || j.job_number || ""} ${[j.address, j.property_unit && `Apt ${j.property_unit}`].filter(Boolean).join(" ")}`
+          .trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\s{2,}/g, " ").slice(0, 110);
+        let name = `${base}.pdf`;
+        for (let n = 2; files[name]; n++) name = `${base}_${n}.pdf`;
+        files[name] = bytes;
+      }
+      if (Object.keys(files).length === 0) { flash("No invoices could be built"); setBusy(false); return; }
+      const { zipSync } = await import("fflate");
+      const zipped = zipSync(files, { level: 1 });
+      const ab = new ArrayBuffer(zipped.byteLength);
+      new Uint8Array(ab).set(zipped);
+      const fname = askFileName(`invoices_${localISO()}.zip`);
+      if (fname) {
+        const url = URL.createObjectURL(new Blob([ab], { type: "application/zip" }));
+        const a = document.createElement("a");
+        a.href = url; a.download = fname; a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        await sb().from("pact_jobs").update({ invoice_sent: today() }).in("id", folderResult.made.map((j) => j.id));
+        flash(`${Object.keys(files).length} invoices downloaded in one zip`);
+        setFolderResult(null);
+        load();
+      }
+    } catch {
+      flash("Couldn't build the zip — check your signal and try again");
+    }
+    setBusy(false);
+  };
+
+  // one job's full package as PDF bytes — invoice page, PO pages, photos
+  const buildPackageBytes = async (j: Job, org2: Org): Promise<Uint8Array | null> => {
+    const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
+    const items = itemsOf(j).filter((it) => Number(it.qty) > 0 && it.description.trim());
+    if (items.length === 0) return null;
       const pkg = await PDFDocument.create();
       const helv = await pkg.embedFont(StandardFonts.Helvetica);
       const bold = await pkg.embedFont(StandardFonts.HelveticaBold);
@@ -517,7 +609,23 @@ export default function Pact() {
           } catch { /* skip bad image */ }
         }
       }
-      const out = await pkg.save();
+      return await pkg.save();
+  };
+
+  // ---------- the submitted package: invoice + PO + before/after, one PDF ----------
+  const buildPackage = async (j: Job) => {
+    // the letterhead needs the company details — if the one fetch at page-open
+    // failed (bad signal), try again now instead of being a dead button
+    let theOrg = org;
+    if (!theOrg) {
+      const { data } = await sb().from("org").select("*").single();
+      if (data) { theOrg = data as Org; setOrg(theOrg); }
+    }
+    if (!theOrg) { flash("Company details haven't loaded — check your signal and try again"); return; }
+    setBusy(true);
+    try {
+      const out = await buildPackageBytes(j, theOrg);
+      if (!out) { flash("Fill in the invoice lines first (open the job → Invoice)"); setBusy(false); return; }
       const blob = new Blob([out.buffer as ArrayBuffer], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
       const aEl = document.createElement("a");
@@ -557,6 +665,25 @@ export default function Pact() {
         </div>
       </div>
       <input ref={poRef} type="file" accept="application/pdf,.pdf,.docx" className="hidden" onChange={handlePo} />
+      {/* a folder (or multi-select) of proposal letters, read in one go */}
+      {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+      <input ref={folderRef} type="file" multiple {...({ webkitdirectory: "" } as any)} className="hidden" onChange={handleProposalFolder} />
+      {folderResult && (
+        <div className="card mb-3 border-work p-3.5">
+          <div className="font-display text-base font-bold uppercase">{folderResult.made.length} proposal{folderResult.made.length === 1 ? "" : "s"} added</div>
+          <div className="mt-1 text-xs text-inksoft">
+            {folderResult.skipped > 0 && `${folderResult.skipped} skipped (already here). `}
+            {folderResult.failed > 0 && `${folderResult.failed} couldn't be read — upload those one at a time. `}
+            Invoice numbers {folderResult.made[0]?.invoice_number}–{folderResult.made[folderResult.made.length - 1]?.invoice_number} assigned.
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button className="btn btn-primary" onClick={downloadFolderInvoices} disabled={busy || folderResult.made.length === 0}>
+              {busy ? "Making invoices…" : `⬇ Download all ${folderResult.made.length} invoices (zip)`}
+            </button>
+            <button className="btn btn-ghost" disabled={busy} onClick={() => setFolderResult(null)}>Not now</button>
+          </div>
+        </div>
+      )}
 
       {addOpen && (
         <div className="card mb-3 border-work p-3.5">
@@ -599,6 +726,7 @@ export default function Pact() {
           </div>
           <div className="flex shrink-0 gap-2">
             <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy} title="A partner PO (PDF) or one of our proposal letters (Word)">📄 Upload PO / proposal</button>
+            <button className="btn whitespace-nowrap" onClick={() => folderRef.current?.click()} disabled={busy} title="Pick a folder of proposal letters — every one becomes a job, then all the invoices download in one zip">📁 Proposal folder</button>
             <button className="btn btn-ghost" onClick={() => setAddOpen(!addOpen)}>+ Manual</button>
           </div>
         </div>

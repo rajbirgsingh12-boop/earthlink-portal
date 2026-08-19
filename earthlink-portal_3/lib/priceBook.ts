@@ -34,19 +34,19 @@ export const PRICE_BOOK: PriceItem[] = [
   { key: "hinge_lobby", description: "Lobby door hinges", unit: "EACH", price: 350, group: "Doors & hardware", words: "hinges?" },
   { key: "hinge_apt", description: "Apartment entrance door hinges", unit: "EACH", price: 150, group: "Doors & hardware", words: "hinges?" },
   // ---- plaster & walls (measured) ----
-  { key: "plaster", description: "Plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "plaster|skim\\s*coat|patch(?:ing)?\\b" },
-  { key: "popcorn", description: "Popcorn ceiling removal", unit: "SF", price: 5, group: "Plaster & walls", words: "popcorn" },
-  { key: "wall_repair", description: "Wall repair", unit: "SF", price: 6, group: "Plaster & walls", words: "wall\\s*repair|repair[^.\\n]{0,12}walls?" },
-  { key: "sheetrock", description: "Sheet rock", unit: "SF", price: 12, group: "Plaster & walls", words: "sheet\\s*rock|sheetrock|dry\\s*wall|drywall" },
-  { key: "hourly", description: "Additional services", unit: "HOUR", price: 12, group: "Plaster & walls", words: "additional\\s*service|per\\s*hour|hourly" },
+  { key: "plaster", description: "Plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "plaster(?:ing)?|skim(?:\\s*coat)?|spackle|spackling|patch(?:ing|es)?\\b|tape\\s*(?:and|&)\\s*spackle|scratch\\s*coat" },
+  { key: "popcorn", description: "Popcorn ceiling removal", unit: "SF", price: 5, group: "Plaster & walls", words: "popcorn|textured?\\s*ceilings?|stipple|scrape\\s*(?:the\\s*)?ceilings?" },
+  { key: "wall_repair", description: "Wall repair", unit: "SF", price: 6, group: "Plaster & walls", words: "wall\\s*repair|repair[^.\\n]{0,12}walls?|hole[s]?\\s*in\\s*the\\s*walls?" },
+  { key: "sheetrock", description: "Sheet rock", unit: "SF", price: 12, group: "Plaster & walls", words: "sheet\\s*rock|sheetrock|dry\\s*wall|drywall|gypsum|blue\\s*board|rock\\s*the\\s*walls?" },
+  { key: "hourly", description: "Additional services", unit: "HOUR", price: 12, group: "Plaster & walls", words: "additional\\s*services?|per\\s*hour|hourly|time\\s*(?:and|&)\\s*material|t\\s*&\\s*m\\b|labou?r\\s*only" },
   // ---- painting (per apartment: 1 coat / 2 coat) ----
   { key: "paint_1br", description: "Paint 1 bedroom 1 bath apartment", unit: "EACH", price: 1190, price2: 1490, group: "Painting", words: "1\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
   { key: "paint_2br", description: "Paint 2 bedroom 1 bath apartment", unit: "EACH", price: 1350, price2: 1650, group: "Painting", words: "2\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
   { key: "paint_3br", description: "Paint 3 bedroom 1 bath apartment", unit: "EACH", price: 1550, price2: 1900, group: "Painting", words: "3\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
   { key: "paint_4br", description: "Paint 4 bedroom 1.5 bath apartment", unit: "EACH", price: 1900, price2: 2250, group: "Painting", words: "4\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
   // priming and painting are priced by the room, not by the square foot
-  { key: "primer", description: "Primer — 1 coat", unit: "ROOM", price: 125, group: "Painting", words: "primer|prime\\b" },
-  { key: "paint_sf", description: "Paint — 2 coats", unit: "ROOM", price: 220, group: "Painting", words: "paint(?:ing)?\\b" },
+  { key: "primer", description: "Primer — 1 coat", unit: "ROOM", price: 125, group: "Painting", words: "primer|prime\\b|priming|seal(?:er|ing)?\\s*coat" },
+  { key: "paint_sf", description: "Paint — 2 coats", unit: "ROOM", price: 220, group: "Painting", words: "paint(?:ing|ed)?\\b|re\\s*paint|finish\\s*coat|two\\s*coats?|2\\s*coats?" },
 ];
 
 // Wet trades carry their prep with them: nobody plasters a wall and leaves it
@@ -240,6 +240,20 @@ const HOURS = /(\d[\d,]*(?:\.\d+)?)\s*(?:hours?|hrs?)\b/gi;
 // "3 rooms" — only a plain room count, never "2 bedroom apartment" (that's a
 // size, not a number of rooms to paint)
 const ROOMS = /(\d[\d,]*(?:\.\d+)?)\s*rooms?\b/gi;
+// the rooms a PO names — "prime and paint the kitchen, bathroom and hallway"
+// is three rooms even though it never says a number
+const ROOM_WORDS = /\b(kitchens?|bath\s*rooms?|baths?|bed\s*rooms?|living\s*rooms?|dining\s*rooms?|hall\s*ways?|halls?|foyers?|vestibules?|dens?|closets?|laundry\s*rooms?|utility\s*rooms?|pantr(?:y|ies)|nurser(?:y|ies)|entry\s*ways?)\b/gi;
+const roomsNamed = (t: string): number => {
+  const kinds = new Map<string, number>();
+  for (const m of t.matchAll(ROOM_WORDS)) {
+    const kind = m[1].toLowerCase().replace(/\s+/g, "").replace(/(?:es|s)$/, "");
+    // "2 bedrooms and the living room" is three rooms, not two kinds of room
+    const said = t.slice(Math.max(0, (m.index as number) - 8), m.index).match(/(\d{1,2})\s+$/);
+    const count = said ? Math.min(20, parseInt(said[1], 10)) : 1;
+    kinds.set(kind, Math.max(kinds.get(kind) || 0, count));
+  }
+  return [...kinds.values()].reduce((a, b) => a + b, 0);
+};
 // a count right before the work, with room for one adjective
 const COUNT_BEFORE = /(?:^|[^\d])(\d{1,2})\s+(?:[A-Za-z.'-]+\s+){0,3}$/;
 // …unless that number is a PO number, an apartment, a building or a date
@@ -383,8 +397,9 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
   const sized = [...merged.keys()].some((k) => /^paint_\d/.test(k));
   if (sized) merged.delete("paint_sf");
 
-  // "3 rooms" anywhere in the PO sets how many rooms the prep covers
-  const roomsSaid = n([...raw.matchAll(ROOMS)][0]?.[1] || "") || 1;
+  // "3 rooms" anywhere in the PO says how many rooms the work covers; failing
+  // that, the rooms it names by hand do; failing that, one
+  const roomsSaid = n([...raw.matchAll(ROOMS)][0]?.[1] || "") || Math.max(1, roomsNamed(raw));
   // the prep that goes with wet trades, right behind the work that needs it
   if (bundle) {
     for (const b of BUNDLES) {
@@ -404,6 +419,10 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
       });
     }
   }
+
+  // any room-priced line the PO didn't count for itself covers the rooms the
+  // PO named — "prime and paint the kitchen, bathroom and hallway" is three
+  for (const h of merged.values()) if (!h.said && byKey.get(h.key)?.unit === "ROOM") h.qty = roomsSaid;
 
   return [...merged.values()]
     .sort((a, b) => a.at - b.at)

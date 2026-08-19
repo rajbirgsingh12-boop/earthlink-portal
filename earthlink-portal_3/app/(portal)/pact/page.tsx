@@ -44,8 +44,8 @@ export default function Pact() {
   const [role, setRole] = useState("");
   const canInvoice = role === "admin";
   const canEdit = role === "admin" || role === "office";
-  // the office writes proposals, so it needs the prices — invoicing stays with
-  // the admin account
+  // PACT proposals and invoices are Admin 1's; the office reads POs, prices
+  // the work lines and tracks the job, and writes NYCHA proposals as before
   const canPrice = canEdit;
   const [q, setQ] = useState("");
   const [addOpen, setAddOpen] = useState(false);
@@ -176,9 +176,9 @@ export default function Pact() {
   // Work lines for this text, from the price list. Anything the PO already
   // priced stays exactly as the PO wrote it — the list only fills the gaps,
   // and work the PO named in its own words never gets a second copy beside it.
-  const priceFromList = async (text: string, existing: Item[]): Promise<Item[]> => {
+  const priceFromList = async (text: string, existing: Item[], opts: { bundle?: boolean; refresh?: boolean } = {}): Promise<Item[]> => {
     const bk = await priceBook();
-    const lines = priceLinesFor(text, { book: bk });
+    const lines = priceLinesFor(text, { book: bk, bundle: opts.bundle ?? true });
     if (lines.length === 0) return existing;
     // what each line already on the job stands for. A line the portal wrote
     // remembers its own price-list line; one typed by hand or read off a PO is
@@ -202,7 +202,14 @@ export default function Pact() {
         continue;
       }
       const it = out[at];
-      if (Number(it.unit_price) > 0) { out[at] = { ...it, key: it.key || l.key }; continue; } // the PO's own price wins
+      // a line the portal put there follows the list; a price the PO stated
+      // stays the PO's, because that one is the agreement
+      if (Number(it.unit_price) > 0) {
+        out[at] = opts.refresh && it.key
+          ? { ...it, unit: l.unit, unit_price: l.unit_price }
+          : { ...it, key: it.key || l.key };
+        continue;
+      }
       out[at] = { ...it, unit: it.unit || l.unit, unit_price: l.unit_price, qty: Number(it.qty) > 1 ? it.qty : l.qty, key: it.key || l.key };
     }
     return out.filter((it) => it.description.trim());
@@ -214,13 +221,17 @@ export default function Pact() {
     try {
       // the job's own words only — feeding our generated line text back in
       // would let "Primer — 1 coat" read as a fresh painting order
-      const next = await priceFromList(j.description || "", itemsOf(j));
-      if (next.length === itemsOf(j).length && next.every((n, i) => n.unit_price === itemsOf(j)[i].unit_price)) {
-        flash("Nothing on the price list matches this one — type the lines in");
+      const before = itemsOf(j);
+      const next = await priceFromList(j.description || "", before, { refresh: true });
+      const added = next.length - before.length;
+      const changed = next.filter((n, i) => i < before.length && n.unit_price !== before[i].unit_price).length;
+      if (added === 0 && changed === 0) {
+        flash("Already matching the price list — nothing to change");
         return;
       }
       setItems(j, next, true);
-      flash(`Filled ${next.length} line${next.length === 1 ? "" : "s"} from the price list — check them before invoicing`);
+      flash([added > 0 ? `${added} line${added === 1 ? "" : "s"} added` : "", changed > 0 ? `${changed} re-priced` : ""]
+        .filter(Boolean).join(" · ") + " from the price list — check them before invoicing");
     } finally { setBusy(false); }
   };
 
@@ -421,7 +432,7 @@ export default function Pact() {
       // the server answering with nothing usable counts as a miss too
       if (!isDocx && fields && !fields.po && !fields.partner && !fields.desc) fields = null;
       // 2) browser fallback
-      if (!fields && isDocx) fields = { po: "", poDate: "", desc: "", partner: "", address: "", billBlock: "", contact: "", punit: "", amount: 0, rows: [], readable: false };
+      if (!fields && isDocx) fields = { po: "", poDate: "", desc: "", scope: "", partner: "", address: "", billBlock: "", contact: "", punit: "", amount: 0, rows: [], readable: false };
       if (!fields) {
         try {
           const pdfjs = await import("pdfjs-dist");
@@ -467,9 +478,14 @@ export default function Pact() {
       // What is this PO for? Whatever the price list already answers — plaster
       // brings its primer and paint with it — gets filled in, priced. A price
       // the PO itself states is never touched: that one is the agreement.
-      const priced = await priceFromList(`${f.desc} ${f.rows.map((r) => r.description).join(" ")}`, seed);
+      // when the PO priced its own lines, that IS the deal — fill the gaps but
+      // never add prep work it didn't ask for
+      const poPriced = seed.some((it) => Number(it.unit_price) > 0);
+      const priced = await priceFromList(
+        [f.desc, f.scope, f.rows.map((r) => r.description).join(" ")].filter(Boolean).join(". "),
+        seed, { bundle: !poPriced });
       const { data: job, error } = await sb().from("pact_jobs").insert({
-        partner: f.partner, development: "", job_number: f.po, description: f.desc, amount,
+        partner: f.partner, development: "", job_number: f.po, description: f.desc || f.scope, amount,
         po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,
         contact: f.contact, bill_to: f.billBlock, items: priced, invoice_number: await nextInvoiceNo(),
         ...(taxFromDoc !== undefined ? { tax_pct: taxFromDoc } : {}),
@@ -946,7 +962,7 @@ export default function Pact() {
       {/* a folder (or multi-select) of proposal letters, read in one go */}
       {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
       <input ref={folderRef} type="file" multiple {...({ webkitdirectory: "" } as any)} className="hidden" onChange={handleProposalFolder} />
-      {oneShot && (() => {
+      {oneShot && canInvoice && (() => {
         // always the job as it stands right now — edits included. The copy
         // taken at upload only stands in while the list is still loading; a
         // deleted job closes the card outright (deleteJob clears it).
@@ -972,7 +988,7 @@ export default function Pact() {
                   {busy ? "Working…" : "⬇ Proposal + invoice"}
                 </button>
               )}
-              <button className={canInvoice && billable.length > 0 ? "btn" : "btn btn-primary"} disabled={busy} onClick={() => saveProposalFor(j)}>📝 Proposal only</button>
+              <button className={billable.length > 0 ? "btn" : "btn btn-primary"} disabled={busy} onClick={() => saveProposalFor(j)}>📝 Proposal only</button>
               {canInvoice && <button className="btn" disabled={busy || billable.length === 0} title={billable.length === 0 ? "The job needs a work line first" : ""} onClick={() => saveInvoiceFor(j)}>🧾 Invoice only</button>}
               <button className="btn btn-ghost" disabled={busy} onClick={() => setOneShot(null)}>Done</button>
             </div>
@@ -994,9 +1010,11 @@ export default function Pact() {
                 {busy ? "Making invoices…" : `⬇ Download all ${folderResult.made.length} invoices (zip)`}
               </button>
             )}
-            <button className={canInvoice ? "btn" : "btn btn-primary"} onClick={downloadFolderProposals} disabled={busy || folderResult.made.length === 0}>
-              {busy ? "Working…" : `📝 Download all ${folderResult.made.length} proposals (zip)`}
-            </button>
+            {canInvoice && (
+              <button className="btn" onClick={downloadFolderProposals} disabled={busy || folderResult.made.length === 0}>
+                {busy ? "Working…" : `📝 Download all ${folderResult.made.length} proposals (zip)`}
+              </button>
+            )}
             <button className="btn btn-ghost" disabled={busy} onClick={() => setFolderResult(null)}>Not now</button>
           </div>
         </div>
@@ -1044,7 +1062,7 @@ export default function Pact() {
           <div className="flex shrink-0 gap-2">
             <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy} title="A partner PO (PDF) or one of our proposal letters (Word)">📄 Upload PO / proposal</button>
             <button className="btn whitespace-nowrap" onClick={() => folderRef.current?.click()} disabled={busy} title="Pick a folder of proposal letters — every one becomes a job, then all the invoices download in one zip">📁 Proposal folder</button>
-            <button className="btn btn-ghost whitespace-nowrap" onClick={blankProposal} disabled={busy} title="A blank proposal letter in our layout — fill it in, and uploading it back here builds the job and the invoice">📝 Proposal template</button>
+            {canInvoice && <button className="btn btn-ghost whitespace-nowrap" onClick={blankProposal} disabled={busy} title="A blank proposal letter in our layout — fill it in, and uploading it back here builds the job and the invoice">📝 Proposal template</button>}
             <button className="btn btn-ghost" onClick={() => setAddOpen(!addOpen)}>+ Manual</button>
           </div>
         </div>
@@ -1217,7 +1235,7 @@ export default function Pact() {
                     <div className="flex flex-wrap gap-2">
                       <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => setItems(j, [...itemsOf(j), { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>
                       <button className="btn btn-ghost px-3 py-1.5 text-[13px]" disabled={busy} title="Fill the lines and prices from the partner price list — plaster brings its primer and paint" onClick={() => fillFromList(j)}>⚡ Price from list</button>
-                      <button className="btn btn-ghost px-3 py-1.5 text-[13px]" disabled={busy} title="Write the proposal letter for this job" onClick={() => makeProposal(j)}>📝 Proposal</button>
+                      {canInvoice && <button className="btn btn-ghost px-3 py-1.5 text-[13px]" disabled={busy} title="Write the proposal letter for this job" onClick={() => makeProposal(j)}>📝 Proposal</button>}
                       {canPrice && (
                         <label className="flex items-center gap-1 text-[12px] text-inksoft" title="The sales tax printed on the proposal and the invoice">
                           Sales tax

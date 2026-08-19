@@ -13,6 +13,7 @@ import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
 import { parsePactPoText, type PactPoFields } from "@/lib/parsePactPo";
+import { priceLinesFor, loadPrices, type PriceItem } from "@/lib/priceBook";
 
 interface Item { description: string; qty: number; unit: string; unit_price: number; }
 interface Job {
@@ -28,7 +29,7 @@ const BLANK = { partner: "", development: "", job_number: "", description: "", a
 // the unit follows the work: doors are counted, plaster is measured
 const unitFor = (desc: string): string => {
   const d = desc.toLowerCase();
-  if (/(plaster|paint|sheetrock|drywall|skim|tile|floor|wall|ceiling|demo)/.test(d)) return "SF";
+  if (/(plaster|paint|primer|prime\b|sheetrock|drywall|skim|tile|floor|wall|ceiling|demo|popcorn)/.test(d)) return "SF";
   if (/(molding|baseboard|cove|trim|pipe|caulk)/.test(d)) return "LF";
   if (/(hour|labor)/.test(d)) return "HOUR";
   return "EACH";
@@ -148,6 +149,111 @@ export default function Pact() {
   // quirks); if the server can't be reached, the browser reads it as a backup.
   // Either way the upload always completes — worst case a blank job with the
   // PDF attached and a note to type the details.
+  // ---------- the partner price list ----------
+  const [book, setBook] = useState<PriceItem[] | null>(null);
+  const priceBook = async (): Promise<PriceItem[]> => {
+    if (book) return book;
+    const b = await loadPrices();
+    setBook(b);
+    return b;
+  };
+
+  // Work lines for this text, from the price list. Anything the PO already
+  // priced stays exactly as the PO wrote it — the list only fills the gaps.
+  const priceFromList = async (text: string, existing: Item[]): Promise<Item[]> => {
+    const lines = priceLinesFor(text, { book: await priceBook() });
+    if (lines.length === 0) return existing;
+    const same = (a: string, b: string) => a.toLowerCase().replace(/[^a-z0-9]/g, "") === b.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const out = existing.map((it) => {
+      if (Number(it.unit_price) > 0) return it; // the PO's own price wins
+      const hit = lines.find((l) => same(l.description, it.description) || l.description.toLowerCase().includes(it.description.toLowerCase().slice(0, 12)));
+      return hit ? { ...it, unit: it.unit || hit.unit, unit_price: hit.unit_price, qty: Number(it.qty) > 1 ? it.qty : hit.qty } : it;
+    });
+    // the lines the PO never listed (the primer and paint behind the plaster)
+    for (const l of lines) {
+      if (out.some((it) => same(it.description, l.description))) continue;
+      // a line the PO described in its own words, already covered above
+      if (out.some((it) => Number(it.unit_price) > 0 && l.description.toLowerCase().includes(it.description.toLowerCase().slice(0, 12)))) continue;
+      out.push({ description: l.description, qty: l.qty, unit: l.unit, unit_price: l.unit_price });
+    }
+    return out.filter((it) => it.description.trim());
+  };
+
+  // "⚡ Price from list" on a job already here
+  const fillFromList = async (j: Job) => {
+    setBusy(true);
+    try {
+      const text = [j.description, itemsOf(j).map((i) => i.description).join(" ")].join(" ");
+      const next = await priceFromList(text, itemsOf(j));
+      if (next.length === itemsOf(j).length && next.every((n, i) => n.unit_price === itemsOf(j)[i].unit_price)) {
+        flash("Nothing on the price list matches this one — type the lines in");
+        return;
+      }
+      setItems(j, next, true);
+      flash(`Filled ${next.length} line${next.length === 1 ? "" : "s"} from the price list — check them before invoicing`);
+    } finally { setBusy(false); }
+  };
+
+  // ---------- the proposal letter ----------
+  const logoBytes = async (): Promise<Uint8Array | undefined> => {
+    try {
+      const r = await fetch("/logo.png");
+      return r.ok ? new Uint8Array(await r.arrayBuffer()) : undefined;
+    } catch { return undefined; }
+  };
+
+  const saveBytes = (bytes: Uint8Array, name: string, type: string) => {
+    const ab = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(ab).set(bytes);
+    const url = URL.createObjectURL(new Blob([ab], { type }));
+    const a = document.createElement("a");
+    a.href = url; a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  };
+
+  // the job's proposal letter — the same shape the reader here understands,
+  // so a signed copy coming back makes the invoice without retyping anything
+  const makeProposal = async (j: Job) => {
+    setBusy(true);
+    try {
+      const { buildProposalDocx, proposalFileName } = await import("@/lib/proposalDoc");
+      let lines = itemsOf(j).map((it) => ({ description: it.description, qty: Number(it.qty) || 1, unit: it.unit, unit_price: Number(it.unit_price) || 0 }));
+      if (lines.length === 0) {
+        const seeded = await priceFromList(j.description || "", []);
+        lines = seeded.map((it) => ({ description: it.description, qty: Number(it.qty) || 1, unit: it.unit, unit_price: Number(it.unit_price) || 0 }));
+      }
+      if (lines.length === 0) lines = [{ description: j.description || "Work as discussed", qty: 1, unit: "EACH", unit_price: 0 }];
+      const fields = {
+        poNumber: j.po_number || j.job_number || "",
+        date: prettyDate(today()),
+        attn: (j.contact || "").split("·")[0].replace(/\s*\d[\d\s().-]{6,}$/, "").trim(),
+        billTo: (j.bill_to || j.partner || "").split(/,\s*/).filter(Boolean).slice(0, 3),
+        serviceAddress: [j.address, j.property_unit ? `Apartment ${j.property_unit}` : ""].filter(Boolean).join(", "),
+        lines,
+        taxPct: taxRate(j),
+      };
+      const name = askFileName(proposalFileName(fields));
+      if (!name) return;
+      saveBytes(buildProposalDocx(fields, await logoBytes()), name, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+      flash("Proposal saved — send it over, and the signed copy reads straight back in here");
+    } catch (err) {
+      flash(`Couldn't build the proposal (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
+    } finally { setBusy(false); }
+  };
+
+  // the empty one to fill in by hand
+  const blankProposal = async () => {
+    setBusy(true);
+    try {
+      const { buildProposalDocx, BLANK_PROPOSAL } = await import("@/lib/proposalDoc");
+      const name = askFileName("proposal template.docx");
+      if (!name) return;
+      saveBytes(buildProposalDocx({ ...BLANK_PROPOSAL, date: prettyDate(today()) }, await logoBytes()), name,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+      flash("Template saved — fill it in, keep the layout, and uploading it back here builds the job");
+    } finally { setBusy(false); }
+  };
+
   const handlePo = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -238,10 +344,14 @@ export default function Pact() {
         : f.rows.length > 0
           ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: unitFor(r.description), unit_price: r.unit_price }))
           : f.desc ? [{ description: f.desc, qty: 1, unit: unitFor(f.desc), unit_price: 0 }] : [];
+      // What is this PO for? Whatever the price list already answers — plaster
+      // brings its primer and paint with it — gets filled in, priced. A price
+      // the PO itself states is never touched: that one is the agreement.
+      const priced = await priceFromList(`${f.desc} ${f.rows.map((r) => r.description).join(" ")}`, seed);
       const { data: job, error } = await sb().from("pact_jobs").insert({
         partner: f.partner, development: "", job_number: f.po, description: f.desc, amount,
         po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,
-        contact: f.contact, bill_to: f.billBlock, items: seed, invoice_number: await nextInvoiceNo(),
+        contact: f.contact, bill_to: f.billBlock, items: priced, invoice_number: await nextInvoiceNo(),
         ...(taxFromDoc !== undefined ? { tax_pct: taxFromDoc } : {}),
       }).select().single();
       if (error || !job) { setBusy(false); flash(upgradeHint(error?.message || "Save failed")); return; }
@@ -727,6 +837,7 @@ export default function Pact() {
           <div className="flex shrink-0 gap-2">
             <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy} title="A partner PO (PDF) or one of our proposal letters (Word)">📄 Upload PO / proposal</button>
             <button className="btn whitespace-nowrap" onClick={() => folderRef.current?.click()} disabled={busy} title="Pick a folder of proposal letters — every one becomes a job, then all the invoices download in one zip">📁 Proposal folder</button>
+            <button className="btn btn-ghost whitespace-nowrap" onClick={blankProposal} disabled={busy} title="A blank proposal letter in our layout — fill it in, and uploading it back here builds the job and the invoice">📝 Proposal template</button>
             <button className="btn btn-ghost" onClick={() => setAddOpen(!addOpen)}>+ Manual</button>
           </div>
         </div>
@@ -893,7 +1004,13 @@ export default function Pact() {
                       </div>
                     );
                   })()}
-                  {canEdit && <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => setItems(j, [...itemsOf(j), { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>}
+                  {canEdit && (
+                    <div className="flex flex-wrap gap-2">
+                      <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => setItems(j, [...itemsOf(j), { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>
+                      <button className="btn btn-ghost px-3 py-1.5 text-[13px]" disabled={busy} title="Fill the lines and prices from the partner price list — plaster brings its primer and paint" onClick={() => fillFromList(j)}>⚡ Price from list</button>
+                      <button className="btn btn-ghost px-3 py-1.5 text-[13px]" disabled={busy} title="Write the proposal letter for this job" onClick={() => makeProposal(j)}>📝 Proposal</button>
+                    </div>
+                  )}
                 </div>
                 <div className="mt-3 flex justify-end">
                   <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => {

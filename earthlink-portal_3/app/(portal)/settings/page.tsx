@@ -10,6 +10,7 @@ import { askFileName } from "@/lib/format";
 import type { Org } from "@/lib/docs";
 import type { Contract, Profile, Role } from "@/lib/types";
 import { PKG_DEFAULTS, type PkgInfo, loadPkgInfo, savePkgInfo } from "@/lib/packageDocs";
+import { PRICE_BOOK, PRICE_GROUPS, loadPrices, savePrices, type PriceItem, type PriceOverrides } from "@/lib/priceBook";
 import { cleanPhone, prettyPhone } from "@/lib/notify";
 
 // the two roles: Admin 1 sees everything; Admin 2 sees everything except
@@ -109,6 +110,29 @@ export default function Settings() {
     const err = await savePkgInfo(pkgSel, clean);
     setPkgSaving(false);
     flash(err || "Package details saved — every new package for this contract uses them");
+  };
+
+  // ---------- partner price list ----------
+  const [prices, setPrices] = useState<PriceItem[]>(PRICE_BOOK);
+  const [priceSaving, setPriceSaving] = useState(false);
+  useEffect(() => { loadPrices().then(setPrices); }, []);
+  const setPrice = (key: string, field: "price" | "price2", v: string) =>
+    setPrices((prev) => prev.map((p) => (p.key === key ? { ...p, [field]: Number(v.replace(/[$,\s]/g, "")) || 0 } : p)));
+  const savePriceList = async () => {
+    setPriceSaving(true);
+    // only what's actually different from the list as they gave it gets stored
+    const ov: PriceOverrides = {};
+    for (const p of prices) {
+      const base = PRICE_BOOK.find((b) => b.key === p.key);
+      if (!base) continue;
+      const d: { price?: number; price2?: number } = {};
+      if (p.price !== base.price) d.price = p.price;
+      if (p.price2 !== undefined && p.price2 !== base.price2) d.price2 = p.price2;
+      if (Object.keys(d).length > 0) ov[p.key] = d;
+    }
+    const err = await savePrices(ov);
+    setPriceSaving(false);
+    flash(err || "Price list saved — new POs and proposals use these prices");
   };
 
   const renameContract = async (c: Contract, name: string) => {
@@ -408,6 +432,50 @@ export default function Settings() {
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <button className="btn btn-primary" onClick={savePkgDetails} disabled={pkgSaving || pkgLoading}>{pkgSaving ? "Saving…" : "Save package details"}</button>
               <span className="text-xs text-inksoft">The affidavit and full replacement PDFs upload on the Invoice Package tab.</span>
+            </div>
+          </div>
+        </>
+      )}
+
+      {me?.role !== "accountant" && (
+        <>
+          <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Partner price list</div>
+          <div className="card p-4">
+            <div className="mb-3 text-xs text-inksoft">
+              The prices quoted to Fairstead and Boulevard. When a PO comes in, this is what fills the work lines in —
+              plaster brings its primer and paint along with it. Change a price here and every PO and proposal after
+              that uses the new one. Painting is priced per apartment, one coat or two.
+            </div>
+            {PRICE_GROUPS.map((g) => (
+              <div key={g} className="mb-3">
+                <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{g}</div>
+                <div className="card divide-y divide-rulesoft">
+                  {prices.filter((p) => p.group === g).map((p) => (
+                    <div key={p.key} className="flex flex-wrap items-center gap-2 p-2.5">
+                      <span className="min-w-[190px] flex-1 text-sm">{p.description}{p.price === 0 && p.price2 === undefined ? <span className="ml-1 text-[11px] text-work">set your price</span> : null}</span>
+                      <span className="text-[11px] uppercase text-inksoft">{p.unit}</span>
+                      <label className="flex items-center gap-1">
+                        {p.price2 !== undefined && <span className="text-[11px] text-inksoft">1 coat</span>}
+                        <span className="text-sm">$</span>
+                        <input className="field w-24 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal"
+                          value={String(p.price)} onChange={(e) => setPrice(p.key, "price", e.target.value)} />
+                      </label>
+                      {p.price2 !== undefined && (
+                        <label className="flex items-center gap-1">
+                          <span className="text-[11px] text-inksoft">2 coat</span>
+                          <span className="text-sm">$</span>
+                          <input className="field w-24 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal"
+                            value={String(p.price2)} onChange={(e) => setPrice(p.key, "price2", e.target.value)} />
+                        </label>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <div className="flex flex-wrap items-center gap-2">
+              <button className="btn btn-primary" onClick={savePriceList} disabled={priceSaving}>{priceSaving ? "Saving…" : "Save price list"}</button>
+              <button className="btn btn-ghost" onClick={() => { setPrices(PRICE_BOOK); flash("Back to the list as it came — save to keep it"); }}>Reset to the sheet</button>
             </div>
           </div>
         </>

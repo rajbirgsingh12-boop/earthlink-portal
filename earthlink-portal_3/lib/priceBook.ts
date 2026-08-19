@@ -67,7 +67,6 @@ export interface PriceLineOut extends PriceLine { key: string }
 // on the Settings page — the wording, the unit, the price — and they can add
 // line items of their own for work the sheet never covered. That's all this
 // store holds; the built-in list stays the fallback.
-const STORE = "pricebook/list.json";
 export interface PriceOverride {
   price?: number;
   price2?: number;
@@ -157,7 +156,8 @@ const stamped = (name: string) => Number(name.match(/^list-(\d+)\.json$/)?.[1] |
 // answers that without reading error text.
 async function readStore(): Promise<{ store: PriceStore; ok: boolean; from: string | null; older: string[] }> {
   try {
-    const { data: listed, error } = await sb().storage.from("docs").list(FOLDER);
+    // newest first, or a backlog of old versions would hide the current one
+    const { data: listed, error } = await sb().storage.from("docs").list(FOLDER, { limit: 100, sortBy: { column: "name", order: "desc" } });
     if (error || !Array.isArray(listed)) return { store: EMPTY_STORE, ok: false, from: null, older: [] };
     const versions = listed.filter((f) => stamped(f.name) > 0).sort((a, b) => stamped(b.name) - stamped(a.name));
     const newest = versions[0]?.name || (listed.some((f) => f.name === "list.json") ? "list.json" : null);
@@ -182,17 +182,32 @@ export async function loadPrices(): Promise<{ items: PriceItem[]; store: PriceSt
   return { items: bookFrom(store), store, ok };
 }
 
-export async function savePrices(store: PriceStore, now = Date.now()): Promise<string | null> {
+export async function savePrices(store: PriceStore): Promise<string | null> {
   // check again at the moment of writing: if the saved list can't be read
   // right now, nothing is written at all
   const { ok, older, from } = await readStore();
   if (!ok) return "Couldn't read the saved line items just now — nothing was changed. Try again in a moment.";
-  const { error } = await sb().storage.from("docs")
-    .upload(`${FOLDER}/list-${now}.json`, new Blob([JSON.stringify(store)], { type: "application/json" }), { contentType: "application/json" });
-  if (error) return error.message;
-  // the new one is safely written, so the ones it replaced can go
-  const stale = [...older, ...(from && from !== `${FOLDER}/list-${now}.json` ? [from] : [])];
-  if (stale.length > 0) await sb().storage.from("docs").remove([...new Set(stale)]).catch?.(() => null);
+  // the name is stamped AFTER that read, so it always sorts above anything the
+  // read saw; two saves in the same millisecond just take the next stamp
+  const body = () => new Blob([JSON.stringify(store)], { type: "application/json" });
+  const known = [...older, ...(from ? [from] : [])];
+  let stamp = Date.now();
+  const seen = Math.max(0, ...known.map((f) => stamped(f.split("/").pop() || "")));
+  if (stamp <= seen) stamp = seen + 1;
+  let written = "";
+  for (let tries = 0; tries < 3; tries++) {
+    const path = `${FOLDER}/list-${stamp + tries}.json`;
+    const { error } = await sb().storage.from("docs").upload(path, body(), { contentType: "application/json" });
+    if (!error) { written = path; break; }
+    if (!/exists|409|duplicate/i.test(error.message)) return error.message;
+  }
+  if (!written) return "Couldn't write the line items — try again in a moment.";
+  // the new one is safely written, so anything OLDER than it can go — never a
+  // file someone else wrote in the meantime
+  const mine = stamped(written.split("/").pop() || "");
+  const stale = [...new Set(known)]
+    .filter((f) => f !== written && (f.endsWith("list.json") || stamped(f.split("/").pop() || "") < mine));
+  if (stale.length > 0) { try { await sb().storage.from("docs").remove(stale); } catch { /* leftovers are harmless */ } }
   return null;
 }
 

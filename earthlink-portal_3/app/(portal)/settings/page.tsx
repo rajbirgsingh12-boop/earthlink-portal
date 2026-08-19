@@ -10,7 +10,7 @@ import { askFileName } from "@/lib/format";
 import type { Org } from "@/lib/docs";
 import type { Contract, Profile, Role } from "@/lib/types";
 import { PKG_DEFAULTS, type PkgInfo, loadPkgInfo, savePkgInfo } from "@/lib/packageDocs";
-import { PRICE_BOOK, PRICE_GROUPS, CUSTOM_GROUP, EMPTY_STORE, blankCustom, bookFrom, loadPrices, savePrices,
+import { PRICE_BOOK, PRICE_GROUPS, CUSTOM_GROUP, EMPTY_STORE, blankCustom, bookFrom, keywordsRe, loadPrices, savePrices,
   type PriceOverride, type PriceStore, type CustomItem } from "@/lib/priceBook";
 import { cleanPhone, prettyPhone } from "@/lib/notify";
 
@@ -138,7 +138,12 @@ export default function Settings() {
       // so a slow read can never throw away what they were doing — or, worse,
       // let the next save write an empty list over everything
       setStore((mine) => ({
-        overrides: { ...st.overrides, ...mine.overrides },
+        // field by field: a switch flicked before the read landed must not
+        // erase the price that was saved for the same line
+        overrides: Object.fromEntries(
+          [...new Set([...Object.keys(st.overrides), ...Object.keys(mine.overrides)])]
+            .map((k) => [k, { ...st.overrides[k], ...mine.overrides[k] }])
+        ),
         custom: [...st.custom.filter((c) => !mine.custom.some((m) => m.key === c.key)), ...mine.custom],
       }));
       setPriceLoaded(ok);
@@ -180,6 +185,13 @@ export default function Settings() {
     setStore((prev) => ({ ...prev, custom: prev.custom.filter((c) => c.key !== key) }));
     setPriceText((prev) => { const next = { ...prev }; delete next[`${key}:price`]; return next; });
   };
+  useEffect(() => {
+    if (!priceTouched) return;
+    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [priceTouched]);
+
   const savePriceList = async () => {
     if (!priceLoaded) { flash("Still reading the saved line items — try again in a second"); return; }
     setPriceSaving(true);
@@ -199,7 +211,8 @@ export default function Settings() {
       if (Object.keys(d).length > 0) overrides[base.key] = d;
     }
     const custom = store.custom
-      .map((c) => ({ ...c, description: c.description.trim(), words: c.words.trim(), price: typedNum(`${c.key}:price`, c.price) ?? c.price ?? 0 }))
+      // their own lines have no sheet price behind them, so an empty box is 0
+      .map((c) => ({ ...c, description: c.description.trim(), words: c.words.trim(), price: priceText[`${c.key}:price`] !== undefined ? (typedNum(`${c.key}:price`, c.price) ?? 0) : (c.price ?? 0) }))
       .filter((c) => c.description.trim() && c.words.trim());
     const next: PriceStore = { overrides, custom };
     const err = await savePrices(next);
@@ -599,11 +612,11 @@ export default function Settings() {
                           </label>
                           <button className="text-xs text-alert" title="Remove this line item" onClick={() => removeCustom(c.key)}>✕</button>
                         </div>
-                        <input className={`field mt-1.5 px-2 py-1.5 text-[12px] ${c.description.trim() && !c.words.trim() ? "border-work" : ""}`} value={c.words}
+                        <input className={`field mt-1.5 px-2 py-1.5 text-[12px] ${c.description.trim() && !keywordsRe(c.words) ? "border-work" : ""}`} value={c.words}
                           placeholder={`what a PO says for this — plain words, commas between: "move out, moveout clean"`}
                           onChange={(e) => setCustom(c.key, { words: e.target.value })} />
-                        {c.description.trim() && !c.words.trim() && (
-                          <div className="mt-1 text-[11px] text-work">Needs wording, or a PO can never pick this line.</div>
+                        {c.description.trim() && !keywordsRe(c.words) && (
+                          <div className="mt-1 text-[11px] text-work">Needs wording of at least two letters, or a PO can never pick this line.</div>
                         )}
                       </div>
                     ))}
@@ -622,7 +635,7 @@ export default function Settings() {
               {priceLoadErr && (
                 <button className="btn" onClick={readList}>Couldn&apos;t read the saved list — try again</button>
               )}
-              <button className="btn btn-ghost" onClick={() => { setStore(EMPTY_STORE); setPriceText({}); setPriceTouched(true); flash("Back to the sheet as it came — save to keep it"); }}>Reset to the sheet</button>
+              <button className="btn btn-ghost" disabled={!priceLoaded} onClick={() => { setStore(EMPTY_STORE); setPriceText({}); setPriceTouched(true); flash("Back to the sheet as it came — save to keep it"); }}>Reset to the sheet</button>
             </div>
           </div>
         </>

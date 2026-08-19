@@ -25,6 +25,17 @@ import { useNumBuffer } from "@/lib/numBuffer";
 import { planFolder, isReleaseFileName, parseReleaseFileName, contractKey, type FileMatch } from "@/lib/matchRelease";
 
 type Filter = "all" | "chase" | "payroll" | "received" | "canceled" | "hours";
+// "007" and "7" are the same release — a database lookup is exact, so it has to
+// be asked for every shape the number could have been typed in
+const relKeyOf = (v: unknown) => String(v ?? "").trim().replace(/^0+(?=\d)/, "");
+const relVariants = (v: unknown) => {
+  const raw = String(v ?? "").trim();
+  const base = relKeyOf(raw);
+  const out = new Set<string>([raw]);
+  if (base) out.add(base);
+  if (/^\d+$/.test(base)) for (let w = base.length + 1; w <= 5; w += 1) out.add(base.padStart(w, "0"));
+  return [...out];
+};
 // just the bits of a pdfjs document the folder scan touches
 // one file in the folder-attach plan: where it goes, or that it makes a new release
 type PlanRow = FileMatch & {
@@ -140,7 +151,7 @@ export default function Releases() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [logged, setLogged] = useState<Record<string, number> | null>(null);
-  const [pending, setPending] = useState<{ items: Omit<Release, "id" | "contract_id">[]; guess: string; omit?: string[]; greenDone?: number } | null>(null);
+  const [pending, setPending] = useState<{ items: Omit<Release, "id" | "contract_id">[]; guess: string; omit?: string[]; greenDone?: number; greenOnlyPayroll?: boolean } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [pdfPending, setPdfPending] = useState<{
     contract: string; rel: string; date: string; location: string; address: string;
@@ -459,7 +470,9 @@ export default function Releases() {
     if (rows.length === 0) { flash("No line items for this release — make a walk sheet with quantities for it, or import the release PDF"); return; }
     setInvPreview(null); // one preview at a time
     const money2 = (n: number) => (Math.round(n * 100) / 100).toFixed(2);
-    const shortDate = (iso: string) => { const m = (iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${Number(m[2])}/${Number(m[3])}/${m[1].slice(2)}` : ""; };
+    // a date typed by hand ("8/14/26", "Aug 14") is still a date — printing
+    // nothing at all is worse than printing it the way it was written
+    const shortDate = (iso: string) => { const m = (iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${Number(m[2])}/${Number(m[3])}/${m[1].slice(2)}` : (iso || "").trim(); };
     // the official form fits 7 labor lines — extras combine into the last one
     const labor: SosLine[] = rows.slice(0, rows.length > 7 ? 6 : 7).map((it) => ({
       describe: it.code || it.description.slice(0, 30), qty: String(it.qty), uom: it.uom || "",
@@ -629,7 +642,9 @@ export default function Releases() {
         const col = (re: RegExp) => headers.findIndex((h) => re.test(h));
         const m = { rel: col(/^release/), location: col(/location/), buildings: col(/building/), ticket: col(/ticket/), amount: col(/amount/), adjusted: col(/adjust/), pre: col(/pre/), date: col(/date|complet/), payroll: col(/payroll/), received: col(/receiv/), status: col(/status/), hours: col(/hour|labor/) };
         const pre = raw.slice(0, hIdx).flat().join(" ");
-        const gm = pre.match(/contract\s*#?\s*([A-Za-z0-9-]+)/i) || fname.match(/(\d{5,})/);
+        // the number has to have a digit in it — otherwise "Contract No. 24425833"
+        // reads as contract "No" and the whole sheet lands under the wrong name
+        const gm = pre.match(/contract\s*(?:#|nos?\.?|numbers?)?\s*:?\s*([A-Za-z0-9][A-Za-z0-9.\-\/]*\d[A-Za-z0-9.\-\/]*)/i) || fname.match(/(\d{5,})/);
         let greenFilled = 0; // rows where only the highlight said "done"
         const items = raw.slice(hIdx + 1)
           .map((r, k) => ({ r, sheetRow: rangeBase + hIdx + 2 + k }))
@@ -664,7 +679,9 @@ export default function Releases() {
         if (m.payroll < 0 && greenRows.size === 0) omit.push("payroll_done");
         if (m.received < 0 && greenRows.size === 0) omit.push("received");
         if (m.hours < 0) omit.push("labor_hours");
-        setPending({ items, guess: gm ? gm[1] : "", omit, greenDone: greenFilled });
+        // no Payroll column at all: the green paint is the only thing that can
+        // say "done" — a plain row says nothing about payroll either way
+        setPending({ items, guess: gm ? gm[1] : "", omit, greenDone: greenFilled, greenOnlyPayroll: m.payroll < 0 });
       } catch { flash("Couldn't read that file — save as .xlsx or .csv"); }
     };
     reader.readAsArrayBuffer(file);
@@ -698,7 +715,11 @@ export default function Releases() {
       // are deleted where nothing depends on them — payroll-linked ones are kept
       // full rows, and across every twin of this contract number — so the sheet
       // always lands on the ORIGINAL of a duplicated release, never the copy
-      const twinIds = contracts.filter((c) => contractKey(c.number) === contractKey(contract.number)).map((c) => c.id);
+      // a contract whose name has no digits in it has no number to be a twin OF —
+      // without this every such contract is everyone else's twin and the import
+      // would clear their releases too
+      const myKey = contractKey(contract.number);
+      const twinIds = myKey ? contracts.filter((c) => contractKey(c.number) === myKey).map((c) => c.id) : [];
       if (!twinIds.includes(contract.id)) twinIds.push(contract.id);
       const existing: Release[] = [];
       for (const tid of twinIds) {
@@ -747,6 +768,11 @@ export default function Releases() {
             delete (patch as Record<string, unknown>).amount;
             delete (patch as Record<string, unknown>).paid_date;
           }
+          // and when the sheet has no Payroll column, an unpainted row is silent —
+          // it must not wipe payroll the crew already did
+          if (pending.greenOnlyPayroll && keeper.payroll_done && !(patch as Record<string, unknown>).payroll_done) {
+            delete (patch as Record<string, unknown>).payroll_done;
+          }
           toUpdate.push({ id: keeper.id, patch });
         } else toInsert.push(it);
       }
@@ -780,7 +806,11 @@ export default function Releases() {
         if (keepIds.has(r.id)) continue;
         const k = relKey(r.rel_number);
         const keeper = keeperByNum.get(k);
-        if (keeper) {
+        if (keeper && r.received) {
+          // a paid copy is history — it is never merged away, exactly like a paid
+          // release the sheet forgot to list
+          keptReceived += 1;
+        } else if (keeper) {
           // duplicate copy — its attachments move to the original before it goes
           const extra = (r.attachments || []).filter((a) => !(keeper.attachments || []).some((b) => b.path === a.path));
           if (extra.length > 0) {
@@ -824,8 +854,10 @@ export default function Releases() {
         for (const cp of copyPairs) {
           if (!removeIds.includes(cp.copyId)) continue;
           if (hasItems.has(cp.keeperId)) continue; // the original's items win
-          const { error: mv } = await sb().from("release_items").update({ release_id: cp.keeperId }).eq("release_id", cp.copyId);
-          if (!mv) hasItems.add(cp.keeperId); // only the first copy donates — never stack
+          const { data: moved, error: mv } = await sb().from("release_items").update({ release_id: cp.keeperId }).eq("release_id", cp.copyId).select("id");
+          // only count it as a donation when rows actually came back — a copy with
+          // no items would otherwise close the door on the copy that has them
+          if (!mv && (moved || []).length > 0) hasItems.add(cp.keeperId);
         }
       }
       let removed = 0, kept = 0;
@@ -853,7 +885,7 @@ export default function Releases() {
       }
       setPending(null); setBusy(false);
       await loadContracts(); setActive(contract.id); await loadRows(contract.id);
-      flash(`Loaded into ${num} — ${updated} updated, ${added} added${removed ? `, ${removed} removed (incl. duplicate copies)` : ""}${keptReceived ? `, ${keptReceived} received release${keptReceived === 1 ? "" : "s"} not in the sheet left untouched` : ""}${kept ? `, ${kept} moved to Canceled (payroll hours linked — restore from the Canceled list if needed)` : ""}`);
+      flash(`Loaded into ${num} — ${updated} updated, ${added} added${removed ? `, ${removed} removed (incl. duplicate copies)` : ""}${keptReceived ? `, ${keptReceived} received release${keptReceived === 1 ? "" : "s"} left untouched` : ""}${kept ? `, ${kept} moved to Canceled (payroll hours linked — restore from the Canceled list if needed)` : ""}`);
       return;
     }
     for (let i = 0; i < pending.items.length; i += 500) {
@@ -878,7 +910,8 @@ export default function Releases() {
   // core merge, shared by the button, the sheet import and the folder attach
   const mergeDuplicatesCore = async (cur: Contract, allContracts: Contract[]) => {
     const key = contractKey(cur.number);
-    const twins = allContracts.filter((c) => contractKey(c.number) === key);
+    // no digits in the name means no number to match on — it is only ever itself
+    const twins = key ? allContracts.filter((c) => contractKey(c.number) === key) : [cur];
     // releases across every twin contract row
     const all: Release[] = [];
     for (const t of twins) {
@@ -926,8 +959,10 @@ export default function Releases() {
         if (dupe.received) { keptReceivedDupes += 1; continue; }
         // the copy's paperwork moves to the original before the copy goes
         if (!keeperHasItems) {
-          const { error: mvErr } = await sb().from("release_items").update({ release_id: keep.id }).eq("release_id", dupe.id);
-          if (!mvErr) keeperHasItems = true; // later copies must never stack more items on
+          const { data: mvRows, error: mvErr } = await sb().from("release_items").update({ release_id: keep.id }).eq("release_id", dupe.id).select("id");
+          // an empty copy donates nothing — leave the door open for the next copy,
+          // otherwise its line items get deleted in the branch below
+          if (!mvErr && (mvRows || []).length > 0) keeperHasItems = true;
         } else {
           await sb().from("release_items").delete().eq("release_id", dupe.id).then(() => null, () => null);
         }
@@ -1521,7 +1556,9 @@ export default function Releases() {
           used.add(contract.id);
           const breakdown = parsed.items.filter((it) => it.uom === "HOUR")
             .map((it) => ({ cls: it.description.replace(/,?\s*Regular Hours/i, "").trim(), hours: it.qty }));
-          const { data: existing } = await sb().from("releases").select("id,received").eq("contract_id", contract.id).eq("rel_number", parsed.rel).limit(1);
+          const { data: existRows } = await sb().from("releases").select("id,received").eq("contract_id", contract.id).in("rel_number", relVariants(parsed.rel));
+          // a paid copy answers first — the import must see the settled one
+          const existing = [...((existRows || []) as { id: string; received?: boolean }[])].sort((a, b) => Number(!!b.received) - Number(!!a.received));
           let relId: string;
           const stripNew = (o: Record<string, unknown>) => { const { labor_breakdown: _b, labor_hours: _h, ...rest } = o; return rest; };
           if (existing && existing[0]) {
@@ -1670,8 +1707,9 @@ export default function Releases() {
     if (!contract) { setBusy(false); return; }
     // if this release number already exists on the contract, UPDATE it instead of duplicating
     const { data: existing } = await sb().from("releases").select("id,buildings,address,received")
-      .eq("contract_id", contract.id).eq("rel_number", pdfPending.rel).limit(1);
-    const prior = (existing || [])[0] as (Release & { address?: string }) | undefined;
+      .eq("contract_id", contract.id).in("rel_number", relVariants(pdfPending.rel));
+    const prior = [...((existing || []) as (Release & { address?: string })[])]
+      .sort((a, b) => Number(!!b.received) - Number(!!a.received))[0];
     if (prior?.received) {
       flash(`Release ${pdfPending.rel} is already received (paid) — its numbers stay as they are. Flip it to NOT received on the row first if you really need to change it.`);
       setPdfPending(null); setBusy(false); return;

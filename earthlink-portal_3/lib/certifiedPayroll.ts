@@ -104,7 +104,7 @@ const near = (x: number, at: number, slack = 11) => Math.abs(x - at) <= slack;
 
 interface Cols {
   day: number[];      // Sa Su Mo Tu We Th Fr
-  hours: number; rate: number; gross: number;
+  hours: number; rate: number; gross: number; cls: number;
   fica: number; fed: number; state: number; city: number; other: number; net: number;
   type: number;       // where ST / OT / VAC sits
   name: number;       // the left edge, where names and SS#/CHECK# lines start
@@ -116,31 +116,48 @@ const labelX = (l: CpLine, want: RegExp): number => {
 };
 
 // the day headings, and every money heading that follows them
-function readCols(lines: CpLine[]): Cols | null {
+function readCols(lines: CpLine[]): (Cols & { bands: number[] }) | null {
   const days = ["sa", "su", "mo", "tu", "we", "th", "fr"];
+  let found: (Cols & { bands: number[] }) | null = null;
+  const bands: number[] = [];
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     if (!l.xs) continue;
     const low = l.tokens.map((t) => t.toLowerCase().replace(/\./g, ""));
+    let day: number[] | null = null;
     const at = days.map((d) => low.findIndex((t) => t === d));
-    if (at.some((x) => x < 0)) continue;
-    if (!at.every((x, k) => k === 0 || x > at[k - 1])) continue; // in order, left to right
-    const day = at.map((x) => l.xs![x]);
+    if (at.every((x) => x >= 0) && at.every((x, k) => k === 0 || x > at[k - 1])) day = at.map((x) => l.xs![x]);
+    if (!day) {
+      // some payroll companies print the dates instead — 8/1 8/2 … — or just 1-7
+      const run = l.tokens
+        .map((t, k) => ({ t, x: l.xs![k] }))
+        .filter((w) => /^\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?$/.test(w.t) || /^[1-7]$/.test(w.t));
+      if (run.length >= 7) {
+        const seven = run.slice(0, 7);
+        const gaps = seven.slice(1).map((w, k) => w.x - seven[k].x);
+        // evenly spaced, left to right — that's the day grid, not stray numbers
+        if (gaps.every((g) => g > 5 && g < 60) && Math.max(...gaps) - Math.min(...gaps) < 14) day = seven.map((w) => w.x);
+      }
+    }
+    if (!day) continue;
     // the money headings are spread over this line and the two under it
     const band = [l, lines[i + 1], lines[i + 2]].filter(Boolean) as CpLine[];
     const find = (re: RegExp) => { for (const b of band) { const x = labelX(b, re); if (x >= 0) return x; } return -1; };
     const cols: Cols = {
       day,
       hours: find(/^hours$/i), rate: find(/^rate$/i), gross: find(/^(?:amt\.?|earned)$/i),
+      cls: find(/^classification$/i),
       fica: find(/^fica$/i), fed: find(/^fed\.?$/i), state: find(/^state$/i), city: find(/^(?:nyc|city|local)$/i),
       other: find(/^other$/i), net: find(/^net(?:\s*pay)?$/i),
       type: find(/^(?:st|rt)$/i), name: Math.min(...band.flatMap((b) => b.xs || [9999])),
     };
     // a form that hides half its headings isn't this form
     if (cols.hours < 0 || cols.gross < 0) continue;
-    return cols;
+    // the three heading rows overlap each other — one band per grid, not three
+    if (bands.length === 0 || i - bands[bands.length - 1] > 3) bands.push(i);
+    if (!found) found = { ...cols, bands };
   }
-  return null;
+  return found;
 }
 
 // what the form says above the grid: week ending, project, contract, payroll #
@@ -187,7 +204,7 @@ function readWh347Header(lines: CpLine[]): { weekEnding: string; payrollNo: stri
   return { weekEnding, payrollNo, project, contractNo, contractor, fedId };
 }
 
-const FORM_WORDS = /department|wage and hour|contractor|payroll|social security|classification|deductions|check|estimate|form wh|exceptions|remarks|total|subtotal/i;
+const FORM_WORDS = /department|wage and hour|contractor|payroll|social security|classification|deductions|check|estimate|form wh|exceptions|remarks|total|subtotal|name,?\s*address|of employee|#\s*of\b|exemp|w\/h|of pay|earned|project|address\b/i;
 
 export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
   const cols = readCols(lines);
@@ -198,27 +215,36 @@ export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
 
   // a worker starts where a name sits at the left edge on a line that also
   // carries a rate-type box (ST / RT)
+  const nameEdge = cols.cls > 0 ? cols.cls - 10 : cols.type - 40;
   const isStart = (l: CpLine): boolean => {
     if (!l.xs || l.xs.length < 2) return false;
-    const first = l.tokens[0];
-    if (!near(l.xs[0], cols.name, 26)) return false;
-    if (!/^[A-Za-z][A-Za-z.'\- ]{2,}$/.test(first) || FORM_WORDS.test(first)) return false;
-    return l.tokens.some((t, k) => /^(?:ST|RT)$/i.test(t) && near(l.xs![k], cols.type, 14));
+    // the rate-type box says this is the first row of a worker
+    if (!l.tokens.some((t, k) => /^(?:ST|RT|REG|R\/T)$/i.test(t) && near(l.xs![k], cols.type, 14))) return false;
+    // …and something with letters sits in the name column. Names print every
+    // which way — "LOJA, IVAN", "Ivan Loja", two separate words — so the shape
+    // of the name is never what decides.
+    const left = l.tokens.filter((_, k) => l.xs![k] < nameEdge).join(" ");
+    return /[A-Za-z]{2}/.test(left) && !FORM_WORDS.test(left);
   };
 
+  // the three heading rows of every grid on every page belong to the form
+  const heading = new Set<number>();
+  for (const b of cols.bands) for (let k = -1; k <= 2; k++) heading.add(b + k);
   const blocks: CpLine[][] = [];
   let cur: CpLine[] | null = null;
-  for (const l of lines) {
+  lines.forEach((l, i) => {
+    if (heading.has(i)) { cur = null; return; }
     if (isStart(l)) { cur = [l]; blocks.push(cur); }
     else if (cur) cur.push(l);
-  }
+  });
 
   for (const block of blocks) {
     const row = blankRow();
     const first = block[0];
-    row.name = first.tokens[0].replace(/\s{2,}/g, " ").trim();
-    // whatever sits between the name and the rate-type box is the craft
-    row.classification = (first.tokens.filter((_, k) => first.xs![k] > cols.name + 30 && first.xs![k] < cols.type - 5).join(" ") || "").trim().slice(0, 40);
+    // everything left of the craft column is the worker's name
+    row.name = first.tokens.filter((_, k) => first.xs![k] < nameEdge).join(" ").replace(/\s{2,}/g, " ").trim();
+    // and what sits between there and the rate-type box is the craft
+    row.classification = (first.tokens.filter((_, k) => first.xs![k] >= nameEdge && first.xs![k] < cols.type - 5).join(" ") || "").trim().slice(0, 40);
 
     for (const l of block) {
       if (!l.xs) continue;
@@ -239,8 +265,15 @@ export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
         if (rate) { if (kind === "OT") row.otRate = Number(rate); else row.stRate = Number(rate); }
       }
       // the SSN, however much of it the payroll company prints
-      const ss = l.tokens.join(" ").match(/SS\s*#?\s*([\dXx*-]{7,})/);
-      if (ss) { const d = ss[1].replace(/\D/g, ""); if (d.length >= 4) row.ssn4 = d.slice(-4); }
+      const flatL = l.tokens.join(" ");
+      const ss = flatL.match(/SS\s*#?\s*:?\s*([\dXx*-]{7,})/) || flatL.match(/\b(\d{3}-\d{2}-\d{4})\b/);
+      if (ss) { const d = ss[1].replace(/\D/g, ""); if (d.length === 9) row.ssn4 = d; else if (d.length >= 4) row.ssn4 = d.slice(-4); }
+      // the street address the form prints under the name
+      else if (!kind && !/check\s*#/i.test(flatL)) {
+        const left = l.tokens.filter((_, k) => l.xs![k] < nameEdge).join(" ").trim();
+        if (left.length > 6 && /\d/.test(left) && /[A-Za-z]{3}/.test(left) && !FORM_WORDS.test(left))
+          row.address = row.address ? `${row.address} ${left}` : left;
+      }
       // the money line: every figure under its own heading
       if (/check\s*#/i.test(l.tokens.join(" ")) || (money(cols.gross) && money(cols.net))) {
         const g = money(cols.gross), fi = money(cols.fica), fe = money(cols.fed), st = money(cols.state),

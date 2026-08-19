@@ -74,10 +74,214 @@ const findWeekEnding = (t: string): string => {
   return `${String(mo).padStart(2, "0")}/${String(d).padStart(2, "0")}/${yy}`;
 };
 
-// One line of extracted PDF text (tokens ordered left→right).
-export interface CpLine { tokens: string[] }
+// One line of extracted PDF text (tokens ordered left→right). `xs` carries
+// where each token sits across the page, which is the only way to tell which
+// DAY a lone "6.0" belongs to on a WH-347 grid.
+export interface CpLine { tokens: string[]; xs?: number[] }
+
+// ---------- WH-347 (the federal payroll form) ----------
+// The form is a grid: the day a worker's hours belong to is decided by where
+// the number sits under Sa Su Mo Tu We Th Fr, and the deductions likewise sit
+// under their own headings. Read by column, the whole page comes out exact.
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const asDate = (toks: string[]): string => {
+  const t = toks.join(" ");
+  const slash = t.match(/(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})/);
+  if (slash) {
+    const y = Number(slash[3]) < 100 ? 2000 + Number(slash[3]) : Number(slash[3]);
+    return `${slash[1].padStart(2, "0")}/${slash[2].padStart(2, "0")}/${y}`;
+  }
+  // "AUG 7 2026" — the way the form prints it
+  const m = t.match(/([A-Za-z]{3,9})\.?\s+(\d{1,2})[,\s]+(\d{4})/);
+  if (m) {
+    const mi = MONTHS.indexOf(m[1].slice(0, 3).toLowerCase());
+    if (mi >= 0) return `${String(mi + 1).padStart(2, "0")}/${m[2].padStart(2, "0")}/${m[3]}`;
+  }
+  return "";
+};
+
+const near = (x: number, at: number, slack = 11) => Math.abs(x - at) <= slack;
+
+interface Cols {
+  day: number[];      // Sa Su Mo Tu We Th Fr
+  hours: number; rate: number; gross: number;
+  fica: number; fed: number; state: number; city: number; other: number; net: number;
+  type: number;       // where ST / OT / VAC sits
+  name: number;       // the left edge, where names and SS#/CHECK# lines start
+}
+
+const labelX = (l: CpLine, want: RegExp): number => {
+  const i = l.tokens.findIndex((t) => want.test(t));
+  return i >= 0 && l.xs ? l.xs[i] : -1;
+};
+
+// the day headings, and every money heading that follows them
+function readCols(lines: CpLine[]): Cols | null {
+  const days = ["sa", "su", "mo", "tu", "we", "th", "fr"];
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.xs) continue;
+    const low = l.tokens.map((t) => t.toLowerCase().replace(/\./g, ""));
+    const at = days.map((d) => low.findIndex((t) => t === d));
+    if (at.some((x) => x < 0)) continue;
+    if (!at.every((x, k) => k === 0 || x > at[k - 1])) continue; // in order, left to right
+    const day = at.map((x) => l.xs![x]);
+    // the money headings are spread over this line and the two under it
+    const band = [l, lines[i + 1], lines[i + 2]].filter(Boolean) as CpLine[];
+    const find = (re: RegExp) => { for (const b of band) { const x = labelX(b, re); if (x >= 0) return x; } return -1; };
+    const cols: Cols = {
+      day,
+      hours: find(/^hours$/i), rate: find(/^rate$/i), gross: find(/^(?:amt\.?|earned)$/i),
+      fica: find(/^fica$/i), fed: find(/^fed\.?$/i), state: find(/^state$/i), city: find(/^(?:nyc|city|local)$/i),
+      other: find(/^other$/i), net: find(/^net(?:\s*pay)?$/i),
+      type: find(/^(?:st|rt)$/i), name: Math.min(...band.flatMap((b) => b.xs || [9999])),
+    };
+    // a form that hides half its headings isn't this form
+    if (cols.hours < 0 || cols.gross < 0) continue;
+    return cols;
+  }
+  return null;
+}
+
+// what the form says above the grid: week ending, project, contract, payroll #
+function readWh347Header(lines: CpLine[]): { weekEnding: string; payrollNo: string; project: string; contractNo: string; contractor: string; fedId: string } {
+  let weekEnding = "", payrollNo = "", project = "", contractNo = "", contractor = "", fedId = "";
+  const flat = lines.map((l) => l.tokens.join(" ")).join("\n");
+  fedId = flat.match(/Fed\.?\s*ID\s*#?\s*([\d-]{9,})/i)?.[1] || "";
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i], next = lines[i + 1];
+    if (!l.xs || !next?.xs) continue;
+    const text = l.tokens.join(" ");
+    if (!/week\s*ending/i.test(text)) continue;
+    // each heading owns the strip of page from its own left edge to the next
+    const heads: { re: RegExp; set: (v: string) => void }[] = [
+      { re: /payroll\s*no/i, set: (v) => { payrollNo = v.replace(/[^\w-]/g, ""); } },
+      { re: /week\s*ending/i, set: (v) => { weekEnding = asDate(v.split(" ")); } },
+      { re: /project\s*and\s*location/i, set: (v) => { project = v; } },
+      { re: /project\s*or\s*contract/i, set: (v) => { contractNo = v; } },
+    ];
+    // rebuild the heading strips from the whole line's tokens
+    const bounds: { from: number; to: number; set: (v: string) => void }[] = [];
+    for (const h of heads) {
+      // the heading may be one token ("FOR WEEK ENDING:") or a few in a row
+      let start = l.tokens.findIndex((t) => h.re.test(t));
+      if (start < 0) start = l.tokens.findIndex((_, k) => h.re.test(l.tokens.slice(k, k + 4).join(" ")) && !h.re.test(l.tokens.slice(k + 1, k + 4).join(" ")));
+      if (start < 0) continue;
+      bounds.push({ from: l.xs![start] - 4, to: Infinity, set: h.set });
+    }
+    bounds.sort((a, b) => a.from - b.from);
+    bounds.forEach((b, k) => { b.to = bounds[k + 1] ? bounds[k + 1].from : Infinity; });
+    for (const b of bounds) {
+      const got = next.tokens.filter((_, k) => next.xs![k] >= b.from && next.xs![k] < b.to).join(" ").trim();
+      if (got) b.set(got);
+    }
+    break;
+  }
+  // the contractor's own name sits under its heading
+  for (let i = 0; i < lines.length; i++) {
+    if (!/name\s*of\s*contractor/i.test(lines[i].tokens.join(" "))) continue;
+    const cand = lines[i + 1]?.tokens.find((t) => /[A-Za-z]{4,}/.test(t) && !/^\[/.test(t));
+    if (cand) contractor = cand;
+    break;
+  }
+  return { weekEnding, payrollNo, project, contractNo, contractor, fedId };
+}
+
+const FORM_WORDS = /department|wage and hour|contractor|payroll|social security|classification|deductions|check|estimate|form wh|exceptions|remarks|total|subtotal/i;
+
+export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
+  const cols = readCols(lines);
+  if (!cols) return null;
+  const head = readWh347Header(lines);
+  const notes: string[] = [];
+  const rows: CpRow[] = [];
+
+  // a worker starts where a name sits at the left edge on a line that also
+  // carries a rate-type box (ST / RT)
+  const isStart = (l: CpLine): boolean => {
+    if (!l.xs || l.xs.length < 2) return false;
+    const first = l.tokens[0];
+    if (!near(l.xs[0], cols.name, 26)) return false;
+    if (!/^[A-Za-z][A-Za-z.'\- ]{2,}$/.test(first) || FORM_WORDS.test(first)) return false;
+    return l.tokens.some((t, k) => /^(?:ST|RT)$/i.test(t) && near(l.xs![k], cols.type, 14));
+  };
+
+  const blocks: CpLine[][] = [];
+  let cur: CpLine[] | null = null;
+  for (const l of lines) {
+    if (isStart(l)) { cur = [l]; blocks.push(cur); }
+    else if (cur) cur.push(l);
+  }
+
+  for (const block of blocks) {
+    const row = blankRow();
+    const first = block[0];
+    row.name = first.tokens[0].replace(/\s{2,}/g, " ").trim();
+    // whatever sits between the name and the rate-type box is the craft
+    row.classification = (first.tokens.filter((_, k) => first.xs![k] > cols.name + 30 && first.xs![k] < cols.type - 5).join(" ") || "").trim().slice(0, 40);
+
+    for (const l of block) {
+      if (!l.xs) continue;
+      const kind = l.tokens.find((t, k) => near(l.xs![k], cols.type, 14) && /^[A-Za-z]{2,4}$/.test(t))?.toUpperCase() || "";
+      const money = (x: number): string => {
+        const k = l.tokens.findIndex((t, i2) => near(l.xs![i2], x, 16) && /^-?\$?\s*[\d,]+(?:\.\d{2})?$/.test(t.replace(/\s/g, "")));
+        return k >= 0 ? l.tokens[k].replace(/[$,\s]/g, "") : "";
+      };
+      // the day-by-day boxes
+      if (kind === "ST" || kind === "RT" || kind === "OT") {
+        const target = kind === "OT" ? row.ot : row.st;
+        l.tokens.forEach((t, k) => {
+          if (!/^\d{1,2}(?:\.\d{1,2})?$/.test(t)) return;
+          const d = cols.day.findIndex((dx) => near(l.xs![k], dx, 9));
+          if (d >= 0) target[d] = Number(t);
+        });
+        const rate = money(cols.rate);
+        if (rate) { if (kind === "OT") row.otRate = Number(rate); else row.stRate = Number(rate); }
+      }
+      // the SSN, however much of it the payroll company prints
+      const ss = l.tokens.join(" ").match(/SS\s*#?\s*([\dXx*-]{7,})/);
+      if (ss) { const d = ss[1].replace(/\D/g, ""); if (d.length >= 4) row.ssn4 = d.slice(-4); }
+      // the money line: every figure under its own heading
+      if (/check\s*#/i.test(l.tokens.join(" ")) || (money(cols.gross) && money(cols.net))) {
+        const g = money(cols.gross), fi = money(cols.fica), fe = money(cols.fed), st = money(cols.state),
+          ci = money(cols.city), ot = money(cols.other), ne = money(cols.net);
+        if (g) { row.grossProject = Number(g); row.grossTotal = Number(g); }
+        if (fi) row.fica = Number(fi);
+        if (fe) row.fedTax = Number(fe);
+        if (st) row.stateTax = Number(st);
+        if (ci) row.cityTax = Number(ci);
+        if (ot) row.otherDed = Number(ot);
+        if (ne) row.net = Number(ne);
+      }
+    }
+    if (!row.ssn4) notes.push(`${row.name || "A worker"}: the payroll hides the Social Security number — type the last 4 in.`);
+    if (row.st.every((h) => !Number(h)) && row.ot.every((h) => !Number(h)))
+      notes.push(`${row.name || "A worker"}: no day-by-day hours were printed — check the grid.`);
+    if (row.name) rows.push(row);
+  }
+  if (rows.length === 0) return null;
+
+  if (!head.weekEnding) notes.push("Couldn't read the week-ending date — type it in above.");
+  if (head.fedId && head.fedId.replace(/\D/g, "") !== COMPANY.fedTaxId.replace(/\D/g, ""))
+    notes.push(`This payroll shows Fed ID ${head.fedId}, but the portal has ${COMPANY.fedTaxId} — check which is right before uploading.`);
+
+  return {
+    fileName,
+    contractor: head.contractor || COMPANY.letterhead.name,
+    payrollNo: head.payrollNo,
+    weekEnding: head.weekEnding,
+    project: head.project,
+    contractNo: head.contractNo,
+    rows,
+    notes,
+  };
+}
 
 export function parseCertifiedPayroll(fileName: string, lines: CpLine[]): CpReport {
+  // the federal form reads exactly when read by column — try that first
+  const wh = parseWh347(fileName, lines);
+  if (wh) return wh;
+
   const flat = lines.map((l) => l.tokens.join(" ")).join("\n");
   const one = flat.replace(/\s+/g, " ");
   const notes: string[] = [];
@@ -287,9 +491,12 @@ export function buildCsv(reports: CpReport[]): string {
       f[30] = money(r.grossTotal) || money(r.grossProject, "0"); // grosspayallprojects
       f[31] = money(r.net, "0");         // netpay
       // city tax and "other" have no columns of their own \u2014 they ride as named deductions
+      // a deduction of nothing isn't a deduction — naming it would only put
+      // "Miscellaneous $0.00" on their upload
+      const some = (v: Cell) => { const m = money(v); return m && Number(m) !== 0 ? m : ""; };
       const deds: [string, string][] = [];
-      if (money(r.cityTax)) deds.push(["City Income Tax", money(r.cityTax)]);
-      if (money(r.otherDed)) deds.push(["Miscellaneous", money(r.otherDed)]);
+      if (some(r.cityTax)) deds.push(["City Income Tax", some(r.cityTax)]);
+      if (some(r.otherDed)) deds.push(["Miscellaneous", some(r.otherDed)]);
       if (deds[0]) { f[33] = deds[0][0]; f[34] = deds[0][1]; }
       if (deds[1]) { f[35] = deds[1][0]; f[36] = deds[1][1]; }
       f[39] = r.classification;          // classification

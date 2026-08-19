@@ -35,13 +35,17 @@ export default function CertifiedPayroll() {
           const t = (it as { transform: number[] }).transform;
           words.push({ x: t[4], y: t[5], s: it.str.trim() });
         }
-        // cluster into rows: same line = y within 3pt
+        // cluster into rows: same line = y within 3pt. Where each word sits
+        // across the page is kept too — on a WH-347 grid that's the only way
+        // to know which DAY a lone "6.0" belongs to.
         words.sort((a, b) => b.y - a.y || a.x - b.x);
         let cur: { y: number; ws: { x: number; s: string }[] } | null = null;
         for (const w of words) {
-          if (!cur || Math.abs(cur.y - w.y) > 3) { cur = { y: w.y, ws: [] }; lines.push({ tokens: [] }); }
+          if (!cur || Math.abs(cur.y - w.y) > 3) { cur = { y: w.y, ws: [] }; lines.push({ tokens: [], xs: [] }); }
           cur.ws.push({ x: w.x, s: w.s });
-          lines[lines.length - 1].tokens = cur.ws.sort((a, b) => a.x - b.x).map((v) => v.s);
+          const sorted = cur.ws.sort((a, b) => a.x - b.x);
+          lines[lines.length - 1].tokens = sorted.map((v) => v.s);
+          lines[lines.length - 1].xs = sorted.map((v) => v.x);
         }
       }
       return lines;

@@ -140,10 +140,19 @@ export function parsePactPoText(raw: string): PactPoFields {
     || labelled(t, "Work\\s*Order") || labelled(t, "\\bOrder")
     || t.match(/Purchase Order\s+([A-Za-z]?\d[\w-]{2,})/i)?.[1] || "";
   const poDate = t.match(/Date Ordered\s*:?\s*([\d/]+)/i)?.[1] || t.match(/\bDate\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i)?.[1] || "";
+  // A PO's description box is often followed on the same row by the form's own
+  // fields — "Contact info", "Scheduled", "PO Closed: No". The description is
+  // the WORK; everything the form adds after it gets cut.
+  const FORM_TAIL = /\s*(?:contact\s*info|scheduled|date\s*payment|po\s*closed|closed\s*\?|status|terms|vendor|approved\s*by|requested\s*by|bill\s*to|ship\s*to|service\s*(?:address|location)|job\s*site|qty\b|quantity\b|unit\s*price|total\s*cost|sales\s*tax|grand\s*total|amount\s*due|signature|page\s*\d)\b[\s\S]*$/i;
+  const cleanWork = (v: string) => (v || "")
+    .replace(FORM_TAIL, "")
+    .replace(/\bpo\s*closed\s*:?\s*(?:no|yes|n|y)\b/gi, "")
+    .replace(/\s*[-–:;,]\s*$/, "")
+    .replace(/\s{2,}/g, " ").trim();
   // the description field, bounded to its own line so it can't run into the table
   const descLine = lines.find((l) => /^description\b\s*:?/i.test(l) && l.replace(/^description\b\s*:?\s*/i, "").length > 2);
-  const desc = (descLine ? descLine.replace(/^description\b\s*:?\s*/i, "") : t.match(/Description\s*:?\s*(.*?)\s+(?:Contact info|Scheduled|Date Payment|PO Closed|Bill To)/i)?.[1] || "")
-    .replace(/\s+(?:Qty|Quantity)\s+Unit\s*Price.*$/i, "").trim();
+  const desc = cleanWork(descLine ? descLine.replace(/^description\b\s*:?\s*/i, "")
+    : t.match(/Description\s*:?\s*(.*?)\s+(?:Contact info|Scheduled|Date Payment|PO Closed|Bill To)/i)?.[1] || "");
   // WHO IS BILLED and WHERE THE WORK IS are two different blocks, and partners
   // label them a dozen ways. The work address is the one that matters on the
   // invoice; the bill-to is the partner's office and the person there.
@@ -206,17 +215,19 @@ export function parsePactPoText(raw: string): PactPoFields {
     || contacts.join(" · ") || phone;
 
   // the work in the PO's own words — its own lines only, never trailing terms
-  const scopeAt = lines.findIndex((l) => /^(?:scope of work|description of work|work to be performed|services?)\b\s*:?/i.test(l));
+  const SCOPE_LABEL = /^(?:scope\s*(?:of\s*work)?|description\s*of\s*work|work\s*(?:to\s*be\s*performed|description|requested)|services?\s*(?:performed|rendered|required|requested))\b\s*:?/i;
+  const scopeAt = lines.findIndex((l) => SCOPE_LABEL.test(l));
   const scopeLines: string[] = [];
   if (scopeAt >= 0) {
     for (let i = scopeAt; i < lines.length && scopeLines.join(" ").length < 400; i++) {
-      const l = i === scopeAt ? lines[i].replace(/^(?:scope of work|description of work|work to be performed|services?)\b\s*:?\s*/i, "") : lines[i];
+      const l = i === scopeAt ? lines[i].replace(SCOPE_LABEL, "").replace(/^\s*:?\s*/, "") : lines[i];
       if (!l) continue;
-      if (TOTALISH.test(l) || /^(?:terms|insurance|vendor|approved|contact info|bill to|ship to|signature|not to exceed)\b/i.test(l)) break;
+      if (TOTALISH.test(l) || SITE_LABEL.test(l) || BILL_LABEL.test(l)
+        || /^(?:terms|insurance|vendor|approved|contact info|signature|not to exceed|po\s*closed|scheduled|date\s*payment)\b/i.test(l)) break;
       scopeLines.push(l);
     }
   }
-  const scope = (scopeLines.join(". ") || "").replace(/\s{2,}/g, " ").trim().slice(0, 400);
+  const scope = cleanWork(scopeLines.join(". ")).slice(0, 400);
 
   return {
     po, poDate, desc, scope, partner, address, billBlock, contact, punit, amount, rows,

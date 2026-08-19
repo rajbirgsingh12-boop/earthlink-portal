@@ -2,7 +2,7 @@
 // Reading happens in Node with pdfjs's legacy build — identical results on
 // every device, no reliance on the phone browser's PDF support.
 import { NextResponse } from "next/server";
-import { parsePactPoText } from "@/lib/parsePactPo";
+import { parsePactPoText, textFromItems } from "@/lib/parsePactPo";
 
 export const runtime = "nodejs";
 const env = (k: string) => process.env[k] || "";
@@ -28,15 +28,15 @@ export async function POST(req: Request) {
   }
   try {
     // unpdf bundles a serverless-safe pdf engine (no worker files to resolve);
-    // the text is joined item-by-item with spaces, exactly like the browser
-    // fallback, so the same regexes see the same text on both paths
+    // the page's own lines are rebuilt from where the words sit, exactly like
+    // the browser fallback, so both paths read the same table
     const { getResolvedPDFJS } = await import("unpdf");
     const pdfjs = await getResolvedPDFJS();
     const doc = await pdfjs.getDocument({ data: new Uint8Array(buf) }).promise;
     let raw = "";
     for (let pg = 1; pg <= doc.numPages; pg++) {
       const tc = await (await doc.getPage(pg)).getTextContent();
-      raw += (tc.items as { str?: string }[]).map((it) => it.str || "").join(" ") + " ";
+      raw += textFromItems(tc.items as { str?: string; transform?: number[] }[]) + "\n";
     }
     await (doc as unknown as { destroy?: () => Promise<void> }).destroy?.().catch(() => null);
     return NextResponse.json({ ok: true, fields: parsePactPoText(raw) });

@@ -31,14 +31,14 @@ export const PRICE_BOOK: PriceItem[] = [
   { key: "panic", description: "Stainless steel panic exit push bar", unit: "EACH", price: 1250, group: "Doors & hardware", words: "panic" },
   { key: "chime", description: "Mechanical door chime", unit: "EACH", price: 190, group: "Doors & hardware", words: "chime|door\\s*bell" },
   { key: "closer", description: "Door closer", unit: "EACH", price: 1050, group: "Doors & hardware", words: "closers?\\b" },
-  { key: "hinge_lobby", description: "Lobby door hinges", unit: "EACH", price: 350, group: "Doors & hardware", words: "hinges?" },
-  { key: "hinge_apt", description: "Apartment entrance door hinges", unit: "EACH", price: 150, group: "Doors & hardware", words: "hinges?" },
+  { key: "hinge_lobby", description: "Lobby door hinges", unit: "EACH", price: 350, group: "Doors & hardware", words: "\\bhinges?\\b" },
+  { key: "hinge_apt", description: "Apartment entrance door hinges", unit: "EACH", price: 150, group: "Doors & hardware", words: "\\bhinges?\\b" },
   // ---- plaster & walls (measured) ----
-  { key: "plaster", description: "Plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "plaster(?:ing)?|skim(?:\\s*coat)?|spackle|spackling|patch(?:ing|es)?\\b|tape\\s*(?:and|&)\\s*spackle|scratch\\s*coat" },
+  { key: "plaster", description: "Plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "\\bplaster(?:ing)?\\b|\\bskim(?:\\s*coat)?\\b|\\bspackl(?:e|ing)\\b|\\bpatch(?:ing|es)?\\b|\\btape\\s*(?:and|&)\\s*spackle\\b|\\bscratch\\s*coat\\b" },
   { key: "popcorn", description: "Popcorn ceiling removal", unit: "SF", price: 5, group: "Plaster & walls", words: "popcorn|textured?\\s*ceilings?|stipple|scrape\\s*(?:the\\s*)?ceilings?" },
   { key: "wall_repair", description: "Wall repair", unit: "SF", price: 6, group: "Plaster & walls", words: "wall\\s*repair|repair[^.\\n]{0,12}walls?|hole[s]?\\s*in\\s*the\\s*walls?" },
   { key: "sheetrock", description: "Sheet rock", unit: "SF", price: 12, group: "Plaster & walls", words: "sheet\\s*rock|sheetrock|dry\\s*wall|drywall|gypsum|blue\\s*board|rock\\s*the\\s*walls?" },
-  { key: "hourly", description: "Additional services", unit: "HOUR", price: 12, group: "Plaster & walls", words: "additional\\s*services?|per\\s*hour|hourly|time\\s*(?:and|&)\\s*material|t\\s*&\\s*m\\b|labou?r\\s*only" },
+  { key: "hourly", description: "Additional services", unit: "HOUR", price: 12, group: "Plaster & walls", words: "additional\\s*services?|time\\s*(?:and|&)\\s*materials?\\b|\\bt\\s*&\\s*m\\b|labou?r\\s*only|\\bhourly\\s*(?:work|labou?r|rate\\s*work)\\b" },
   // ---- painting (per apartment: 1 coat / 2 coat) ----
   { key: "paint_1br", description: "Paint 1 bedroom 1 bath apartment", unit: "EACH", price: 1190, price2: 1490, group: "Painting", words: "1\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
   { key: "paint_2br", description: "Paint 2 bedroom 1 bath apartment", unit: "EACH", price: 1350, price2: 1650, group: "Painting", words: "2\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
@@ -242,14 +242,25 @@ const HOURS = /(\d[\d,]*(?:\.\d+)?)\s*(?:hours?|hrs?)\b/gi;
 const ROOMS = /(\d[\d,]*(?:\.\d+)?)\s*rooms?\b/gi;
 // the rooms a PO names — "prime and paint the kitchen, bathroom and hallway"
 // is three rooms even though it never says a number
-const ROOM_WORDS = /\b(kitchens?|bath\s*rooms?|baths?|bed\s*rooms?|living\s*rooms?|dining\s*rooms?|hall\s*ways?|halls?|foyers?|vestibules?|dens?|closets?|laundry\s*rooms?|utility\s*rooms?|pantr(?:y|ies)|nurser(?:y|ies)|entry\s*ways?)\b/gi;
+const ROOM_WORDS = /\b(kitchens?|bath\s*rooms?|bed\s*rooms?|living\s*rooms?|dining\s*rooms?|hall\s*ways?|foyers?|vestibules?|dens?|laundry\s*rooms?|utility\s*rooms?|pantr(?:y|ies)|nurser(?:y|ies)|entry\s*ways?)\b/gi;
+const STREETY = /\b(?:ave|avenue|st|street|blvd|boulevard|rd|road|dr|drive|ln|lane|pl|place|ct|court|ter|terrace|pkwy|parkway|houses?|towers?)\b/i;
+const NOT_A_ROOM_COUNT = /(?:apt\.?|apartment|unit|#|no\.?|bldg|building|floor|fl\.?|suite|ste\.?|p\.?o\.?)\s*$/i;
 const roomsNamed = (t: string): number => {
   const kinds = new Map<string, number>();
   for (const m of t.matchAll(ROOM_WORDS)) {
+    const at = m.index as number;
+    // "1465 Bedford Avenue" and "Kitchen Lane" name a place, not a room
+    if (STREETY.test(t.slice(at, at + m[1].length + 14))) continue;
+    const lead = t.slice(Math.max(0, at - 14), at);
     const kind = m[1].toLowerCase().replace(/\s+/g, "").replace(/(?:es|s)$/, "");
+    // "hall bath" and "master bedroom" are one room, not two
+    if (/\b(?:hall|master|half|full|en\s*suite)\s*$/i.test(lead) && /bath/.test(kind)) continue;
+    // an apartment SIZE ("1 bedroom 1 bath apartment") is not a room count
+    if (/\d\s*(?:bed\s*rooms?|br)\b[^.]{0,14}$/i.test(lead) && /bath/.test(kind)) continue;
     // "2 bedrooms and the living room" is three rooms, not two kinds of room
-    const said = t.slice(Math.max(0, (m.index as number) - 8), m.index).match(/(\d{1,2})\s+$/);
-    const count = said ? Math.min(20, parseInt(said[1], 10)) : 1;
+    const said = lead.match(/(\d{1,2})\s+$/);
+    const count = said && !NOT_A_ROOM_COUNT.test(lead.slice(0, lead.length - said[0].length))
+      ? Math.min(20, parseInt(said[1], 10)) : 1;
     kinds.set(kind, Math.max(kinds.get(kind) || 0, count));
   }
   return [...kinds.values()].reduce((a, b) => a + b, 0);
@@ -269,7 +280,7 @@ export interface PriceMatchOpts {
 // inside the same clause, so other work in the PO is never quietly deleted
 const BEATS: [string, string][] = [["wall_repair", "plaster"]];
 // hardware that names a door as the place it goes, not a door being ordered
-const ON_A_DOOR = /lock|closer|hinge|chime|bell|strike|panic|push\s*bar|knob|peep|viewer|sweep|jamb/i;
+const ON_A_DOOR = /lock|closer|hinge|chime|door\s*bell|strike|panic|push\s*bar/i;
 
 interface Hit { key: string; qty: number; said: boolean; at: number }
 
@@ -279,7 +290,9 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
   const raw = flatten(text || "").trim();
   if (!raw) return [];
   // "one coat" on the PO means the one-coat price
-  const coats: 1 | 2 = opts.coats ?? (/\b(?:1|one|single)\s*coat\b/i.test(raw) ? 1 : 2);
+  const oneCoat = /\b(?:1|one|single)\s*coat\b/i.test(raw) && !/\b(?:2|two)\s*coats?\b/i.test(raw)
+    && !/\bprim(?:e|er)[^.]{0,12}\b(?:1|one)\s*coat\b/i.test(raw);
+  const coats: 1 | 2 = opts.coats ?? (oneCoat ? 1 : 2);
   const byKey = new Map(book.map((p) => [p.key, p]));
   const hits: Hit[] = [];
 
@@ -342,7 +355,7 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
       for (const [win, lose] of BEATS) if (has(win) && !drop.has(win)) drop.add(lose);
       // an apartment size only prices a whole apartment when the clause is
       // about painting one — "paint 2 bedrooms and the living room" isn't
-      const paintSized = /paint|coat/i.test(cl.s) && /\b(?:apartments?|apt\b|units?|bath)/i.test(cl.s);
+      const paintSized = /paint|coat/i.test(cl.s) && /\b(?:apartments?|apt\b|units?)\b|\d\s*(?:\.\d)?\s*bath\b/i.test(cl.s);
 
       for (const x of inClause) {
         if (drop.has(x.key)) continue;
@@ -374,6 +387,17 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
         if (pool[pr.mi].used || takenW.has(pr.wi)) continue;
         pool[pr.mi].used = true; takenW.add(pr.wi);
         want[pr.wi].qty = pool[pr.mi].v;
+      }
+      // "plaster 200 sq ft and 150 sq ft" is 350 — a measurement nobody claimed
+      // belongs to the work in its own clause
+      for (const mm of pool) {
+        if (mm.used) continue;
+        const mine = want.filter((w) => w.cl === clOf(mm.at));
+        // its own clause if there is one piece of work there, otherwise the
+        // nearest work in the same sentence
+        const owner = mine.length === 1 ? mine[0]
+          : want.length > 0 ? want.reduce((a, b) => (Math.abs(b.at - mm.at) < Math.abs(a.at - mm.at) ? b : a)) : null;
+        if (owner) { owner.qty += mm.v; mm.used = true; }
       }
     }
     hits.push(...pend.map((x) => ({ key: x.key, qty: x.qty || 1, said: x.qty > 0, at: sent.at + x.at })));

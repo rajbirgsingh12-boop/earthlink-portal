@@ -13,7 +13,7 @@ import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
 import { parsePactPoText, type PactPoFields } from "@/lib/parsePactPo";
-import { priceLinesFor, soleKey, loadPrices, type PriceItem } from "@/lib/priceBook";
+import { priceLinesFor, soleKey, normUnit, loadPrices, type PriceItem } from "@/lib/priceBook";
 
 interface Item { description: string; qty: number; unit: string; unit_price: number; key?: string; }
 interface Job {
@@ -176,7 +176,7 @@ export default function Pact() {
   // Work lines for this text, from the price list. Anything the PO already
   // priced stays exactly as the PO wrote it — the list only fills the gaps,
   // and work the PO named in its own words never gets a second copy beside it.
-  const priceFromList = async (text: string, existing: Item[], opts: { bundle?: boolean; refresh?: boolean } = {}): Promise<Item[]> => {
+  const priceFromList = async (text: string, existing: Item[], opts: { bundle?: boolean; refresh?: boolean; fillOnly?: boolean } = {}): Promise<Item[]> => {
     const bk = await priceBook();
     const lines = priceLinesFor(text, { book: bk, bundle: opts.bundle ?? true });
     if (lines.length === 0) return existing;
@@ -197,6 +197,9 @@ export default function Pact() {
     for (const l of lines) {
       const at = covered.get(l.key);
       if (at === undefined) {
+        // a PO that priced its own table is the agreement — fill what it left
+        // blank, but never add work beside it
+        if (opts.fillOnly) continue;
         out.push({ description: l.description, qty: l.qty, unit: l.unit, unit_price: l.unit_price, key: l.key });
         covered.set(l.key, out.length - 1);
         continue;
@@ -205,9 +208,9 @@ export default function Pact() {
       // a line the portal put there follows the list; a price the PO stated
       // stays the PO's, because that one is the agreement
       if (Number(it.unit_price) > 0) {
-        out[at] = opts.refresh && it.key
-          ? { ...it, unit: l.unit, unit_price: l.unit_price }
-          : { ...it, key: it.key || l.key };
+        // a line that already carries a price of its own is the PO's or theirs
+        // — re-pricing only touches lines the portal itself wrote
+        if (opts.refresh && it.key) out[at] = { ...it, unit: l.unit, unit_price: l.unit_price };
         continue;
       }
       out[at] = { ...it, unit: it.unit || l.unit, unit_price: l.unit_price, qty: Number(it.qty) > 1 ? it.qty : l.qty, key: it.key || l.key };
@@ -441,7 +444,8 @@ export default function Pact() {
           let raw = "";
           for (let pg = 1; pg <= doc.numPages; pg++) {
             const tc = await (await doc.getPage(pg)).getTextContent();
-            raw += tc.items.map((it) => ("str" in it ? it.str : "")).join(" ") + " ";
+            const { textFromItems } = await import("@/lib/parsePactPo");
+            raw += textFromItems(tc.items as { str?: string; transform?: number[] }[]) + "\n";
           }
           fields = parsePactPoText(raw);
         } catch {
@@ -473,17 +477,19 @@ export default function Pact() {
       const amount = unreadable ? 0 : f.amount;
       const seed: Item[] = unreadable ? []
         : f.rows.length > 0
-          ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: r.uom || unitFor(r.description), unit_price: r.unit_price }))
-          : f.desc ? [{ description: f.desc, qty: 1, unit: unitFor(f.desc), unit_price: 0 }] : [];
+          ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: normUnit(r.uom || unitFor(r.description)), unit_price: r.unit_price }))
+          : (f.desc || f.scope) ? [{ description: (f.desc || f.scope).slice(0, 120), qty: 1, unit: unitFor(f.desc || f.scope), unit_price: 0 }] : [];
       // What is this PO for? Whatever the price list already answers — plaster
       // brings its primer and paint with it — gets filled in, priced. A price
       // the PO itself states is never touched: that one is the agreement.
       // when the PO priced its own lines, that IS the deal — fill the gaps but
       // never add prep work it didn't ask for
       const poPriced = seed.some((it) => Number(it.unit_price) > 0);
-      const priced = await priceFromList(
-        [f.desc, f.scope, f.rows.map((r) => r.description).join(" ")].filter(Boolean).join(". "),
-        seed, { bundle: !poPriced });
+      // the same words must only be priced once — a PO often repeats its
+      // description as its scope, and counting both doubles every quantity
+      const said = [...new Set([f.desc, f.scope, f.rows.map((r) => r.description).join(" ")]
+        .map((x) => (x || "").trim()).filter(Boolean))];
+      const priced = await priceFromList(said.join(". "), seed, { bundle: !poPriced, fillOnly: poPriced });
       const { data: job, error } = await sb().from("pact_jobs").insert({
         partner: f.partner, development: "", job_number: f.po, description: f.desc || f.scope, amount,
         po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,

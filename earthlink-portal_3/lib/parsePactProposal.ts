@@ -86,10 +86,10 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
     // letters write it this way, and read whole it can't be split by a $ or a
     // stray keyword inside the description
     // the quantity cell may carry how the work is measured: "250 SF x"
-    const whole = l.match(/^(.*?)(\d[\d,]*(?:\.\d+)?)\s*([A-Za-z]{1,8})?\s*[x@]\s*\$\s*(-?[\d,]+(?:\.\d{1,2})?)\s+\$\s*(-?[\d,]+(?:\.\d{1,2})?)\s*$/i);
+    const whole = l.match(/^(.*?)(\d[\d,]*(?:\.\d+)?)\s*((?:[A-Za-z]{1,10}\s?){0,2})?\s*[x@]\s*\$\s*(-?[\d,]+(?:\.\d{1,2})?)\s+\$\s*(-?[\d,]+(?:\.\d{1,2})?)\s*$/i);
     if (whole) {
       const qty = money(whole[2]), up = money(whole[4]), amt = money(whole[5]);
-      const uom = (whole[3] || "").toUpperCase();
+      const uom = (whole[3] || "").trim().toUpperCase();
       const desc = `${pending} ${whole[1]}`.trim().replace(/[\t:;,\s-]+$/g, "").replace(/\s{2,}/g, " ");
       pending = "";
       if (desc.length >= 3 && Math.abs(qty * up - amt) < 0.02) { rows.push({ description: desc, qty, unit_price: up, property: "", unit: punit, ...(uom ? { uom } : {}) }); continue; }

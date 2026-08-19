@@ -69,6 +69,11 @@ export default function Payroll() {
   const [addQ, setAddQ] = useState("");
   const checkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const makingWeek = useRef(false); // guards Make payroll against double-taps
+  // which week the screen is asking about — a slower answer for a week the user
+  // has already navigated away from is thrown away instead of being shown
+  const openReq = useRef(0);
+  const paidChain = useRef<Promise<void>>(Promise.resolve()); // PAID marks save one at a time
+  const weekRef = useRef<Week | null>(null); // the open week as of right now, for queued saves
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
   const num = useNumBuffer();
   // the accountant can read everything here but the database won't accept their
@@ -110,6 +115,7 @@ export default function Payroll() {
     if (c) setContracts(c as Contract[]);
   };
   useEffect(() => { load(); }, []);
+  useEffect(() => { weekRef.current = openWeek; }, [openWeek]);
 
   // live: crew, weeks (incl. paid marks), releases and contracts stay current —
   // refetching only the table the event came from
@@ -117,8 +123,13 @@ export default function Payroll() {
   // live: hours entered on another device appear in the open week
   useLive(["timesheet_entries"], async () => {
     if (!openWeek) return;
-    const { data } = await sb().from("timesheet_entries").select("*").eq("week_id", openWeek.id);
-    setEntries(((data || []) as Entry[]).map((en) => ({ ...en, hours: (en.hours || []).map(Number) })));
+    const req = openReq.current;
+    const wid = openWeek.id;
+    const { data } = await sb().from("timesheet_entries").select("*").eq("week_id", wid);
+    if (openReq.current !== req) return; // a different week is open now
+    setEntries(((data || []) as Entry[])
+      .filter((en) => en.week_id === wid)
+      .map((en) => ({ ...en, hours: (en.hours || []).map(Number) })));
   }, { enabled: !!openWeek, skipWhileTyping: true });
 
   // live check: for each release linked this week, are the classification
@@ -151,10 +162,18 @@ export default function Payroll() {
   }, [entries, openWeek]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const openW = async (w: Week) => {
+    const req = (openReq.current += 1);
     setOpenWeek(w);
+    // last week's rows come off the screen FIRST — otherwise they are still
+    // showing while the new week loads, and hours typed into them save
+    // themselves into the week the user just left
+    setEntries([]); setWeekCheck([]);
     setExtraSections([]); setRelPickQ(""); setAddFor(null); setAddQ("");
     const { data } = await sb().from("timesheet_entries").select("*").eq("week_id", w.id);
-    const ents = ((data || []) as Entry[]).map((en) => ({ ...en, hours: (en.hours || []).map(Number) }));
+    if (openReq.current !== req) return; // the user moved on — this answer is stale
+    const ents = ((data || []) as Entry[])
+      .filter((en) => en.week_id === w.id)
+      .map((en) => ({ ...en, hours: (en.hours || []).map(Number) }));
     setEntries(ents);
     loadWeekCheck(ents);
   };
@@ -275,22 +294,30 @@ export default function Payroll() {
     // make sure it's really gone — a silently-blocked delete would leave ghost hours
     const { data: still } = await sb().from("timesheet_weeks").select("id").eq("id", w.id).limit(1);
     if (still && still.length > 0) { flash("That week wouldn't delete — check your account's role"); load(); return; }
-    if (openWeek?.id === w.id) setOpenWeek(null);
+    if (openWeek?.id === w.id) { openReq.current += 1; setOpenWeek(null); setEntries([]); setWeekCheck([]); }
     load(); flash("Week and its hours deleted");
   };
 
   // one PAID mark per worker per week — no more side spreadsheet
-  const togglePaid = async (eid: string) => {
+  const togglePaid = (eid: string) => {
     if (!openWeek) return;
-    // start from the row as the database has it — writing this device's copy
-    // wholesale would erase a PAID mark just made on another phone, and letting
-    // this device's stale copy win could resurrect a mark someone just cleared
-    const { data: fresh } = await sb().from("timesheet_weeks").select("paid_map").eq("id", openWeek.id).single();
-    const map = { ...((((fresh as { paid_map?: Record<string, string> | null } | null)?.paid_map) || openWeek.paid_map) || {}) };
-    if (map[eid]) delete map[eid]; else map[eid] = localISO();
-    setOpenWeek({ ...openWeek, paid_map: map });
-    const { error } = await sb().from("timesheet_weeks").update({ paid_map: map }).eq("id", openWeek.id);
-    if (error) { flash(/column/i.test(error.message) ? "Run supabase/upgrade_payroll_paid.sql first" : error.message); load(); }
+    const wid = openWeek.id;
+    // marks go one at a time: tapping two workers quickly used to have both
+    // read the same starting list, so the second write dropped the first mark
+    paidChain.current = paidChain.current.then(async () => {
+      // start from the row as the database has it — writing this device's copy
+      // wholesale would erase a PAID mark just made on another phone, and letting
+      // this device's stale copy win could resurrect a mark someone just cleared
+      const { data: fresh } = await sb().from("timesheet_weeks").select("paid_map").eq("id", wid).single();
+      const stored = ((fresh as { paid_map?: Record<string, string> | null } | null)?.paid_map) || null;
+      // the previous mark in the chain has already been written, so what comes
+      // back is the whole truth; the on-screen copy is only the fallback
+      const map = { ...(stored || (weekRef.current?.id === wid ? weekRef.current.paid_map : null) || {}) };
+      if (map[eid]) delete map[eid]; else map[eid] = localISO();
+      setOpenWeek((prev) => (prev && prev.id === wid ? { ...prev, paid_map: map } : prev));
+      const { error } = await sb().from("timesheet_weeks").update({ paid_map: map }).eq("id", wid);
+      if (error) { flash(/column/i.test(error.message) ? "Run supabase/upgrade_payroll_paid.sql first" : error.message); load(); }
+    }).catch(() => {});
   };
 
   const summ = summarize(entries, emps);
@@ -415,8 +442,15 @@ export default function Payroll() {
           const t = (en.trade ?? "").trim(); // only what the user typed — no defaults
           if (t) (tradesBy[en.employee_id] ||= new Map()).set(t.toLowerCase(), t);
         });
+        // on the printed sheet a blank Category is useless to the payroll company —
+        // where nothing was typed the worker's usual trade from Settings fills in.
+        // (the release minimums check above still counts only what was typed.)
         const workers = Object.entries(by)
-          .map(([eid, days]) => ({ eid, emp: emps.find((e) => e.id === eid), days, cat: [...(tradesBy[eid]?.values() || [])].join(" / ") }))
+          .map(([eid, days]) => {
+            const emp = emps.find((e) => e.id === eid);
+            const typed = [...(tradesBy[eid]?.values() || [])].join(" / ");
+            return { eid, emp, days, cat: typed || (emp?.trade || "").trim() };
+          })
           .sort((a, b) => (a.emp?.name || "").localeCompare(b.emp?.name || ""));
         workers.forEach(({ eid, emp, days, cat }) => {
           nameRows.push({ row: aoa.length, eid });
@@ -495,7 +529,7 @@ export default function Payroll() {
       <div>
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2.5">
-            <button className="btn btn-ghost" onClick={() => { setOpenWeek(null); load(); }}>← Weeks</button>
+            <button className="btn btn-ghost" onClick={() => { openReq.current += 1; setOpenWeek(null); setEntries([]); setWeekCheck([]); load(); }}>← Weeks</button>
             <div>
               <div className="font-display text-lg font-bold uppercase leading-tight">Week of {range}</div>
               <div className="text-[11px] text-inksoft">Sat & Sun count as overtime</div>
@@ -506,7 +540,7 @@ export default function Payroll() {
             <button className="btn btn-primary" onClick={() => {
               // blur fires the focused field's save synchronously, then close right away
               (document.activeElement as HTMLElement | null)?.blur?.();
-              setOpenWeek(null); load();
+              openReq.current += 1; setOpenWeek(null); setEntries([]); setWeekCheck([]); load();
             }}>{readOnly ? "Close" : "Save & close"}</button>
           </div>
         </div>
@@ -560,9 +594,12 @@ export default function Payroll() {
           extraSections.forEach((x) => { const key = x.release_id || "none"; if (!groups.has(key)) groups.set(key, x); });
           const allSections = [...groups.entries()].map(([key, v]) => ({ key, ...v }))
             .sort((a, b) => (a.release_id === null ? 1 : b.release_id === null ? -1 : a.label.localeCompare(b.label, undefined, { numeric: true })));
-          // when a contract is picked up top, only its releases show — the rest stay saved, just hidden
+          // when a contract is picked up top, only its releases show — the rest stay saved, just hidden.
+          // shop/misc hours belong to no contract, so they are never what the filter
+          // is hiding — without this the "Hours without a release" button opens a
+          // section the filter immediately swallows and nothing appears to happen
           const sections = linkContract
-            ? allSections.filter((s) => s.release_id !== null && relById2.get(s.release_id)?.contract_id === linkContract)
+            ? allSections.filter((s) => s.release_id === null || relById2.get(s.release_id)?.contract_id === linkContract)
             : allSections;
           const hiddenCount = allSections.length - sections.length;
           if (sections.length === 0) {
@@ -590,8 +627,11 @@ export default function Payroll() {
             const query = addQ.trim().toLowerCase();
             // full roster — the dropdown scrolls, so never hide anyone behind a cap
             const crewMatch = emps.filter((e) => e.active !== false).filter((e) => !query || e.name.toLowerCase().includes(query));
+            // a name only drops off the template list once it is on the ACTIVE crew —
+            // otherwise someone taken off the crew shows in neither list and can
+            // never be put back on
             const tplMatch = TEMPLATE_CREW.map((t, i) => ({ ...t, idx: i }))
-              .filter((t) => !emps.some((e) => e.name.trim().toLowerCase() === t.name.toLowerCase()))
+              .filter((t) => !emps.some((e) => e.active !== false && e.name.trim().toLowerCase() === t.name.toLowerCase()))
               .filter((t) => !query || t.name.toLowerCase().includes(query));
             const contract = rel ? contracts.find((x) => x.id === rel.contract_id) : null;
             return (

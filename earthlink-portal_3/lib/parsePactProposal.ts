@@ -2,7 +2,7 @@
 // "Dear …, Service Address …, PO …, Scope of Work" letter — into the same
 // fields the PO reader produces, so uploading either kind of file makes a job.
 import { unzipSync, strFromU8 } from "fflate";
-import type { PactPoFields } from "./parsePactPo";
+import { readRow, type PactPoFields } from "./parsePactPo";
 
 // document.xml → plain text, one line per paragraph. Table rows become one
 // line each with tab-separated cells, so "description | price" tables read
@@ -82,18 +82,16 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
   for (let i = start + 1; start >= 0 && i < lines.length; i++) {
     const l = lines[i].replace(/\t/g, " ").trim();
     if (!l) continue;
-    // "<work> 250 x $5.00 $1,250.00" — our own proposals and most partner
-    // letters write it this way, and read whole it can't be split by a $ or a
-    // stray keyword inside the description
-    // the quantity cell may carry how the work is measured: "250 SF x"
-    const whole = l.match(/^(.*?)(\d[\d,]*(?:\.\d+)?)\s*((?:[A-Za-z]{1,10}\s?){0,2})?\s*[x@]\s*\$\s*(-?[\d,]+(?:\.\d{1,2})?)\s+\$\s*(-?[\d,]+(?:\.\d{1,2})?)\s*$/i);
-    if (whole) {
-      const qty = money(whole[2]), up = money(whole[4]), amt = money(whole[5]);
-      const uom = (whole[3] || "").trim().toUpperCase();
-      const desc = `${pending} ${whole[1]}`.trim().replace(/[\t:;,\s-]+$/g, "").replace(/\s{2,}/g, " ");
+    // A work line is a line whose own numbers agree: quantity times price is
+    // the line total. That holds for our own letters and for most partners',
+    // and nothing else on the page can fake it.
+    const row = readRow(`${pending} ${l}`.trim(), { allowTotalish: true });
+    if (row) {
       pending = "";
-      if (desc.length >= 3 && Math.abs(qty * up - amt) < 0.02) { rows.push({ description: desc, qty, unit_price: up, property: "", unit: punit, ...(uom ? { uom } : {}) }); continue; }
+      rows.push({ description: row.description, qty: row.qty, unit_price: row.unit_price, property: "", unit: punit, ...(row.uom ? { uom: row.uom } : {}) });
+      continue;
     }
+
     if (stopRe.test(l) || /^total\b/i.test(l)) { stopAt = i; break; }
     // a work table's column headings ("Description Qty Unit price Amount")
     // are not a work line — and must not glue themselves to the first one

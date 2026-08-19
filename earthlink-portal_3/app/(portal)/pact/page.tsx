@@ -92,6 +92,20 @@ export default function Pact() {
   const today = () => localISO();
   const isImg = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n);
   const itemsOf = (j: Job): Item[] => (Array.isArray(j.items) ? j.items : []);
+  // the job's short name: the street and the apartment, nothing else. The
+  // borough, the state and the zip are on the invoice, not in a list you
+  // scroll on a phone.
+  const shortSite = (j: Job): string => {
+    const street = (j.address || "").split(",")[0].replace(/\s{2,}/g, " ").trim();
+    const apt = j.property_unit ? `Apt ${j.property_unit}` : "";
+    return [street || j.development || j.partner, apt].filter(Boolean).join(" · ");
+  };
+  // and its short description: the first thing it says, not the whole scope
+  const shortWork = (j: Job): string => {
+    const d = (j.description || "").replace(/\s+/g, " ").trim();
+    const first = d.split(/(?<=[.;])\s+/)[0] || d;
+    return first.length > 54 ? `${first.slice(0, 54).trim()}…` : first;
+  };
   // private work is taxable — NYC sales tax by default, editable per job
   const taxRate = (j: Job) => (j.tax_pct === null || j.tax_pct === undefined ? 8.875 : Number(j.tax_pct));
   const invSubtotal = (j: Job) => itemsOf(j).reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
@@ -178,7 +192,7 @@ export default function Pact() {
   // Work lines for this text, from the price list. Anything the PO already
   // priced stays exactly as the PO wrote it — the list only fills the gaps,
   // and work the PO named in its own words never gets a second copy beside it.
-  const priceFromList = async (text: string, existing: Item[], opts: { bundle?: boolean; refresh?: boolean; fillOnly?: boolean } = {}): Promise<Item[]> => {
+  const priceFromList = async (text: string, existing: Item[], opts: { bundle?: boolean; refresh?: boolean; fillOnly?: boolean; prepOnly?: boolean } = {}): Promise<Item[]> => {
     const bk = await priceBook();
     const lines = priceLinesFor(text, { book: bk, bundle: opts.bundle ?? true });
     if (lines.length === 0) return existing;
@@ -199,9 +213,11 @@ export default function Pact() {
     for (const l of lines) {
       const at = covered.get(l.key);
       if (at === undefined) {
-        // a PO that priced its own table is the agreement — fill what it left
-        // blank, but never add work beside it
-        if (opts.fillOnly) continue;
+        // A PO that priced its own table is the agreement — nothing new goes
+        // beside it, EXCEPT the prep a wet trade always carries: plaster is
+        // never billed without its primer and paint.
+        const isPrep = l.key === "primer" || l.key === "paint_sf";
+        if (opts.fillOnly && !(opts.prepOnly && isPrep)) continue;
         out.push({ description: l.description, qty: l.qty, unit: l.unit, unit_price: l.unit_price, key: l.key });
         covered.set(l.key, out.length - 1);
         continue;
@@ -273,7 +289,9 @@ export default function Pact() {
       poNumber: j.po_number || j.job_number || "",
       date: prettyDate(today()),
       attn: (j.contact || "").split("·")[0].replace(/\s*\d[\d\s().-]{6,}$/, "").trim(),
-      billTo: (j.bill_to || j.partner || "").split(/,\s*/).filter(Boolean).slice(0, 3),
+      // the partner's office as the PO writes it — name, title, street, suite,
+      // city — with the company at the top
+      billTo: [...new Set([j.partner, ...(j.bill_to || "").split(/,\s*/)].map((x) => (x || "").trim()).filter(Boolean))].slice(0, 6),
       serviceAddress: [j.address, j.property_unit ? `Apartment ${j.property_unit}` : ""].filter(Boolean).join(", "),
       lines,
       taxPct: taxRate(j),
@@ -505,9 +523,9 @@ export default function Pact() {
       // description as its scope, and counting both doubles every quantity
       const said = [...new Set([f.desc, f.scope, f.rows.map((r) => r.description).join(" ")]
         .map((x) => (x || "").trim()).filter(Boolean))];
-      const priced = await priceFromList(said.join(". "), seed, { bundle: !poPriced, fillOnly: poPriced });
+      const priced = await priceFromList(said.join(". "), seed, { fillOnly: poPriced, prepOnly: poPriced });
       const { data: job, error } = await sb().from("pact_jobs").insert({
-        partner: f.partner, development: "", job_number: f.po, description: f.desc || f.scope, amount,
+        partner: f.partner, development: "", job_number: f.po, description: (f.desc || f.scope).slice(0, 120), amount,
         po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,
         contact: f.contact, bill_to: f.billBlock, items: priced, invoice_number: await nextInvoiceNo(),
         ...(taxFromDoc !== undefined ? { tax_pct: taxFromDoc } : {}),
@@ -1098,10 +1116,10 @@ export default function Pact() {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <button className="min-w-0 text-left" onClick={() => { setOpenId(openId === j.id ? null : j.id); setShowDetails(false); }}>
                 <div className={`text-[14px] font-semibold ${j.canceled ? "line-through" : ""}`}>
-                  {j.address || j.development || j.partner}
+                  {shortSite(j)}
                   {(j.po_number || j.job_number) ? <span className="ml-1.5 font-mono text-xs text-inksoft">PO {j.po_number || j.job_number}</span> : null}
                 </div>
-                <div className="max-w-[340px] truncate text-[13px] text-inksoft">{j.partner}{j.description ? ` · ${j.description}` : ""}</div>
+                <div className="max-w-[340px] truncate text-[13px] text-inksoft">{[j.partner, shortWork(j)].filter(Boolean).join(" · ")}</div>
                 {!j.canceled && (() => {
                   const stages = pipeline(j);
                   const current = stages.findIndex(([, done]) => !done);

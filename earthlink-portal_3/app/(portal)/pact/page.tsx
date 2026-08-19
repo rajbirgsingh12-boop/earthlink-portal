@@ -284,7 +284,6 @@ export default function Pact() {
       const seeded = await priceFromList(j.description || "", []);
       lines = seeded.map((it) => ({ description: it.description, qty: Number(it.qty) || 1, unit: it.unit, unit_price: Number(it.unit_price) || 0 }));
     }
-    if (lines.length === 0) lines = [{ description: j.description || "Work as discussed", qty: 1, unit: "EACH", unit_price: 0 }];
     return {
       poNumber: j.po_number || j.job_number || "",
       date: prettyDate(today()),
@@ -298,9 +297,11 @@ export default function Pact() {
     };
   };
 
-  const proposalBytes = async (j: Job): Promise<{ bytes: Uint8Array; name: string }> => {
+  const proposalBytes = async (j: Job): Promise<{ bytes: Uint8Array; name: string } | null> => {
     const { buildProposalDocx, proposalFileName } = await import("@/lib/proposalDoc");
     const fields = await proposalFields(j);
+    // a letter with nothing priced on it isn't a proposal
+    if (!fields.lines.some((l) => l.description.trim() && l.qty > 0 && l.unit_price > 0)) return null;
     return { bytes: buildProposalDocx(fields, await logoBytes()), name: proposalFileName(fields) };
   };
 
@@ -309,7 +310,9 @@ export default function Pact() {
   const makeProposal = async (j: Job) => {
     setBusy(true);
     try {
-      const { bytes, name: def } = await proposalBytes(j);
+      const made = await proposalBytes(j);
+      if (!made) { flash("Nothing priced on this job yet — fill the work lines in first"); return; }
+      const { bytes, name: def } = made;
       const name = askFileName(def);
       if (!name) return;
       saveBytes(bytes, name, DOCX);
@@ -327,7 +330,9 @@ export default function Pact() {
   const saveProposalFor = async (j: Job, quiet = false): Promise<boolean> => {
     if (!quiet) setBusy(true);
     try {
-      const { bytes, name } = await proposalBytes(j);
+      const made = await proposalBytes(j);
+      if (!made) { flash("Nothing priced on this job yet — fill the work lines in first"); return false; }
+      const { bytes, name } = made;
       saveBytes(bytes, name, DOCX);
       await keepOnJob(j, bytes, name, DOCX);
       await stampProposalSent(j);
@@ -383,7 +388,9 @@ export default function Pact() {
         flash(`Writing proposals… ${++done} of ${folderResult.made.length}`);
         const live = jobs.find((x) => x.id === j.id) || j;
         try {
-          const { bytes, name } = await proposalBytes(live);
+          const made = await proposalBytes(live);
+          if (!made) continue;
+          const { bytes, name } = made;
           let nm = name;
           for (let n = 2; files[nm]; n++) nm = name.replace(/\.docx$/i, ` (${n}).docx`);
           files[nm] = bytes;
@@ -490,6 +497,19 @@ export default function Pact() {
       const unreadable = !f.po && !f.partner && !f.desc;
       // this PO may already be a job — uploading it again must not make a second
       // one (a hand-typed job carries the PO in job_number, so check both)
+      // a letter with no PO number is still the same job if it's the same
+      // address for the same money — otherwise every upload makes a new one
+      if (!f.po && f.address) {
+        const { data: same } = await sb().from("pact_jobs").select("id,amount,address").ilike("address", `${f.address.slice(0, 30)}%`).limit(20);
+        const hit = ((same || []) as Job[]).find((x) => Math.abs(Number(x.amount || 0) - amount) < 0.02);
+        if (hit) {
+          setBusy(false);
+          await load();
+          setOpenId(hit.id); setShowDetails(true);
+          flash("That proposal is already here — opened it (nothing new was created)");
+          return;
+        }
+      }
       if (f.po) {
         const { data: dupes } = await sb().from("pact_jobs").select("id,attachments").or(`po_number.eq.${f.po},job_number.eq.${f.po}`).limit(1);
         const dupe = (dupes || [])[0] as Job | undefined;
@@ -587,9 +607,11 @@ export default function Pact() {
   const keepOnJob = async (j: Job, bytes: Uint8Array, name: string, type: string): Promise<void> => {
     try {
       // "#" (and friends) end a web address, so the shelf name drops them —
-      // the file the user downloads keeps the name they expect
+      // the file the user downloads keeps the name they expect. Papers the
+      // portal wrote live under their own folder so the invoice package can
+      // tell them apart from the PO and the photos and never swallow itself.
       const safe = name.replace(/[#?%&]+/g, "").replace(/\s{2,}/g, " ").trim();
-      const path = `pact/${j.id}/${safe}`;
+      const path = `pact/${j.id}/made/${safe}`;
       const ab = new ArrayBuffer(bytes.byteLength);
       new Uint8Array(ab).set(bytes);
       const { error } = await sb().storage.from("docs").upload(path, new Blob([ab], { type }), { upsert: true, contentType: type });
@@ -744,8 +766,10 @@ export default function Pact() {
     try {
       const files: Record<string, Uint8Array> = {};
       let done = 0;
-      for (const j of folderResult.made) {
+      for (const j0 of folderResult.made) {
         flash(`Making invoices… ${++done} of ${folderResult.made.length}`);
+        // whatever was corrected since the import is what gets billed
+        const j = jobs.find((x) => x.id === j0.id) || j0;
         const bytes = await buildPackageBytes(j, theOrg);
         if (!bytes) continue;
         let base = `invoice # ${j.invoice_number || ""} PO ${j.po_number || j.job_number || ""} ${[j.address, j.property_unit && `Apt ${j.property_unit}`].filter(Boolean).join(" ")}`
@@ -778,6 +802,9 @@ export default function Pact() {
   };
 
   // one job's full package as PDF bytes — invoice page, PO pages, photos
+  // a paper the portal made, filed on the job — never merged back into a package
+  const isMade = (a: { path?: string; name?: string }) => /\/made\//.test(a.path || "");
+
   const buildPackageBytes = async (j: Job, org2: Org): Promise<Uint8Array | null> => {
     const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
     const items = itemsOf(j).filter((it) => Number(it.qty) > 0 && it.description.trim());
@@ -907,8 +934,8 @@ export default function Pact() {
       hr(72, 0.6);
       const foot = `Make all checks payable to ${(org2.company || "").toUpperCase()} · Thank you for your business`;
       put(foot, (612 - helv.widthOfTextAtSize(foot, 8.5)) / 2, 58, 8.5, helv, soft);
-      // --- the PO pdf(s) ---
-      const atts = j.attachments || [];
+      // --- the PO pdf(s) --- (never a package this job already produced)
+      const atts = (j.attachments || []).filter((a) => !isMade(a));
       for (const a of atts.filter((x) => /\.pdf$/i.test(x.name))) {
         try {
           const { data } = await sb().storage.from("docs").createSignedUrl(a.path, 600);
@@ -1278,7 +1305,12 @@ export default function Pact() {
                         <label className="flex items-center gap-1 text-[12px] text-inksoft" title="The sales tax printed on the proposal and the invoice">
                           Sales tax
                           <input className="field w-16 px-1.5 py-1.5 text-right font-mono text-[12px]" inputMode="decimal"
-                            {...num(`${j.id}:tax`, taxRate(j), () => null, (n2) => patch(j, { tax_pct: n2 }))} />
+                            {...num(`${j.id}:tax`, taxRate(j), () => null, (n2) => {
+                              // the billed amount follows the rate — otherwise the
+                              // job keeps yesterday's total at today's tax
+                              const sub = invSubtotal(j);
+                              patch(j, sub > 0 ? { tax_pct: n2, amount: sub * (1 + n2 / 100) } : { tax_pct: n2 });
+                            }, { showZero: true })} />
                           %
                         </label>
                       )}

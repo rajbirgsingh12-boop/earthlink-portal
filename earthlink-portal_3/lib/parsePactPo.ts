@@ -125,12 +125,27 @@ export function readRows(raw: string): PactPoFields["rows"] {
   return out;
 }
 
-// a labelled number, never a date and never a page number
+// A labelled number — never a date, never a page number. Partners write the
+// label every way there is: "PO # 8300", "Purchase Order No: 8300", "PO: 8300"
+// and plain "P.O. 8300".
 const labelled = (t: string, label: string): string => {
-  const m = t.match(new RegExp(`${label}\\s*(?:No\\.?|Number|#)\\s*:?\\s*([A-Za-z]?\\d[\\w-]*)`, "i"))
-    || t.match(new RegExp(`${label}\\s*:\\s*([A-Za-z]?\\d[\\w-]*)`, "i"));
-  const v = m?.[1] || "";
-  return /^\d{1,2}$/.test(v) ? "" : v;   // "08" out of a date is not a PO number
+  const pats = [
+    new RegExp(`${label}\\s*(?:No\\.?|Number|#)\\s*:?\\s*([A-Za-z]?\\d[\\w-]*)`, "i"),
+    new RegExp(`${label}\\s*:\\s*([A-Za-z]?\\d[\\w-]*)`, "i"),
+    new RegExp(`${label}\\s+([A-Za-z]?\\d[\\w-]*)`, "i"),   // no marker at all
+  ];
+  for (const re of pats) {
+    const m = t.match(re);
+    if (!m) continue;
+    const v = m[1];
+    // "08" or "12" out of 08/12/2026 is a date, not a PO number — and neither
+    // is a number with a slash on either side of it
+    if (/^\d{1,2}$/.test(v)) continue;
+    const at = (m.index ?? 0) + m[0].length;
+    if (t[at] === "/" || t[at] === "-" && /^\d{4}$/.test(v)) continue;
+    return v;
+  }
+  return "";
 };
 
 export function parsePactPoText(raw: string): PactPoFields {

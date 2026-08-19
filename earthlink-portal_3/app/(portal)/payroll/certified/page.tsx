@@ -153,17 +153,25 @@ export default function CertifiedPayroll() {
       const nameById = new Map((emps || []).map((e: { id: string; name: string }) => [e.id, e.name]));
       // hours by release → by worker (7 days, Sat…Fri — same order as the CSV grid)
       const byRel: Record<string, ReleaseHours> = {};
+      // hours that belong to no release — shop, yard, anything off the jobs.
+      // They aren't billed to a release, but the week's pay covers them, so
+      // they have to count when the pay is shared out.
+      const offRelease: Record<string, number[]> = {};
       for (const en of (ents || []) as { employee_id: string; release_id: string | null; hours: (number | string)[] }[]) {
-        let rel = en.release_id ? relNumById.get(en.release_id) : undefined;
-        if (rel === undefined) continue; // shop/misc hours belong to no release
-        if (!rel.trim()) rel = "unnumbered"; // a release saved without a number still counts
         const k = workerKey(nameById.get(en.employee_id) || "");
         if (!k) continue;
+        let rel = en.release_id ? relNumById.get(en.release_id) : undefined;
+        if (rel === undefined) {
+          const off = (offRelease[k] ||= [0, 0, 0, 0, 0, 0, 0]);
+          (en.hours || []).forEach((h, i) => { if (i < 7) off[i] += Number(h) || 0; });
+          continue;
+        }
+        if (!rel.trim()) rel = "unnumbered"; // a release saved without a number still counts
         const g = (byRel[rel] ||= { rel, byWorker: {} });
         const arr = (g.byWorker[k] ||= [0, 0, 0, 0, 0, 0, 0]);
         (en.hours || []).forEach((h, i) => { if (i < 7) arr[i] += Number(h) || 0; });
       }
-      const { groups, unmatched } = splitReportByRelease(rep, Object.values(byRel));
+      const { groups, unmatched } = splitReportByRelease(rep, Object.values(byRel), offRelease);
       if (groups.length === 0) {
         flash("Nobody on this report has release hours that week in the portal — check the names match the crew list in Settings.");
         return;

@@ -104,7 +104,7 @@ const near = (x: number, at: number, slack = 11) => Math.abs(x - at) <= slack;
 
 interface Cols {
   day: number[];      // Sa Su Mo Tu We Th Fr
-  hours: number; rate: number; gross: number; cls: number;
+  hours: number; rate: number; gross: number; cls: number; exemp: number;
   fica: number; fed: number; state: number; city: number; other: number; net: number;
   type: number;       // where ST / OT / VAC sits
   name: number;       // the left edge, where names and SS#/CHECK# lines start
@@ -147,6 +147,7 @@ function readCols(lines: CpLine[]): (Cols & { bands: number[] }) | null {
       day,
       hours: find(/^hours$/i), rate: find(/^rate$/i), gross: find(/^(?:amt\.?|earned)$/i),
       cls: find(/^classification$/i),
+      exemp: find(/^(?:exemp\.?|exemptions?|#\s*of)$/i),
       fica: find(/^fica$/i), fed: find(/^fed\.?$/i), state: find(/^state$/i), city: find(/^(?:nyc|city|local)$/i),
       other: find(/^other$/i), net: find(/^net(?:\s*pay)?$/i),
       type: find(/^(?:st|rt)$/i), name: Math.min(...band.flatMap((b) => b.xs || [9999])),
@@ -218,7 +219,10 @@ export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
 
   // a worker starts where a name sits at the left edge on a line that also
   // carries a rate-type box (ST / RT)
-  const nameEdge = cols.cls > 0 ? cols.cls - 10 : cols.type - 40;
+  // the name column ends where the next box begins — the exemptions box comes
+  // first on the federal form, then the craft
+  const nameEdge = cols.exemp > 0 ? cols.exemp - 8 : cols.cls > 0 ? cols.cls - 10 : cols.type - 40;
+  const craftFrom = cols.cls > 0 ? cols.cls - 10 : nameEdge;
   const isStart = (l: CpLine): boolean => {
     if (!l.xs || l.xs.length < 2) return false;
     // the rate-type box says this is the first row of a worker
@@ -240,8 +244,13 @@ export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
     if (isStart(l)) { cur = [l]; blocks.push(cur); return; }
     if (!cur) return;
     const text = l.tokens.join(" ");
+    // the page-total strip at the foot of the grid: nothing but money, and all
+    // of it out to the right of the name and hours columns
+    const moneyOnly = l.xs && l.tokens.length >= 4
+      && l.tokens.every((t) => /^-?\$?[\d,]+(?:\.\d{2})?$/.test(t.replace(/\s/g, "")))
+      && Math.min(...l.xs) >= cols.gross - 12;
     // the footnotes, the page totals and the next section are not this worker
-    if (cur.length >= 12 || BLOCK_END.test(text) || text.length > 90) { cur = null; return; }
+    if (cur.length >= 12 || moneyOnly || BLOCK_END.test(text) || text.length > 90) { cur = null; return; }
     cur.push(l);
   });
 
@@ -251,7 +260,12 @@ export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
     // everything left of the craft column is the worker's name
     row.name = first.tokens.filter((_, k) => first.xs![k] < nameEdge).join(" ").replace(/\s{2,}/g, " ").trim();
     // and what sits between there and the rate-type box is the craft
-    row.classification = (first.tokens.filter((_, k) => first.xs![k] >= nameEdge && first.xs![k] < cols.type - 5).join(" ") || "").trim().slice(0, 40);
+    row.classification = (first.tokens.filter((_, k) => first.xs![k] >= craftFrom && first.xs![k] < cols.type - 5).join(" ") || "").trim().slice(0, 40);
+    // whatever the payroll printed in the exemptions box
+    if (cols.exemp > 0) {
+      const ex = first.tokens.find((_, k) => near(first.xs![k], cols.exemp, 12) && /^\d{1,2}$/.test(first.tokens[k]));
+      if (ex) row.exemption = ex;
+    }
 
     for (const l of block) {
       if (!l.xs) continue;
@@ -348,6 +362,8 @@ export function parseCertifiedPayroll(fileName: string, lines: CpLine[]): CpRepo
   let cur: CpLine[] | null = null;
   for (const line of lines) {
     const text = line.tokens.join(" ");
+    // the form's own banner and headings are never a worker
+    if (FORM_WORDS.test(text)) { cur = null; continue; }
     const starts = ssnRe.test(text) || (nameRe.test(text) && classWords.test(text));
     if (starts) { cur = [line]; blocks.push(cur); }
     else if (cur) cur.push(line);
@@ -581,7 +597,11 @@ const moneyN = (v: Cell): number => {
   return Number.isFinite(x) ? x : 0;
 };
 
-export function splitReportByRelease(rep: CpReport, releases: ReleaseHours[]): { groups: { rel: string; report: CpReport }[]; unmatched: CpReport | null } {
+// `offRelease` is the worker's hours that week that belong to no release —
+// shop time, yard time, anything not on a NYCHA job. They are not billed to a
+// release, but they ARE part of the week the gross was earned in, so they have
+// to count in the share and show up as hours on other work.
+export function splitReportByRelease(rep: CpReport, releases: ReleaseHours[], offRelease: Record<string, number[]> = {}): { groups: { rel: string; report: CpReport }[]; unmatched: CpReport | null } {
   const daySum = (days: number[], weekend: boolean) =>
     days.reduce((s, h, i) => (i < 2) === weekend ? s + (Number(h) || 0) : s, 0);
   // which releases each payroll worker shows up on, and their total hours.
@@ -600,16 +620,25 @@ export function splitReportByRelease(rep: CpReport, releases: ReleaseHours[]): {
       .filter((x): x is { rel: string; days: number[] } => !!k && !!x.days && x.days.some((h) => Number(h) > 0));
     if (mine.length === 0) continue;
     matched.add(k);
-    const totWk = mine.reduce((s, m) => s + daySum(m.days, false), 0);
-    const totWe = mine.reduce((s, m) => s + daySum(m.days, true), 0);
+    const off = offRelease[k] || [];
+    const relWkAll = mine.reduce((s, m) => s + daySum(m.days, false), 0);
+    const relWeAll = mine.reduce((s, m) => s + daySum(m.days, true), 0);
+    // the whole week the pay covers, releases and everything else
+    const totWk = relWkAll + daySum(off, false);
+    const totWe = relWeAll + daySum(off, true);
     const totAll = totWk + totWe;
-    const gross = moneyN(row.grossTotal) || moneyN(row.grossProject);
+    const relAll = relWkAll + relWeAll;
+    // what the worker earned on this project is what gets split across its
+    // releases; the all-jobs figure stays whole in its own column
+    const gross = moneyN(row.grossProject) || moneyN(row.grossTotal);
+    // only the part of the pay that the release hours earned is shared out
+    const relGross = Math.round(gross * (relAll / (totAll || 1)) * 100) / 100;
     let allocated = 0;
     mine.forEach((m, i) => {
       const relWk = daySum(m.days, false), relWe = daySum(m.days, true);
-      // shares add back to the exact gross — the last release takes the remainder
+      // shares add back to that exactly — the last release takes the remainder
       const share = i === mine.length - 1
-        ? Math.round((gross - allocated) * 100) / 100
+        ? Math.round((relGross - allocated) * 100) / 100
         : Math.round(gross * ((relWk + relWe) / (totAll || 1)) * 100) / 100;
       allocated = Math.round((allocated + share) * 100) / 100;
       (rowsByRel[m.rel] ||= []).push({

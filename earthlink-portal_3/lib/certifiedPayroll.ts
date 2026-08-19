@@ -204,6 +204,9 @@ function readWh347Header(lines: CpLine[]): { weekEnding: string; payrollNo: stri
   return { weekEnding, payrollNo, project, contractNo, contractor, fedId };
 }
 
+// where a worker's rows stop: the small print, the next section, another page.
+// The CHECK# line is NOT one of these — it carries the worker's money.
+const BLOCK_END = /department of labor|wage and hour|we estimate|washington|purchase this form|form wh|exceptions|remarks|name of contractor|for week ending|payroll no|omb no|deductions\b.*\bnet pay/i;
 const FORM_WORDS = /department|wage and hour|contractor|payroll|social security|classification|deductions|check|estimate|form wh|exceptions|remarks|total|subtotal|name,?\s*address|of employee|#\s*of\b|exemp|w\/h|of pay|earned|project|address\b/i;
 
 export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
@@ -234,8 +237,12 @@ export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
   let cur: CpLine[] | null = null;
   lines.forEach((l, i) => {
     if (heading.has(i)) { cur = null; return; }
-    if (isStart(l)) { cur = [l]; blocks.push(cur); }
-    else if (cur) cur.push(l);
+    if (isStart(l)) { cur = [l]; blocks.push(cur); return; }
+    if (!cur) return;
+    const text = l.tokens.join(" ");
+    // the footnotes, the page totals and the next section are not this worker
+    if (cur.length >= 12 || BLOCK_END.test(text) || text.length > 90) { cur = null; return; }
+    cur.push(l);
   });
 
   for (const block of blocks) {
@@ -271,7 +278,9 @@ export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
       // the street address the form prints under the name
       else if (!kind && !/check\s*#/i.test(flatL)) {
         const left = l.tokens.filter((_, k) => l.xs![k] < nameEdge).join(" ").trim();
-        if (left.length > 6 && /\d/.test(left) && /[A-Za-z]{3}/.test(left) && !FORM_WORDS.test(left))
+        const looksLikeAddress = /^\d/.test(left)
+          && /\b(?:ave|avenue|st|street|blvd|boulevard|rd|road|dr|drive|ln|lane|pl|place|ct|court|ter|terrace|pkwy|parkway|hwy|way|apt|unit)\b/i.test(left);
+        if (looksLikeAddress && left.length <= 60 && !FORM_WORDS.test(left))
           row.address = row.address ? `${row.address} ${left}` : left;
       }
       // the money line: every figure under its own heading

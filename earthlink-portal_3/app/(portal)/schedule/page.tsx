@@ -161,7 +161,11 @@ export default function Schedule() {
       const fails = res.failed || [];
       const skippedNote = res.skipped ? ` (${res.skipped} already texted — skipped)` : "";
       flash(fails.length === 0
-        ? `Sent ${res.sent} text${res.sent === 1 ? "" : "s"} from the company number ✓${skippedNote}`
+        ? res.sent === 0
+          // nothing actually went out — saying "✓" here is how a crew ends up
+          // never being told anything
+          ? "Everyone here was already texted today — nothing new went out"
+          : `Sent ${res.sent} text${res.sent === 1 ? "" : "s"} from the company number ✓${skippedNote}`
         : `Sent ${res.sent}, but ${fails.length} didn't go through — check those numbers in Payroll → Crew`);
     } else if (res.status === 501) {
       // no company number yet — group text from this phone. The stamp waits for
@@ -189,20 +193,30 @@ export default function Schedule() {
     // saved description just for tapping in and out of the box
     if (descBuf[relId] === undefined) return;
     const desc = descBuf[relId].trim();
-    const ids = rows.filter((x) => x.release_id === relId).map((x) => x.id);
+    const mine = rows.filter((x) => x.release_id === relId);
+    const ids = mine.map((x) => x.id);
     if (ids.length === 0) return;
-    setRows((prev) => prev.map((x) => (x.release_id === relId ? { ...x, description: desc } : x)));
-    await sb().from("schedule_days").update({ description: desc }).in("id", ids);
+    // the crew was texted the OLD wording — a real change puts them back in the
+    // to-send pile, otherwise Assign & text skips everyone and says it sent ✓
+    const resend = mine.some((x) => (x.description || "").trim() !== desc) && mine.some((x) => x.texted);
+    setRows((prev) => prev.map((x) => (x.release_id === relId ? { ...x, description: desc, ...(resend ? { texted: false } : {}) } : x)));
+    await sb().from("schedule_days").update(resend ? { description: desc, texted: false } : { description: desc }).in("id", ids);
+    if (resend) flash("Description changed — hit Assign & text again so the crew gets it");
   };
   const saveAddr = async (relId: string, value?: string) => {
     if (value === undefined && addrBuf[relId] === undefined) return; // untouched — see saveDesc
     const addr = (value ?? addrBuf[relId] ?? "").trim();
     if (value !== undefined) setAddrBuf((p) => ({ ...p, [relId]: addr }));
-    const ids = rows.filter((x) => x.release_id === relId).map((x) => x.id);
+    const mine = rows.filter((x) => x.release_id === relId);
+    const ids = mine.map((x) => x.id);
     if (ids.length === 0) return;
-    setRows((prev) => prev.map((x) => (x.release_id === relId ? { ...x, address: addr } : x)));
-    const { error } = await sb().from("schedule_days").update({ address: addr }).in("id", ids);
+    // same as the description: a corrected address the crew never got told is
+    // the whole reason to text again
+    const resend = mine.some((x) => (x.address || "").trim() !== addr) && mine.some((x) => x.texted);
+    setRows((prev) => prev.map((x) => (x.release_id === relId ? { ...x, address: addr, ...(resend ? { texted: false } : {}) } : x)));
+    const { error } = await sb().from("schedule_days").update(resend ? { address: addr, texted: false } : { address: addr }).in("id", ids);
     if (error && /column|schema cache/i.test(error.message)) flash("Re-run supabase/upgrade_day_schedule.sql so addresses save");
+    else if (resend) flash("Address changed — hit Assign & text again so the crew gets it");
   };
   const openMap = (relId: string) => {
     const start = addrOf(relId).trim() || (rels.find((r) => r.id === relId)?.location || "");

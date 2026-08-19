@@ -77,7 +77,7 @@ const findWeekEnding = (t: string): string => {
 // One line of extracted PDF text (tokens ordered left→right). `xs` carries
 // where each token sits across the page, which is the only way to tell which
 // DAY a lone "6.0" belongs to on a WH-347 grid.
-export interface CpLine { tokens: string[]; xs?: number[] }
+export interface CpLine { tokens: string[]; xs?: number[]; ws?: number[] }
 
 // ---------- WH-347 (the federal payroll form) ----------
 // The form is a grid: the day a worker's hours belong to is decided by where
@@ -101,6 +101,25 @@ const asDate = (toks: string[]): string => {
 };
 
 const near = (x: number, at: number, slack = 11) => Math.abs(x - at) <= slack;
+
+// Which day box a number sits in. Payroll companies left-align, centre and
+// right-align the hours, so measuring from the heading's left edge puts a
+// right-aligned "8" a day late and drops Friday off the end. Instead each
+// heading opens a cell that runs to the next heading, and a number belongs to
+// the cell its MIDDLE lands in — that reads all three the same way.
+const dayAt = (mid: number, day: number[], rightEdge: number): number => {
+  if (day.length === 0) return -1;
+  const gaps: number[] = [];
+  for (let i = 1; i < day.length; i++) if (day[i] > day[i - 1]) gaps.push(day[i] - day[i - 1]);
+  const span = gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : 15;
+  const last = day[day.length - 1];
+  // the last day box ends where the TOTAL HOURS column starts — a number whose
+  // middle has reached that heading is the week's total, not Friday's hours
+  const stop = rightEdge > last ? rightEdge : last + span;
+  if (mid < day[0] - span * 0.6 || mid >= stop) return -1;
+  for (let i = day.length - 1; i >= 0; i--) if (mid >= (i === 0 ? day[0] - span * 0.6 : day[i])) return i;
+  return -1;
+};
 
 interface Cols {
   day: number[];      // Sa Su Mo Tu We Th Fr
@@ -223,10 +242,15 @@ export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
   // first on the federal form, then the craft
   const nameEdge = cols.exemp > 0 ? cols.exemp - 8 : cols.cls > 0 ? cols.cls - 10 : cols.type - 40;
   const craftFrom = cols.cls > 0 ? cols.cls - 10 : nameEdge;
+  // "117-01 ATLANTIC AVE, RICHMOND HILL NY 11418" is an address, not a name
+  const STREET = /\b(?:ave|avenue|st|street|blvd|boulevard|rd|road|dr|drive|ln|lane|pl|place|ct|court|ter|terrace|pkwy|parkway|hwy|way|apt|unit)\b/i;
+  const addressish = (t: string) => /^\d/.test(t) && STREET.test(t);
   const isStart = (l: CpLine): boolean => {
     if (!l.xs || l.xs.length < 2) return false;
-    // the rate-type box says this is the first row of a worker
-    if (!l.tokens.some((t, k) => /^(?:ST|RT|REG|R\/T)$/i.test(t) && near(l.xs![k], cols.type, 14))) return false;
+    // the rate-type box says this is the first row of a worker. The form's own
+    // instructions print "O" over "S", so plenty of payroll companies put the
+    // overtime line first — a worker whose top line says OT is still a worker
+    if (!l.tokens.some((t, k) => /^(?:ST|RT|REG|R\/T|OT|O\/T)$/i.test(t) && near(l.xs![k], cols.type, 14))) return false;
     // …and something with letters sits in the name column. Names print every
     // which way — "LOJA, IVAN", "Ivan Loja", two separate words — so the shape
     // of the name is never what decides.
@@ -238,10 +262,11 @@ export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
   const heading = new Set<number>();
   for (const b of cols.bands) for (let k = -1; k <= 2; k++) heading.add(b + k);
   const blocks: CpLine[][] = [];
+  const blockAt: number[] = []; // which line each block starts on
   let cur: CpLine[] | null = null;
   lines.forEach((l, i) => {
     if (heading.has(i)) { cur = null; return; }
-    if (isStart(l)) { cur = [l]; blocks.push(cur); return; }
+    if (isStart(l)) { cur = [l]; blocks.push(cur); blockAt.push(i); return; }
     if (!cur) return;
     const text = l.tokens.join(" ");
     // the page-total strip at the foot of the grid: nothing but money, and all
@@ -254,11 +279,24 @@ export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
     cur.push(l);
   });
 
-  for (const block of blocks) {
+  blocks.forEach((block, bi) => {
     const row = blankRow();
     const first = block[0];
     // everything left of the craft column is the worker's name
     row.name = first.tokens.filter((_, k) => first.xs![k] < nameEdge).join(" ").replace(/\s{2,}/g, " ").trim();
+    // some payrolls print the name on its own line and start the hours row with
+    // the street address — the name is then the short line just above
+    if (addressish(row.name)) {
+      const above = lines[blockAt[bi] - 1];
+      const left = above && above.xs
+        ? above.tokens.filter((_, k) => above.xs![k] < nameEdge).join(" ").replace(/\s{2,}/g, " ").trim()
+        : "";
+      if (left && left.length <= 40 && /[A-Za-z]{2}/.test(left) && !addressish(left)
+        && !FORM_WORDS.test(left) && !heading.has(blockAt[bi] - 1)) {
+        row.address = row.name;
+        row.name = left;
+      }
+    }
     // and what sits between there and the rate-type box is the craft
     row.classification = (first.tokens.filter((_, k) => first.xs![k] >= craftFrom && first.xs![k] < cols.type - 5).join(" ") || "").trim().slice(0, 40);
     // whatever the payroll printed in the exemptions box
@@ -279,7 +317,7 @@ export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
         const target = kind === "OT" ? row.ot : row.st;
         l.tokens.forEach((t, k) => {
           if (!/^\d{1,2}(?:\.\d{1,2})?$/.test(t)) return;
-          const d = cols.day.findIndex((dx) => near(l.xs![k], dx, 9));
+          const d = dayAt(l.xs![k] + (l.ws?.[k] || 0) / 2, cols.day, cols.hours);
           if (d >= 0) target[d] = Number(t);
         });
         const rate = money(cols.rate);
@@ -293,7 +331,7 @@ export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
       else if (!kind && !/check\s*#/i.test(flatL)) {
         const left = l.tokens.filter((_, k) => l.xs![k] < nameEdge).join(" ").trim();
         const looksLikeAddress = /^\d/.test(left)
-          && /\b(?:ave|avenue|st|street|blvd|boulevard|rd|road|dr|drive|ln|lane|pl|place|ct|court|ter|terrace|pkwy|parkway|hwy|way|apt|unit)\b/i.test(left);
+          && STREET.test(left);
         if (looksLikeAddress && left.length <= 60 && !FORM_WORDS.test(left))
           row.address = row.address ? `${row.address} ${left}` : left;
       }
@@ -314,7 +352,7 @@ export function parseWh347(fileName: string, lines: CpLine[]): CpReport | null {
     if (row.st.every((h) => !Number(h)) && row.ot.every((h) => !Number(h)))
       notes.push(`${row.name || "A worker"}: no day-by-day hours were printed — check the grid.`);
     if (row.name) rows.push(row);
-  }
+  });
   if (rows.length === 0) return null;
 
   if (!head.weekEnding) notes.push("Couldn't read the week-ending date — type it in above.");

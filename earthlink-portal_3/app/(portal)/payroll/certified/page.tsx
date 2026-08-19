@@ -29,23 +29,26 @@ export default function CertifiedPayroll() {
       const lines: CpLine[] = [];
       for (let pg = 1; pg <= loaded.numPages; pg++) {
         const tc = await (await loaded.getPage(pg)).getTextContent();
-        const words: { x: number; y: number; s: string }[] = [];
+        const words: { x: number; y: number; w: number; s: string }[] = [];
         for (const it of tc.items) {
           if (!("str" in it) || !it.str.trim()) continue;
           const t = (it as { transform: number[] }).transform;
-          words.push({ x: t[4], y: t[5], s: it.str.trim() });
+          // how WIDE the word is matters as much as where it starts: a payroll
+          // that right-aligns "8" in the Wednesday box starts it near Thursday
+          words.push({ x: t[4], y: t[5], w: Number((it as { width?: number }).width) || 0, s: it.str.trim() });
         }
         // cluster into rows: same line = y within 3pt. Where each word sits
         // across the page is kept too — on a WH-347 grid that's the only way
         // to know which DAY a lone "6.0" belongs to.
         words.sort((a, b) => b.y - a.y || a.x - b.x);
-        let cur: { y: number; ws: { x: number; s: string }[] } | null = null;
+        let cur: { y: number; ws: { x: number; w: number; s: string }[] } | null = null;
         for (const w of words) {
-          if (!cur || Math.abs(cur.y - w.y) > 3) { cur = { y: w.y, ws: [] }; lines.push({ tokens: [], xs: [] }); }
-          cur.ws.push({ x: w.x, s: w.s });
+          if (!cur || Math.abs(cur.y - w.y) > 3) { cur = { y: w.y, ws: [] }; lines.push({ tokens: [], xs: [], ws: [] }); }
+          cur.ws.push({ x: w.x, w: w.w, s: w.s });
           const sorted = cur.ws.sort((a, b) => a.x - b.x);
           lines[lines.length - 1].tokens = sorted.map((v) => v.s);
           lines[lines.length - 1].xs = sorted.map((v) => v.x);
+          lines[lines.length - 1].ws = sorted.map((v) => v.w);
         }
       }
       return lines;

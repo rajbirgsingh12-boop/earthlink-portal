@@ -13,7 +13,7 @@ import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
 import { parsePactPoText, type PactPoFields } from "@/lib/parsePactPo";
-import { priceLinesFor, loadPrices, type PriceItem } from "@/lib/priceBook";
+import { priceLinesFor, keysIn, loadPrices, type PriceItem } from "@/lib/priceBook";
 
 interface Item { description: string; qty: number; unit: string; unit_price: number; }
 interface Job {
@@ -153,28 +153,32 @@ export default function Pact() {
   const [book, setBook] = useState<PriceItem[] | null>(null);
   const priceBook = async (): Promise<PriceItem[]> => {
     if (book) return book;
-    const b = await loadPrices();
-    setBook(b);
-    return b;
+    const { items } = await loadPrices();
+    setBook(items);
+    return items;
   };
 
   // Work lines for this text, from the price list. Anything the PO already
-  // priced stays exactly as the PO wrote it — the list only fills the gaps.
+  // priced stays exactly as the PO wrote it — the list only fills the gaps,
+  // and work the PO named in its own words never gets a second copy beside it.
   const priceFromList = async (text: string, existing: Item[]): Promise<Item[]> => {
-    const lines = priceLinesFor(text, { book: await priceBook() });
+    const bk = await priceBook();
+    const lines = priceLinesFor(text, { book: bk });
     if (lines.length === 0) return existing;
-    const same = (a: string, b: string) => a.toLowerCase().replace(/[^a-z0-9]/g, "") === b.toLowerCase().replace(/[^a-z0-9]/g, "");
-    const out = existing.map((it) => {
-      if (Number(it.unit_price) > 0) return it; // the PO's own price wins
-      const hit = lines.find((l) => same(l.description, it.description) || l.description.toLowerCase().includes(it.description.toLowerCase().slice(0, 12)));
-      return hit ? { ...it, unit: it.unit || hit.unit, unit_price: hit.unit_price, qty: Number(it.qty) > 1 ? it.qty : hit.qty } : it;
-    });
-    // the lines the PO never listed (the primer and paint behind the plaster)
+    // what each line already on the job stands for, in price-list terms
+    const covered = new Map<string, number>();
+    existing.forEach((it, i) => keysIn(it.description, bk).forEach((k) => { if (!covered.has(k)) covered.set(k, i); }));
+    const out = [...existing];
     for (const l of lines) {
-      if (out.some((it) => same(it.description, l.description))) continue;
-      // a line the PO described in its own words, already covered above
-      if (out.some((it) => Number(it.unit_price) > 0 && l.description.toLowerCase().includes(it.description.toLowerCase().slice(0, 12)))) continue;
-      out.push({ description: l.description, qty: l.qty, unit: l.unit, unit_price: l.unit_price });
+      const at = covered.get(l.key);
+      if (at === undefined) {
+        out.push({ description: l.description, qty: l.qty, unit: l.unit, unit_price: l.unit_price });
+        covered.set(l.key, out.length - 1);
+        continue;
+      }
+      const it = out[at];
+      if (Number(it.unit_price) > 0) continue; // the PO's own price wins
+      out[at] = { ...it, unit: it.unit || l.unit, unit_price: l.unit_price, qty: Number(it.qty) > 1 ? it.qty : l.qty };
     }
     return out.filter((it) => it.description.trim());
   };
@@ -183,8 +187,9 @@ export default function Pact() {
   const fillFromList = async (j: Job) => {
     setBusy(true);
     try {
-      const text = [j.description, itemsOf(j).map((i) => i.description).join(" ")].join(" ");
-      const next = await priceFromList(text, itemsOf(j));
+      // the job's own words only — feeding our generated line text back in
+      // would let "Primer — 1 coat" read as a fresh painting order
+      const next = await priceFromList(j.description || "", itemsOf(j));
       if (next.length === itemsOf(j).length && next.every((n, i) => n.unit_price === itemsOf(j)[i].unit_price)) {
         flash("Nothing on the price list matches this one — type the lines in");
         return;
@@ -217,7 +222,9 @@ export default function Pact() {
     setBusy(true);
     try {
       const { buildProposalDocx, proposalFileName } = await import("@/lib/proposalDoc");
-      let lines = itemsOf(j).map((it) => ({ description: it.description, qty: Number(it.qty) || 1, unit: it.unit, unit_price: Number(it.unit_price) || 0 }));
+      let lines = itemsOf(j)
+        .filter((it) => it.description.trim() && Number(it.qty) > 0)
+        .map((it) => ({ description: it.description, qty: Number(it.qty), unit: it.unit, unit_price: Number(it.unit_price) || 0 }));
       if (lines.length === 0) {
         const seeded = await priceFromList(j.description || "", []);
         lines = seeded.map((it) => ({ description: it.description, qty: Number(it.qty) || 1, unit: it.unit, unit_price: Number(it.unit_price) || 0 }));
@@ -251,6 +258,8 @@ export default function Pact() {
       saveBytes(buildProposalDocx({ ...BLANK_PROPOSAL, date: prettyDate(today()) }, await logoBytes()), name,
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
       flash("Template saved — fill it in, keep the layout, and uploading it back here builds the job");
+    } catch (err) {
+      flash(`Couldn't build the template (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
     } finally { setBusy(false); }
   };
 

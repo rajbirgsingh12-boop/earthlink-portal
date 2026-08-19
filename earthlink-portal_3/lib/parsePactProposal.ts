@@ -51,7 +51,7 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
   const billBlock = [contactName, ...billLines].filter(Boolean).join(", ");
 
   // "Service Address: Building 2156 LINDEN BOULEVARD, Apartment 8 A Brooklyn ,NY 11207"
-  const svc = t.match(/Service Address\s*:?\s*(.+)/i)?.[1]?.trim() || "";
+  const svc = t.match(/Service Address[ \t]*:?[ \t]*([^\n]*)/i)?.[1]?.trim() || "";
   const punit = svc.match(/\b(?:Apartment|Apt\.?|Unit)\s*#?\s*([\dA-Za-z][\dA-Za-z -]{0,8}?)(?=\s*(?:,|Brooklyn|Bronx|Queens|Manhattan|Staten|New York|NY\b|$))/i)?.[1]?.trim() || "";
   const address = svc
     .replace(/\bBuilding\s+/i, "")
@@ -78,10 +78,21 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
     rows.push({ description, qty: consistent ? qty : 1, unit_price: consistent ? up : amount, property: "", unit: punit });
   };
   let pending = "";
+  let stopAt = -1; // where the work stops and the totals begin
   for (let i = start + 1; start >= 0 && i < lines.length; i++) {
     const l = lines[i].replace(/\t/g, " ").trim();
     if (!l) continue;
-    if (stopRe.test(l) || /^total\b/i.test(l)) break;
+    // "<work> 250 x $5.00 $1,250.00" — our own proposals and most partner
+    // letters write it this way, and read whole it can't be split by a $ or a
+    // stray keyword inside the description
+    const whole = l.match(/^(.*?)(\d[\d,]*(?:\.\d+)?)\s*[x@]\s*\$\s*(-?[\d,]+(?:\.\d{1,2})?)\s+\$\s*(-?[\d,]+(?:\.\d{1,2})?)\s*$/i);
+    if (whole) {
+      const qty = money(whole[2]), up = money(whole[3]), amt = money(whole[4]);
+      const desc = `${pending} ${whole[1]}`.trim().replace(/[\t:;,\s-]+$/g, "").replace(/\s{2,}/g, " ");
+      pending = "";
+      if (desc.length >= 3 && Math.abs(qty * up - amt) < 0.02) { rows.push({ description: desc, qty, unit_price: up, property: "", unit: punit }); continue; }
+    }
+    if (stopRe.test(l) || /^total\b/i.test(l)) { stopAt = i; break; }
     // a work table's column headings ("Description Qty Unit price Amount")
     // are not a work line — and must not glue themselves to the first one
     if (!l.includes("$") && /^(?:item|description|scope|work)\b/i.test(l) && /\b(?:qty|quantity|unit|price|amount|cost)\b/i.test(l)) { pending = ""; continue; }
@@ -114,10 +125,20 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
     if (tail) pending = tail;
   }
 
-  const sub = money(t.match(/(?:Labor and materials?|Total Cost|Sub\s*-?\s*total)[^$\n]{0,40}\$\s*([\d,]+\.?\d*)/i)?.[1] || "") || rows.reduce((s, r) => s + r.qty * r.unit_price, 0);
-  const tax = money(t.match(/(?:Sales\s*)?Tax[^$\n]{0,20}\$\s*([\d,]+\.?\d*)/i)?.[1] || "");
-  const grand = money(t.match(/(?:Grand Total|Amount Due|Total Due)[^$\n]{0,20}\$\s*([\d,]+\.?\d*)/i)?.[1] || "");
-  const taxPct = sub > 0 && tax > 0 ? Math.round((tax / sub) * 100 * 1000) / 1000 : undefined;
+  // the totals are read from below the work, so a work line that opens with
+  // "Tax…" or "Total…" can never be mistaken for one
+  const totalsText = stopAt >= 0 ? lines.slice(stopAt).join("\n") : t;
+  const lineStart = (label: string) => new RegExp(`^\\s*(?:${label})\\b[^$\\n]{0,40}\\$\\s*([\\d,]+\\.?\\d*)`, "im");
+  const sub = money(totalsText.match(lineStart("Labor and materials?|Total Cost|Sub\\s*-?\\s*total|Subtotal"))?.[1] || "") || rows.reduce((s, r) => s + r.qty * r.unit_price, 0);
+  const taxM = totalsText.match(lineStart("(?:Sales\\s*)?Tax"));
+  const tax = money(taxM?.[1] || "");
+  const grand = money(totalsText.match(lineStart("Grand Total|Amount Due|Total Due"))?.[1] || "");
+  // the percentage the letter prints beats one worked back out of the money,
+  // and a tax line of $0.00 means no tax — not "no tax rate given"
+  const printed = taxM ? parseFloat(taxM[0].match(/\(?\s*([\d.]+)\s*%/)?.[1] || "") : NaN;
+  const taxPct = Number.isFinite(printed) ? printed
+    : taxM && sub > 0 ? Math.round((tax / sub) * 100 * 1000) / 1000
+      : undefined;
 
   const desc = rows[0]?.description || t.match(/proposal for the property/i)?.[0] || "";
   return {

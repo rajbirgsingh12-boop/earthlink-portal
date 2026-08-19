@@ -65,7 +65,10 @@ const pngSize = (b: Uint8Array): { w: number; h: number } => {
   try { return { w: dv.getUint32(16), h: dv.getUint32(20) }; } catch { return { w: 381, h: 350 }; }
 };
 
-export const lineTotal = (l: ProposalLine) => (Number(l.qty) || 0) * (Number(l.unit_price) || 0);
+const cents = (v: number) => Math.round((Number(v) || 0) * 100) / 100;
+// the printed unit price is what the total must be built from, or the reader
+// (and the customer with a calculator) sees a line that doesn't add up
+export const lineTotal = (l: ProposalLine) => cents(cents(l.unit_price) * (Number(l.qty) || 0));
 
 // Build the .docx. `logo` is the bytes of public/logo.png when the page could
 // fetch it — without it the letterhead is the same block in text.
@@ -86,27 +89,27 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
 
   // the work table — the Qty column reads "250 x" so the price and the line
   // total sit next to each other exactly the way the reader expects them
+  const billLines = (f.billTo || []).filter(Boolean);
   const hdr = ["Description", "Qty", "Unit price", "Amount"];
   const widths = [5100, 1100, 1500, 1660];
   const headRow = hdr.map((h, i) => cell(para(h, { b: true, sz: 20, space: 0, align: i ? "right" : "left" }), widths[i], { shade: "EFEFEF" })).join("");
   const bodyRows = f.lines.map((l) =>
     cell(para(l.description, { sz: 20, space: 0 }), widths[0]) +
     cell(para(`${l.qty} x`, { sz: 20, space: 0, align: "right" }), widths[1]) +
-    cell(para(money(Number(l.unit_price) || 0), { sz: 20, space: 0, align: "right" }), widths[2]) +
+    cell(para(money(cents(l.unit_price)), { sz: 20, space: 0, align: "right" }), widths[2]) +
     cell(para(money(lineTotal(l)), { sz: 20, space: 0, align: "right" }), widths[3]));
 
-  const billLines = (f.billTo || []).filter(Boolean);
   const body = [
     head,
     para("", { rule: true, space: 160 }),
     para(`Date: ${f.date || ""}`, { sz: 20 }),
     f.poNumber ? para(`PO #: ${f.poNumber}`, { sz: 20 }) : "",
-    f.attn ? para(`ATTN: ${f.attn}`, { sz: 20 }) : "",
+    f.attn || billLines.length > 0 ? para(`ATTN: ${f.attn || ""}`, { sz: 20 }) : "",
     ...billLines.map((b) => para(b, { sz: 20 })),
     para("", { space: 120 }),
     para(`Dear ${f.attn || "Sir or Madam"},`, { sz: 20 }),
     para("We are pleased to submit our proposal for the property below.", { sz: 20, space: 120 }),
-    para(`Service Address: ${f.serviceAddress || ""}`, { sz: 20, space: 160 }),
+    para(`Service Address: ${f.serviceAddress || "—"}`, { sz: 20, space: 160 }),
     para("Scope of Work", { b: true, sz: 24, space: 80 }),
     table([headRow, ...bodyRows], true, widths),
     para("", { space: 120 }),

@@ -113,26 +113,55 @@ export default function Settings() {
   };
 
   // ---------- partner price list ----------
+  // prices are held as typed text, so "1,395.00" survives being typed one
+  // character at a time and a cleared box means "leave the sheet price alone"
   const [prices, setPrices] = useState<PriceItem[]>(PRICE_BOOK);
+  const [priceText, setPriceText] = useState<Record<string, string>>({});
   const [priceSaving, setPriceSaving] = useState(false);
-  useEffect(() => { loadPrices().then(setPrices); }, []);
-  const setPrice = (key: string, field: "price" | "price2", v: string) =>
-    setPrices((prev) => prev.map((p) => (p.key === key ? { ...p, [field]: Number(v.replace(/[$,\s]/g, "")) || 0 } : p)));
+  const [priceLoaded, setPriceLoaded] = useState(false);
+  const [priceTouched, setPriceTouched] = useState(false);
+  useEffect(() => {
+    loadPrices().then(({ items, ok }) => {
+      // a late answer must never wipe something already being typed
+      setPriceTouched((touched) => {
+        if (!touched) { setPrices(items); setPriceText({}); }
+        return touched;
+      });
+      setPriceLoaded(ok);
+    });
+  }, []);
+  const priceVal = (p: PriceItem, field: "price" | "price2") =>
+    priceText[`${p.key}:${field}`] ?? String(field === "price2" ? (p.price2 ?? "") : p.price);
+  const setPrice = (key: string, field: "price" | "price2", v: string) => {
+    setPriceTouched(true);
+    setPriceText((prev) => ({ ...prev, [`${key}:${field}`]: v.replace(/[^\d.,]/g, "") }));
+  };
   const savePriceList = async () => {
+    if (!priceLoaded) { flash("Still reading the saved prices — try again in a second"); return; }
     setPriceSaving(true);
-    // only what's actually different from the list as they gave it gets stored
+    // only what actually differs from the list as they gave it gets stored;
+    // a box left empty keeps the sheet price rather than saving a zero
     const ov: PriceOverrides = {};
-    for (const p of prices) {
-      const base = PRICE_BOOK.find((b) => b.key === p.key);
-      if (!base) continue;
+    for (const base of PRICE_BOOK) {
+      const cur = prices.find((p) => p.key === base.key) || base;
       const d: { price?: number; price2?: number } = {};
-      if (p.price !== base.price) d.price = p.price;
-      if (p.price2 !== undefined && p.price2 !== base.price2) d.price2 = p.price2;
-      if (Object.keys(d).length > 0) ov[p.key] = d;
+      for (const f of ["price", "price2"] as const) {
+        if (f === "price2" && base.price2 === undefined) continue;
+        const typed = priceText[`${base.key}:${f}`];
+        const now = typed === undefined ? (f === "price2" ? cur.price2 : cur.price)
+          : typed.trim() === "" ? undefined
+            : Number(typed.replace(/,/g, ""));
+        if (now === undefined || !Number.isFinite(now)) continue;
+        if (now !== (f === "price2" ? base.price2 : base.price)) d[f] = now;
+      }
+      if (Object.keys(d).length > 0) ov[base.key] = d;
     }
     const err = await savePrices(ov);
     setPriceSaving(false);
-    flash(err || "Price list saved — new POs and proposals use these prices");
+    if (err) { flash(err); return; }
+    setPrices(PRICE_BOOK.map((p) => (ov[p.key] ? { ...p, ...ov[p.key] } : p)));
+    setPriceText({}); setPriceTouched(false);
+    flash("Price list saved — new POs and proposals use these prices");
   };
 
   const renameContract = async (c: Contract, name: string) => {
@@ -458,14 +487,16 @@ export default function Settings() {
                         {p.price2 !== undefined && <span className="text-[11px] text-inksoft">1 coat</span>}
                         <span className="text-sm">$</span>
                         <input className="field w-24 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal"
-                          value={String(p.price)} onChange={(e) => setPrice(p.key, "price", e.target.value)} />
+                          value={priceVal(p, "price")} onChange={(e) => setPrice(p.key, "price", e.target.value)}
+                          placeholder={String(PRICE_BOOK.find((b) => b.key === p.key)?.price ?? 0)} />
                       </label>
                       {p.price2 !== undefined && (
                         <label className="flex items-center gap-1">
                           <span className="text-[11px] text-inksoft">2 coat</span>
                           <span className="text-sm">$</span>
                           <input className="field w-24 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal"
-                            value={String(p.price2)} onChange={(e) => setPrice(p.key, "price2", e.target.value)} />
+                            value={priceVal(p, "price2")} onChange={(e) => setPrice(p.key, "price2", e.target.value)}
+                            placeholder={String(PRICE_BOOK.find((b) => b.key === p.key)?.price2 ?? 0)} />
                         </label>
                       )}
                     </div>
@@ -474,8 +505,8 @@ export default function Settings() {
               </div>
             ))}
             <div className="flex flex-wrap items-center gap-2">
-              <button className="btn btn-primary" onClick={savePriceList} disabled={priceSaving}>{priceSaving ? "Saving…" : "Save price list"}</button>
-              <button className="btn btn-ghost" onClick={() => { setPrices(PRICE_BOOK); flash("Back to the list as it came — save to keep it"); }}>Reset to the sheet</button>
+              <button className="btn btn-primary" onClick={savePriceList} disabled={priceSaving || !priceLoaded}>{priceSaving ? "Saving…" : priceLoaded ? "Save price list" : "Reading saved prices…"}</button>
+              <button className="btn btn-ghost" onClick={() => { setPrices(PRICE_BOOK); setPriceText({}); setPriceTouched(true); flash("Back to the list as it came — save to keep it"); }}>Reset to the sheet</button>
             </div>
           </div>
         </>

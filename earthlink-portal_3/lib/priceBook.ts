@@ -14,7 +14,6 @@ export interface PriceItem {
   price: number;
   group: string;
   words: string;         // the PO wording that means this line (regex source)
-  not?: string;          // wording near the hit that means it ISN'T this line
   price2?: number;       // painting: the second-coat price
 }
 
@@ -23,20 +22,17 @@ export const PRICE_GROUPS = ["Doors & hardware", "Plaster & walls", "Painting"] 
 // their list, as written, with the wording a PO tends to use for each line
 export const PRICE_BOOK: PriceItem[] = [
   // ---- doors & hardware (counted) ----
-  // their list prices apartment and basement doors — a "lobby door" in a PO is
-  // naming where the hardware goes, not ordering a door
-  { key: "door", description: "Apartment / basement door — supply & install", unit: "EACH", price: 1395, group: "Doors & hardware", words: "(?:apartment|basement|entrance)\\s+doors?\\b|\\bdoors?\\b(?!\\s*(?:closer|chime|hinge|bell|bar|strike|frame))", not: "lobby|panic|closer|chime|hinge|bell|strike" },
+  { key: "door", description: "Apartment / basement door — supply & install", unit: "EACH", price: 1395, group: "Doors & hardware", words: "\\bdoors?\\b(?!\\s*(?:closer|chime|hinge|bell|bar|strike|frame|knob|sweep))" },
   { key: "mortise", description: "Apartment mortise lock", unit: "EACH", price: 990, group: "Doors & hardware", words: "mortise" },
-  { key: "lever", description: "Lever handle lock", unit: "EACH", price: 490, group: "Doors & hardware", words: "lever\\s*handle(?:\\s*lock)?", not: "panic" },
-  { key: "strike_bsmt", description: "Electrical strike — basement", unit: "EACH", price: 890, group: "Doors & hardware", words: "electric(?:al)?\\s*strikes?[^.\\n]{0,20}basement|basement[^.\\n]{0,20}electric(?:al)?\\s*strikes?" },
-  // no location named = the lobby price (the dearer one) — they can switch it
-  { key: "strike_lobby", description: "Electrical strike — lobby", unit: "EACH", price: 1090, group: "Doors & hardware", words: "electric(?:al)?\\s*strikes?", not: "basement" },
-  { key: "panic_lever", description: "Stainless steel panic exit push bar with lever handle", unit: "EACH", price: 1550, group: "Doors & hardware", words: "panic[^.\\n]{0,30}lever" },
-  { key: "panic", description: "Stainless steel panic exit push bar", unit: "EACH", price: 1250, group: "Doors & hardware", words: "panic(?:\\s*(?:exit|bar|push))?" },
+  { key: "lever", description: "Lever handle lock", unit: "EACH", price: 490, group: "Doors & hardware", words: "lever\\s*handle(?:\\s*lock)?" },
+  { key: "strike_bsmt", description: "Electrical strike — basement", unit: "EACH", price: 890, group: "Doors & hardware", words: "electric(?:al)?\\s*strikes?" },
+  { key: "strike_lobby", description: "Electrical strike — lobby", unit: "EACH", price: 1090, group: "Doors & hardware", words: "electric(?:al)?\\s*strikes?" },
+  { key: "panic_lever", description: "Stainless steel panic exit push bar with lever handle", unit: "EACH", price: 1550, group: "Doors & hardware", words: "panic" },
+  { key: "panic", description: "Stainless steel panic exit push bar", unit: "EACH", price: 1250, group: "Doors & hardware", words: "panic" },
   { key: "chime", description: "Mechanical door chime", unit: "EACH", price: 190, group: "Doors & hardware", words: "chime|door\\s*bell" },
-  { key: "closer", description: "Door closer", unit: "EACH", price: 1050, group: "Doors & hardware", words: "door\\s*closer|closers?\\b" },
-  { key: "hinge_lobby", description: "Lobby door hinges", unit: "EACH", price: 350, group: "Doors & hardware", words: "hinges?", not: "apartment|apt\\b" },
-  { key: "hinge_apt", description: "Apartment entrance door hinges", unit: "EACH", price: 150, group: "Doors & hardware", words: "hinges?", not: "lobby" },
+  { key: "closer", description: "Door closer", unit: "EACH", price: 1050, group: "Doors & hardware", words: "closers?\\b" },
+  { key: "hinge_lobby", description: "Lobby door hinges", unit: "EACH", price: 350, group: "Doors & hardware", words: "hinges?" },
+  { key: "hinge_apt", description: "Apartment entrance door hinges", unit: "EACH", price: 150, group: "Doors & hardware", words: "hinges?" },
   // ---- plaster & walls (measured) ----
   { key: "plaster", description: "Plaster", unit: "SF", price: 5, group: "Plaster & walls", words: "plaster|skim\\s*coat|patch(?:ing)?\\b" },
   { key: "popcorn", description: "Popcorn ceiling removal", unit: "SF", price: 5, group: "Plaster & walls", words: "popcorn" },
@@ -44,10 +40,10 @@ export const PRICE_BOOK: PriceItem[] = [
   { key: "sheetrock", description: "Sheet rock", unit: "SF", price: 12, group: "Plaster & walls", words: "sheet\\s*rock|sheetrock|dry\\s*wall|drywall" },
   { key: "hourly", description: "Additional services", unit: "HOUR", price: 12, group: "Plaster & walls", words: "additional\\s*service|per\\s*hour|hourly" },
   // ---- painting (per apartment: 1 coat / 2 coat) ----
-  { key: "paint_1br", description: "Paint 1 bedroom 1 bath apartment", unit: "EACH", price: 1190, price2: 1490, group: "Painting", words: "1\\s*(?:bed\\s*room|bedroom|br|bdrm)" },
-  { key: "paint_2br", description: "Paint 2 bedroom 1 bath apartment", unit: "EACH", price: 1350, price2: 1650, group: "Painting", words: "2\\s*(?:bed\\s*room|bedroom|br|bdrm)" },
-  { key: "paint_3br", description: "Paint 3 bedroom 1 bath apartment", unit: "EACH", price: 1550, price2: 1900, group: "Painting", words: "3\\s*(?:bed\\s*room|bedroom|br|bdrm)" },
-  { key: "paint_4br", description: "Paint 4 bedroom 1.5 bath apartment", unit: "EACH", price: 1900, price2: 2250, group: "Painting", words: "4\\s*(?:bed\\s*room|bedroom|br|bdrm)" },
+  { key: "paint_1br", description: "Paint 1 bedroom 1 bath apartment", unit: "EACH", price: 1190, price2: 1490, group: "Painting", words: "1\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
+  { key: "paint_2br", description: "Paint 2 bedroom 1 bath apartment", unit: "EACH", price: 1350, price2: 1650, group: "Painting", words: "2\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
+  { key: "paint_3br", description: "Paint 3 bedroom 1 bath apartment", unit: "EACH", price: 1550, price2: 1900, group: "Painting", words: "3\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
+  { key: "paint_4br", description: "Paint 4 bedroom 1.5 bath apartment", unit: "EACH", price: 1900, price2: 2250, group: "Painting", words: "4\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
   // primer isn't on their list — it rides along at whatever they set in Settings
   { key: "primer", description: "Primer — 1 coat", unit: "SF", price: 0, group: "Painting", words: "primer|prime\\b" },
   { key: "paint_sf", description: "Paint — 2 coats", unit: "SF", price: 0, group: "Painting", words: "paint(?:ing)?\\b" },
@@ -64,120 +60,209 @@ export const BUNDLES: { key: string; adds: string[] }[] = [
 ];
 
 export interface PriceLine { description: string; qty: number; unit: string; unit_price: number }
+export interface PriceLineOut extends PriceLine { key: string }
 
 // ---- prices they've edited in Settings ----
 const STORE = "pricebook/list.json";
-export interface PriceOverride { price?: number; price2?: number; description?: string }
+export interface PriceOverride { price?: number; price2?: number }
 export type PriceOverrides = Record<string, PriceOverride>;
 
-export async function loadPrices(): Promise<PriceItem[]> {
+// Reading the saved prices has to be able to tell "nothing saved yet" from
+// "couldn't read it" — a save that guessed wrong would wipe prices it never
+// loaded. Listing the folder answers that without reading error text.
+async function readOverrides(): Promise<{ ov: PriceOverrides; ok: boolean }> {
   try {
-    const { data } = await sb().storage.from("docs").download(STORE);
-    if (!data) return PRICE_BOOK;
-    const ov = JSON.parse(await data.text()) as PriceOverrides;
-    return PRICE_BOOK.map((p) => (ov[p.key] ? { ...p, ...ov[p.key] } : p));
-  } catch { return PRICE_BOOK; }
+    const { data: listed, error } = await sb().storage.from("docs").list("pricebook");
+    if (error || !Array.isArray(listed)) return { ov: {}, ok: false };
+    if (!listed.some((f) => f.name === "list.json")) return { ov: {}, ok: true }; // never saved any
+    const { data, error: de } = await sb().storage.from("docs").download(STORE);
+    if (de || !data) return { ov: {}, ok: false };
+    return { ov: JSON.parse(await data.text()) as PriceOverrides, ok: true };
+  } catch { return { ov: {}, ok: false }; }
+}
+
+const withOverrides = (ov: PriceOverrides): PriceItem[] =>
+  PRICE_BOOK.map((p) => (ov[p.key] ? { ...p, ...ov[p.key] } : p));
+
+// `ok` false means the saved prices couldn't be read — the page must not then
+// save, or it would write over edits it never loaded
+export async function loadPrices(): Promise<{ items: PriceItem[]; ok: boolean }> {
+  const { ov, ok } = await readOverrides();
+  return { items: withOverrides(ov), ok };
 }
 
 export async function savePrices(ov: PriceOverrides): Promise<string | null> {
-  await sb().storage.from("docs").remove([STORE]);
+  // check again at the moment of writing: if the saved list can't be read
+  // right now, nothing is written at all
+  const { ok } = await readOverrides();
+  if (!ok) return "Couldn't read the saved price list just now — nothing was changed. Try again in a moment.";
+  // upsert, never remove-then-write: a failed write must not lose the old list
   const { error } = await sb().storage.from("docs")
-    .upload(STORE, new Blob([JSON.stringify(ov)], { type: "application/json" }), { contentType: "application/json" });
+    .upload(STORE, new Blob([JSON.stringify(ov)], { type: "application/json" }), { contentType: "application/json", upsert: true });
   return error ? error.message : null;
 }
 
 // ---- reading a purchase order ----
-const n = (s: string): number => { const v = parseFloat(String(s).replace(/,/g, "")); return Number.isFinite(v) && v > 0 ? v : 0; };
+// Reading a PO is guesswork, so the rules lean the safe way: a quantity is
+// only believed when the PO puts it right next to the work, a price only goes
+// on work the PO actually names, and anything unclear comes through as 1 for
+// them to correct. Over-billing a partner is the outcome worth contorting the
+// code to avoid.
+const n = (v: string): number => { const x = parseFloat(String(v).replace(/,/g, "")); return Number.isFinite(x) && x > 0 ? x : 0; };
 
-// How many? POs write it every which way: "250 sq ft", "install 3 apartment
-// doors", "door closer x 2", "6 hours". Counted things are capped at a sane
-// number so a PO number can never be mistaken for a quantity.
-function qtyFor(text: string, at: number, hit: string, unit: string): number {
-  const before = text.slice(Math.max(0, at - 48), at);
-  const after = text.slice(at + hit.length, at + hit.length + 48);
-  const measure = unit === "SF" ? /(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*(?:ft|feet)|sf\b|square\s*feet)/i
-    : unit === "HOUR" ? /(\d[\d,]*(?:\.\d+)?)\s*(?:hours?|hrs?)\b/i : null;
-  if (measure) {
-    // the measurement next to this line wins over one further off in the PO
-    const near = before.match(measure) || after.match(measure) || text.match(measure);
-    if (near) return n(near[1]);
-    return 0;
+// sentences hold the measurements ("…320 sq ft"); clauses hold the meaning
+// ("panic bar on the lobby door" is one thing, not three)
+const splitAt = (text: string, re: RegExp): { s: string; at: number }[] => {
+  const out: { s: string; at: number }[] = [];
+  let last = 0;
+  for (const m of text.matchAll(re)) {
+    out.push({ s: text.slice(last, m.index), at: last });
+    last = (m.index as number) + m[0].length;
   }
-  // "x 2", "(3)", "4 ea"
-  const a = after.match(/^\s*(?:[x×]|qty\.?|=|\()\s*(\d{1,3})\b/i) || after.match(/^\s*(\d{1,3})\s*(?:ea\b|each|pcs?\b|pieces?|units?)/i);
-  if (a) return n(a[1]);
-  // "3 doors" — and up to three words in between ("3 apartment entrance doors")
-  const b = before.match(/\b(\d{1,3})\s+((?:[A-Za-z.'-]+\s+){0,3})$/);
-  if (b && (b[2].trim() === "" || n(b[1]) <= 99)) return n(b[1]);
-  return 0;
-}
+  out.push({ s: text.slice(last), at: last });
+  return out.filter((c) => c.s.trim());
+};
+const SENTENCE = /[.;\n]+\s*/g;
+const CLAUSE = /\s*(?:,|\band\b|\balso\b|\bplus\b)\s+/gi;
+
+const MEASURE = /(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*(?:ft|feet)|sf\b|square\s*feet)/gi;
+const HOURS = /(\d[\d,]*(?:\.\d+)?)\s*(?:hours?|hrs?)\b/gi;
+// a count right before the work, with room for one adjective
+const COUNT_BEFORE = /(?:^|[^\d])(\d{1,2})\s+(?:[A-Za-z.'-]+\s+){0,3}$/;
+// …unless that number is a PO number, an apartment, a building or a date
+const NOT_A_COUNT = /(?:p\.?\s*o\.?|no\.?|#|apt\.?|apartment|unit|bldg|building|floor|fl\.?|suite|ste\.?|room|work\s*order|\d[/-])\s*$/i;
 
 export interface PriceMatchOpts {
   book?: PriceItem[];
-  coats?: 1 | 2;      // painting: which column of their list (default 2 coats)
+  coats?: 1 | 2;      // painting: which column of their list (2 unless the PO says one)
   bundle?: boolean;   // add the prep lines that go with wet trades (default yes)
 }
 
-// a narrower line wins over the general one it would otherwise double up with
-const BEATS: [string, string][] = [
-  ["panic_lever", "panic"], ["panic_lever", "lever"], ["wall_repair", "plaster"],
-];
+// a narrower line wins over the general one it would double up with — but only
+// inside the same clause, so other work in the PO is never quietly deleted
+const BEATS: [string, string][] = [["wall_repair", "plaster"]];
+// hardware that names a door as the place it goes, not a door being ordered
+const ON_A_DOOR = /lock|closer|hinge|chime|bell|strike|panic|push\s*bar|knob|peep|viewer|sweep|jamb/i;
 
-// Everything on the price list this PO is asking for, in the order the PO says
-// it, with the count the PO gave (1 when it didn't say) and the list price.
-export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLine[] {
+interface Hit { key: string; qty: number; said: boolean; at: number }
+
+export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLineOut[] {
   const book = opts.book || PRICE_BOOK;
-  const coats = opts.coats ?? 2;
   const bundle = opts.bundle ?? true;
-  const t = (text || "").replace(/\s+/g, " ");
-  if (!t.trim()) return [];
+  const raw = (text || "").replace(/[ \t]+/g, " ").trim();
+  if (!raw) return [];
+  // "one coat" on the PO means the one-coat price
+  const coats: 1 | 2 = opts.coats ?? (/\b(?:1|one|single)\s*coat\b/i.test(raw) ? 1 : 2);
   const byKey = new Map(book.map((p) => [p.key, p]));
-  const hit = new Map<string, { qty: number; at: number; said: boolean }>();
-  const put = (key: string, qty: number, at: number, said: boolean) => {
-    const had = hit.get(key);
-    if (!had) { hit.set(key, { qty, at, said }); return; }
-    hit.set(key, { qty: Math.max(had.qty, qty), at: Math.min(had.at, at), said: had.said || said });
-  };
-  let sized = false; // the PO named an apartment size, so painting is priced per apartment
-  for (const p of book) {
-    const re = new RegExp(p.words, "gi");
-    const no = p.not ? new RegExp(p.not, "i") : null;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(t))) {
-      const at = m.index;
-      if (m.index === re.lastIndex) re.lastIndex++;
-      // wording right around the hit that means this isn't that line
-      if (no && no.test(t.slice(Math.max(0, at - 30), at + m[0].length + 30))) continue;
-      // an apartment size only means painting when the PO is about painting
-      if (/^paint_\d/.test(p.key)) {
-        if (!/paint|coat/i.test(t)) break;
-        sized = true;
+  const hits: Hit[] = [];
+
+  for (const sent of splitAt(raw, SENTENCE)) {
+    // every measurement in the sentence, each spendable by one line only
+    const measures = [...sent.s.matchAll(MEASURE)].map((m) => ({ v: n(m[1]), at: m.index as number, used: false }));
+    const hours = [...sent.s.matchAll(HOURS)].map((m) => ({ v: n(m[1]), at: m.index as number, used: false }));
+
+    const pend: { key: string; at: number; hit: string; unit: string; qty: number; cl: number }[] = [];
+    const ranges: { a: number; b: number }[] = [];
+    for (const cl of splitAt(sent.s, CLAUSE)) {
+      const clIdx = ranges.length;
+      ranges.push({ a: cl.at, b: cl.at + cl.s.length });
+      const inClause: { key: string; at: number; hit: string }[] = [];
+      for (const p of book) {
+        const re = new RegExp(p.words, "gi");
+        const m = re.exec(cl.s);
+        if (m) inClause.push({ key: p.key, at: m.index, hit: m[0] }); // a clause names a thing once
       }
-      put(p.key, qtyFor(t, at, m[0], p.unit) || 1, at, true);
+      const has = (k: string) => inClause.some((x) => x.key === k);
+      const drop = new Set<string>();
+      // a door named next to its hardware is where the hardware goes
+      if (has("door") && ON_A_DOOR.test(cl.s)) drop.add("door");
+      // one location wins; with none named, the cheaper line is the safe guess
+      if (has("hinge_lobby") || has("hinge_apt")) drop.add(/lobby/i.test(cl.s) ? "hinge_apt" : "hinge_lobby");
+      if (has("strike_lobby") || has("strike_bsmt")) drop.add(/lobby/i.test(cl.s) ? "strike_bsmt" : "strike_lobby");
+      // the panic bar is one line — with the lever handle when the PO says so
+      if (has("panic") || has("panic_lever")) {
+        if (/lever/i.test(cl.s)) { drop.add("panic"); drop.add("lever"); } else drop.add("panic_lever");
+      }
+      for (const [win, lose] of BEATS) if (has(win) && !drop.has(win)) drop.add(lose);
+      // an apartment size only prices a whole apartment when the clause is
+      // about painting one — "paint 2 bedrooms and the living room" isn't
+      const paintSized = /paint|coat/i.test(cl.s) && /\b(?:apartments?|apt\b|units?|bath)/i.test(cl.s);
+
+      for (const x of inClause) {
+        if (drop.has(x.key)) continue;
+        if (/^paint_\d/.test(x.key) && !paintSized) continue;
+        const p = byKey.get(x.key)!;
+        let qty = 0;
+        if (p.unit !== "SF" && p.unit !== "HOUR") {
+          const before = cl.s.slice(0, x.at);
+          const b = before.match(COUNT_BEFORE);
+          if (b && !NOT_A_COUNT.test(before.slice(0, (b.index ?? 0) + (/^\D/.test(b[0]) ? 1 : 0)))) qty = n(b[1]);
+          if (!qty) {
+            const after = cl.s.slice(x.at + x.hit.length, x.at + x.hit.length + 24);
+            const a = after.match(/^\s*(?:[x×]|qty\.?|=|\()\s*(\d{1,2})\b/i) || after.match(/^\s*(\d{1,2})\s*(?:ea\b|each|pcs?\b|pieces?|units?)/i);
+            if (a) qty = n(a[1]);
+          }
+        }
+        pend.push({ key: x.key, at: cl.at + x.at, hit: x.hit, unit: p.unit, qty, cl: clIdx });
+      }
     }
+    // each measurement in the sentence belongs to the work nearest it, and is
+    // spent once — so one "150 sq ft" can't be billed on two different lines
+    const clOf = (pos: number) => { const i = ranges.findIndex((r) => pos >= r.a && pos <= r.b); return i < 0 ? -1 : i; };
+    for (const [unit, pool] of [["SF", measures], ["HOUR", hours]] as const) {
+      const want = pend.filter((x) => x.unit === unit);
+      // work in the same clause as the measurement gets first claim on it
+      const pairs = pool.flatMap((mm, mi) => want.map((w, wi) => ({ mi, wi, d: Math.abs(mm.at - w.at), far: clOf(mm.at) === w.cl ? 0 : 1 })));
+      pairs.sort((a, b) => a.far - b.far || a.d - b.d);
+      const takenW = new Set<number>();
+      for (const pr of pairs) {
+        if (pool[pr.mi].used || takenW.has(pr.wi)) continue;
+        pool[pr.mi].used = true; takenW.add(pr.wi);
+        want[pr.wi].qty = pool[pr.mi].v;
+      }
+    }
+    hits.push(...pend.map((x) => ({ key: x.key, qty: x.qty || 1, said: x.qty > 0, at: sent.at + x.at })));
   }
-  if (sized) hit.delete("paint_sf");
-  for (const [win, lose] of BEATS) if (hit.has(win)) hit.delete(lose);
+
+  // the same work named more than once: counts the PO gave add up; when it
+  // never gave one, it stays a single line of 1
+  const merged = new Map<string, Hit>();
+  for (const h of hits) {
+    const had = merged.get(h.key);
+    if (!had) { merged.set(h.key, { ...h }); continue; }
+    if (h.said && had.said) had.qty = Math.round((had.qty + h.qty) * 100) / 100;
+    else if (h.said) { had.qty = h.qty; had.said = true; }
+    had.at = Math.min(had.at, h.at);
+  }
+  // an apartment price covers the painting; the per-square-foot line would double it
+  const sized = [...merged.keys()].some((k) => /^paint_\d/.test(k));
+  if (sized) merged.delete("paint_sf");
+
   // the prep that goes with wet trades, right behind the work that needs it
   if (bundle) {
     for (const b of BUNDLES) {
-      const trig = hit.get(b.key);
+      const trig = merged.get(b.key);
       if (!trig) continue;
       b.adds.forEach((add, i) => {
-        if (add === "paint_sf" && sized) return; // an apartment price already covers the painting
-        const had = hit.get(add);
-        // prep covers the same area as the work that needs it
-        if (!had) hit.set(add, { qty: trig.qty, at: trig.at + (i + 1) / 100, said: false });
-        else if (!had.said || had.qty === 1) hit.set(add, { ...had, qty: Math.max(had.qty, trig.qty) });
+        if (add === "paint_sf" && sized) return;
+        const had = merged.get(add);
+        if (!had) merged.set(add, { key: add, qty: trig.qty, said: false, at: trig.at + (i + 1) / 100 });
+        else if (!had.said) had.qty = Math.max(had.qty, trig.qty);
       });
     }
   }
-  return [...hit.entries()]
-    .sort((a, b) => a[1].at - b[1].at)
-    .map(([k, v]) => {
-      const p = byKey.get(k)!;
-      const price = coats === 1 ? p.price : (p.price2 ?? p.price);
+
+  return [...merged.values()]
+    .sort((a, b) => a.at - b.at)
+    .map((h) => {
+      const p = byKey.get(h.key)!;
+      const price = p.price2 !== undefined && coats === 2 ? p.price2 : p.price;
       const desc = p.price2 !== undefined ? `${p.description} — ${coats} coat${coats > 1 ? "s" : ""}` : p.description;
-      return { description: desc, qty: v.qty, unit: p.unit, unit_price: price };
+      return { key: h.key, description: desc, qty: h.qty, unit: p.unit, unit_price: price };
     });
 }
+
+// which price-list lines a description already stands for — so work a PO
+// priced in its own words never gets a second, list-priced copy beside it
+export const keysIn = (description: string, book?: PriceItem[]): string[] =>
+  priceLinesFor(description, { book, bundle: false }).map((l) => l.key);

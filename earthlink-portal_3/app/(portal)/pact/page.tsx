@@ -150,11 +150,14 @@ export default function Pact() {
   // Either way the upload always completes — worst case a blank job with the
   // PDF attached and a note to type the details.
   // ---------- the partner price list ----------
-  const [book, setBook] = useState<PriceItem[] | null>(null);
+  // the line items as Settings has them now — re-read rather than remembered,
+  // so a price changed on another phone is used on the very next PO (a folder
+  // of proposals still only reads it once)
+  const [book, setBook] = useState<{ items: PriceItem[]; at: number } | null>(null);
   const priceBook = async (): Promise<PriceItem[]> => {
-    if (book) return book;
+    if (book && Date.now() - book.at < 30_000) return book.items;
     const { items } = await loadPrices();
-    setBook(items);
+    setBook({ items, at: Date.now() });
     return items;
   };
 

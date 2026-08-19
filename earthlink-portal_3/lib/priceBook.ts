@@ -62,43 +62,100 @@ export const BUNDLES: { key: string; adds: string[] }[] = [
 export interface PriceLine { description: string; qty: number; unit: string; unit_price: number }
 export interface PriceLineOut extends PriceLine { key: string }
 
-// ---- prices they've edited in Settings ----
+// ---- the line items they keep in Settings ----
+// The list above is what the partners quoted. Everything about it is editable
+// on the Settings page — the wording, the unit, the price — and they can add
+// line items of their own for work the sheet never covered. That's all this
+// store holds; the built-in list stays the fallback.
 const STORE = "pricebook/list.json";
-export interface PriceOverride { price?: number; price2?: number }
+export interface PriceOverride {
+  price?: number;
+  price2?: number;
+  description?: string;
+  unit?: string;
+  extra?: string;   // more PO wording that means this line (plain words, comma separated)
+  off?: boolean;    // stop using this line
+}
 export type PriceOverrides = Record<string, PriceOverride>;
+// a line item they wrote themselves
+export interface CustomItem { key: string; description: string; unit: string; price: number; group: string; words: string }
+export interface PriceStore { overrides: PriceOverrides; custom: CustomItem[] }
+export const EMPTY_STORE: PriceStore = { overrides: {}, custom: [] };
+export const CUSTOM_GROUP = "Our own line items";
 
-// Reading the saved prices has to be able to tell "nothing saved yet" from
-// "couldn't read it" — a save that guessed wrong would wipe prices it never
-// loaded. Listing the folder answers that without reading error text.
-async function readOverrides(): Promise<{ ov: PriceOverrides; ok: boolean }> {
+// What they type as trigger wording is plain words — "popcorn, textured
+// ceiling" — never a regular expression, so a stray bracket can't break the
+// reader or match something wild.
+export const keywordsRe = (words: string): string =>
+  (words || "").split(/[,\n]/).map((w) => w.trim()).filter(Boolean)
+    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"))
+    .map((w) => `${/^[a-z0-9]/i.test(w) ? "\\b" : ""}${w}${/[a-z0-9]$/i.test(w) ? "\\b" : ""}`)
+    .join("|");
+
+const newKey = (existing: string[]): string => {
+  for (let i = 1; ; i++) { const k = `own${i}`; if (!existing.includes(k)) return k; }
+};
+export const blankCustom = (existing: CustomItem[]): CustomItem =>
+  ({ key: newKey(existing.map((c) => c.key)), description: "", unit: "EACH", price: 0, group: CUSTOM_GROUP, words: "" });
+
+// the list the reader actually works from: the sheet as edited, minus what
+// they switched off, plus their own line items
+export function bookFrom(store: PriceStore): PriceItem[] {
+  const built = PRICE_BOOK
+    .filter((p) => !store.overrides[p.key]?.off)
+    .map((p) => {
+      const o = store.overrides[p.key];
+      if (!o) return p;
+      const extra = keywordsRe(o.extra || "");
+      return {
+        ...p,
+        price: o.price ?? p.price,
+        price2: o.price2 ?? p.price2,
+        description: o.description?.trim() || p.description,
+        unit: o.unit?.trim() || p.unit,
+        words: extra ? `${p.words}|${extra}` : p.words,
+      };
+    });
+  const own = (store.custom || [])
+    .filter((c) => c.description.trim() && keywordsRe(c.words))
+    .map((c) => ({ key: c.key, description: c.description.trim(), unit: (c.unit || "EACH").trim(), price: Number(c.price) || 0, group: c.group || CUSTOM_GROUP, words: keywordsRe(c.words) }));
+  return [...built, ...own];
+}
+
+// Reading the saved list has to tell "nothing saved yet" from "couldn't read
+// it" — a save that guessed wrong would wipe work it never loaded. Listing the
+// folder answers that without reading error text.
+async function readStore(): Promise<{ store: PriceStore; ok: boolean }> {
   try {
     const { data: listed, error } = await sb().storage.from("docs").list("pricebook");
-    if (error || !Array.isArray(listed)) return { ov: {}, ok: false };
-    if (!listed.some((f) => f.name === "list.json")) return { ov: {}, ok: true }; // never saved any
+    if (error || !Array.isArray(listed)) return { store: EMPTY_STORE, ok: false };
+    if (!listed.some((f) => f.name === "list.json")) return { store: EMPTY_STORE, ok: true }; // never saved any
     const { data, error: de } = await sb().storage.from("docs").download(STORE);
-    if (de || !data) return { ov: {}, ok: false };
-    return { ov: JSON.parse(await data.text()) as PriceOverrides, ok: true };
-  } catch { return { ov: {}, ok: false }; }
+    if (de || !data) return { store: EMPTY_STORE, ok: false };
+    const raw = JSON.parse(await data.text()) as Partial<PriceStore> & PriceOverrides;
+    // the first version of this file was just {key: {price}} — still readable
+    const store: PriceStore = raw && (raw.overrides || raw.custom)
+      ? { overrides: raw.overrides || {}, custom: Array.isArray(raw.custom) ? raw.custom : [] }
+      : { overrides: (raw || {}) as PriceOverrides, custom: [] };
+    return { store, ok: true };
+  } catch { return { store: EMPTY_STORE, ok: false }; }
 }
 
-const withOverrides = (ov: PriceOverrides): PriceItem[] =>
-  PRICE_BOOK.map((p) => (ov[p.key] ? { ...p, ...ov[p.key] } : p));
-
-// `ok` false means the saved prices couldn't be read — the page must not then
+// `ok` false means the saved list couldn't be read — the page must not then
 // save, or it would write over edits it never loaded
-export async function loadPrices(): Promise<{ items: PriceItem[]; ok: boolean }> {
-  const { ov, ok } = await readOverrides();
-  return { items: withOverrides(ov), ok };
+export async function loadPrices(): Promise<{ items: PriceItem[]; store: PriceStore; ok: boolean }> {
+  const { store, ok } = await readStore();
+  return { items: bookFrom(store), store, ok };
 }
 
-export async function savePrices(ov: PriceOverrides): Promise<string | null> {
+export async function savePrices(store: PriceStore): Promise<string | null> {
   // check again at the moment of writing: if the saved list can't be read
   // right now, nothing is written at all
-  const { ok } = await readOverrides();
-  if (!ok) return "Couldn't read the saved price list just now — nothing was changed. Try again in a moment.";
+  const { ok } = await readStore();
+  if (!ok) return "Couldn't read the saved line items just now — nothing was changed. Try again in a moment.";
   // upsert, never remove-then-write: a failed write must not lose the old list
   const { error } = await sb().storage.from("docs")
-    .upload(STORE, new Blob([JSON.stringify(ov)], { type: "application/json" }), { contentType: "application/json", upsert: true });
+    .upload(STORE, new Blob([JSON.stringify(store)], { type: "application/json" }), { contentType: "application/json", upsert: true });
   return error ? error.message : null;
 }
 
@@ -168,7 +225,8 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
       ranges.push({ a: cl.at, b: cl.at + cl.s.length });
       const inClause: { key: string; at: number; hit: string }[] = [];
       for (const p of book) {
-        const re = new RegExp(p.words, "gi");
+        let re: RegExp;
+        try { re = new RegExp(p.words, "gi"); } catch { continue; } // a line item with unusable wording is simply skipped
         const m = re.exec(cl.s);
         if (m) inClause.push({ key: p.key, at: m.index, hit: m[0] }); // a clause names a thing once
       }
@@ -177,8 +235,10 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
       // a door named next to its hardware is where the hardware goes
       if (has("door") && ON_A_DOOR.test(cl.s)) drop.add("door");
       // one location wins; with none named, the cheaper line is the safe guess
-      if (has("hinge_lobby") || has("hinge_apt")) drop.add(/lobby/i.test(cl.s) ? "hinge_apt" : "hinge_lobby");
-      if (has("strike_lobby") || has("strike_bsmt")) drop.add(/lobby/i.test(cl.s) ? "strike_bsmt" : "strike_lobby");
+      // …but only when both variants matched: if one is switched off in
+      // Settings, the other stands on its own
+      if (has("hinge_lobby") && has("hinge_apt")) drop.add(/lobby/i.test(cl.s) ? "hinge_apt" : "hinge_lobby");
+      if (has("strike_lobby") && has("strike_bsmt")) drop.add(/lobby/i.test(cl.s) ? "strike_bsmt" : "strike_lobby");
       // the panic bar is one line — with the lever handle when the PO says so
       if (has("panic") || has("panic_lever")) {
         if (/lever/i.test(cl.s)) { drop.add("panic"); drop.add("lever"); } else drop.add("panic_lever");

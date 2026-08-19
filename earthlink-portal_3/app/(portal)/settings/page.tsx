@@ -10,7 +10,8 @@ import { askFileName } from "@/lib/format";
 import type { Org } from "@/lib/docs";
 import type { Contract, Profile, Role } from "@/lib/types";
 import { PKG_DEFAULTS, type PkgInfo, loadPkgInfo, savePkgInfo } from "@/lib/packageDocs";
-import { PRICE_BOOK, PRICE_GROUPS, loadPrices, savePrices, type PriceItem, type PriceOverrides } from "@/lib/priceBook";
+import { PRICE_BOOK, PRICE_GROUPS, CUSTOM_GROUP, EMPTY_STORE, blankCustom, bookFrom, loadPrices, savePrices,
+  type PriceOverride, type PriceStore, type CustomItem } from "@/lib/priceBook";
 import { cleanPhone, prettyPhone } from "@/lib/notify";
 
 // the two roles: Admin 1 sees everything; Admin 2 sees everything except
@@ -112,56 +113,84 @@ export default function Settings() {
     flash(err || "Package details saved — every new package for this contract uses them");
   };
 
-  // ---------- partner price list ----------
-  // prices are held as typed text, so "1,395.00" survives being typed one
-  // character at a time and a cleared box means "leave the sheet price alone"
-  const [prices, setPrices] = useState<PriceItem[]>(PRICE_BOOK);
+  // ---------- line items (the partner price list, and their own) ----------
+  // Everything is held as typed text, so "1,395.00" survives being typed one
+  // character at a time and a cleared box means "leave the sheet price alone".
+  const [store, setStore] = useState<PriceStore>(EMPTY_STORE);
   const [priceText, setPriceText] = useState<Record<string, string>>({});
   const [priceSaving, setPriceSaving] = useState(false);
   const [priceLoaded, setPriceLoaded] = useState(false);
   const [priceTouched, setPriceTouched] = useState(false);
+  const [showWords, setShowWords] = useState(false);
   useEffect(() => {
-    loadPrices().then(({ items, ok }) => {
+    loadPrices().then(({ store: st, ok }) => {
       // a late answer must never wipe something already being typed
-      setPriceTouched((touched) => {
-        if (!touched) { setPrices(items); setPriceText({}); }
-        return touched;
-      });
+      setPriceTouched((touched) => { if (!touched) { setStore(st); setPriceText({}); } return touched; });
       setPriceLoaded(ok);
     });
   }, []);
-  const priceVal = (p: PriceItem, field: "price" | "price2") =>
-    priceText[`${p.key}:${field}`] ?? String(field === "price2" ? (p.price2 ?? "") : p.price);
-  const setPrice = (key: string, field: "price" | "price2", v: string) => {
+  const ovOf = (key: string): PriceOverride => store.overrides[key] || {};
+  const setOv = (key: string, patch: PriceOverride) => {
     setPriceTouched(true);
-    setPriceText((prev) => ({ ...prev, [`${key}:${field}`]: v.replace(/[^\d.,]/g, "") }));
+    setStore((prev) => ({ ...prev, overrides: { ...prev.overrides, [key]: { ...prev.overrides[key], ...patch } } }));
+  };
+  // money boxes keep exactly what was typed until it's saved
+  const moneyBox = (id: string, saved: number | undefined, fallback: number | undefined) => ({
+    value: priceText[id] ?? (saved === undefined ? "" : String(saved)),
+    placeholder: fallback === undefined ? "0" : String(fallback),
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => {
+      setPriceTouched(true);
+      setPriceText((prev) => ({ ...prev, [id]: e.target.value.replace(/[^\d.,]/g, "") }));
+    },
+  });
+  const typedNum = (id: string, current: number | undefined): number | undefined => {
+    const t = priceText[id];
+    if (t === undefined) return current;
+    if (!t.trim()) return undefined;              // cleared = keep the sheet price
+    const v = Number(t.replace(/,/g, ""));
+    return Number.isFinite(v) ? v : current;
+  };
+  const setCustom = (key: string, patch: Partial<CustomItem>) => {
+    setPriceTouched(true);
+    setStore((prev) => ({ ...prev, custom: prev.custom.map((c) => (c.key === key ? { ...c, ...patch } : c)) }));
+  };
+  const addCustom = () => {
+    setPriceTouched(true);
+    setStore((prev) => ({ ...prev, custom: [...prev.custom, blankCustom(prev.custom)] }));
+  };
+  const removeCustom = (key: string) => {
+    setPriceTouched(true);
+    setStore((prev) => ({ ...prev, custom: prev.custom.filter((c) => c.key !== key) }));
+    setPriceText((prev) => { const next = { ...prev }; delete next[`${key}:price`]; return next; });
   };
   const savePriceList = async () => {
-    if (!priceLoaded) { flash("Still reading the saved prices — try again in a second"); return; }
+    if (!priceLoaded) { flash("Still reading the saved line items — try again in a second"); return; }
     setPriceSaving(true);
-    // only what actually differs from the list as they gave it gets stored;
-    // a box left empty keeps the sheet price rather than saving a zero
-    const ov: PriceOverrides = {};
+    // only what actually differs from the sheet gets stored
+    const overrides: Record<string, PriceOverride> = {};
     for (const base of PRICE_BOOK) {
-      const cur = prices.find((p) => p.key === base.key) || base;
-      const d: { price?: number; price2?: number } = {};
-      for (const f of ["price", "price2"] as const) {
-        if (f === "price2" && base.price2 === undefined) continue;
-        const typed = priceText[`${base.key}:${f}`];
-        const now = typed === undefined ? (f === "price2" ? cur.price2 : cur.price)
-          : typed.trim() === "" ? undefined
-            : Number(typed.replace(/,/g, ""));
-        if (now === undefined || !Number.isFinite(now)) continue;
-        if (now !== (f === "price2" ? base.price2 : base.price)) d[f] = now;
-      }
-      if (Object.keys(d).length > 0) ov[base.key] = d;
+      const o = ovOf(base.key);
+      const d: PriceOverride = {};
+      const price = typedNum(`${base.key}:price`, o.price);
+      const price2 = typedNum(`${base.key}:price2`, o.price2);
+      if (price !== undefined && price !== base.price) d.price = price;
+      if (base.price2 !== undefined && price2 !== undefined && price2 !== base.price2) d.price2 = price2;
+      if (o.description?.trim() && o.description.trim() !== base.description) d.description = o.description.trim();
+      if (o.unit?.trim() && o.unit.trim() !== base.unit) d.unit = o.unit.trim();
+      if (o.extra?.trim()) d.extra = o.extra.trim();
+      if (o.off) d.off = true;
+      if (Object.keys(d).length > 0) overrides[base.key] = d;
     }
-    const err = await savePrices(ov);
+    const custom = store.custom
+      .map((c) => ({ ...c, description: c.description.trim(), words: c.words.trim(), price: typedNum(`${c.key}:price`, c.price) ?? 0 }))
+      .filter((c) => c.description || c.words);
+    const next: PriceStore = { overrides, custom };
+    const err = await savePrices(next);
     setPriceSaving(false);
     if (err) { flash(err); return; }
-    setPrices(PRICE_BOOK.map((p) => (ov[p.key] ? { ...p, ...ov[p.key] } : p)));
-    setPriceText({}); setPriceTouched(false);
-    flash("Price list saved — new POs and proposals use these prices");
+    setStore(next); setPriceText({}); setPriceTouched(false);
+    const live = bookFrom(next).length;
+    flash(`Saved — ${live} line item${live === 1 ? "" : "s"} the PO reader will use from now on`);
   };
 
   const renameContract = async (c: Contract, name: string) => {
@@ -468,45 +497,90 @@ export default function Settings() {
 
       {me?.role !== "accountant" && (
         <>
-          <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Partner price list</div>
+          <div className="mb-2 mt-6 flex flex-wrap items-baseline justify-between gap-2">
+            <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Line items &amp; prices</div>
+            <button className="text-[11px] uppercase tracking-widest text-inksoft underline" onClick={() => setShowWords(!showWords)}>
+              {showWords ? "hide PO wording" : "edit PO wording"}
+            </button>
+          </div>
           <div className="card p-4">
             <div className="mb-3 text-xs text-inksoft">
-              The prices quoted to Fairstead and Boulevard. When a PO comes in, this is what fills the work lines in —
-              plaster brings its primer and paint along with it. Change a price here and every PO and proposal after
-              that uses the new one. Painting is priced per apartment, one coat or two.
+              These are the lines a PO gets turned into — the prices quoted to Fairstead and Boulevard, plus anything you
+              add of your own. Upload a PO and whatever it asks for lands on the job and on the proposal, priced from
+              here. Plaster brings its primer and paint along with it. Painting is priced per apartment, one coat or two.
+              {showWords ? " The wording box is what a PO has to say to pick that line — plain words, separated by commas." : ""}
             </div>
-            {PRICE_GROUPS.map((g) => (
-              <div key={g} className="mb-3">
-                <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{g}</div>
-                <div className="card divide-y divide-rulesoft">
-                  {prices.filter((p) => p.group === g).map((p) => (
-                    <div key={p.key} className="flex flex-wrap items-center gap-2 p-2.5">
-                      <span className="min-w-[190px] flex-1 text-sm">{p.description}{p.price === 0 && p.price2 === undefined ? <span className="ml-1 text-[11px] text-work">set your price</span> : null}</span>
-                      <span className="text-[11px] uppercase text-inksoft">{p.unit}</span>
-                      <label className="flex items-center gap-1">
-                        {p.price2 !== undefined && <span className="text-[11px] text-inksoft">1 coat</span>}
-                        <span className="text-sm">$</span>
-                        <input className="field w-24 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal"
-                          value={priceVal(p, "price")} onChange={(e) => setPrice(p.key, "price", e.target.value)}
-                          placeholder={String(PRICE_BOOK.find((b) => b.key === p.key)?.price ?? 0)} />
-                      </label>
-                      {p.price2 !== undefined && (
-                        <label className="flex items-center gap-1">
-                          <span className="text-[11px] text-inksoft">2 coat</span>
-                          <span className="text-sm">$</span>
-                          <input className="field w-24 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal"
-                            value={priceVal(p, "price2")} onChange={(e) => setPrice(p.key, "price2", e.target.value)}
-                            placeholder={String(PRICE_BOOK.find((b) => b.key === p.key)?.price2 ?? 0)} />
-                        </label>
-                      )}
-                    </div>
-                  ))}
+            {[...PRICE_GROUPS, CUSTOM_GROUP].map((g) => {
+              const rows = g === CUSTOM_GROUP ? [] : PRICE_BOOK.filter((p) => p.group === g);
+              if (g !== CUSTOM_GROUP && rows.length === 0) return null;
+              return (
+                <div key={g} className="mb-3">
+                  <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{g}</div>
+                  <div className="card divide-y divide-rulesoft">
+                    {rows.map((p) => {
+                      const o = ovOf(p.key);
+                      const off = !!o.off;
+                      return (
+                        <div key={p.key} className={`p-2.5 ${off ? "opacity-45" : ""}`}>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <input className="min-w-[170px] flex-1 field px-2 py-1.5 text-[13px]" value={o.description ?? p.description}
+                              placeholder={p.description} onChange={(e) => setOv(p.key, { description: e.target.value })} />
+                            <input className="field w-16 px-1 py-1.5 text-center text-[11px] uppercase" title="EACH · SF · HOUR"
+                              value={o.unit ?? p.unit} placeholder={p.unit} onChange={(e) => setOv(p.key, { unit: e.target.value.toUpperCase() })} />
+                            <label className="flex items-center gap-1">
+                              {p.price2 !== undefined && <span className="text-[11px] text-inksoft">1 coat</span>}
+                              <span className="text-sm">$</span>
+                              <input className="field w-24 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" {...moneyBox(`${p.key}:price`, o.price, p.price)} />
+                            </label>
+                            {p.price2 !== undefined && (
+                              <label className="flex items-center gap-1">
+                                <span className="text-[11px] text-inksoft">2 coat</span>
+                                <span className="text-sm">$</span>
+                                <input className="field w-24 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" {...moneyBox(`${p.key}:price2`, o.price2, p.price2)} />
+                              </label>
+                            )}
+                            <button className={`text-xs ${off ? "text-work" : "text-inksoft"}`} title={off ? "Use this line again" : "Stop using this line"}
+                              onClick={() => setOv(p.key, { off: !off })}>{off ? "off" : "✕"}</button>
+                          </div>
+                          {showWords && (
+                            <input className="field mt-1.5 px-2 py-1.5 text-[12px]" value={o.extra || ""}
+                              placeholder={`extra wording a PO might use for this — e.g. "textured ceiling, stipple"`}
+                              onChange={(e) => setOv(p.key, { extra: e.target.value })} />
+                          )}
+                        </div>
+                      );
+                    })}
+                    {g === CUSTOM_GROUP && store.custom.map((c) => (
+                      <div key={c.key} className="p-2.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <input className="min-w-[170px] flex-1 field px-2 py-1.5 text-[13px]" value={c.description}
+                            placeholder="What the line says on the invoice" onChange={(e) => setCustom(c.key, { description: e.target.value })} />
+                          <input className="field w-16 px-1 py-1.5 text-center text-[11px] uppercase" title="EACH · SF · HOUR"
+                            value={c.unit} onChange={(e) => setCustom(c.key, { unit: e.target.value.toUpperCase() })} />
+                          <label className="flex items-center gap-1">
+                            <span className="text-sm">$</span>
+                            <input className="field w-24 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" {...moneyBox(`${c.key}:price`, c.price, 0)} />
+                          </label>
+                          <button className="text-xs text-alert" title="Remove this line item" onClick={() => removeCustom(c.key)}>✕</button>
+                        </div>
+                        <input className="field mt-1.5 px-2 py-1.5 text-[12px]" value={c.words}
+                          placeholder={`what a PO says for this — plain words, commas between: "move out, moveout clean"`}
+                          onChange={(e) => setCustom(c.key, { words: e.target.value })} />
+                      </div>
+                    ))}
+                    {g === CUSTOM_GROUP && store.custom.length === 0 && (
+                      <div className="p-2.5 text-xs text-inksoft">Nothing of your own yet — add a line for work the partners&apos; sheet doesn&apos;t cover.</div>
+                    )}
+                  </div>
+                  {g === CUSTOM_GROUP && (
+                    <button className="btn btn-ghost mt-2 px-3 py-1.5 text-[13px]" onClick={addCustom}>+ Add line item</button>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
             <div className="flex flex-wrap items-center gap-2">
-              <button className="btn btn-primary" onClick={savePriceList} disabled={priceSaving || !priceLoaded}>{priceSaving ? "Saving…" : priceLoaded ? "Save price list" : "Reading saved prices…"}</button>
-              <button className="btn btn-ghost" onClick={() => { setPrices(PRICE_BOOK); setPriceText({}); setPriceTouched(true); flash("Back to the list as it came — save to keep it"); }}>Reset to the sheet</button>
+              <button className="btn btn-primary" onClick={savePriceList} disabled={priceSaving || !priceLoaded}>{priceSaving ? "Saving…" : priceLoaded ? "Save line items" : "Reading saved list…"}</button>
+              <button className="btn btn-ghost" onClick={() => { setStore(EMPTY_STORE); setPriceText({}); setPriceTouched(true); flash("Back to the sheet as it came — save to keep it"); }}>Reset to the sheet</button>
             </div>
           </div>
         </>

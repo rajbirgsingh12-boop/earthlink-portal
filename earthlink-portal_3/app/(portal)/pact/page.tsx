@@ -23,6 +23,7 @@ interface Job {
   attachments?: { name: string; path: string }[] | null; notes: string; created_at: string;
   po_number?: string; po_date?: string; address?: string; property_unit?: string;
   contact?: string; bill_to?: string; items?: Item[] | null; invoice_number?: string; tax_pct?: number | null;
+  proposal_sent?: string | null;
 }
 const BLANK = { partner: "", development: "", job_number: "", description: "", amount: "" };
 
@@ -84,7 +85,8 @@ export default function Pact() {
   };
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3500); };
   const num = useNumBuffer();
-  const upgradeHint = (m: string) => (/relation|column|schema/i.test(m) ? "Database needs the upgrade — re-run supabase/upgrade_pact.sql" : m);
+  const upgradeHint = (m: string) => (/proposal_sent/i.test(m) ? "Run supabase/upgrade_pact_proposal.sql to track proposals sent"
+    : /relation|column|schema/i.test(m) ? "Database needs the upgrade — re-run supabase/upgrade_pact.sql" : m);
   const today = () => localISO();
   const isImg = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n);
   const itemsOf = (j: Job): Item[] => (Array.isArray(j.items) ? j.items : []);
@@ -272,7 +274,9 @@ export default function Pact() {
       const name = askFileName(def);
       if (!name) return;
       saveBytes(bytes, name, DOCX);
-      flash("Proposal saved — send it over, and the signed copy reads straight back in here");
+      await keepOnJob(j, bytes, def, DOCX);
+      await stampProposalSent(j);
+      flash("Proposal saved — a copy is kept on the job, and the signed one reads straight back in here");
     } catch (err) {
       flash(`Couldn't build the proposal (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
     } finally { setBusy(false); }
@@ -286,7 +290,9 @@ export default function Pact() {
     try {
       const { bytes, name } = await proposalBytes(j);
       saveBytes(bytes, name, DOCX);
-      if (!quiet) flash("Proposal saved");
+      await keepOnJob(j, bytes, name, DOCX);
+      await stampProposalSent(j);
+      if (!quiet) flash("Proposal saved — a copy is kept on the job");
       return true;
     } catch (err) {
       flash(`Couldn't build the proposal (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
@@ -302,7 +308,8 @@ export default function Pact() {
       const bytes = await buildPackageBytes(j, theOrg);
       if (!bytes) { flash("Couldn't build the invoice — the job needs at least one priced work line"); return false; }
       saveBytes(bytes, invoiceFileName(j), "application/pdf");
-      if (!quiet) flash("Invoice saved");
+      await keepOnJob(j, bytes, invoiceFileName(j), "application/pdf");
+      if (!quiet) flash("Invoice saved — a copy is kept on the job");
       return true;
     } catch (err) {
       flash(`Couldn't build the invoice (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
@@ -341,6 +348,8 @@ export default function Pact() {
           let nm = name;
           for (let n = 2; files[nm]; n++) nm = name.replace(/\.docx$/i, ` (${n}).docx`);
           files[nm] = bytes;
+          await keepOnJob(live, bytes, name, DOCX);
+          await stampProposalSent(live);
         } catch { /* one bad letter must not stop the rest */ }
       }
       if (Object.keys(files).length === 0) { flash("Couldn't build any of them — open one and check its work lines"); return; }
@@ -516,6 +525,38 @@ export default function Pact() {
     }
   };
 
+  // A paper the portal made gets kept on the job, next to the PO and the
+  // photos — so what was quoted and what was billed can be looked up later.
+  // Making it again replaces that copy rather than piling up new ones.
+  const keepOnJob = async (j: Job, bytes: Uint8Array, name: string, type: string): Promise<void> => {
+    try {
+      // "#" (and friends) end a web address, so the shelf name drops them —
+      // the file the user downloads keeps the name they expect
+      const safe = name.replace(/[#?%&]+/g, "").replace(/\s{2,}/g, " ").trim();
+      const path = `pact/${j.id}/${safe}`;
+      const ab = new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(ab).set(bytes);
+      const { error } = await sb().storage.from("docs").upload(path, new Blob([ab], { type }), { upsert: true, contentType: type });
+      if (error) return; // the download still happened — keeping a copy is a bonus, never a blocker
+      const { data: cur } = await sb().from("pact_jobs").select("attachments").eq("id", j.id).single();
+      const existing = (cur as { attachments?: { name: string; path: string }[] } | null)?.attachments
+        || jobs.find((x) => x.id === j.id)?.attachments || [];
+      if (existing.some((a) => a.path === path)) return; // already listed, and now replaced on the shelf
+      const list = [...existing, { name, path }];
+      await sb().from("pact_jobs").update({ attachments: list }).eq("id", j.id);
+      setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, attachments: list } : x)));
+      setAttachJob((prev) => (prev && prev.id === j.id ? { ...prev, attachments: list } : prev));
+    } catch { /* keeping the copy is best effort */ }
+  };
+
+  // a proposal going out is a date on the job, like an invoice going out
+  const stampProposalSent = async (j: Job): Promise<void> => {
+    if (j.proposal_sent) return;
+    const { error } = await sb().from("pact_jobs").update({ proposal_sent: today() }).eq("id", j.id);
+    if (error) { if (/column|schema cache/i.test(error.message)) flash("Run supabase/upgrade_pact_proposal.sql to track proposals sent"); return; }
+    setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, proposal_sent: today() } : x)));
+  };
+
   // ---------- attachments & photos ----------
   const attachFiles = async (j: Job, files: File[]): Promise<void> => {
     if (files.length === 0) return;
@@ -656,6 +697,7 @@ export default function Pact() {
         let name = `${base}.pdf`;
         for (let n = 2; files[name]; n++) name = `${base}_${n}.pdf`;
         files[name] = bytes;
+        await keepOnJob(j, bytes, invoiceFileName(j), "application/pdf");
       }
       if (Object.keys(files).length === 0) { flash("No invoices could be built"); setBusy(false); return; }
       const { zipSync } = await import("fflate");
@@ -870,6 +912,7 @@ export default function Pact() {
       const fname = askFileName(invoiceFileName(j));
       if (!fname) { URL.revokeObjectURL(url); setBusy(false); return; }
       aEl.href = url; aEl.download = fname; aEl.click();
+      await keepOnJob(j, out, invoiceFileName(j), "application/pdf");
       // revoking right away can abort the download on iPhone — give it a minute
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
       if (!j.invoice_sent) patch(j, { invoice_sent: today() });
@@ -887,7 +930,7 @@ export default function Pact() {
   const partners = [...new Set(jobs.map((j) => j.partner).filter(Boolean))];
   const list = jobs.filter((j) => !q || `${j.partner} ${j.development} ${j.job_number} ${j.po_number || ""} ${j.address || ""} ${j.description}`.toLowerCase().includes(q.toLowerCase()));
   const pipeline = (j: Job): [string, boolean][] => [
-    ["APPROVED", j.approved], ["WORK DONE", j.work_done],
+    ["PROPOSAL", !!j.proposal_sent], ["APPROVED", j.approved], ["WORK DONE", j.work_done],
     ...(canInvoice ? ([["INVOICED", !!j.invoice_sent], ["PAID", j.received]] as [string, boolean][]) : []),
   ];
 
@@ -1026,6 +1069,7 @@ export default function Pact() {
                       {stages.map(([l, done], i) => (
                         <span key={l} className={`rounded-[2px] border px-1 py-px font-mono text-[9px] font-semibold ${done ? "border-ok bg-ok/10 text-ok" : i === current ? "border-work text-work" : "border-rulesoft text-rule"}`}>{l}</span>
                       ))}
+                      {j.proposal_sent && !j.approved && <span className="ml-1 font-mono text-[10px] text-work">{days(j.proposal_sent)}d waiting</span>}
                       {canInvoice && j.invoice_sent && !j.received && <span className="ml-1 font-mono text-[10px] text-inksoft">{days(j.invoice_sent)}d out</span>}
                     </div>
                   );
@@ -1098,6 +1142,7 @@ export default function Pact() {
                 })()}
                 {canEdit && (
                 <div className="mb-2.5 flex flex-wrap gap-2">
+                  <button onClick={() => patch(j, j.proposal_sent ? { proposal_sent: null } : { proposal_sent: today() })}><Stamp label={j.proposal_sent ? `PROPOSAL SENT ${prettyDate(j.proposal_sent)}` : "MARK PROPOSAL SENT"} tone={j.proposal_sent ? "ok" : "mute"} /></button>
                   <button onClick={() => patch(j, { approved: !j.approved })}><Stamp label={j.approved ? "APPROVED ✓" : "MARK APPROVED"} tone={j.approved ? "ok" : "mute"} /></button>
                   <button onClick={() => patch(j, { work_done: !j.work_done })}><Stamp label={j.work_done ? "WORK DONE ✓" : "MARK WORK DONE"} tone={j.work_done ? "ok" : "mute"} /></button>
                   {canInvoice && <button onClick={() => patch(j, j.received ? { received: false, paid_date: null } : { received: true, paid_date: today() })}><Stamp label={j.received ? `PAID ${prettyDate(j.paid_date)}` : "MARK PAID"} tone={j.received ? "ok" : "work"} /></button>}

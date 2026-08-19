@@ -7,6 +7,8 @@ import { myProfile } from "@/lib/profile";
 import { fmt, parseNum, askFileName } from "@/lib/format";
 import { prettyDate, localISO, type Org } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
+import PrintShell from "@/components/PrintShell";
+import Letterhead from "@/components/Letterhead";
 import { useLive } from "@/lib/useLive";
 import { COMPANY } from "@/lib/company";
 import { useNumBuffer } from "@/lib/numBuffer";
@@ -257,8 +259,8 @@ export default function Pact() {
 
   // the job's proposal letter — the same shape the reader here understands,
   // so a signed copy coming back makes the invoice without retyping anything
-  const proposalBytes = async (j: Job): Promise<{ bytes: Uint8Array; name: string }> => {
-    const { buildProposalDocx, proposalFileName } = await import("@/lib/proposalDoc");
+  // everything the proposal letter says, for the view and the file alike
+  const proposalFields = async (j: Job) => {
     let lines = itemsOf(j)
       .filter((it) => it.description.trim() && Number(it.qty) > 0)
       .map((it) => ({ description: it.description, qty: Number(it.qty), unit: it.unit, unit_price: Number(it.unit_price) || 0 }));
@@ -267,7 +269,7 @@ export default function Pact() {
       lines = seeded.map((it) => ({ description: it.description, qty: Number(it.qty) || 1, unit: it.unit, unit_price: Number(it.unit_price) || 0 }));
     }
     if (lines.length === 0) lines = [{ description: j.description || "Work as discussed", qty: 1, unit: "EACH", unit_price: 0 }];
-    const fields = {
+    return {
       poNumber: j.po_number || j.job_number || "",
       date: prettyDate(today()),
       attn: (j.contact || "").split("·")[0].replace(/\s*\d[\d\s().-]{6,}$/, "").trim(),
@@ -276,6 +278,11 @@ export default function Pact() {
       lines,
       taxPct: taxRate(j),
     };
+  };
+
+  const proposalBytes = async (j: Job): Promise<{ bytes: Uint8Array; name: string }> => {
+    const { buildProposalDocx, proposalFileName } = await import("@/lib/proposalDoc");
+    const fields = await proposalFields(j);
     return { bytes: buildProposalDocx(fields, await logoBytes()), name: proposalFileName(fields) };
   };
 
@@ -370,6 +377,15 @@ export default function Pact() {
       saveBytes(zipSync(files, { level: 1 }), fname, "application/zip");
       flash(`${Object.keys(files).length} proposal${Object.keys(files).length === 1 ? "" : "s"} saved`);
     } finally { setBusy(false); }
+  };
+
+  // read it on screen before it goes anywhere
+  const [viewJob, setViewJob] = useState<{ job: Job; f: Awaited<ReturnType<typeof proposalFields>> } | null>(null);
+  const viewProposal = async (j: Job) => {
+    setBusy(true);
+    try { setViewJob({ job: j, f: await proposalFields(j) }); }
+    catch (err) { flash(`Couldn't build the proposal (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`); }
+    finally { setBusy(false); }
   };
 
   // the empty one to fill in by hand
@@ -994,6 +1010,7 @@ export default function Pact() {
                   {busy ? "Working…" : "⬇ Proposal + invoice"}
                 </button>
               )}
+              <button className="btn" disabled={busy} onClick={() => viewProposal(j)}>👁 View proposal</button>
               <button className={billable.length > 0 ? "btn" : "btn btn-primary"} disabled={busy} onClick={() => saveProposalFor(j)}>📝 Proposal only</button>
               {canInvoice && <button className="btn" disabled={busy || billable.length === 0} title={billable.length === 0 ? "The job needs a work line first" : ""} onClick={() => saveInvoiceFor(j)}>🧾 Invoice only</button>}
               <button className="btn btn-ghost" disabled={busy} onClick={() => setOneShot(null)}>Done</button>
@@ -1115,10 +1132,8 @@ export default function Pact() {
                   {canEdit && <button className="btn px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "before")} disabled={busy}>📷 Before{beforeN > 0 ? ` · ${beforeN}` : ""}</button>}
                   {canEdit && <button className="btn px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "after")} disabled={busy}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}
                   {(beforeN > 0 || afterN > 0 || (j.attachments || []).length > 0) && (
-                    <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => setAttachJob(j)}>View photos & files</button>
+                    <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => setAttachJob(j)}>📎 Files{(j.attachments || []).length > 0 ? ` · ${(j.attachments || []).length}` : ""}</button>
                   )}
-                  {canInvoice && <button className="btn px-3 py-1.5 text-[13px]" onClick={() => setInvJob(j)}>Invoice</button>}
-                  {canInvoice && <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => buildPackage(j)} disabled={busy}>📦 Package</button>}
                   {canEdit && <button className="btn px-3 py-1.5 text-[13px]" onClick={() => openNotify(j)}>📱 Text worker</button>}
                 </div>
                 {notifyJob === j.id && (() => {
@@ -1241,7 +1256,6 @@ export default function Pact() {
                     <div className="flex flex-wrap gap-2">
                       <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => setItems(j, [...itemsOf(j), { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>
                       <button className="btn btn-ghost px-3 py-1.5 text-[13px]" disabled={busy} title="Fill the lines and prices from the partner price list — plaster brings its primer and paint" onClick={() => fillFromList(j)}>⚡ Price from list</button>
-                      {canInvoice && <button className="btn btn-ghost px-3 py-1.5 text-[13px]" disabled={busy} title="Write the proposal letter for this job" onClick={() => makeProposal(j)}>📝 Proposal</button>}
                       {canPrice && (
                         <label className="flex items-center gap-1 text-[12px] text-inksoft" title="The sales tax printed on the proposal and the invoice">
                           Sales tax
@@ -1253,6 +1267,17 @@ export default function Pact() {
                     </div>
                   )}
                 </div>
+                {canInvoice && (
+                  <div className="mt-3 border-t border-rulesoft pt-3">
+                    <div className="mb-1.5 text-[10px] uppercase tracking-[.15em] text-inksoft">Papers</div>
+                    <div className="flex flex-wrap gap-2">
+                      <button className="btn px-3 py-1.5 text-[13px]" disabled={busy} title="Read the proposal letter on screen first" onClick={() => viewProposal(j)}>👁 View proposal</button>
+                      <button className="btn px-3 py-1.5 text-[13px]" disabled={busy} title="Save the proposal letter as a Word file" onClick={() => makeProposal(j)}>⬇ Proposal (Word)</button>
+                      <button className="btn px-3 py-1.5 text-[13px]" title="The invoice lines, tax and total" onClick={() => setInvJob(j)}>🧾 Invoice</button>
+                      <button className="btn btn-primary px-3 py-1.5 text-[13px]" disabled={busy} title="Invoice, the PO and the before/after photos in one PDF" onClick={() => buildPackage(j)}>📦 Invoice package</button>
+                    </div>
+                  </div>
+                )}
                 <div className="mt-3 flex justify-end">
                   <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => {
                     (document.activeElement as HTMLElement | null)?.blur?.();
@@ -1339,6 +1364,65 @@ export default function Pact() {
       })()}
 
       {/* ---------- documents & photos ---------- */}
+      {viewJob && canInvoice && (() => {
+        const { job: j, f } = viewJob;
+        const sub = f.lines.reduce((t, l) => t + l.qty * l.unit_price, 0);
+        const tax = Math.round(sub * f.taxPct) / 100;
+        return (
+          <PrintShell title={`proposal ${f.poNumber || ""} ${(f.serviceAddress || "").split(",")[0]}`.trim()}>
+            <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
+              <div className="printable mx-auto max-w-3xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
+                <Letterhead />
+                <div className="text-[13px] leading-relaxed">
+                  <div>Date: {f.date}</div>
+                  {f.poNumber && <div>PO #: {f.poNumber}</div>}
+                  <div>ATTN: {f.attn || "—"}</div>
+                  {f.billTo.map((b, i) => <div key={i}>{b}</div>)}
+                  <div className="mt-3">Dear {f.attn || "Sir or Madam"},</div>
+                  <div className="mt-1">We are pleased to submit our proposal for the property below.</div>
+                  <div className="mt-3"><b>Service Address:</b> {f.serviceAddress || "—"}</div>
+                </div>
+                <div className="mt-4 font-display text-base font-bold uppercase">Scope of Work</div>
+                <table className="mt-1 w-full border-collapse border border-ink text-[12px]">
+                  <thead><tr className="bg-paper text-left font-display text-[10px] uppercase tracking-widest">
+                    <th className="border border-ink p-1.5">Description</th>
+                    <th className="border border-ink p-1.5 text-right">Qty</th>
+                    <th className="border border-ink p-1.5 text-right">Unit price</th>
+                    <th className="border border-ink p-1.5 text-right">Amount</th>
+                  </tr></thead>
+                  <tbody>
+                    {f.lines.map((l, i) => (
+                      <tr key={i} className="align-top">
+                        <td className="border border-rulesoft p-1.5">{l.description}</td>
+                        <td className="border border-rulesoft p-1.5 text-right font-mono">{l.qty}{l.unit && l.unit.toUpperCase() !== "EACH" ? ` ${l.unit.toUpperCase()}` : ""}</td>
+                        <td className="border border-rulesoft p-1.5 text-right font-mono">{fmt(l.unit_price)}</td>
+                        <td className="border border-rulesoft p-1.5 text-right font-mono font-semibold">{fmt(l.qty * l.unit_price)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="mt-3 flex flex-col items-end gap-0.5 text-[13px]">
+                  <div>Total Cost: <span className="font-mono">{fmt(sub)}</span></div>
+                  <div>Sales Tax ({f.taxPct}%): <span className="font-mono">{fmt(tax)}</span></div>
+                  <div className="font-display text-base font-bold">Grand Total: <span className="font-mono">{fmt(sub + tax)}</span></div>
+                </div>
+                <div className="mt-5 text-[13px]">
+                  <div>Thank you for the opportunity. Please sign and return a copy to authorize the work.</div>
+                  <div className="mt-4">Best regards,</div>
+                  <div className="font-semibold">{COMPANY.letterhead.name}</div>
+                  <div className="text-[12px]">{COMPANY.letterhead.phones.replace(/^Phone:\s*/, "")}</div>
+                </div>
+              </div>
+              <div className="no-print mx-auto mt-3 flex max-w-3xl flex-wrap justify-end gap-2">
+                <button className="btn bg-white" disabled={busy} onClick={() => saveProposalFor(j)}>⬇ Download Word</button>
+                <button className="btn bg-white" onClick={() => window.print()}>Print / Save as PDF</button>
+                <button className="btn btn-ghost bg-white" onClick={() => setViewJob(null)}>Close</button>
+              </div>
+            </div>
+          </PrintShell>
+        );
+      })()}
+
       {attachJob && (
         <div className="fixed inset-0 z-40 overflow-y-auto bg-ink/50 px-2 py-10" onClick={() => setAttachJob(null)}>
           <div className="card mx-auto max-w-md bg-card p-4" onClick={(e) => e.stopPropagation()}>

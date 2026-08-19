@@ -34,7 +34,7 @@ export const PRICE_BOOK: PriceItem[] = [
   { key: "hinge_lobby", description: "Lobby door hinges", unit: "EACH", price: 350, group: "Doors & hardware", words: "hinges?" },
   { key: "hinge_apt", description: "Apartment entrance door hinges", unit: "EACH", price: 150, group: "Doors & hardware", words: "hinges?" },
   // ---- plaster & walls (measured) ----
-  { key: "plaster", description: "Plaster", unit: "SF", price: 5, group: "Plaster & walls", words: "plaster|skim\\s*coat|patch(?:ing)?\\b" },
+  { key: "plaster", description: "Plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "plaster|skim\\s*coat|patch(?:ing)?\\b" },
   { key: "popcorn", description: "Popcorn ceiling removal", unit: "SF", price: 5, group: "Plaster & walls", words: "popcorn" },
   { key: "wall_repair", description: "Wall repair", unit: "SF", price: 6, group: "Plaster & walls", words: "wall\\s*repair|repair[^.\\n]{0,12}walls?" },
   { key: "sheetrock", description: "Sheet rock", unit: "SF", price: 12, group: "Plaster & walls", words: "sheet\\s*rock|sheetrock|dry\\s*wall|drywall" },
@@ -44,9 +44,9 @@ export const PRICE_BOOK: PriceItem[] = [
   { key: "paint_2br", description: "Paint 2 bedroom 1 bath apartment", unit: "EACH", price: 1350, price2: 1650, group: "Painting", words: "2\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
   { key: "paint_3br", description: "Paint 3 bedroom 1 bath apartment", unit: "EACH", price: 1550, price2: 1900, group: "Painting", words: "3\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
   { key: "paint_4br", description: "Paint 4 bedroom 1.5 bath apartment", unit: "EACH", price: 1900, price2: 2250, group: "Painting", words: "4\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
-  // primer isn't on their list — it rides along at whatever they set in Settings
-  { key: "primer", description: "Primer — 1 coat", unit: "SF", price: 0, group: "Painting", words: "primer|prime\\b" },
-  { key: "paint_sf", description: "Paint — 2 coats", unit: "SF", price: 0, group: "Painting", words: "paint(?:ing)?\\b" },
+  // priming and painting are priced by the room, not by the square foot
+  { key: "primer", description: "Primer — 1 coat", unit: "ROOM", price: 125, group: "Painting", words: "primer|prime\\b" },
+  { key: "paint_sf", description: "Paint — 2 coats", unit: "ROOM", price: 220, group: "Painting", words: "paint(?:ing)?\\b" },
 ];
 
 // Wet trades carry their prep with them: nobody plasters a wall and leaves it
@@ -109,6 +109,7 @@ export const normUnit = (u: string): string => {
   const t = flatten(u).trim().toUpperCase().replace(/\./g, "");
   if (/^(SF|SQ ?FT|SQFT|S F|SQUARE (FT|FEET)|FT2|SQ)$/.test(t)) return "SF";
   if (/^(HOUR|HOURS|HR|HRS|PER HOUR|HOURLY)$/.test(t)) return "HOUR";
+  if (/^(ROOM|ROOMS|RM|RMS|PER ROOM)$/.test(t)) return "ROOM";
   if (/^(EACH|EA|UNIT|UNITS|PC|PCS|PIECE|PIECES)$/.test(t) || !t) return "EACH";
   return t;
 };
@@ -236,6 +237,9 @@ const CLAUSE = /\s*(?:,|\band\b|\balso\b|\bplus\b)\s+/gi;
 
 const MEASURE = /(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*(?:ft|feet)|sf\b|square\s*feet)/gi;
 const HOURS = /(\d[\d,]*(?:\.\d+)?)\s*(?:hours?|hrs?)\b/gi;
+// "3 rooms" — only a plain room count, never "2 bedroom apartment" (that's a
+// size, not a number of rooms to paint)
+const ROOMS = /(\d[\d,]*(?:\.\d+)?)\s*rooms?\b/gi;
 // a count right before the work, with room for one adjective
 const COUNT_BEFORE = /(?:^|[^\d])(\d{1,2})\s+(?:[A-Za-z.'-]+\s+){0,3}$/;
 // …unless that number is a PO number, an apartment, a building or a date
@@ -269,6 +273,7 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
     // every measurement in the sentence, each spendable by one line only
     const measures = [...sent.s.matchAll(MEASURE)].map((m) => ({ v: n(m[1]), at: m.index as number, used: false }));
     const hours = [...sent.s.matchAll(HOURS)].map((m) => ({ v: n(m[1]), at: m.index as number, used: false }));
+    const rooms = [...sent.s.matchAll(ROOMS)].map((m) => ({ v: n(m[1]), at: m.index as number, used: false }));
     // clause boundaries: the guards below read the clause a hit lands in, but
     // matching runs across the whole sentence so wording like "strip and wax"
     // still finds itself
@@ -330,7 +335,7 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
         if (/^paint_\d/.test(x.key) && !paintSized) continue;
         const p = byKey.get(x.key)!;
         let qty = 0;
-        if (p.unit !== "SF" && p.unit !== "HOUR") {
+        if (p.unit !== "SF" && p.unit !== "HOUR" && p.unit !== "ROOM") {
           const before = sent.s.slice(cl.a, x.at);
           const b = before.match(COUNT_BEFORE);
           if (b && !NOT_A_COUNT.test(before.slice(0, (b.index ?? 0) + (/^\D/.test(b[0]) ? 1 : 0)))) qty = n(b[1]);
@@ -345,7 +350,7 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
     }
     // each measurement in the sentence belongs to the work nearest it, and is
     // spent once — so one "150 sq ft" can't be billed on two different lines
-    for (const [unit, pool] of [["SF", measures], ["HOUR", hours]] as const) {
+    for (const [unit, pool] of [["SF", measures], ["HOUR", hours], ["ROOM", rooms]] as const) {
       const want = pend.filter((x) => x.unit === unit);
       // work in the same clause as the measurement gets first claim on it
       const pairs = pool.flatMap((mm, mi) => want.map((w, wi) => ({ mi, wi, d: Math.abs(mm.at - w.at), far: clOf(mm.at) === w.cl ? 0 : 1 })));
@@ -370,10 +375,16 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
     else if (h.said) { had.qty = h.qty; had.said = true; }
     had.at = Math.min(had.at, h.at);
   }
-  // an apartment price covers the painting; the per-square-foot line would double it
+  // plaster work brings its own primer and paint by the room — a whole-
+  // apartment repaint price on top of that is just noise
+  if (["plaster", "wall_repair", "popcorn", "sheetrock"].some((k) => merged.has(k)))
+    for (const k of [...merged.keys()]) if (/^paint_\d/.test(k)) merged.delete(k);
+  // an apartment price covers the painting; the by-the-room line would double it
   const sized = [...merged.keys()].some((k) => /^paint_\d/.test(k));
   if (sized) merged.delete("paint_sf");
 
+  // "3 rooms" anywhere in the PO sets how many rooms the prep covers
+  const roomsSaid = n([...raw.matchAll(ROOMS)][0]?.[1] || "") || 1;
   // the prep that goes with wet trades, right behind the work that needs it
   if (bundle) {
     for (const b of BUNDLES) {
@@ -381,9 +392,15 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
       if (!trig) continue;
       b.adds.forEach((add, i) => {
         if (add === "paint_sf" && sized) return;
+        const addUnit = byKey.get(add)?.unit;
+        // prep measured the same way as the work covers the same amount of it;
+        // measured differently (rooms behind square feet), the PO's own room
+        // count decides, and one room is the safe default
+        const qty = addUnit === byKey.get(b.key)?.unit ? trig.qty
+          : addUnit === "ROOM" ? roomsSaid : 1;
         const had = merged.get(add);
-        if (!had) merged.set(add, { key: add, qty: trig.qty, said: false, at: trig.at + (i + 1) / 100 });
-        else if (!had.said) had.qty = Math.max(had.qty, trig.qty);
+        if (!had) merged.set(add, { key: add, qty, said: false, at: trig.at + (i + 1) / 100 });
+        else if (!had.said) had.qty = Math.max(had.qty, qty);
       });
     }
   }

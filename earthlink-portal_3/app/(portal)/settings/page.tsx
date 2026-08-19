@@ -16,8 +16,8 @@ import { cleanPhone, prettyPhone } from "@/lib/notify";
 
 // the two roles: Admin 1 sees everything; Admin 2 sees everything except
 // PACT invoices (internally these are the existing admin/office roles)
-// how a line is measured: counted, by the square foot, or by the hour
-const UNITS = ["EACH", "SF", "HOUR"];
+// how a line is measured: counted, by the square foot, by the room, or by the hour
+const UNITS = ["EACH", "SF", "ROOM", "HOUR"];
 
 const ROLE_OPTIONS: [Role, string][] = [
   ["admin", "Admin 1 — full access"],

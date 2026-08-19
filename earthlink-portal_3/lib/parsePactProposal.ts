@@ -85,12 +85,14 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
     // "<work> 250 x $5.00 $1,250.00" — our own proposals and most partner
     // letters write it this way, and read whole it can't be split by a $ or a
     // stray keyword inside the description
-    const whole = l.match(/^(.*?)(\d[\d,]*(?:\.\d+)?)\s*[x@]\s*\$\s*(-?[\d,]+(?:\.\d{1,2})?)\s+\$\s*(-?[\d,]+(?:\.\d{1,2})?)\s*$/i);
+    // the quantity cell may carry how the work is measured: "250 SF x"
+    const whole = l.match(/^(.*?)(\d[\d,]*(?:\.\d+)?)\s*([A-Za-z]{1,8})?\s*[x@]\s*\$\s*(-?[\d,]+(?:\.\d{1,2})?)\s+\$\s*(-?[\d,]+(?:\.\d{1,2})?)\s*$/i);
     if (whole) {
-      const qty = money(whole[2]), up = money(whole[3]), amt = money(whole[4]);
+      const qty = money(whole[2]), up = money(whole[4]), amt = money(whole[5]);
+      const uom = (whole[3] || "").toUpperCase();
       const desc = `${pending} ${whole[1]}`.trim().replace(/[\t:;,\s-]+$/g, "").replace(/\s{2,}/g, " ");
       pending = "";
-      if (desc.length >= 3 && Math.abs(qty * up - amt) < 0.02) { rows.push({ description: desc, qty, unit_price: up, property: "", unit: punit }); continue; }
+      if (desc.length >= 3 && Math.abs(qty * up - amt) < 0.02) { rows.push({ description: desc, qty, unit_price: up, property: "", unit: punit, ...(uom ? { uom } : {}) }); continue; }
     }
     if (stopRe.test(l) || /^total\b/i.test(l)) { stopAt = i; break; }
     // a work table's column headings ("Description Qty Unit price Amount")

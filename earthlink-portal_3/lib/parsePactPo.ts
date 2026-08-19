@@ -11,7 +11,7 @@ export interface PactPoFields {
   contact: string;
   punit: string;
   amount: number;
-  rows: { description: string; qty: number; unit_price: number; property: string; unit: string }[];
+  rows: { description: string; qty: number; unit_price: number; property: string; unit: string; uom?: string }[];
   readable: boolean;    // false = no text in the PDF at all (a scan)
 }
 

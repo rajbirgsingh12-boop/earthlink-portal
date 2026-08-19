@@ -91,11 +91,11 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
   // total sit next to each other exactly the way the reader expects them
   const billLines = (f.billTo || []).filter(Boolean);
   const hdr = ["Description", "Qty", "Unit price", "Amount"];
-  const widths = [5100, 1100, 1500, 1660];
+  const widths = [4900, 1300, 1500, 1660];
   const headRow = hdr.map((h, i) => cell(para(h, { b: true, sz: 20, space: 0, align: i ? "right" : "left" }), widths[i], { shade: "EFEFEF" })).join("");
   const bodyRows = f.lines.map((l) =>
     cell(para(l.description, { sz: 20, space: 0 }), widths[0]) +
-    cell(para(`${l.qty} x`, { sz: 20, space: 0, align: "right" }), widths[1]) +
+    cell(para(`${l.qty}${l.unit && l.unit.toUpperCase() !== "EACH" ? ` ${l.unit.toUpperCase()}` : ""} x`, { sz: 20, space: 0, align: "right" }), widths[1]) +
     cell(para(money(cents(l.unit_price)), { sz: 20, space: 0, align: "right" }), widths[2]) +
     cell(para(money(lineTotal(l)), { sz: 20, space: 0, align: "right" }), widths[3]));
 

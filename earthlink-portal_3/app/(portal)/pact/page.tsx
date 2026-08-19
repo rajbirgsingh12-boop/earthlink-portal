@@ -176,8 +176,12 @@ export default function Pact() {
     // matched only when it reads as exactly one line and nothing else, so
     // nothing gets silently swallowed or doubled.
     const covered = new Map<string, number>();
+    const sameText = (a: string, b: string) => a.toLowerCase().replace(/[^a-z0-9]/g, "") === b.toLowerCase().replace(/[^a-z0-9]/g, "");
     existing.forEach((it, i) => {
-      const k = it.key || soleKey(it.description, bk);
+      // a line that IS one of the price-list lines, word for word, covers that
+      // one and nothing else — before falling back to reading its wording
+      const exact = bk.find((p) => sameText(p.description, it.description))?.key;
+      const k = it.key || exact || soleKey(it.description, bk);
       if (k && !covered.has(k)) covered.set(k, i);
     });
     const out = [...existing];
@@ -407,7 +411,7 @@ export default function Pact() {
       const amount = unreadable ? 0 : f.amount;
       const seed: Item[] = unreadable ? []
         : f.rows.length > 0
-          ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: unitFor(r.description), unit_price: r.unit_price }))
+          ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: r.uom || unitFor(r.description), unit_price: r.unit_price }))
           : f.desc ? [{ description: f.desc, qty: 1, unit: unitFor(f.desc), unit_price: 0 }] : [];
       // What is this PO for? Whatever the price list already answers — plaster
       // brings its primer and paint with it — gets filled in, priced. A price
@@ -566,7 +570,7 @@ export default function Pact() {
             if (hit) partner = hit.partner;
           }
           seq += 1;
-          const seed: Item[] = parsed.rows.map((r) => ({ description: r.description, qty: r.qty, unit: unitFor(r.description), unit_price: r.unit_price }));
+          const seed: Item[] = parsed.rows.map((r) => ({ description: r.description, qty: r.qty, unit: r.uom || unitFor(r.description), unit_price: r.unit_price }));
           const { data: job, error } = await sb().from("pact_jobs").insert({
             partner, development: "", job_number: parsed.po, description: parsed.desc, amount: parsed.amount,
             po_number: parsed.po, po_date: parsed.poDate, address: parsed.address, property_unit: parsed.punit,

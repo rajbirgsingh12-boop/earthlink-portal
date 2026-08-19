@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 // the export engine is heavy — it loads on demand, never with the page itself
 let XLSX!: typeof import("xlsx-js-style");
@@ -16,6 +16,9 @@ import { cleanPhone, prettyPhone } from "@/lib/notify";
 
 // the two roles: Admin 1 sees everything; Admin 2 sees everything except
 // PACT invoices (internally these are the existing admin/office roles)
+// how a line is measured: counted, by the square foot, or by the hour
+const UNITS = ["EACH", "SF", "HOUR"];
+
 const ROLE_OPTIONS: [Role, string][] = [
   ["admin", "Admin 1 — full access"],
   ["office", "Admin 2 — no PACT invoices"],
@@ -31,7 +34,12 @@ export default function Settings() {
   const [me, setMe] = useState<Profile | null>(null);
   const [people, setPeople] = useState<Profile[]>([]);
   const [msg, setMsg] = useState("");
-  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2000); };
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flash = (m: string) => {
+    setMsg(m);
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setMsg(""), 4000);
+  };
 
   const loadUsers = async () => {
     const { data: { user } } = await sb().auth.getUser();
@@ -121,14 +129,23 @@ export default function Settings() {
   const [priceSaving, setPriceSaving] = useState(false);
   const [priceLoaded, setPriceLoaded] = useState(false);
   const [priceTouched, setPriceTouched] = useState(false);
+  const [priceLoadErr, setPriceLoadErr] = useState(false);
   const [showWords, setShowWords] = useState(false);
-  useEffect(() => {
+  const readList = () => {
+    setPriceLoadErr(false);
     loadPrices().then(({ store: st, ok }) => {
-      // a late answer must never wipe something already being typed
-      setPriceTouched((touched) => { if (!touched) { setStore(st); setPriceText({}); } return touched; });
+      // the saved list is the base; anything already typed sits on top of it,
+      // so a slow read can never throw away what they were doing — or, worse,
+      // let the next save write an empty list over everything
+      setStore((mine) => ({
+        overrides: { ...st.overrides, ...mine.overrides },
+        custom: [...st.custom.filter((c) => !mine.custom.some((m) => m.key === c.key)), ...mine.custom],
+      }));
       setPriceLoaded(ok);
+      setPriceLoadErr(!ok);
     });
-  }, []);
+  };
+  useEffect(readList, []);
   const ovOf = (key: string): PriceOverride => store.overrides[key] || {};
   const setOv = (key: string, patch: PriceOverride) => {
     setPriceTouched(true);
@@ -182,8 +199,8 @@ export default function Settings() {
       if (Object.keys(d).length > 0) overrides[base.key] = d;
     }
     const custom = store.custom
-      .map((c) => ({ ...c, description: c.description.trim(), words: c.words.trim(), price: typedNum(`${c.key}:price`, c.price) ?? 0 }))
-      .filter((c) => c.description || c.words);
+      .map((c) => ({ ...c, description: c.description.trim(), words: c.words.trim(), price: typedNum(`${c.key}:price`, c.price) ?? c.price ?? 0 }))
+      .filter((c) => c.description.trim() && c.words.trim());
     const next: PriceStore = { overrides, custom };
     const err = await savePrices(next);
     setPriceSaving(false);
@@ -510,7 +527,7 @@ export default function Settings() {
         </>
       )}
 
-      {me?.role !== "accountant" && (
+      {me && (me.role === "admin" || me.role === "office") && (
         <>
           <div className="mb-2 mt-6 flex flex-wrap items-baseline justify-between gap-2">
             <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Line items &amp; prices</div>
@@ -540,8 +557,10 @@ export default function Settings() {
                           <div className="flex flex-wrap items-center gap-2">
                             <input className="min-w-[170px] flex-1 field px-2 py-1.5 text-[13px]" value={o.description ?? p.description}
                               placeholder={p.description} onChange={(e) => setOv(p.key, { description: e.target.value })} />
-                            <input className="field w-16 px-1 py-1.5 text-center text-[11px] uppercase" title="EACH · SF · HOUR"
-                              value={o.unit ?? p.unit} placeholder={p.unit} onChange={(e) => setOv(p.key, { unit: e.target.value.toUpperCase() })} />
+                            <select className="field w-[74px] px-1 py-1.5 text-center text-[11px]" title="How it's measured"
+                              value={o.unit ?? p.unit} onChange={(e) => setOv(p.key, { unit: e.target.value })}>
+                              {UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
+                            </select>
                             <label className="flex items-center gap-1">
                               {p.price2 !== undefined && <span className="text-[11px] text-inksoft">1 coat</span>}
                               <span className="text-sm">$</span>
@@ -570,17 +589,22 @@ export default function Settings() {
                         <div className="flex flex-wrap items-center gap-2">
                           <input className="min-w-[170px] flex-1 field px-2 py-1.5 text-[13px]" value={c.description}
                             placeholder="What the line says on the invoice" onChange={(e) => setCustom(c.key, { description: e.target.value })} />
-                          <input className="field w-16 px-1 py-1.5 text-center text-[11px] uppercase" title="EACH · SF · HOUR"
-                            value={c.unit} onChange={(e) => setCustom(c.key, { unit: e.target.value.toUpperCase() })} />
+                          <select className="field w-[74px] px-1 py-1.5 text-center text-[11px]" title="How it's measured"
+                            value={c.unit} onChange={(e) => setCustom(c.key, { unit: e.target.value })}>
+                            {UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
+                          </select>
                           <label className="flex items-center gap-1">
                             <span className="text-sm">$</span>
-                            <input className="field w-24 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" {...moneyBox(`${c.key}:price`, c.price, 0)} />
+                            <input className="field w-24 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" {...moneyBox(`${c.key}:price`, c.price || undefined, 0)} />
                           </label>
                           <button className="text-xs text-alert" title="Remove this line item" onClick={() => removeCustom(c.key)}>✕</button>
                         </div>
-                        <input className="field mt-1.5 px-2 py-1.5 text-[12px]" value={c.words}
+                        <input className={`field mt-1.5 px-2 py-1.5 text-[12px] ${c.description.trim() && !c.words.trim() ? "border-work" : ""}`} value={c.words}
                           placeholder={`what a PO says for this — plain words, commas between: "move out, moveout clean"`}
                           onChange={(e) => setCustom(c.key, { words: e.target.value })} />
+                        {c.description.trim() && !c.words.trim() && (
+                          <div className="mt-1 text-[11px] text-work">Needs wording, or a PO can never pick this line.</div>
+                        )}
                       </div>
                     ))}
                     {g === CUSTOM_GROUP && store.custom.length === 0 && (
@@ -595,6 +619,9 @@ export default function Settings() {
             })}
             <div className="flex flex-wrap items-center gap-2">
               <button className="btn btn-primary" onClick={savePriceList} disabled={priceSaving || !priceLoaded}>{priceSaving ? "Saving…" : priceLoaded ? "Save line items" : "Reading saved list…"}</button>
+              {priceLoadErr && (
+                <button className="btn" onClick={readList}>Couldn&apos;t read the saved list — try again</button>
+              )}
               <button className="btn btn-ghost" onClick={() => { setStore(EMPTY_STORE); setPriceText({}); setPriceTouched(true); flash("Back to the sheet as it came — save to keep it"); }}>Reset to the sheet</button>
             </div>
           </div>

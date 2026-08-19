@@ -83,14 +83,36 @@ export interface PriceStore { overrides: PriceOverrides; custom: CustomItem[] }
 export const EMPTY_STORE: PriceStore = { overrides: {}, custom: [] };
 export const CUSTOM_GROUP = "Our own line items";
 
+// Word turns "-" into a dash and "\'" into a curly quote, and people write
+// "move-out" where a PO says "move out". Both sides get flattened the same way
+// so wording matches the way a person means it to.
+export const flatten = (t: string): string =>
+  (t || "")
+    .replace(/[\u2010-\u2015\u2212]/g, "-")
+    .replace(/[\u2018\u2019\u02BC]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ");
+
 // What they type as trigger wording is plain words — "popcorn, textured
 // ceiling" — never a regular expression, so a stray bracket can't break the
-// reader or match something wild.
+// reader or match something wild. A word must carry letters or digits to
+// count, so a stray "-" can't attach a price to every PO.
 export const keywordsRe = (words: string): string =>
-  (words || "").split(/[,\n]/).map((w) => w.trim()).filter(Boolean)
-    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"))
+  flatten(words).split(/[,\n]/).map((w) => w.trim().replace(/\.+$/, "")).filter((w) => /[a-z0-9]/i.test(w) && w.length > 1)
+    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+").replace(/\\\./g, "\\.?"))
     .map((w) => `${/^[a-z0-9]/i.test(w) ? "\\b" : ""}${w}${/[a-z0-9]$/i.test(w) ? "\\b" : ""}`)
     .join("|");
+
+// a unit is only meaningful to the reader as EACH, SF or HOUR — however it
+// gets typed
+export const normUnit = (u: string): string => {
+  const t = flatten(u).trim().toUpperCase().replace(/\./g, "");
+  if (/^(SF|SQ ?FT|SQFT|S F|SQUARE (FT|FEET)|FT2|SQ)$/.test(t)) return "SF";
+  if (/^(HOUR|HOURS|HR|HRS|PER HOUR|HOURLY)$/.test(t)) return "HOUR";
+  if (/^(EACH|EA|UNIT|UNITS|PC|PCS|PIECE|PIECES)$/.test(t) || !t) return "EACH";
+  return t;
+};
 
 const newKey = (existing: string[]): string => {
   for (let i = 1; ; i++) { const k = `own${i}`; if (!existing.includes(k)) return k; }
@@ -112,33 +134,45 @@ export function bookFrom(store: PriceStore): PriceItem[] {
         price: o.price ?? p.price,
         price2: o.price2 ?? p.price2,
         description: o.description?.trim() || p.description,
-        unit: o.unit?.trim() || p.unit,
+        unit: normUnit(o.unit || p.unit),
         words: extra ? `${p.words}|${extra}` : p.words,
       };
     });
   const own = (store.custom || [])
     .filter((c) => c.description.trim() && keywordsRe(c.words))
-    .map((c) => ({ key: c.key, description: c.description.trim(), unit: (c.unit || "EACH").trim(), price: Number(c.price) || 0, group: c.group || CUSTOM_GROUP, words: keywordsRe(c.words) }));
+    .map((c) => ({ key: `own:${c.key}`, description: c.description.trim(), unit: normUnit(c.unit), price: Number(c.price) || 0, group: c.group || CUSTOM_GROUP, words: keywordsRe(c.words) }));
   return [...built, ...own];
 }
 
-// Reading the saved list has to tell "nothing saved yet" from "couldn't read
-// it" — a save that guessed wrong would wipe work it never loaded. Listing the
-// folder answers that without reading error text.
-async function readStore(): Promise<{ store: PriceStore; ok: boolean }> {
+// The saved list is written as a new file each time and the newest one wins.
+// The docs bucket allows insert and delete but not update, so overwriting one
+// fixed name would fail from the second save on — and a delete-then-write
+// would leave a moment with no list at all.
+const FOLDER = "pricebook";
+const LEGACY = "pricebook/list.json";
+const stamped = (name: string) => Number(name.match(/^list-(\d+)\.json$/)?.[1] || 0);
+
+// Reading has to tell "nothing saved yet" from "couldn't read it" — a save
+// that guessed wrong would write over work it never loaded. Listing the folder
+// answers that without reading error text.
+async function readStore(): Promise<{ store: PriceStore; ok: boolean; from: string | null; older: string[] }> {
   try {
-    const { data: listed, error } = await sb().storage.from("docs").list("pricebook");
-    if (error || !Array.isArray(listed)) return { store: EMPTY_STORE, ok: false };
-    if (!listed.some((f) => f.name === "list.json")) return { store: EMPTY_STORE, ok: true }; // never saved any
-    const { data, error: de } = await sb().storage.from("docs").download(STORE);
-    if (de || !data) return { store: EMPTY_STORE, ok: false };
+    const { data: listed, error } = await sb().storage.from("docs").list(FOLDER);
+    if (error || !Array.isArray(listed)) return { store: EMPTY_STORE, ok: false, from: null, older: [] };
+    const versions = listed.filter((f) => stamped(f.name) > 0).sort((a, b) => stamped(b.name) - stamped(a.name));
+    const newest = versions[0]?.name || (listed.some((f) => f.name === "list.json") ? "list.json" : null);
+    const older = versions.slice(1).map((f) => `${FOLDER}/${f.name}`);
+    if (!newest) return { store: EMPTY_STORE, ok: true, from: null, older: [] }; // never saved any
+    const path = newest === "list.json" ? LEGACY : `${FOLDER}/${newest}`;
+    const { data, error: de } = await sb().storage.from("docs").download(path);
+    if (de || !data) return { store: EMPTY_STORE, ok: false, from: null, older: [] };
     const raw = JSON.parse(await data.text()) as Partial<PriceStore> & PriceOverrides;
     // the first version of this file was just {key: {price}} — still readable
     const store: PriceStore = raw && (raw.overrides || raw.custom)
       ? { overrides: raw.overrides || {}, custom: Array.isArray(raw.custom) ? raw.custom : [] }
       : { overrides: (raw || {}) as PriceOverrides, custom: [] };
-    return { store, ok: true };
-  } catch { return { store: EMPTY_STORE, ok: false }; }
+    return { store, ok: true, from: path, older: newest === "list.json" ? older : [...older, ...(listed.some((f) => f.name === "list.json") ? [LEGACY] : [])] };
+  } catch { return { store: EMPTY_STORE, ok: false, from: null, older: [] }; }
 }
 
 // `ok` false means the saved list couldn't be read — the page must not then
@@ -148,15 +182,18 @@ export async function loadPrices(): Promise<{ items: PriceItem[]; store: PriceSt
   return { items: bookFrom(store), store, ok };
 }
 
-export async function savePrices(store: PriceStore): Promise<string | null> {
+export async function savePrices(store: PriceStore, now = Date.now()): Promise<string | null> {
   // check again at the moment of writing: if the saved list can't be read
   // right now, nothing is written at all
-  const { ok } = await readStore();
+  const { ok, older, from } = await readStore();
   if (!ok) return "Couldn't read the saved line items just now — nothing was changed. Try again in a moment.";
-  // upsert, never remove-then-write: a failed write must not lose the old list
   const { error } = await sb().storage.from("docs")
-    .upload(STORE, new Blob([JSON.stringify(store)], { type: "application/json" }), { contentType: "application/json", upsert: true });
-  return error ? error.message : null;
+    .upload(`${FOLDER}/list-${now}.json`, new Blob([JSON.stringify(store)], { type: "application/json" }), { contentType: "application/json" });
+  if (error) return error.message;
+  // the new one is safely written, so the ones it replaced can go
+  const stale = [...older, ...(from && from !== `${FOLDER}/list-${now}.json` ? [from] : [])];
+  if (stale.length > 0) await sb().storage.from("docs").remove([...new Set(stale)]).catch?.(() => null);
+  return null;
 }
 
 // ---- reading a purchase order ----
@@ -187,7 +224,7 @@ const HOURS = /(\d[\d,]*(?:\.\d+)?)\s*(?:hours?|hrs?)\b/gi;
 // a count right before the work, with room for one adjective
 const COUNT_BEFORE = /(?:^|[^\d])(\d{1,2})\s+(?:[A-Za-z.'-]+\s+){0,3}$/;
 // …unless that number is a PO number, an apartment, a building or a date
-const NOT_A_COUNT = /(?:p\.?\s*o\.?|no\.?|#|apt\.?|apartment|unit|bldg|building|floor|fl\.?|suite|ste\.?|room|work\s*order|\d[/-])\s*$/i;
+const NOT_A_COUNT = /(?:p\.?\s*o\.?|no\.?|#|apt\.?|apartment|unit|bldg|building|floor|fl\.?|suite|ste\.?|room|work\s*order|\d[/-]?)\s*$/i;
 
 export interface PriceMatchOpts {
   book?: PriceItem[];
@@ -206,7 +243,7 @@ interface Hit { key: string; qty: number; said: boolean; at: number }
 export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLineOut[] {
   const book = opts.book || PRICE_BOOK;
   const bundle = opts.bundle ?? true;
-  const raw = (text || "").replace(/[ \t]+/g, " ").trim();
+  const raw = flatten(text || "").trim();
   if (!raw) return [];
   // "one coat" on the PO means the one-coat price
   const coats: 1 | 2 = opts.coats ?? (/\b(?:1|one|single)\s*coat\b/i.test(raw) ? 1 : 2);
@@ -217,26 +254,51 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
     // every measurement in the sentence, each spendable by one line only
     const measures = [...sent.s.matchAll(MEASURE)].map((m) => ({ v: n(m[1]), at: m.index as number, used: false }));
     const hours = [...sent.s.matchAll(HOURS)].map((m) => ({ v: n(m[1]), at: m.index as number, used: false }));
+    // clause boundaries: the guards below read the clause a hit lands in, but
+    // matching runs across the whole sentence so wording like "strip and wax"
+    // still finds itself
+    const ranges: { a: number; b: number; s: string }[] = splitAt(sent.s, CLAUSE).map((c) => ({ a: c.at, b: c.at + c.s.length, s: c.s }));
+    const clOf = (pos: number) => { const i = ranges.findIndex((r) => pos >= r.a && pos <= r.b); return i < 0 ? Math.max(0, ranges.length - 1) : i; };
+
+    // where each line item shows up in this sentence — once per clause
+    const found: { key: string; at: number; end: number; hit: string; cl: number; own: boolean }[] = [];
+    for (const p of book) {
+      let re: RegExp;
+      try { re = new RegExp(p.words, "gi"); } catch { continue; } // unusable wording is simply skipped
+      const seenCl = new Set<number>();
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(sent.s))) {
+        if (m.index === re.lastIndex) re.lastIndex++;
+        const cl = clOf(m.index);
+        if (seenCl.has(cl)) continue; // a clause names a thing once
+        seenCl.add(cl);
+        found.push({ key: p.key, at: m.index, end: m.index + m[0].length, hit: m[0], cl, own: p.key.startsWith("own:") });
+      }
+    }
+    // two lines claiming the same words is one piece of work: the longer
+    // wording wins, and their own line item wins a tie against the sheet
+    const shadowed = new Set<number>();
+    found.forEach((a, i) => found.forEach((b, j) => {
+      if (i === j || shadowed.has(i) || shadowed.has(j)) return;
+      if (a.at >= b.end || b.at >= a.end) return; // no overlap
+      const alen = a.end - a.at, blen = b.end - b.at;
+      // the sheet's own pairs (hinges, strikes, panic bar) share wording on
+      // purpose and are settled by the clause rules below — leave them be
+      const bothSheet = !a.own && !b.own;
+      if (alen > blen) shadowed.add(j);
+      else if (alen === blen && !bothSheet && (a.own !== b.own ? a.own : i < j)) shadowed.add(j);
+    }));
 
     const pend: { key: string; at: number; hit: string; unit: string; qty: number; cl: number }[] = [];
-    const ranges: { a: number; b: number }[] = [];
-    for (const cl of splitAt(sent.s, CLAUSE)) {
-      const clIdx = ranges.length;
-      ranges.push({ a: cl.at, b: cl.at + cl.s.length });
-      const inClause: { key: string; at: number; hit: string }[] = [];
-      for (const p of book) {
-        let re: RegExp;
-        try { re = new RegExp(p.words, "gi"); } catch { continue; } // a line item with unusable wording is simply skipped
-        const m = re.exec(cl.s);
-        if (m) inClause.push({ key: p.key, at: m.index, hit: m[0] }); // a clause names a thing once
-      }
+    for (let ci = 0; ci < ranges.length; ci++) {
+      const cl = ranges[ci];
+      const inClause = found.filter((f, i) => f.cl === ci && !shadowed.has(i));
       const has = (k: string) => inClause.some((x) => x.key === k);
       const drop = new Set<string>();
       // a door named next to its hardware is where the hardware goes
       if (has("door") && ON_A_DOOR.test(cl.s)) drop.add("door");
-      // one location wins; with none named, the cheaper line is the safe guess
-      // …but only when both variants matched: if one is switched off in
-      // Settings, the other stands on its own
+      // one location wins — but only when both variants matched: if one is
+      // switched off in Settings, the other stands on its own
       if (has("hinge_lobby") && has("hinge_apt")) drop.add(/lobby/i.test(cl.s) ? "hinge_apt" : "hinge_lobby");
       if (has("strike_lobby") && has("strike_bsmt")) drop.add(/lobby/i.test(cl.s) ? "strike_bsmt" : "strike_lobby");
       // the panic bar is one line — with the lever handle when the PO says so
@@ -254,21 +316,20 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
         const p = byKey.get(x.key)!;
         let qty = 0;
         if (p.unit !== "SF" && p.unit !== "HOUR") {
-          const before = cl.s.slice(0, x.at);
+          const before = sent.s.slice(cl.a, x.at);
           const b = before.match(COUNT_BEFORE);
           if (b && !NOT_A_COUNT.test(before.slice(0, (b.index ?? 0) + (/^\D/.test(b[0]) ? 1 : 0)))) qty = n(b[1]);
           if (!qty) {
-            const after = cl.s.slice(x.at + x.hit.length, x.at + x.hit.length + 24);
+            const after = sent.s.slice(x.at + x.hit.length, x.at + x.hit.length + 24);
             const a = after.match(/^\s*(?:[x×]|qty\.?|=|\()\s*(\d{1,2})\b/i) || after.match(/^\s*(\d{1,2})\s*(?:ea\b|each|pcs?\b|pieces?|units?)/i);
             if (a) qty = n(a[1]);
           }
         }
-        pend.push({ key: x.key, at: cl.at + x.at, hit: x.hit, unit: p.unit, qty, cl: clIdx });
+        pend.push({ key: x.key, at: x.at, hit: x.hit, unit: p.unit, qty, cl: ci });
       }
     }
     // each measurement in the sentence belongs to the work nearest it, and is
     // spent once — so one "150 sq ft" can't be billed on two different lines
-    const clOf = (pos: number) => { const i = ranges.findIndex((r) => pos >= r.a && pos <= r.b); return i < 0 ? -1 : i; };
     for (const [unit, pool] of [["SF", measures], ["HOUR", hours]] as const) {
       const want = pend.filter((x) => x.unit === unit);
       // work in the same clause as the measurement gets first claim on it
@@ -326,3 +387,12 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
 // priced in its own words never gets a second, list-priced copy beside it
 export const keysIn = (description: string, book?: PriceItem[]): string[] =>
   priceLinesFor(description, { book, bundle: false }).map((l) => l.key);
+
+// Which single line item a description already stands for — used to tell
+// whether work is already on a job. Only an unambiguous answer counts: a
+// description that reads as two different lines ("move out clean and paint
+// touch-up") claims neither, so nothing gets silently swallowed.
+export const soleKey = (description: string, book?: PriceItem[]): string | null => {
+  const ks = keysIn(description, book);
+  return ks.length === 1 ? ks[0] : null;
+};

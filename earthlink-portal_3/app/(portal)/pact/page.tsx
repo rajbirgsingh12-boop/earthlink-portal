@@ -13,9 +13,9 @@ import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
 import { parsePactPoText, type PactPoFields } from "@/lib/parsePactPo";
-import { priceLinesFor, keysIn, loadPrices, type PriceItem } from "@/lib/priceBook";
+import { priceLinesFor, soleKey, loadPrices, type PriceItem } from "@/lib/priceBook";
 
-interface Item { description: string; qty: number; unit: string; unit_price: number; }
+interface Item { description: string; qty: number; unit: string; unit_price: number; key?: string; }
 interface Job {
   id: string; partner: string; development: string; job_number: string; description: string;
   amount: number; approved: boolean; work_done: boolean; invoice_sent: string | null;
@@ -171,20 +171,26 @@ export default function Pact() {
     const bk = await priceBook();
     const lines = priceLinesFor(text, { book: bk });
     if (lines.length === 0) return existing;
-    // what each line already on the job stands for, in price-list terms
+    // what each line already on the job stands for. A line the portal wrote
+    // remembers its own price-list line; one typed by hand or read off a PO is
+    // matched only when it reads as exactly one line and nothing else, so
+    // nothing gets silently swallowed or doubled.
     const covered = new Map<string, number>();
-    existing.forEach((it, i) => keysIn(it.description, bk).forEach((k) => { if (!covered.has(k)) covered.set(k, i); }));
+    existing.forEach((it, i) => {
+      const k = it.key || soleKey(it.description, bk);
+      if (k && !covered.has(k)) covered.set(k, i);
+    });
     const out = [...existing];
     for (const l of lines) {
       const at = covered.get(l.key);
       if (at === undefined) {
-        out.push({ description: l.description, qty: l.qty, unit: l.unit, unit_price: l.unit_price });
+        out.push({ description: l.description, qty: l.qty, unit: l.unit, unit_price: l.unit_price, key: l.key });
         covered.set(l.key, out.length - 1);
         continue;
       }
       const it = out[at];
-      if (Number(it.unit_price) > 0) continue; // the PO's own price wins
-      out[at] = { ...it, unit: it.unit || l.unit, unit_price: l.unit_price, qty: Number(it.qty) > 1 ? it.qty : l.qty };
+      if (Number(it.unit_price) > 0) { out[at] = { ...it, key: it.key || l.key }; continue; } // the PO's own price wins
+      out[at] = { ...it, unit: it.unit || l.unit, unit_price: l.unit_price, qty: Number(it.qty) > 1 ? it.qty : l.qty, key: it.key || l.key };
     }
     return out.filter((it) => it.description.trim());
   };

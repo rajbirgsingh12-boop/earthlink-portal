@@ -43,6 +43,9 @@ export default function Pact() {
   const [role, setRole] = useState("");
   const canInvoice = role === "admin";
   const canEdit = role === "admin" || role === "office";
+  // the office writes proposals, so it needs the prices — invoicing stays with
+  // the admin account
+  const canPrice = canEdit;
   const [q, setQ] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [draft, setDraft] = useState({ ...BLANK });
@@ -221,34 +224,78 @@ export default function Pact() {
 
   // the job's proposal letter — the same shape the reader here understands,
   // so a signed copy coming back makes the invoice without retyping anything
+  const proposalBytes = async (j: Job): Promise<{ bytes: Uint8Array; name: string }> => {
+    const { buildProposalDocx, proposalFileName } = await import("@/lib/proposalDoc");
+    let lines = itemsOf(j)
+      .filter((it) => it.description.trim() && Number(it.qty) > 0)
+      .map((it) => ({ description: it.description, qty: Number(it.qty), unit: it.unit, unit_price: Number(it.unit_price) || 0 }));
+    if (lines.length === 0) {
+      const seeded = await priceFromList(j.description || "", []);
+      lines = seeded.map((it) => ({ description: it.description, qty: Number(it.qty) || 1, unit: it.unit, unit_price: Number(it.unit_price) || 0 }));
+    }
+    if (lines.length === 0) lines = [{ description: j.description || "Work as discussed", qty: 1, unit: "EACH", unit_price: 0 }];
+    const fields = {
+      poNumber: j.po_number || j.job_number || "",
+      date: prettyDate(today()),
+      attn: (j.contact || "").split("·")[0].replace(/\s*\d[\d\s().-]{6,}$/, "").trim(),
+      billTo: (j.bill_to || j.partner || "").split(/,\s*/).filter(Boolean).slice(0, 3),
+      serviceAddress: [j.address, j.property_unit ? `Apartment ${j.property_unit}` : ""].filter(Boolean).join(", "),
+      lines,
+      taxPct: taxRate(j),
+    };
+    return { bytes: buildProposalDocx(fields, await logoBytes()), name: proposalFileName(fields) };
+  };
+
+  const DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
   const makeProposal = async (j: Job) => {
     setBusy(true);
     try {
-      const { buildProposalDocx, proposalFileName } = await import("@/lib/proposalDoc");
-      let lines = itemsOf(j)
-        .filter((it) => it.description.trim() && Number(it.qty) > 0)
-        .map((it) => ({ description: it.description, qty: Number(it.qty), unit: it.unit, unit_price: Number(it.unit_price) || 0 }));
-      if (lines.length === 0) {
-        const seeded = await priceFromList(j.description || "", []);
-        lines = seeded.map((it) => ({ description: it.description, qty: Number(it.qty) || 1, unit: it.unit, unit_price: Number(it.unit_price) || 0 }));
-      }
-      if (lines.length === 0) lines = [{ description: j.description || "Work as discussed", qty: 1, unit: "EACH", unit_price: 0 }];
-      const fields = {
-        poNumber: j.po_number || j.job_number || "",
-        date: prettyDate(today()),
-        attn: (j.contact || "").split("·")[0].replace(/\s*\d[\d\s().-]{6,}$/, "").trim(),
-        billTo: (j.bill_to || j.partner || "").split(/,\s*/).filter(Boolean).slice(0, 3),
-        serviceAddress: [j.address, j.property_unit ? `Apartment ${j.property_unit}` : ""].filter(Boolean).join(", "),
-        lines,
-        taxPct: taxRate(j),
-      };
-      const name = askFileName(proposalFileName(fields));
+      const { bytes, name: def } = await proposalBytes(j);
+      const name = askFileName(def);
       if (!name) return;
-      saveBytes(buildProposalDocx(fields, await logoBytes()), name, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+      saveBytes(bytes, name, DOCX);
       flash("Proposal saved — send it over, and the signed copy reads straight back in here");
     } catch (err) {
       flash(`Couldn't build the proposal (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
     } finally { setBusy(false); }
+  };
+
+  // One PO in, both papers out: the proposal to send now and the invoice for
+  // when the work is done. Each saves on its own tap so no browser blocks the
+  // second file, and "both" saves them back to back.
+  const saveProposalFor = async (j: Job) => {
+    setBusy(true);
+    try {
+      const { bytes, name } = await proposalBytes(j);
+      saveBytes(bytes, name, DOCX);
+      flash("Proposal saved");
+    } catch (err) {
+      flash(`Couldn't build the proposal (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
+    } finally { setBusy(false); }
+  };
+
+  const saveInvoiceFor = async (j: Job): Promise<boolean> => {
+    setBusy(true);
+    try {
+      const theOrg = await companyOrg();
+      if (!theOrg) { flash("Company details haven't loaded — check your signal and try again"); return false; }
+      const bytes = await buildPackageBytes(j, theOrg);
+      if (!bytes) { flash("Couldn't build the invoice — open the job and check the work lines"); return false; }
+      saveBytes(bytes, invoiceFileName(j), "application/pdf");
+      flash("Invoice saved");
+      return true;
+    } catch (err) {
+      flash(`Couldn't build the invoice (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
+      return false;
+    } finally { setBusy(false); }
+  };
+
+  const saveBoth = async (j: Job) => {
+    await saveProposalFor(j);
+    await new Promise((r) => setTimeout(r, 600)); // let the first download land
+    await saveInvoiceFor(j);
+    flash("Proposal and invoice both saved");
   };
 
   // the empty one to fill in by hand
@@ -376,6 +423,11 @@ export default function Pact() {
       // open the fresh job with its details showing so what was read is on screen
       setOpenId((job as Job).id);
       setShowDetails(true);
+      // the finished job, with the lines the price list filled in — and if
+      // that read comes back empty, the job we just made is still the truth
+      const { data: fresh } = await sb().from("pact_jobs").select("*").eq("id", (job as Job).id).single();
+      const ready = (fresh as Job | null)?.id ? (fresh as Job) : (job as Job);
+      if (!unreadable) setOneShot({ job: ready, note: f.po ? `PO ${f.po}` : "PO read" });
       flash(ue
         ? `Job created, but the PDF didn't attach (${/bucket/i.test(ue.message) ? "storage not set up — run supabase/upgrade_invoices_aging_docs.sql" : ue.message.slice(0, 80)}) — add it from the Documents button`
         : unreadable
@@ -472,6 +524,8 @@ export default function Pact() {
   // ---------- a whole folder of proposals in, all their invoices out ----------
   const folderRef = useRef<HTMLInputElement>(null);
   const [folderResult, setFolderResult] = useState<{ made: Job[]; skipped: number; failed: number } | null>(null);
+  // the PO that just came in: its proposal and invoice, ready to save
+  const [oneShot, setOneShot] = useState<{ job: Job; note: string } | null>(null);
   const handleProposalFolder = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []).filter((f) => /\.docx$/i.test(f.name));
     e.target.value = "";
@@ -735,14 +789,23 @@ export default function Pact() {
   };
 
   // ---------- the submitted package: invoice + PO + before/after, one PDF ----------
+  // the letterhead needs the company details — if the one fetch at page-open
+  // failed (bad signal), try again now instead of being a dead button
+  const companyOrg = async (): Promise<Org | null> => {
+    if (org) return org;
+    const { data } = await sb().from("org").select("*").single();
+    if (!data) return null;
+    setOrg(data as Org);
+    return data as Org;
+  };
+
+  // "invoice # <invoice number> PO <PO number> <address>" — easy to spot in downloads
+  const invoiceFileName = (j: Job) =>
+    `invoice # ${j.invoice_number || ""} PO ${j.po_number || j.job_number || ""} ${[j.address, j.property_unit && `Apt ${j.property_unit}`].filter(Boolean).join(" ")}`
+      .trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\s{2,}/g, " ").slice(0, 120) + ".pdf";
+
   const buildPackage = async (j: Job) => {
-    // the letterhead needs the company details — if the one fetch at page-open
-    // failed (bad signal), try again now instead of being a dead button
-    let theOrg = org;
-    if (!theOrg) {
-      const { data } = await sb().from("org").select("*").single();
-      if (data) { theOrg = data as Org; setOrg(theOrg); }
-    }
+    const theOrg = await companyOrg();
     if (!theOrg) { flash("Company details haven't loaded — check your signal and try again"); return; }
     setBusy(true);
     try {
@@ -751,11 +814,7 @@ export default function Pact() {
       const blob = new Blob([out.buffer as ArrayBuffer], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
       const aEl = document.createElement("a");
-      // "invoice # <invoice number> PO <PO number> <address>" — easy to spot in downloads
-      const fname = askFileName(
-        `invoice # ${j.invoice_number || ""} PO ${j.po_number || j.job_number || ""} ${[j.address, j.property_unit && `Apt ${j.property_unit}`].filter(Boolean).join(" ")}`
-          .trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\s{2,}/g, " ").slice(0, 120) + ".pdf"
-      );
+      const fname = askFileName(invoiceFileName(j));
       if (!fname) { URL.revokeObjectURL(url); setBusy(false); return; }
       aEl.href = url; aEl.download = fname; aEl.click();
       // revoking right away can abort the download on iPhone — give it a minute
@@ -790,6 +849,29 @@ export default function Pact() {
       {/* a folder (or multi-select) of proposal letters, read in one go */}
       {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
       <input ref={folderRef} type="file" multiple {...({ webkitdirectory: "" } as any)} className="hidden" onChange={handleProposalFolder} />
+      {oneShot && (
+        <div className="card mb-3 border-work p-3.5">
+          <div className="font-display text-base font-bold uppercase">{oneShot.note} — papers ready</div>
+          <div className="mt-1 text-xs text-inksoft">
+            {oneShot.job.address || "This job"}{oneShot.job.property_unit ? ` · Apt ${oneShot.job.property_unit}` : ""}
+            {" · "}{itemsOf(oneShot.job).length} work line{itemsOf(oneShot.job).length === 1 ? "" : "s"}
+            {canPrice && Number(oneShot.job.amount) > 0 ? ` · ${fmt(Number(oneShot.job.amount))}` : ""}
+            {canInvoice ? ` · invoice # ${oneShot.job.invoice_number || ""}` : ""}
+            . Check the lines below before you send anything.
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {canInvoice && (
+              <button className="btn btn-primary" disabled={busy} onClick={() => saveBoth(oneShot.job)}>
+                {busy ? "Working…" : "⬇ Proposal + invoice"}
+              </button>
+            )}
+            <button className={canInvoice ? "btn" : "btn btn-primary"} disabled={busy} onClick={() => saveProposalFor(oneShot.job)}>📝 Proposal only</button>
+            {canInvoice && <button className="btn" disabled={busy} onClick={() => saveInvoiceFor(oneShot.job)}>🧾 Invoice only</button>}
+            <button className="btn btn-ghost" disabled={busy} onClick={() => setOneShot(null)}>Done</button>
+          </div>
+        </div>
+      )}
+
       {folderResult && (
         <div className="card mb-3 border-work p-3.5">
           <div className="font-display text-base font-bold uppercase">{folderResult.made.length} proposal{folderResult.made.length === 1 ? "" : "s"} added</div>
@@ -880,7 +962,7 @@ export default function Pact() {
                 })()}
               </button>
               <div className="flex shrink-0 items-center gap-2">
-                {canInvoice && <span className="font-mono text-sm font-semibold">{fmt(Number(j.amount) || invTotal(j))}</span>}
+                {canPrice && <span className="font-mono text-sm font-semibold">{fmt(Number(j.amount) || invTotal(j))}</span>}
                 <button className="text-inksoft" title="Documents & photos" onClick={() => setAttachJob(j)}>📎{(j.attachments || []).length > 0 ? <span className="font-mono text-[10px]">{(j.attachments || []).length}</span> : null}</button>
                 {canEdit && j.canceled && <button className="text-ok" title="Restore" onClick={() => patch(j, { canceled: false })}>↺</button>}
                 {canEdit && <button className="text-alert" title="Delete job" onClick={() => deleteJob(j)}>✕</button>}
@@ -973,15 +1055,15 @@ export default function Pact() {
                   ))}
                   {!canEdit && itemsOf(j).length === 0 && <div className="text-xs text-inksoft">No lines yet.</div>}
                   {canEdit && (() => {
-                    const cols = canInvoice ? "minmax(150px,1fr) 52px 52px 72px 72px 18px" : "minmax(150px,1fr) 52px 52px 18px";
+                    const cols = canPrice ? "minmax(150px,1fr) 52px 52px 72px 72px 18px" : "minmax(150px,1fr) 52px 52px 18px";
                     return (
                       <div className="overflow-x-auto">
-                        <div className={canInvoice ? "min-w-[460px]" : ""}>
+                        <div className={canPrice ? "min-w-[460px]" : ""}>
                           {itemsOf(j).length > 0 && (
                             <div className="mb-1 grid gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-inksoft" style={{ gridTemplateColumns: cols }}>
                               <span>Description of work</span><span className="text-right">Qty</span><span className="text-center">Unit</span>
-                              {canInvoice && <span className="text-right">Price</span>}
-                              {canInvoice && <span className="text-right">Total</span>}
+                              {canPrice && <span className="text-right">Price</span>}
+                              {canPrice && <span className="text-right">Total</span>}
                               <span />
                             </div>
                           )}
@@ -1002,13 +1084,13 @@ export default function Pact() {
                               <input className="field px-1 py-1.5 text-center font-mono" title="Unit of measure" value={it.unit}
                                 onChange={(e) => { const next = [...itemsOf(j)]; next[i] = { ...it, unit: e.target.value }; setItems(j, next); }}
                                 onBlur={() => setItems(j, itemsOf(j), true)} />
-                              {canInvoice && (
+                              {canPrice && (
                                 <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="decimal" title="Price per unit"
                                   {...num(`${j.id}:wl${i}:p`, Number(it.unit_price) || 0,
                                     (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next); },
                                     (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next, true); })} />
                               )}
-                              {canInvoice && <span className="text-right font-mono text-[12px]">{fmt((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</span>}
+                              {canPrice && <span className="text-right font-mono text-[12px]">{fmt((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</span>}
                               <button className="text-alert" title="Remove line" onClick={() => setItems(j, itemsOf(j).filter((_, x) => x !== i), true)}>✕</button>
                             </div>
                           ))}

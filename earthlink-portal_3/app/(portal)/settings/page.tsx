@@ -214,6 +214,21 @@ export default function Settings() {
     loadUsers();
   };
 
+  // sending someone a reset link — the only way to change another person's
+  // password without a Supabase visit
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
+  const sendReset = async () => {
+    const email = resetEmail.trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { flash("Type the person's email address first"); return; }
+    setResetBusy(true);
+    const { error } = await sb().auth.resetPasswordForEmail(email, { redirectTo: `${window.location.origin}/reset` });
+    setResetBusy(false);
+    if (error) { flash(error.message); return; }
+    setResetEmail("");
+    flash(`Reset link sent to ${email} — they open it and pick a new password`);
+  };
+
   const [addOpen, setAddOpen] = useState(false);
   const [newUser, setNewUser] = useState({ name: "", email: "", password: "", role: "office" as Role });
   const [adding, setAdding] = useState(false);
@@ -624,8 +639,17 @@ export default function Settings() {
               </div>
             ))}
           </div>
+          <div className="card mt-2 p-3">
+            <div className="text-[11px] uppercase tracking-widest text-inksoft">Change someone&apos;s password</div>
+            <div className="mt-1 text-xs text-inksoft">Sends them a link to pick a new one. Works for an account that already exists — including your own.</div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <input className="field max-w-xs flex-1" type="email" inputMode="email" placeholder="their email address"
+                value={resetEmail} onChange={(e) => setResetEmail(e.target.value)} />
+              <button className="btn" onClick={sendReset} disabled={resetBusy}>{resetBusy ? "Sending…" : "Send reset link"}</button>
+            </div>
+          </div>
           <div className="mt-2 text-xs text-inksoft">
-            To add a person: Supabase dashboard → Authentication → Add user (email + password). They appear here after first sign-in — new accounts start as foreman.
+            New people: use + Add user above (email, password, role). They can sign in straight away.
           </div>
         </>
       )}

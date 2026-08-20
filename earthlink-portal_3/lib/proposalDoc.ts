@@ -30,24 +30,31 @@ const BRAND = "C24A0A";      // the rule under the letterhead, the totals bar
 const BAND = "F4F1EB";       // the warm tint behind a heading row
 const HAIR = "DCD7CB";       // the line between two work lines
 
+// Word checks the ORDER of these, not just their presence: rFonts, b, i, caps,
+// color, spacing, sz, szCs. Out of order and it opens the letter read-only and
+// says part of it is unreadable.
 interface RunOpts { b?: boolean; sz?: number; color?: string; caps?: boolean; track?: number; font?: string }
 const run = (text: string, o: RunOpts = {}) =>
-  `<w:r><w:rPr>${o.b ? "<w:b/>" : ""}<w:sz w:val="${o.sz ?? 21}"/><w:szCs w:val="${o.sz ?? 21}"/>` +
-  `<w:color w:val="${o.color ?? INK}"/>${o.caps ? "<w:caps/>" : ""}` +
+  `<w:r><w:rPr>` +
+  `<w:rFonts w:ascii="${o.font ?? "Calibri"}" w:hAnsi="${o.font ?? "Calibri"}" w:cs="${o.font ?? "Calibri"}"/>` +
+  `${o.b ? "<w:b/><w:bCs/>" : ""}${o.caps ? "<w:caps/>" : ""}` +
+  `<w:color w:val="${o.color ?? INK}"/>` +
   `${o.track ? `<w:spacing w:val="${o.track}"/>` : ""}` +
-  `<w:rFonts w:ascii="${o.font ?? "Calibri"}" w:hAnsi="${o.font ?? "Calibri"}"/></w:rPr>` +
-  `<w:t xml:space="preserve">${esc(text)}</w:t></w:r>`;
+  `<w:sz w:val="${o.sz ?? 21}"/><w:szCs w:val="${o.sz ?? 21}"/>` +
+  `</w:rPr><w:t xml:space="preserve">${esc(text)}</w:t></w:r>`;
 
+// Same again for the paragraph: pBdr, shd, spacing, ind, jc, in that order.
 interface ParaOpts extends RunOpts { align?: string; space?: number; before?: number; rule?: string; ruleTop?: string; ruleW?: number; shade?: string; indent?: number; line?: number }
 const paraOf = (inner: string, o: ParaOpts = {}) =>
-  `<w:p><w:pPr>${o.align ? `<w:jc w:val="${o.align}"/>` : ""}` +
-  `<w:spacing w:before="${o.before ?? 0}" w:after="${o.space ?? 60}" w:line="${o.line ?? 264}" w:lineRule="auto"/>` +
-  (o.indent ? `<w:ind w:left="${o.indent}" w:right="${o.indent}"/>` : "") +
+  `<w:p><w:pPr>` +
   (o.rule || o.ruleTop
     ? `<w:pBdr>${o.ruleTop ? `<w:top w:val="single" w:sz="${o.ruleW ?? 6}" w:space="8" w:color="${o.ruleTop}"/>` : ""}`
       + `${o.rule ? `<w:bottom w:val="single" w:sz="${o.ruleW ?? 6}" w:space="6" w:color="${o.rule}"/>` : ""}</w:pBdr>`
     : "") +
-  (o.shade ? `<w:shd w:val="clear" w:fill="${o.shade}"/>` : "") +
+  (o.shade ? `<w:shd w:val="clear" w:color="auto" w:fill="${o.shade}"/>` : "") +
+  `<w:spacing w:before="${o.before ?? 0}" w:after="${o.space ?? 60}" w:line="${o.line ?? 264}" w:lineRule="auto"/>` +
+  (o.indent ? `<w:ind w:left="${o.indent}" w:right="${o.indent}"/>` : "") +
+  (o.align ? `<w:jc w:val="${o.align}"/>` : "") +
   `</w:pPr>${inner}</w:p>`;
 const para = (text: string, o: ParaOpts = {}) => paraOf(text ? run(text, o) : "", o);
 // a blank line of a chosen height, for spacing that a margin can't give
@@ -59,9 +66,11 @@ const cell = (inner: string, w: number, o: CellOpts = {}) => {
   const side = (n: string, c?: string) => `<w:${n} w:val="${c ? "single" : "nil"}" w:sz="${o.bw ?? 6}" w:space="0" w:color="${c ?? "auto"}"/>`;
   return `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/>` +
     `<w:tcBorders>${side("top", o.top)}${side("left")}${side("bottom", o.bottom)}${side("right")}</w:tcBorders>` +
-    (o.shade ? `<w:shd w:val="clear" w:fill="${o.shade}"/>` : "") +
+    (o.shade ? `<w:shd w:val="clear" w:color="auto" w:fill="${o.shade}"/>` : "") +
     `<w:tcMar><w:top w:w="${pt}" w:type="dxa"/><w:left w:w="${pl}" w:type="dxa"/><w:bottom w:w="${pb}" w:type="dxa"/><w:right w:w="${pr}" w:type="dxa"/></w:tcMar>` +
-    `<w:vAlign w:val="${o.valign ?? "center"}"/></w:tcPr>${inner}</w:tc>`;
+    // a cell has to hold at least one paragraph — an empty one is what makes
+    // Word say part of the document is unreadable
+    `<w:vAlign w:val="${o.valign ?? "center"}"/></w:tcPr>${inner || para("", { space: 0 })}</w:tc>`;
 };
 
 // every table here draws its own lines cell by cell, so a row can carry a rule
@@ -222,18 +231,48 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
       `<Default Extension="xml" ContentType="application/xml"/>` +
       `<Default Extension="png" ContentType="image/png"/>` +
       `<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>` +
+      `<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>` +
+      `<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>` +
+      `<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>` +
       `</Types>`),
     "_rels/.rels": strToU8(
       `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
       `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
       `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>` +
+      `<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>` +
+      `<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>` +
       `</Relationships>`),
     "word/document.xml": strToU8(doc),
     "word/_rels/document.xml.rels": strToU8(
       `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
       `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+      `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>` +
       (logo ? `<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/logo.png"/>` : "") +
       `</Relationships>`),
+    // the default face and size, so Word doesn't reach for its own
+    "word/styles.xml": strToU8(
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+      `<w:docDefaults><w:rPrDefault><w:rPr>` +
+      `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/><w:color w:val="${INK}"/><w:sz w:val="21"/><w:szCs w:val="21"/>` +
+      `</w:rPr></w:rPrDefault>` +
+      `<w:pPrDefault><w:pPr><w:spacing w:after="60" w:line="264" w:lineRule="auto"/></w:pPr></w:pPrDefault>` +
+      `</w:docDefaults>` +
+      `<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>` +
+      `</w:styles>`),
+    "docProps/core.xml": strToU8(
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"` +
+      ` xmlns:dc="http://purl.org/dc/elements/1.1/">` +
+      `<dc:title>${esc(`Proposal${f.poNumber ? ` ${f.poNumber}` : ""}`)}</dc:title>` +
+      `<dc:creator>${esc(L.name)}</dc:creator>` +
+      `<cp:lastModifiedBy>${esc(L.name)}</cp:lastModifiedBy>` +
+      `</cp:coreProperties>`),
+    "docProps/app.xml": strToU8(
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">` +
+      `<Application>Earth Link Field Office</Application><Company>${esc(L.name)}</Company>` +
+      `</Properties>`),
   };
   if (logo) files["word/media/logo.png"] = logo;
   return zipSync(files, { level: 6 });

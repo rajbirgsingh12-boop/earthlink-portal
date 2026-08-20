@@ -2,7 +2,8 @@
 // Reading happens in Node with pdfjs's legacy build — identical results on
 // every device, no reliance on the phone browser's PDF support.
 import { NextResponse } from "next/server";
-import { parsePactPoPages, type PoItem } from "@/lib/parsePactPo";
+import { type PoItem } from "@/lib/parsePactPo";
+import { readPoOrProposalPages } from "@/lib/parsePactProposal";
 
 export const runtime = "nodejs";
 const env = (k: string) => process.env[k] || "";
@@ -39,7 +40,7 @@ export async function POST(req: Request) {
       pages.push(tc.items as PoItem[]);
     }
     await (doc as unknown as { destroy?: () => Promise<void> }).destroy?.().catch(() => null);
-    return NextResponse.json({ ok: true, fields: parsePactPoPages(pages) });
+    return NextResponse.json({ ok: true, fields: readPoOrProposalPages(pages) });
   } catch (e) {
     return NextResponse.json({ error: `Couldn't open the PDF: ${e instanceof Error ? e.message.slice(0, 120) : "unknown"}` }, { status: 422 });
   }

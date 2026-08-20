@@ -2,7 +2,7 @@
 // "Dear …, Service Address …, PO …, Scope of Work" letter — into the same
 // fields the PO reader produces, so uploading either kind of file makes a job.
 import { unzipSync, strFromU8 } from "fflate";
-import { readRow, type PactPoFields } from "./parsePactPo";
+import { readRow, parsePactPoPages, linesFromItems, type PactPoFields, type PoItem } from "./parsePactPo";
 
 // document.xml → plain text, one line per paragraph. Table rows become one
 // line each with tab-separated cells, so "description | price" tables read
@@ -175,4 +175,12 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
 
 export function parsePactProposalDocx(buf: ArrayBuffer): PactPoFields & PactProposalExtra {
   return parsePactProposalText(docxToText(buf));
+}
+
+// A PDF dropped on the PACT tab is either a partner's purchase order or one of
+// our own proposal letters coming back signed. Both readers live behind this
+// one call so the server and the phone can never decide it differently.
+export function readPoOrProposalPages(pages: PoItem[][]): PactPoFields & PactProposalExtra {
+  const text = pages.map((items, i) => linesFromItems(items, i + 1).map((l) => l.text).join("\n")).join("\n");
+  return looksLikeProposal(text) ? parsePactProposalText(text) : parsePactPoPages(pages);
 }

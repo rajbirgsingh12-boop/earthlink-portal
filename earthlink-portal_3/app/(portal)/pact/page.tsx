@@ -880,6 +880,7 @@ export default function Pact() {
 
   const buildPackageBytes = async (j: Job, org2: Org): Promise<Uint8Array | null> => {
     const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
+    const { money: usd } = await import("@/lib/proposalDoc");
     const items = itemsOf(j).filter((it) => Number(it.qty) > 0 && it.description.trim());
     if (items.length === 0) return null;
       const pkg = await PDFDocument.create();
@@ -890,7 +891,9 @@ export default function Pact() {
       const L = 54, R = 558;
       let y = 736;
       const ink = rgb(0.09, 0.09, 0.08), soft = rgb(0.45, 0.44, 0.42);
-      const ruleC = rgb(0.82, 0.8, 0.75), fillC = rgb(0.94, 0.93, 0.9);
+      const ruleC = rgb(0.86, 0.84, 0.79), fillC = rgb(0.957, 0.945, 0.922);
+      // the same orange as the proposal letter, so the pair look like one company
+      const brand = rgb(0.761, 0.290, 0.039), white = rgb(1, 1, 1);
       const put = (t: string, x: number, yy: number, size = 9.5, font = helv, color = ink) =>
         page.drawText(t, { x, y: yy, size, font, color });
       const putR = (t: string, xr: number, yy: number, size = 9.5, font = helv, color = ink) =>
@@ -909,7 +912,7 @@ export default function Pact() {
         lx = L + lw2 + 12;
       } catch { /* logo unavailable — text-only letterhead */ }
       put(COMPANY.letterhead.name, lx, y, 14, bold);
-      putR("INVOICE", R, y - 3, 21, bold);
+      putR("INVOICE", R, y - 3, 22, bold, brand);
       y -= 14;
       put(COMPANY.letterhead.address, lx, y, 8.5, helv, soft);
       y -= 11;
@@ -917,8 +920,8 @@ export default function Pact() {
       y -= 11;
       put(COMPANY.letterhead.emails, lx, y, 8.5, helv, soft);
       y -= 12;
-      hr(y, 1.6, ink);
-      y -= 24;
+      hr(y, 2, brand);
+      y -= 26;
 
       // invoice meta
       ([["INVOICE #", j.invoice_number || j.po_number || "—"], ["DATE", prettyDate(today())], ["PURCHASE ORDER", j.po_number || j.job_number || "—"]] as [string, string][]).forEach(([k, v], i) => {
@@ -937,7 +940,15 @@ export default function Pact() {
       const billRest = (j.bill_to || "").startsWith(j.partner || "") && j.partner
         ? (j.bill_to || "").slice(j.partner.length)
         : (j.bill_to || "");
-      const billLines = [j.partner, ...billRest.trim().split(/(?<=\d{5})\s|,\s*/).filter(Boolean)].filter(Boolean).slice(0, 4) as string[];
+      // "White Plains, NY 10606" is one place — splitting on every comma cut the
+      // city off its state and zip, and the four-line cap then dropped them
+      // entirely. An invoice missing the city is an invoice nobody can pay.
+      const billParts: string[] = [];
+      for (const part of billRest.trim().split(/,\s*/).map((x) => x.trim()).filter(Boolean)) {
+        if (billParts.length > 0 && /^[A-Z]{2}\b\s*\d{5}(?:-\d{4})?$/.test(part)) billParts[billParts.length - 1] += `, ${part}`;
+        else billParts.push(part);
+      }
+      const billLines = [j.partner, ...billParts].filter(Boolean).slice(0, 6) as string[];
       const siteLines = [j.address || "", unitLabel(j.property_unit || "")].filter(Boolean) as string[];
       const startY = y;
       billLines.forEach((s, i) => put(String(s).slice(0, 48), L, startY - i * 12, 9.5, i === 0 ? bold : helv));
@@ -945,24 +956,22 @@ export default function Pact() {
       y = startY - Math.max(billLines.length, siteLines.length, 1) * 12 - 16;
 
       // work table
-      page.drawRectangle({ x: L, y: y - 5, width: R - L, height: 18, color: fillC });
-      put("DESCRIPTION OF WORK", L + 6, y, 8, bold, soft);
-      putR("QTY", 388, y, 8, bold, soft);
-      put("UNIT", 400, y, 8, bold, soft);
-      putR("UNIT PRICE", 500, y, 8, bold, soft);
-      putR("AMOUNT", R - 6, y, 8, bold, soft);
-      y -= 20;
+      const tableHead = (label: string) => {
+        page.drawRectangle({ x: L, y: y - 6, width: R - L, height: 20, color: fillC });
+        page.drawLine({ start: { x: L, y: y - 6 }, end: { x: R, y: y - 6 }, thickness: 1.4, color: brand });
+        put(label, L + 8, y, 8, bold, soft);
+        putR("QTY", 388, y, 8, bold, soft);
+        put("UNIT", 400, y, 8, bold, soft);
+        putR("UNIT PRICE", 500, y, 8, bold, soft);
+        putR("AMOUNT", R - 8, y, 8, bold, soft);
+        y -= 22;
+      };
+      tableHead("DESCRIPTION OF WORK");
       // a long work list spills onto extra pages instead of running off the sheet
       const newItemsPage = () => {
         page = pkg.addPage([612, 792]);
         y = 736;
-        page.drawRectangle({ x: L, y: y - 5, width: R - L, height: 18, color: fillC });
-        put("DESCRIPTION OF WORK (continued)", L + 6, y, 8, bold, soft);
-        putR("QTY", 388, y, 8, bold, soft);
-        put("UNIT", 400, y, 8, bold, soft);
-        putR("UNIT PRICE", 500, y, 8, bold, soft);
-        putR("AMOUNT", R - 6, y, 8, bold, soft);
-        y -= 20;
+        tableHead("DESCRIPTION OF WORK (continued)");
       };
       let subtotal = 0;
       items.forEach((it) => {
@@ -975,14 +984,14 @@ export default function Pact() {
         if (cur.trim()) rowsTxt.push(cur.trim());
         rowsTxt.forEach((rt, i2) => {
           if (y < 96) newItemsPage();
-          put(rt, L + 6, y);
+          put(rt, L + 8, y);
           if (i2 === 0) {
-            putR(String(it.qty), 388, y);
-            put(it.unit, 400, y);
-            putR(Number(it.unit_price).toFixed(2), 500, y);
-            putR(amount.toFixed(2), R - 6, y);
+            putR(String(it.qty), 388, y, 9.5, helv, soft);
+            put(it.unit, 400, y, 9.5, helv, soft);
+            putR(usd(Number(it.unit_price)), 500, y, 9.5, helv, soft);
+            putR(usd(amount), R - 8, y);
           }
-          y -= 13;
+          y -= 14;
         });
         y -= 3;
         hr(y + 9, 0.5);
@@ -992,16 +1001,15 @@ export default function Pact() {
       if (y < 150) { page = pkg.addPage([612, 792]); y = 736; }
       y -= 8;
       const taxAmt = subtotal * taxRate(j) / 100;
-      putR("Subtotal", 470, y, 9.5, helv, soft);
-      putR(`$${subtotal.toFixed(2)}`, R - 6, y);
-      y -= 15;
-      putR(`Sales tax ${taxRate(j)}%`, 470, y, 9.5, helv, soft);
-      putR(`$${taxAmt.toFixed(2)}`, R - 6, y);
-      y -= 10;
-      page.drawLine({ start: { x: 380, y }, end: { x: R, y }, thickness: 1.2, color: ink });
-      y -= 17;
-      putR("TOTAL DUE", 470, y, 10.5, bold);
-      putR(`$${(subtotal + taxAmt).toFixed(2)}`, R - 6, y, 12.5, bold);
+      putR("Subtotal", 466, y, 9.5, helv, soft);
+      putR(usd(subtotal), R - 8, y);
+      y -= 16;
+      putR(`Sales tax ${taxRate(j)}%`, 466, y, 9.5, helv, soft);
+      putR(usd(taxAmt), R - 8, y);
+      y -= 30;
+      page.drawRectangle({ x: 330, y: y - 6, width: R - 330, height: 26, color: brand });
+      putR("TOTAL DUE", 466, y, 10.5, bold, white);
+      putR(usd(subtotal + taxAmt), R - 8, y, 13, bold, white);
 
       // footer
       hr(72, 0.6);

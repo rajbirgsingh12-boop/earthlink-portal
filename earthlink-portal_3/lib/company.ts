@@ -21,6 +21,8 @@ export const COMPANY = {
     // how the owner signs a proposal letter
     signer: "Harpinder Singh",
     signerTitle: "President",
+    // the line along the foot of their own letters
+    footer: "Proudly serving since 1999  ·  Interior & exterior renovations  ·  Fully licensed and insured",
   },
   // filing details used on NYCHA paperwork (Statement of Services, invoices)
   fax: "718-766-8010",

@@ -54,14 +54,24 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
   const contactName = (cutAt > 0 ? attnLine.slice(0, cutAt) : attnLine).replace(/[\s,]+$/, "").trim();
   const billLines: string[] = [];
   if (cutAt > 0) { const rest = attnLine.slice(cutAt).trim(); if (rest) billLines.push(rest); }
-  // the office block sits under the ATTN line — or, on a letter that names
-  // nobody, between the date and the greeting
-  const blockFrom = attnIdx >= 0 ? attnIdx + 1 : lines.findIndex((l) => /^date\b\s*:?/i.test(l)) + 1;
-  for (let i = blockFrom; blockFrom > 0 && i < lines.length && billLines.length < 3; i++) {
-    const l = lines[i];
-    if (!l) { if (attnIdx >= 0) break; continue; }
-    if (/^dear\b|service address|^po\s*#|pleased to submit/i.test(l)) break;
-    billLines.push(l);
+  const HEADINGISH = /^dear\b|service address|^po\s*#|pleased to submit|scope of work|^proposal\b|^date\b/i;
+  if (attnIdx >= 0) {
+    // the office block sits under the ATTN line
+    for (let i = attnIdx + 1; i < lines.length && billLines.length < 3; i++) {
+      const l = lines[i];
+      if (!l || HEADINGISH.test(l)) break;
+      billLines.push(l);
+    }
+  } else {
+    // a letter that names nobody: the block is the run of lines sitting
+    // directly above the greeting, read upwards from it
+    const dearAt = lines.findIndex((l) => /^dear\b/i.test(l));
+    for (let i = dearAt - 1; i >= 0 && billLines.length < 3; i--) {
+      const l = lines[i];
+      if (!l) { if (billLines.length > 0) break; continue; }
+      if (HEADINGISH.test(l)) break;
+      billLines.unshift(l);
+    }
   }
   const billBlock = [contactName, ...billLines].filter(Boolean).join(", ");
 

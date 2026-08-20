@@ -21,32 +21,57 @@ export interface ProposalFields {
 const esc = (s: string) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 export const money = (n: number) => `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-// ---- little OOXML helpers (half-points for size, twips for width) ----
-const run = (text: string, o: { b?: boolean; sz?: number; color?: string } = {}) =>
-  `<w:r><w:rPr>${o.b ? "<w:b/>" : ""}<w:sz w:val="${o.sz ?? 22}"/><w:szCs w:val="${o.sz ?? 22}"/>` +
-  `${o.color ? `<w:color w:val="${o.color}"/>` : ""}<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/></w:rPr>` +
+// ---- the letter's palette and type scale ----
+// Sizes are half-points, widths are twips (1/1440 in), letter-spacing is
+// twentieths of a point — Word's own units, so nothing is guessed at.
+const INK = "1F2328";        // body text: a touch softer than pure black in print
+const MUTED = "6E6E66";      // labels and the second line of anything
+const BRAND = "C24A0A";      // the rule under the letterhead, the totals bar
+const BAND = "F4F1EB";       // the warm tint behind a heading row
+const HAIR = "DCD7CB";       // the line between two work lines
+
+interface RunOpts { b?: boolean; sz?: number; color?: string; caps?: boolean; track?: number; font?: string }
+const run = (text: string, o: RunOpts = {}) =>
+  `<w:r><w:rPr>${o.b ? "<w:b/>" : ""}<w:sz w:val="${o.sz ?? 21}"/><w:szCs w:val="${o.sz ?? 21}"/>` +
+  `<w:color w:val="${o.color ?? INK}"/>${o.caps ? "<w:caps/>" : ""}` +
+  `${o.track ? `<w:spacing w:val="${o.track}"/>` : ""}` +
+  `<w:rFonts w:ascii="${o.font ?? "Calibri"}" w:hAnsi="${o.font ?? "Calibri"}"/></w:rPr>` +
   `<w:t xml:space="preserve">${esc(text)}</w:t></w:r>`;
 
-const para = (text: string, o: { b?: boolean; sz?: number; align?: string; space?: number; rule?: boolean; color?: string } = {}) =>
+interface ParaOpts extends RunOpts { align?: string; space?: number; before?: number; rule?: string; ruleTop?: string; ruleW?: number; shade?: string; indent?: number; line?: number }
+const paraOf = (inner: string, o: ParaOpts = {}) =>
   `<w:p><w:pPr>${o.align ? `<w:jc w:val="${o.align}"/>` : ""}` +
-  `<w:spacing w:after="${o.space ?? 60}" w:line="240" w:lineRule="auto"/>` +
-  `${o.rule ? '<w:pBdr><w:bottom w:val="single" w:sz="12" w:space="4" w:color="1A1A1A"/></w:pBdr>' : ""}` +
-  `</w:pPr>${text ? run(text, o) : ""}</w:p>`;
-
-const cell = (inner: string, w: number, o: { border?: boolean; shade?: string; align?: string } = {}) =>
-  `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/>` +
-  (o.border === false ? "<w:tcBorders><w:top w:val=\"nil\"/><w:left w:val=\"nil\"/><w:bottom w:val=\"nil\"/><w:right w:val=\"nil\"/></w:tcBorders>" : "") +
+  `<w:spacing w:before="${o.before ?? 0}" w:after="${o.space ?? 60}" w:line="${o.line ?? 264}" w:lineRule="auto"/>` +
+  (o.indent ? `<w:ind w:left="${o.indent}" w:right="${o.indent}"/>` : "") +
+  (o.rule || o.ruleTop
+    ? `<w:pBdr>${o.ruleTop ? `<w:top w:val="single" w:sz="${o.ruleW ?? 6}" w:space="8" w:color="${o.ruleTop}"/>` : ""}`
+      + `${o.rule ? `<w:bottom w:val="single" w:sz="${o.ruleW ?? 6}" w:space="6" w:color="${o.rule}"/>` : ""}</w:pBdr>`
+    : "") +
   (o.shade ? `<w:shd w:val="clear" w:fill="${o.shade}"/>` : "") +
-  `<w:vAlign w:val="center"/></w:tcPr>${inner}</w:tc>`;
+  `</w:pPr>${inner}</w:p>`;
+const para = (text: string, o: ParaOpts = {}) => paraOf(text ? run(text, o) : "", o);
+// a blank line of a chosen height, for spacing that a margin can't give
+const gap = (h: number) => `<w:p><w:pPr><w:spacing w:after="0" w:line="${h}" w:lineRule="exact"/></w:pPr></w:p>`;
 
-const table = (rows: string[], borders: boolean, cols: number[]) =>
+interface CellOpts { shade?: string; pad?: [number, number, number, number]; top?: string; bottom?: string; bw?: number; valign?: string }
+const cell = (inner: string, w: number, o: CellOpts = {}) => {
+  const [pt, pr, pb, pl] = o.pad ?? [90, 110, 90, 110];
+  const side = (n: string, c?: string) => `<w:${n} w:val="${c ? "single" : "nil"}" w:sz="${o.bw ?? 6}" w:space="0" w:color="${c ?? "auto"}"/>`;
+  return `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/>` +
+    `<w:tcBorders>${side("top", o.top)}${side("left")}${side("bottom", o.bottom)}${side("right")}</w:tcBorders>` +
+    (o.shade ? `<w:shd w:val="clear" w:fill="${o.shade}"/>` : "") +
+    `<w:tcMar><w:top w:w="${pt}" w:type="dxa"/><w:left w:w="${pl}" w:type="dxa"/><w:bottom w:w="${pb}" w:type="dxa"/><w:right w:w="${pr}" w:type="dxa"/></w:tcMar>` +
+    `<w:vAlign w:val="${o.valign ?? "center"}"/></w:tcPr>${inner}</w:tc>`;
+};
+
+// every table here draws its own lines cell by cell, so a row can carry a rule
+// where it needs one and nothing where it doesn't
+const table = (rows: string[], cols: number[]) =>
   `<w:tbl><w:tblPr><w:tblW w:w="${cols.reduce((a, b) => a + b, 0)}" w:type="dxa"/>` +
-  (borders
-    ? '<w:tblBorders><w:top w:val="single" w:sz="6" w:color="9A9A9A"/><w:left w:val="single" w:sz="6" w:color="9A9A9A"/><w:bottom w:val="single" w:sz="6" w:color="9A9A9A"/><w:right w:val="single" w:sz="6" w:color="9A9A9A"/><w:insideH w:val="single" w:sz="6" w:color="C8C8C8"/><w:insideV w:val="single" w:sz="6" w:color="C8C8C8"/></w:tblBorders>'
-    : '<w:tblBorders><w:top w:val="nil"/><w:left w:val="nil"/><w:bottom w:val="nil"/><w:right w:val="nil"/><w:insideH w:val="nil"/><w:insideV w:val="nil"/></w:tblBorders>') +
-  `<w:tblCellMar><w:top w:w="60" w:type="dxa"/><w:left w:w="90" w:type="dxa"/><w:bottom w:w="60" w:type="dxa"/><w:right w:w="90" w:type="dxa"/></w:tblCellMar></w:tblPr>` +
+  `<w:tblBorders><w:top w:val="nil"/><w:left w:val="nil"/><w:bottom w:val="nil"/><w:right w:val="nil"/><w:insideH w:val="nil"/><w:insideV w:val="nil"/></w:tblBorders>` +
+  `<w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr>` +
   `<w:tblGrid>${cols.map((c) => `<w:gridCol w:w="${c}"/>`).join("")}</w:tblGrid>` +
-  rows.map((r) => `<w:tr>${r}</w:tr>`).join("") + "</w:tbl>";
+  rows.map((r) => `<w:tr><w:trPr><w:cantSplit/></w:trPr>${r}</w:tr>`).join("") + "</w:tbl>";
 
 // the logo, sized to about 0.85" tall, sitting inline in its own cell
 const logoPara = (relId: string, px: { w: number; h: number }) => {
@@ -80,65 +105,105 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
   const tax = Math.round(sub * taxPct) / 100;
   const grand = Math.round((sub + tax) * 100) / 100;
 
-  // letterhead: logo on the left, the company block beside it
-  const nameBlock =
-    para(L.name, { b: true, sz: 30, space: 20 }) + para(L.address, { sz: 18, space: 10 }) +
-    para(L.phones, { sz: 18, space: 10 }) + para(L.emails, { sz: 18, space: 0 });
-  const head = logo
-    ? table([cell(logoPara("rId9", pngSize(logo)), 1900, { border: false }) + cell(nameBlock, 7460, { border: false })], false, [1900, 7460])
-    : nameBlock;
-
-  // the work table. The reader that takes a signed copy back in doesn't need
-  // any marker in the quantity column — it checks that quantity times price
-  // equals the line total, which is what makes a row a row.
-  const billLines = (f.billTo || []).filter(Boolean);
-  const hdr = ["Description", "Qty", "Unit price", "Amount"];
-  const widths = [4900, 1300, 1500, 1660];
-  const headRow = hdr.map((h, i) => cell(para(h, { b: true, sz: 20, space: 0, align: i ? "right" : "left" }), widths[i], { shade: "EFEFEF" })).join("");
-  const bodyRows = f.lines.map((l) =>
-    cell(para(l.description, { sz: 20, space: 0 }), widths[0]) +
-    cell(para(`${l.qty}${l.unit && l.unit.toUpperCase() !== "EACH" ? ` ${l.unit.toUpperCase()}` : ""}`, { sz: 20, space: 0, align: "right" }), widths[1]) +
-    cell(para(money(cents(l.unit_price)), { sz: 20, space: 0, align: "right" }), widths[2]) +
-    cell(para(money(lineTotal(l)), { sz: 20, space: 0, align: "right" }), widths[3]));
-
-  // the totals, right-aligned against the work table so the figures line up
-  const TOT = [6700, 2660];
-  const totalRow = (label: string, amount: string, b = false) =>
-    cell(para(label, { sz: b ? 22 : 20, b, space: 0, align: "right" }), TOT[0], { border: false }) +
-    cell(para(amount, { sz: b ? 22 : 20, b, space: 0, align: "right" }), TOT[1], { border: false });
-  // "…for the following work at 758 Stanley Avenue."
+  const W = 10080;                       // the width of the page inside its margins
   const site = (f.serviceAddress || "").split(",")[0].trim();
   const dearName = (f.attn || "").split(/[\s,]+/)[0] || "";
+  const billLines = (f.billTo || []).filter(Boolean);
+
+  // ---- letterhead: the logo, the name beside it, and a brand rule under both
+  const nameBlock =
+    para(L.name, { b: true, sz: 32, space: 40, track: 4 }) +
+    para(L.address, { sz: 17, color: MUTED, space: 14 }) +
+    para(L.phones.replace(/^Phone:\s*/, "").replace(/\s*\|\s*/g, "  ·  "), { sz: 17, color: MUTED, space: 14 }) +
+    para(L.emails.replace(/^Email:\s*/, "").replace(/\s*\|\s*Office Email:\s*/, "  ·  "), { sz: 17, color: MUTED, space: 0 });
+  const head = logo
+    ? table([cell(logoPara("rId9", pngSize(logo)), 1500, { pad: [0, 200, 0, 0], valign: "top" })
+      + cell(nameBlock, W - 1500, { pad: [40, 0, 0, 0], valign: "top" })], [1500, W - 1500])
+    : nameBlock;
+
+  // ---- the title, with what identifies this letter set against it
+  const metaLine = (label: string, value: string) =>
+    paraOf(run(label, { sz: 15, color: MUTED, caps: true, track: 30 }) + run("   ", { sz: 15 })
+      + run(value, { sz: 21, b: true }), { align: "right", space: 30 });
+  const titleRow = table([
+    cell(para("PROPOSAL", { b: true, sz: 40, color: BRAND, track: 40, space: 0 }), 5000, { pad: [0, 0, 0, 0], valign: "bottom" })
+    + cell((f.poNumber ? metaLine("PO #", f.poNumber) : "") + metaLine("Date", f.date || ""),
+      W - 5000, { pad: [0, 0, 0, 0], valign: "bottom" }),
+  ], [5000, W - 5000]);
+
+  // ---- who it is going to. Plain stacked lines: the invoice maker reads a
+  // signed copy back off exactly these, so they never move into a table.
+  const attnBlock = [
+    f.attn ? para(`ATTN: ${f.attn}`, { sz: 21, b: true, space: 20 }) : "",
+    f.attnTitle ? para(f.attnTitle, { sz: 20, color: MUTED, space: 20 }) : "",
+    ...billLines.map((b2) => para(b2, { sz: 20, color: MUTED, space: 20 })),
+  ].join("");
+
+  // ---- the work. No box around it: a rule under the heading and a hairline
+  // between the lines is enough, and it reads as a document rather than a form.
+  const COLS = [5180, 1300, 1700, 1900];
+  const headCell = (t: string, i: number) =>
+    cell(para(t, { b: true, sz: 16, color: MUTED, caps: true, track: 24, space: 0, align: i ? "right" : "left" }),
+      COLS[i], { shade: BAND, bottom: BRAND, bw: 12, pad: [80, 110, 80, 110] });
+  const headRow = ["Description", "Qty", "Unit price", "Amount"].map(headCell).join("");
+  const bodyRows = f.lines.map((l) => {
+    const qty = `${l.qty}${l.unit && l.unit.toUpperCase() !== "EACH" ? ` ${l.unit.toUpperCase()}` : ""}`;
+    const c = (inner: string, i: number) => cell(inner, COLS[i], { bottom: HAIR, pad: [110, 110, 110, 110] });
+    return c(para(l.description, { sz: 20, space: 0 }), 0)
+      + c(para(qty, { sz: 20, space: 0, align: "right", color: MUTED }), 1)
+      + c(para(money(cents(l.unit_price)), { sz: 20, space: 0, align: "right", color: MUTED }), 2)
+      + c(para(money(lineTotal(l)), { sz: 20, space: 0, align: "right" }), 3);
+  });
+
+  // ---- the totals, lined up under the amount column, the grand total in a bar
+  const TL = W - 1900, TR = 1900;
+  const totalRow = (label: string, amount: string) =>
+    cell(para(label, { sz: 20, space: 0, align: "right", color: MUTED }), TL, { pad: [70, 110, 70, 0] })
+    + cell(para(amount, { sz: 20, space: 0, align: "right" }), TR, { pad: [70, 110, 70, 0] });
+  const grandRow =
+    cell(para("Grand Total", { b: true, sz: 24, space: 0, align: "right", color: "FFFFFF", caps: true, track: 20 }), TL,
+      { shade: BRAND, pad: [130, 110, 130, 0] })
+    + cell(para(money(grand), { b: true, sz: 26, space: 0, align: "right", color: "FFFFFF" }), TR,
+      { shade: BRAND, pad: [130, 110, 130, 0] });
+
+  // ---- somewhere to actually sign, since the letter asks them to
+  const SIGW = Math.floor((W - 400) / 2);
+  const signLine = (label: string) =>
+    cell(para("", { space: 0, rule: HAIR, ruleW: 6, line: 400 })
+      + para(label, { sz: 15, color: MUTED, caps: true, track: 30, space: 0, before: 40 }),
+      SIGW, { pad: [0, 0, 0, 0], valign: "bottom" });
 
   const body = [
     head,
-    para("", { rule: true, space: 160 }),
-    para(`Date: ${f.date || ""}`, { sz: 20 }),
-    // the letter is addressed to the person at the partner's office — their
-    // company name belongs on the purchase order, not at the top of our letter
-    f.attn ? para(`ATTN: ${f.attn}`, { sz: 20 }) : "",
-    f.attnTitle ? para(f.attnTitle, { sz: 20 }) : "",
-    ...billLines.map((b) => para(b, { sz: 20 })),
-    para("", { space: 120 }),
-    para(`Dear ${dearName || "Sir or Madam"},`, { sz: 20, space: 120 }),
-    para(`Service Address: ${f.serviceAddress || "—"}`, { sz: 20 }),
-    f.poNumber ? para(`PO #: ${f.poNumber}`, { sz: 20 }) : "",
+    para("", { rule: BRAND, ruleW: 18, space: 260 }),
+    titleRow,
+    gap(260),
+    attnBlock,
+    gap(260),
+    para(`Dear ${dearName || "Sir or Madam"},`, { sz: 21, space: 180 }),
     para(`${L.name} is pleased to submit this proposal for the following work${site ? ` at ${site}` : ""}.`,
-      { sz: 20, space: 200 }),
-    para("Scope of Work", { b: true, sz: 24, space: 80 }),
-    table([headRow, ...bodyRows], true, widths),
-    para("", { space: 160 }),
-    table([
-      totalRow("Total Cost — labor and materials:", money(sub)),
-      totalRow(`Sales Tax (${taxPct}%):`, money(tax)),
-      totalRow("Grand Total:", money(grand), true),
-    ], false, TOT),
-    para("Please sign and return a copy of this proposal to authorize the work.", { sz: 20, space: 240 }),
-    para("Best regards,", { sz: 20, space: 60 }),
-    para(f.signer || L.signer, { b: true, sz: 20, space: 0 }),
-    para(L.signerTitle, { sz: 20, space: 0 }),
-    para(L.name, { sz: 20, space: 0 }),
-    para(L.phones.replace(/^Phone:\s*/, ""), { sz: 18 }),
+      { sz: 21, space: 220 }),
+    // the one fact everything else hangs off, set apart so it cannot be missed
+    table([cell(paraOf(run("Service Address:  ", { sz: 16, b: true, color: MUTED, caps: true, track: 24 })
+      + run(f.serviceAddress || "—", { sz: 21, b: true }), { space: 0 }),
+      W, { shade: BAND, pad: [130, 160, 130, 160] })], [W]),
+    gap(300),
+    para("Scope of Work", { b: true, sz: 18, color: BRAND, caps: true, track: 34, space: 90 }),
+    table([headRow, ...bodyRows], COLS),
+    gap(180),
+    table([totalRow("Total Cost — labor and materials", money(sub)),
+      totalRow(`Sales Tax (${taxPct}%)`, money(tax)), grandRow], [TL, TR]),
+    gap(400),
+    para("Please sign and return a copy of this proposal to authorize the work.", { sz: 20, space: 60 }),
+    gap(560),
+    table([signLine("Accepted by") + cell("", 400, { pad: [0, 0, 0, 0] }) + signLine("Date")], [SIGW, 400, SIGW]),
+    gap(520),
+    para("Best regards,", { sz: 20, space: 300 }),
+    para(f.signer || L.signer, { b: true, sz: 22, space: 20 }),
+    para(`${L.signerTitle}  ·  ${L.name}`, { sz: 19, color: MUTED, space: 0 }),
+    gap(420),
+    paraOf(run(L.footer, { sz: 15, color: MUTED, track: 8 }),
+      { align: "center", space: 0, before: 160, ruleTop: HAIR, ruleW: 4 }),
   ].join("");
 
   const doc =
@@ -185,11 +250,11 @@ export const BLANK_PROPOSAL: ProposalFields = {
   poNumber: "0000",
   date: "",
   attn: "",
-  billTo: ["Fairstead", "10 Bank Street", "White Plains, NY 10606"],
-  serviceAddress: "Building 123 EXAMPLE STREET, Apartment 4B Brooklyn, NY 11207",
+  billTo: ["10 Bank Street, Suite 550, White Plains, NY 10606"],
+  serviceAddress: "123 EXAMPLE STREET, Brooklyn, NY 11207, Apartment 4B",
   lines: [
-    { description: "Plaster", qty: 100, unit: "SF", unit_price: 5 },
-    { description: "Primer — 1 coat", qty: 100, unit: "SF", unit_price: 0 },
-    { description: "Paint — 2 coats", qty: 100, unit: "SF", unit_price: 0 },
+    { description: "Scrape and plaster", qty: 100, unit: "SF", unit_price: 6 },
+    { description: "Primer — 1 coat", qty: 1, unit: "ROOM", unit_price: 125 },
+    { description: "Paint", qty: 1, unit: "ROOM", unit_price: 220 },
   ],
 };

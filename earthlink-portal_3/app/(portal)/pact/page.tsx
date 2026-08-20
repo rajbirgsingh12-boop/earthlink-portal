@@ -13,7 +13,6 @@ import PageHeader from "@/components/PageHeader";
 import CardToolbar from "@/components/CardToolbar";
 import Modal from "@/components/Modal";
 import Disclosure from "@/components/Disclosure";
-import Letterhead from "@/components/Letterhead";
 import { useLive } from "@/lib/useLive";
 import { COMPANY } from "@/lib/company";
 import { useNumBuffer } from "@/lib/numBuffer";
@@ -1575,7 +1574,16 @@ export default function Pact() {
           <PrintShell title={`proposal ${f.poNumber || ""} ${(f.serviceAddress || "").split(",")[0]}`.trim()}>
             <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
               <div className="printable mx-auto max-w-3xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
-                <Letterhead />
+                {/* centered, matching the letter the PDF and Word file print */}
+                <div className="text-center">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src="/logo.png" alt="" className="mx-auto h-12 w-auto" />
+                  <div className="mt-1 font-display text-xl font-bold">{COMPANY.letterhead.name}</div>
+                  <div className="text-[11px] text-inksoft">{COMPANY.letterhead.address}</div>
+                  <div className="text-[11px] text-inksoft">{COMPANY.letterhead.phones.replace(/^Phone:\s*/, "").replace(/\s*\|\s*/g, "  ·  ")}</div>
+                  <div className="text-[11px] text-inksoft">{COMPANY.letterhead.emails.replace(/^Email:\s*/, "").replace(/\s*\|\s*Office Email:\s*/, "  ·  ")}</div>
+                  <div className="mt-2 border-b-2 border-work" />
+                </div>
                 {/* this is the letter they are about to send — it reads the same
                     as the PDF and the Word file, down to the sign-off */}
                 <div className="mt-4 flex items-end justify-between border-b-[3px] border-work pb-2">
@@ -1584,10 +1592,6 @@ export default function Pact() {
                     {f.poNumber && <div><span className="text-[10px] uppercase tracking-widest text-inksoft">PO # </span><b>{f.poNumber}</b></div>}
                     <div><span className="text-[10px] uppercase tracking-widest text-inksoft">Date </span><b>{f.date}</b></div>
                   </div>
-                </div>
-                <div className="mt-4 bg-card px-3 py-2 text-[13px]">
-                  <span className="text-[10px] uppercase tracking-widest text-inksoft">Service Address: </span>
-                  <b>{f.serviceAddress || "—"}</b>
                 </div>
                 <div className="mt-4 text-[13px] leading-relaxed">
                   {f.attn && <div className="font-semibold">ATTN: {f.attn}</div>}
@@ -1598,6 +1602,10 @@ export default function Pact() {
                     {COMPANY.letterhead.name} is pleased to submit this proposal for the following work
                     {(f.serviceAddress || "").split(",")[0].trim() ? ` at ${(f.serviceAddress || "").split(",")[0].trim()}` : ""}.
                   </div>
+                </div>
+                <div className="mt-3 bg-card px-3 py-2 text-[13px]">
+                  <span className="text-[10px] uppercase tracking-widest text-inksoft">Service Address: </span>
+                  <b>{f.serviceAddress || "—"}</b>
                 </div>
                 <div className="mt-4 font-display text-[13px] font-bold uppercase tracking-widest text-work">Scope of Work</div>
                 <table className="mt-1 w-full border-collapse text-[12px]">

@@ -46,6 +46,13 @@ const MID: Space = {
   afterIntro: 10, afterBand: 30, afterScope: 14, afterHead: 21, rowGap: 4,
   preTot: 11, preGrand: 28, postGrand: 32, preSign: 44, postSign: 34, regards: 24,
 };
+const XTIGHT: Space = {
+  headRule: 50, afterRule: 18, metaRow: 14, afterMeta: 22, attn: 12, line: 11.5,
+  afterBill: 9, afterDear: 16, introLine: 12.5, afterIntro: 7, afterBand: 26,
+  afterScope: 12, afterHead: 19, rowLine: 12.5, rowGap: 3,
+  preTot: 9, totRow: 14, preGrand: 24, postGrand: 28,
+  preSign: 34, signLab: 10, postSign: 26, regards: 20, signerLine: 12,
+};
 const TIGHT: Space = {
   ...NORMAL,
   headRule: 50, afterRule: 20, afterMeta: 24, attn: 13, line: 12,
@@ -63,7 +70,7 @@ const tailHeight = (s: Space) =>
 export async function buildProposalPdf(f: ProposalFields, logo?: Uint8Array): Promise<Uint8Array> {
   const first = await render(f, NORMAL, logo);
   if (first.pages === 1) return first.bytes;
-  for (const s of [MID, TIGHT]) {
+  for (const s of [MID, TIGHT, XTIGHT]) {
     const tryIt = await render(f, s, logo);
     if (tryIt.pages === 1) return tryIt.bytes;
   }
@@ -124,21 +131,28 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
     return out.length ? out : [""];
   };
 
-  // ---- letterhead ----
-  let lx = M;
+  // ---- letterhead: centered, the way the company's paper reads ----
+  void S.headRule;
+  y += 12; // the centered stack starts a touch higher to buy its extra height
+  const ctr = (t: string, size: number, font = helv, color: Rgb = INK) => {
+    putAt(t, (612 - font.widthOfTextAtSize(t, size)) / 2, y, size, font, color);
+  };
   if (logo) {
     try {
       const img = await doc.embedPng(logo);
-      const h = 60, w = (img.width / img.height) * h;
-      page.drawImage(img, { x: M, y: y - h + 14, width: w, height: h });
-      lx = M + w + 14;
+      const h = 36, w = (img.width / img.height) * h;
+      page.drawImage(img, { x: (612 - w) / 2, y: y - h + 8, width: w, height: h });
+      y -= h + 7; // clear air between the logo and the name — no overlap
     } catch { /* unreadable logo — text letterhead */ }
   }
-  putAt(L.name, lx, y, 14.5, bold);
-  putAt(L.address, lx, y - 15, 8.5, helv, MUTED);
-  putAt(L.phones.replace(/^Phone:\s*/, "").replace(/\s*\|\s*/g, "  ·  "), lx, y - 27, 8.5, helv, MUTED);
-  putAt(L.emails.replace(/^Email:\s*/, "").replace(/\s*\|\s*Office Email:\s*/, "  ·  "), lx, y - 39, 8.5, helv, MUTED);
-  y -= S.headRule;
+  ctr(L.name, 14.5, bold);
+  y -= 15;
+  ctr(L.address, 8.5, helv, MUTED);
+  y -= 11.5;
+  ctr(L.phones.replace(/^Phone:\s*/, "").replace(/\s*\|\s*/g, "  ·  "), 8.5, helv, MUTED);
+  y -= 11.5;
+  ctr(L.emails.replace(/^Email:\s*/, "").replace(/\s*\|\s*Office Email:\s*/, "  ·  "), 8.5, helv, MUTED);
+  y -= 10;
   rule(y, 2, BRAND);
   y -= S.afterRule;
 
@@ -154,16 +168,6 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
   meta("DATE", f.date || "");
   y -= S.afterMeta;
 
-  // ---- the service address leads, in its own band (wrapping — a long
-  // development name must not run off the page edge) ----
-  const labW = trackW("SERVICE ADDRESS:", 8, bold, 1.2);
-  const addrX = M + 10 + labW + 8;
-  const addrLines = wrap(f.serviceAddress || "—", RIGHT - 10 - addrX, 10.5, bold);
-  page.drawRectangle({ x: M, y: y - 8 - (addrLines.length - 1) * 14, width: W, height: 26 + (addrLines.length - 1) * 14, color: C(BAND) });
-  track("SERVICE ADDRESS:", M + 10, 8, bold, MUTED, 1.2, y);
-  addrLines.forEach((ln, i) => putAt(ln, addrX, y - i * 14, 10.5, bold));
-  y -= S.afterBand + (addrLines.length - 1) * 14;
-
   // ---- who it is going to ----
   if (f.attn) { put(`ATTN: ${f.attn}`, M, 10.5, bold); y -= S.attn; }
   if (f.attnTitle) { put(f.attnTitle, M, 10, helv, MUTED); y -= S.line; }
@@ -178,6 +182,16 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
     put(ln, M, 10.5); y -= S.introLine;
   }
   y -= S.afterIntro;
+
+  // ---- the service address, in its own band (wrapping — a long development
+  // name must not run off the page edge) ----
+  const labW = trackW("SERVICE ADDRESS:", 8, bold, 1.2);
+  const addrX = M + 10 + labW + 8;
+  const addrLines = wrap(f.serviceAddress || "—", RIGHT - 10 - addrX, 10.5, bold);
+  page.drawRectangle({ x: M, y: y - 8 - (addrLines.length - 1) * 14, width: W, height: 26 + (addrLines.length - 1) * 14, color: C(BAND) });
+  track("SERVICE ADDRESS:", M + 10, 8, bold, MUTED, 1.2, y);
+  addrLines.forEach((ln, i) => putAt(ln, addrX, y - i * 14, 10.5, bold));
+  y -= S.afterBand + (addrLines.length - 1) * 14;
 
   // ---- the work ----
   track("SCOPE OF WORK", M, 9, bold, BRAND, 1.7);

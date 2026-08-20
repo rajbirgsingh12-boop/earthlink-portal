@@ -83,10 +83,10 @@ const table = (rows: string[], cols: number[]) =>
   rows.map((r) => `<w:tr><w:trPr><w:cantSplit/></w:trPr>${r}</w:tr>`).join("") + "</w:tbl>";
 
 // the logo, sized to about 0.85" tall, sitting inline in its own cell
-const logoPara = (relId: string, px: { w: number; h: number }) => {
+const logoPara = (relId: string, px: { w: number; h: number }, center = false) => {
   const cy = 777240; // 0.85 inch in EMU
   const cx = Math.round((px.w / px.h) * cy);
-  return `<w:p><w:pPr><w:spacing w:after="0"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">` +
+  return `<w:p><w:pPr><w:spacing w:after="0"/>${center ? '<w:jc w:val="center"/>' : ""}</w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">` +
     `<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="1" name="Logo"/>` +
     `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
     `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="1" name="logo.png"/><pic:cNvPicPr/></pic:nvPicPr>` +
@@ -119,16 +119,14 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
   const dearName = (f.attn || "").split(/[\s,]+/)[0] || "";
   const billLines = (f.billTo || []).filter(Boolean);
 
-  // ---- letterhead: the logo, the name beside it, and a brand rule under both
+  // ---- letterhead: everything centered, the way the company's paper reads —
+  // the logo above the name, the contact lines under it, a brand rule below
   const nameBlock =
-    para(L.name, { b: true, sz: 32, space: 40, track: 4 }) +
-    para(L.address, { sz: 17, color: MUTED, space: 14 }) +
-    para(L.phones.replace(/^Phone:\s*/, "").replace(/\s*\|\s*/g, "  ·  "), { sz: 17, color: MUTED, space: 14 }) +
-    para(L.emails.replace(/^Email:\s*/, "").replace(/\s*\|\s*Office Email:\s*/, "  ·  "), { sz: 17, color: MUTED, space: 0 });
-  const head = logo
-    ? table([cell(logoPara("rId9", pngSize(logo)), 1500, { pad: [0, 200, 0, 0], valign: "top" })
-      + cell(nameBlock, W - 1500, { pad: [40, 0, 0, 0], valign: "top" })], [1500, W - 1500])
-    : nameBlock;
+    para(L.name, { b: true, sz: 32, space: 40, track: 4, align: "center" }) +
+    para(L.address, { sz: 17, color: MUTED, space: 14, align: "center" }) +
+    para(L.phones.replace(/^Phone:\s*/, "").replace(/\s*\|\s*/g, "  ·  "), { sz: 17, color: MUTED, space: 14, align: "center" }) +
+    para(L.emails.replace(/^Email:\s*/, "").replace(/\s*\|\s*Office Email:\s*/, "  ·  "), { sz: 17, color: MUTED, space: 0, align: "center" });
+  const head = (logo ? logoPara("rId9", pngSize(logo), true) : "") + nameBlock;
 
   // ---- the title, with what identifies this letter set against it
   const metaLine = (label: string, value: string) =>
@@ -187,17 +185,15 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
     para("", { rule: BRAND, ruleW: 18, space: 260 }),
     titleRow,
     gap(260),
-    // the property is the headline — the one fact everything else hangs off,
-    // set apart at the top so it cannot be missed
-    table([cell(paraOf(run("Service Address:  ", { sz: 16, b: true, color: MUTED, caps: true, track: 24 })
-      + run(f.serviceAddress || "—", { sz: 21, b: true }), { space: 0 }),
-      W, { shade: BAND, pad: [130, 160, 130, 160] })], [W]),
-    gap(260),
     attnBlock,
     gap(260),
     para(`Dear ${dearName || "Sir or Madam"},`, { sz: 21, space: 180 }),
     para(`${L.name} is pleased to submit this proposal for the following work${site ? ` at ${site}` : ""}.`,
       { sz: 21, space: 220 }),
+    // the one fact everything else hangs off, set apart so it cannot be missed
+    table([cell(paraOf(run("Service Address:  ", { sz: 16, b: true, color: MUTED, caps: true, track: 24 })
+      + run(f.serviceAddress || "—", { sz: 21, b: true }), { space: 0 }),
+      W, { shade: BAND, pad: [130, 160, 130, 160] })], [W]),
     gap(300),
     para("Scope of Work", { b: true, sz: 18, color: BRAND, caps: true, track: 34, space: 90 }),
     table([headRow, ...bodyRows], COLS),

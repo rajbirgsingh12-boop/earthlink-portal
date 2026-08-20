@@ -41,14 +41,24 @@ export default function Settings() {
     flashTimer.current = setTimeout(() => setMsg(""), 4000);
   };
 
+  // the email column arrives with supabase/upgrade_user_email.sql; until that is
+  // run the page still works, it just cannot show anyone's address
+  const [noEmailCol, setNoEmailCol] = useState(false);
   const loadUsers = async () => {
     const { data: { user } } = await sb().auth.getUser();
     if (!user) return;
     const { data: p } = await sb().from("profiles").select("id,name,role").eq("id", user.id).single();
     setMe(p as Profile);
     if ((p as Profile)?.role === "admin") {
-      const { data: all } = await sb().from("profiles").select("id,name,role").order("name");
-      setPeople((all || []) as Profile[]);
+      const withEmail = await sb().from("profiles").select("id,name,role,email").order("name");
+      if (withEmail.error) {
+        setNoEmailCol(true);
+        const { data: all } = await sb().from("profiles").select("id,name,role").order("name");
+        setPeople((all || []) as Profile[]);
+      } else {
+        setNoEmailCol(false);
+        setPeople((withEmail.data || []) as Profile[]);
+      }
     }
   };
   const [contracts, setContracts] = useState<Contract[]>([]);
@@ -248,13 +258,26 @@ export default function Settings() {
     flash(error ? error.message : "Role updated");
     loadUsers();
   };
+  // renaming someone: typed into a box that keeps what you type, saved when you
+  // tap away — an empty name is rejected rather than saved as a blank row
+  const [nameBuf, setNameBuf] = useState<Record<string, string>>({});
+  const saveName = async (p: Profile) => {
+    const typed = (nameBuf[p.id] ?? "").trim();
+    setNameBuf((b) => { const n = { ...b }; delete n[p.id]; return n; });
+    if (!typed || typed === (p.name || "")) return;
+    const { data, error } = await sb().from("profiles").update({ name: typed }).eq("id", p.id).select("id");
+    if (error) { flash(error.message); return; }
+    if (!data || data.length === 0) { flash("Didn't save — only Admin 1 can rename people"); return; }
+    flash("Name saved");
+    loadUsers();
+  };
 
   // sending someone a reset link — the only way to change another person's
   // password without a Supabase visit
   const [resetEmail, setResetEmail] = useState("");
   const [resetBusy, setResetBusy] = useState(false);
-  const sendReset = async () => {
-    const email = resetEmail.trim();
+  const sendResetTo = async (raw: string) => {
+    const email = raw.trim();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { flash("Type the person's email address first"); return; }
     setResetBusy(true);
     const { error } = await sb().auth.resetPasswordForEmail(email, { redirectTo: `${window.location.origin}/reset` });
@@ -263,6 +286,7 @@ export default function Settings() {
     setResetEmail("");
     flash(`Reset link sent to ${email} — they open it and pick a new password`);
   };
+  const sendReset = () => sendResetTo(resetEmail);
 
   const [addOpen, setAddOpen] = useState(false);
   const [newUser, setNewUser] = useState({ name: "", email: "", password: "", role: "office" as Role });
@@ -286,9 +310,12 @@ export default function Settings() {
     let roleWarn = "";
     if (newId) {
       // the profile row is created automatically; set the display name and role
-      const patch: { name?: string; role?: Role } = {};
+      const patch: { name?: string; role?: Role; email?: string } = {};
       if (newUser.name.trim()) patch.name = newUser.name.trim();
       patch.role = newUser.role;
+      // the signup trigger fills the email in too; writing it here means the
+      // new row shows an address right away, and only when the column is there
+      if (!noEmailCol) patch.email = newUser.email.trim();
       // only an admin account can set roles — confirm the update really landed
       const { data: upd, error: pe } = await sb().from("profiles").update(patch).eq("id", newId).select("id");
       if (pe || !upd || upd.length === 0) roleWarn = " ⚠ The role didn't apply — an admin needs to set it in the list below.";
@@ -688,14 +715,36 @@ export default function Settings() {
               <div className="mt-2 text-xs text-inksoft">Give them this email + password to sign in. You can change their role any time below.</div>
             </div>
           )}
+          {noEmailCol && (
+            <div className="card mb-2 border-work p-3 text-xs text-inksoft">
+              Run <span className="font-mono">supabase/upgrade_user_email.sql</span> in Supabase to see everyone&rsquo;s email address here.
+            </div>
+          )}
           <div className="card divide-y divide-rulesoft">
             {people.map((p) => (
-              <div key={p.id} className="flex items-center justify-between gap-3 p-3">
-                <div className="text-sm font-medium">{p.name || p.id.slice(0, 8)}{p.id === me.id && <span className="ml-2 text-[11px] text-inksoft">(you)</span>}</div>
+              <div key={p.id} className="flex flex-wrap items-center gap-2 p-3 md:flex-nowrap">
+                <div className="min-w-[180px] flex-1">
+                  <input className="field text-sm font-medium" placeholder="their name"
+                    value={nameBuf[p.id] ?? p.name ?? ""}
+                    onChange={(e) => setNameBuf({ ...nameBuf, [p.id]: e.target.value })}
+                    onBlur={() => saveName(p)}
+                    onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
+                  <div className="mt-1 truncate text-[11px] text-inksoft">
+                    {p.email || (noEmailCol ? p.id.slice(0, 8) : "no email on file")}
+                    {p.id === me.id && <span className="ml-2">(you)</span>}
+                  </div>
+                </div>
                 <select className="field max-w-[220px]" value={p.role} onChange={(e) => setRole(p.id, e.target.value as Role)}>
                   {ROLE_OPTIONS.map(([r, label]) => <option key={r} value={r}>{label}</option>)}
                   {!ROLE_OPTIONS.some(([r]) => r === p.role) && <option value={p.role}>{p.role} (legacy)</option>}
                 </select>
+                {p.email && (
+                  <button className="btn btn-ghost whitespace-nowrap px-3 py-1.5 text-[13px]" disabled={resetBusy}
+                    title="Sends them a link to pick a new password"
+                    onClick={() => sendResetTo(p.email || "")}>
+                    Reset password
+                  </button>
+                )}
               </div>
             ))}
           </div>

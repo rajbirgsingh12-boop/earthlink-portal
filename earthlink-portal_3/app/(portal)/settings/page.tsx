@@ -263,11 +263,16 @@ export default function Settings() {
   const [nameBuf, setNameBuf] = useState<Record<string, string>>({});
   const saveName = async (p: Profile) => {
     const typed = (nameBuf[p.id] ?? "").trim();
-    setNameBuf((b) => { const n = { ...b }; delete n[p.id]; return n; });
-    if (!typed || typed === (p.name || "")) return;
+    if (!typed || typed === (p.name || "")) {
+      setNameBuf((b) => { const n = { ...b }; delete n[p.id]; return n; });
+      return;
+    }
+    // the typed name stays in the box until the save is CONFIRMED — a failed
+    // save must not silently revert to the old name and lose the typing
     const { data, error } = await sb().from("profiles").update({ name: typed }).eq("id", p.id).select("id");
-    if (error) { flash(error.message); return; }
+    if (error) { flash(`Didn't save — ${error.message}. The name you typed is still in the box.`); return; }
     if (!data || data.length === 0) { flash("Didn't save — only Admin 1 can rename people"); return; }
+    setNameBuf((b) => { const n = { ...b }; delete n[p.id]; return n; });
     flash("Name saved");
     loadUsers();
   };
@@ -283,7 +288,7 @@ export default function Settings() {
     const { error } = await sb().auth.resetPasswordForEmail(email, { redirectTo: `${window.location.origin}/reset` });
     setResetBusy(false);
     if (error) { flash(error.message); return; }
-    setResetEmail("");
+    setResetEmail((cur) => (cur.trim() === email ? "" : cur));
     flash(`Reset link sent to ${email} — they open it and pick a new password`);
   };
   const sendReset = () => sendResetTo(resetEmail);
@@ -572,7 +577,9 @@ export default function Settings() {
         </>
       )}
 
-      {me && (me.role === "admin" || me.role === "office") && (
+      {/* the PACT price book and addressee price every PACT paper — Admin 1's alone,
+          same as the PACT tab itself */}
+      {me && me.role === "admin" && (
         <>
           <div className="mb-2 mt-6 flex flex-wrap items-baseline justify-between gap-2">
             <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Line items &amp; prices</div>

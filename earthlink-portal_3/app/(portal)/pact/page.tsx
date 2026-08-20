@@ -600,6 +600,10 @@ export default function Pact() {
           if (hit) fields.partner = hit.partner;
         }
       }
+      // whichever read won, a proposal letter's own tax rate travels with it —
+      // the server path returns taxPct too, and dropping it here billed 8.875%
+      // against letters that printed a different rate
+      taxFromDoc = (fields as { taxPct?: number }).taxPct ?? taxFromDoc;
       const f = fields;
       const unreadable = !f.po && !f.partner && !f.desc;
       // an unreadable PDF must not smuggle in a dollar amount from a stray "Total $" hit
@@ -1143,7 +1147,10 @@ export default function Pact() {
     ...(canInvoice ? ([["INVOICED", !!j.invoice_sent], ["PAID", j.received]] as [string, boolean][]) : []),
   ];
 
-  // Admin 2 has no PACT menu, so the page is shut to them by address too
+  // Admin 2 has no PACT menu, so the page is shut to them by address too.
+  // Until the profile answers, nothing renders — the gate must not fail open
+  // and flash every partner and PO at an account that is about to be turned away.
+  if (!role) return <div className="card p-4 text-sm text-inksoft">Checking your account…</div>;
   if (role === "office") return <div className="text-sm text-inksoft">PACT is Admin 1&rsquo;s. Nothing here for this account.</div>;
 
   return (

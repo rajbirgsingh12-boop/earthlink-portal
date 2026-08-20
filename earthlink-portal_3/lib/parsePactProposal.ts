@@ -76,7 +76,17 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
   const billBlock = [contactName, ...billLines].filter(Boolean).join(", ");
 
   // "Service Address: Building 2156 LINDEN BOULEVARD, Apartment 8 A Brooklyn ,NY 11207"
-  const svc = t.match(/Service Address[ \t]*:?[ \t]*([^\n]*)/i)?.[1]?.trim() || "";
+  // — and when a long address wraps in the letter, the lines after it belong
+  // to the address until the letter moves on to the work
+  let svc = t.match(/Service Address[ \t]*:?[ \t]*([^\n]*)/i)?.[1]?.trim() || "";
+  {
+    const at = lines.findIndex((l) => /service address/i.test(l));
+    for (let k = at + 1; at >= 0 && k < Math.min(at + 3, lines.length); k++) {
+      const cont = lines[k].trim();
+      if (!cont || cont.includes("$") || HEADINGISH.test(cont) || /scope of work/i.test(cont)) break;
+      svc = `${svc} ${cont}`.trim();
+    }
+  }
   const punit = svc.match(/\b(?:Apartment|Apt\.?|Unit)\s*#?\s*([\dA-Za-z][\dA-Za-z -]{0,8}?)(?=\s*(?:,|Brooklyn|Bronx|Queens|Manhattan|Staten|New York|NY\b|$))/i)?.[1]?.trim() || "";
   const address = svc
     .replace(/\bBuilding\s+/i, "")
@@ -110,14 +120,32 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
     // A work line is a line whose own numbers agree: quantity times price is
     // the line total. That holds for our own letters and for most partners',
     // and nothing else on the page can fake it.
-    const row = readRow(`${pending} ${l}`.trim(), { allowTotalish: true });
+    //
+    // Two wrap layouts exist. Some letters put the description on its own
+    // line with the money on the NEXT line — that is what `pending` gluing is
+    // for. Our own PDF prints the money beside the FIRST fragment and wraps
+    // the rest BELOW it, so when a line is a complete row all by itself, the
+    // text waiting in `pending` belonged to the row before it.
+    const bare = readRow(l, { allowTotalish: true });
+    if (bare && pending && rows.length > 0) {
+      rows[rows.length - 1].description = `${rows[rows.length - 1].description} ${pending}`.replace(/\s{2,}/g, " ").trim();
+      pending = "";
+    }
+    const row = bare || readRow(`${pending} ${l}`.trim(), { allowTotalish: true });
     if (row) {
       pending = "";
       rows.push({ description: row.description, qty: row.qty, unit_price: row.unit_price, property: "", unit: punit, ...(row.uom ? { uom: row.uom } : {}) });
       continue;
     }
 
-    if (stopRe.test(l) || /^total\b/i.test(l)) { stopAt = i; break; }
+    if (stopRe.test(l) || /^total\b/i.test(l)) {
+      // the LAST row's wrapped tail sits in pending when the totals arrive
+      if (pending && !pending.includes("$") && rows.length > 0) {
+        rows[rows.length - 1].description = `${rows[rows.length - 1].description} ${pending}`.replace(/\s{2,}/g, " ").trim();
+        pending = "";
+      }
+      stopAt = i; break;
+    }
     // a work table's column headings ("Description Qty Unit price Amount")
     // are not a work line — and must not glue themselves to the first one
     if (!l.includes("$") && /^(?:item|description|scope|work)\b/i.test(l) && /\b(?:qty|quantity|unit|price|amount|cost)\b/i.test(l)) { pending = ""; continue; }

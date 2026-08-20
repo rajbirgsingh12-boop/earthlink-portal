@@ -102,9 +102,21 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
     page.drawLine({ start: { x: x0, y: yy }, end: { x: x1, y: yy }, thickness: w, color: C(color) });
   // break a description to fit its column
   const wrap = (t: string, width: number, size: number, font = helv) => {
+    // a single run of characters wider than the column breaks mid-word —
+    // otherwise it would print straight through the money columns beside it
+    const fit = (word: string): string[] => {
+      if (font.widthOfTextAtSize(word, size) <= width) return [word];
+      const parts: string[] = [];
+      let piece = "";
+      for (const ch of word) {
+        if (font.widthOfTextAtSize(piece + ch, size) > width && piece) { parts.push(piece); piece = ch; } else piece += ch;
+      }
+      if (piece) parts.push(piece);
+      return parts;
+    };
     const out: string[] = [];
     let cur = "";
-    for (const word of t.split(/\s+/)) {
+    for (const word of t.split(/\s+/).flatMap(fit)) {
       const next = cur ? `${cur} ${word}` : word;
       if (font.widthOfTextAtSize(next, size) > width && cur) { out.push(cur); cur = word; } else cur = next;
     }
@@ -157,11 +169,15 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
   }
   y -= S.afterIntro;
 
-  // ---- the service address, in its own band ----
-  page.drawRectangle({ x: M, y: y - 8, width: W, height: 26, color: C(BAND) });
-  const labEnd = track("SERVICE ADDRESS:", M + 10, 8, bold, MUTED, 1.2, y);
-  putAt(f.serviceAddress || "—", labEnd + 8, y, 10.5, bold);
-  y -= S.afterBand;
+  // ---- the service address, in its own band (wrapping — a long development
+  // name must not run off the page edge) ----
+  const labW = trackW("SERVICE ADDRESS:", 8, bold, 1.2);
+  const addrX = M + 10 + labW + 8;
+  const addrLines = wrap(f.serviceAddress || "—", RIGHT - 10 - addrX, 10.5, bold);
+  page.drawRectangle({ x: M, y: y - 8 - (addrLines.length - 1) * 14, width: W, height: 26 + (addrLines.length - 1) * 14, color: C(BAND) });
+  track("SERVICE ADDRESS:", M + 10, 8, bold, MUTED, 1.2, y);
+  addrLines.forEach((ln, i) => putAt(ln, addrX, y - i * 14, 10.5, bold));
+  y -= S.afterBand + (addrLines.length - 1) * 14;
 
   // ---- the work ----
   track("SCOPE OF WORK", M, 9, bold, BRAND, 1.7);
@@ -186,6 +202,9 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
     const qty = `${l.qty}${l.unit && l.unit.toUpperCase() !== "EACH" ? ` ${l.unit.toUpperCase()}` : ""}`;
     sub += lineTotal(l);
     rows.forEach((rt, i) => {
+      // one description long enough to outrun the page breaks mid-block —
+      // nothing may print below the footer rule
+      if (y < 96) { page = doc.addPage([612, 792]); y = 738; tableHead("DESCRIPTION (continued)"); }
       put(rt, M + 8, 10);
       if (i === 0) {
         putR(qty, QX, 10, helv, MUTED);

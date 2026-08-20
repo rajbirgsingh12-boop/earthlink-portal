@@ -16,6 +16,12 @@
 -- uses to load faster on phones, and the slimmer release
 -- audit log. This file also REPAIRS the release audit
 -- trigger if an older copy of upgrade_speed.sql was ever run.
+--
+-- Aug 20 additions: the proposal-sent date on PACT jobs,
+-- PACT invoicing locked to Admin 1 in the database itself,
+-- everyone's email on their profile row (Settings shows it),
+-- and the login fix for accounts stuck waiting on Supabase
+-- emails that never arrive.
 -- ============================================================
 
 -- ---------- from upgrade_invoices_aging_docs.sql ----------
@@ -372,3 +378,83 @@ begin
           to_jsonb(old) - 'attachments', to_jsonb(new) - 'attachments');
   return coalesce(new, old);
 end $$;
+
+-- ============================================================
+-- ADDED AUG 20, 2026 — everything since the last consolidation,
+-- in one place so this file stays the only one you ever run.
+-- Every step below checks itself; running twice never hurts.
+-- ============================================================
+
+-- 6) PACT proposals — the date one went out, so a quote waiting on a
+--    signature is visible the same way an unpaid invoice is.
+alter table pact_jobs add column if not exists proposal_sent date;
+
+-- 7) PACT invoicing belongs to Admin 1 only. The app already hides it from
+--    Admin 2; this makes the database itself refuse, so the rule holds even
+--    for someone poking at the API directly.
+create or replace function pact_invoice_fields_admin_only()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if my_role() <> 'admin' and (
+       new.invoice_number is distinct from old.invoice_number
+    or new.invoice_sent   is distinct from old.invoice_sent
+    or new.received       is distinct from old.received
+    or new.paid_date      is distinct from old.paid_date
+  ) then
+    raise exception 'Only Admin 1 can change PACT invoicing (invoice number, invoiced, received, paid)';
+  end if;
+  return new;
+end $$;
+drop trigger if exists pact_invoice_fields_admin_only on pact_jobs;
+create trigger pact_invoice_fields_admin_only
+  before update on pact_jobs
+  for each row execute function pact_invoice_fields_admin_only();
+
+-- 8) Every person's email shows on the Settings page. Emails live in
+--    auth.users, which the app cannot read — this copies each one onto the
+--    person's profile row and keeps it there as accounts come and go.
+alter table profiles add column if not exists email text default '';
+
+update profiles p
+   set email = u.email
+  from auth.users u
+ where u.id = p.id
+   and coalesce(p.email, '') is distinct from coalesce(u.email, '');
+
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  insert into public.profiles (id, name, email)
+  values (new.id, split_part(new.email, '@', 1), new.email)
+  on conflict (id) do update set email = excluded.email;
+  return new;
+end $$;
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created after insert on auth.users
+  for each row execute function public.handle_new_user();
+
+create or replace function public.sync_profile_email()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  update public.profiles set email = new.email where id = new.id;
+  return new;
+end $$;
+drop trigger if exists on_auth_user_email_changed on auth.users;
+create trigger on_auth_user_email_changed after update of email on auth.users
+  for each row execute function public.sync_profile_email();
+
+-- 9) Fix logins without email. Supabase's built-in mailer barely delivers
+--    anything until a real email service is connected, which strands new
+--    accounts on a confirmation email that never comes. This confirms every
+--    waiting account so they can just sign in with their password.
+update auth.users
+   set email_confirmed_at = now()
+ where email_confirmed_at is null;
+
+-- 10) To set someone's password directly (instead of a reset email that
+--     won't arrive): take the -- off the two lines below, fill in the email
+--     and the new password, Run — then clear the password from this window.
+--
+-- update auth.users
+--    set encrypted_password = extensions.crypt('THE_NEW_PASSWORD', extensions.gen_salt('bf'))
+--  where email = 'info@earthlinkgc.com';

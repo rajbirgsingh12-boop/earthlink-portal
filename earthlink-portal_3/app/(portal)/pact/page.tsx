@@ -44,13 +44,13 @@ const unitFor = (desc: string): string => {
 export default function Pact() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [org, setOrg] = useState<Org | null>(null);
-  // Admin 1 (admin) sees everything; Admin 2 (office) sees POs & photos but no
-  // invoices; accountants can look but not edit (matches the pact_jobs policies)
+  // Admin 1 (admin) sees everything; Admin 2 (office) has no PACT at all and is
+  // turned away below; accountants can look but not edit (matches the policies)
   const [role, setRole] = useState("");
   const canInvoice = role === "admin";
   const canEdit = role === "admin" || role === "office";
-  // PACT proposals and invoices are Admin 1's; the office reads POs, prices
-  // the work lines and tracks the job, and writes NYCHA proposals as before
+  // PACT is Admin 1's; the office side keeps NYCHA — releases, price book,
+  // proposals and the invoice package — as before
   const canPrice = canEdit;
   const [q, setQ] = useState("");
   const [addOpen, setAddOpen] = useState(false);
@@ -1142,6 +1142,9 @@ export default function Pact() {
     ["PROPOSAL", !!j.proposal_sent], ["APPROVED", j.approved], ["WORK DONE", j.work_done],
     ...(canInvoice ? ([["INVOICED", !!j.invoice_sent], ["PAID", j.received]] as [string, boolean][]) : []),
   ];
+
+  // Admin 2 has no PACT menu, so the page is shut to them by address too
+  if (role === "office") return <div className="text-sm text-inksoft">PACT is Admin 1&rsquo;s. Nothing here for this account.</div>;
 
   return (
     <div>

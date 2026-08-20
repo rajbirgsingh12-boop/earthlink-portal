@@ -76,6 +76,9 @@ export default function PactSchedule() {
     </div>
   );
 
+  // shut to Admin 2 the same way the jobs page is
+  if (role === "office") return <div className="text-sm text-inksoft">PACT is Admin 1&rsquo;s. Nothing here for this account.</div>;
+
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">

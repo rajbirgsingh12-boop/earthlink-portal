@@ -53,7 +53,10 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
   // entries render in order: plain links and group menus mixed
   const entries: (["link", string, string] | ["group", Group])[] = [["link", "/home", "Home"]];
   if (role === "admin" || role === "office") {
-    entries.push(["group", NYCHA], ["group", PACT], ["link", "/schedule", "Schedule"], ["link", "/payroll", "Payroll"], ["link", "/settings", "Settings"]);
+    // PACT is Admin 1's alone — Admin 2 (office) does not get the menu at all
+    entries.push(["group", NYCHA]);
+    if (role === "admin") entries.push(["group", PACT]);
+    entries.push(["link", "/schedule", "Schedule"], ["link", "/payroll", "Payroll"], ["link", "/settings", "Settings"]);
   } else if (role === "accountant") {
     entries.push(["link", "/releases", "Releases"], ["link", "/pact", "PACT"], ["link", "/payroll", "Payroll"], ["link", "/package", "Invoice Package"]);
   } else {

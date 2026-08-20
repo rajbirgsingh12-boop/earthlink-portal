@@ -7,6 +7,8 @@ import { sb } from "@/lib/supabase";
 import { fmt, parseNum } from "@/lib/format";
 import type { Contract } from "@/lib/types";
 import ContractPicker from "@/components/ContractPicker";
+import PageHeader from "@/components/PageHeader";
+import { RowActions } from "@/components/ActionMenu";
 import { useLive } from "@/lib/useLive";
 
 interface Item { id: string; code: string; description: string; unit: string; unit_price: number; category: string; line?: number; }
@@ -169,14 +171,12 @@ export default function Items() {
 
   return (
     <div>
-      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-        <div className="font-display text-2xl font-bold uppercase">Price Book</div>
-        <div className="flex gap-2">
-          <button className="btn btn-ghost" onClick={() => setAddOpen(!addOpen)}>+ Add item</button>
-          <button className="btn btn-ghost" onClick={() => fileRef.current?.click()}>Upload sheet</button>
-          {items.length > 0 && !confirmWipe && <button className="btn btn-ghost text-alert" onClick={() => setConfirmWipe(true)}>Remove all</button>}
-        </div>
-      </div>
+      <PageHeader title="Price Book"
+        primary={<button className="btn btn-primary min-h-[44px]" onClick={() => setAddOpen(!addOpen)}>+ Add item</button>}
+        menu={[
+          { label: "Upload sheet", glyph: "📄", onSelect: () => fileRef.current?.click() },
+          { label: "Remove all…", destructive: true, hidden: items.length === 0 || confirmWipe, onSelect: () => setConfirmWipe(true) },
+        ]} />
       <div className="mb-3">
         <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Which price book?</div>
         <ContractPicker contracts={contracts} value={sel} onChange={setSel} extra={[{ id: "", label: "General (no contract)" }]} />
@@ -220,8 +220,8 @@ export default function Items() {
                   <td className="p-1.5"><input className="field w-24 px-1.5 py-1.5 text-right font-mono" inputMode="decimal" value={edit.unit_price}
                     onChange={(e) => setEdit({ ...edit, unit_price: e.target.value })} onKeyDown={(e) => e.key === "Enter" && saveEdit()} /></td>
                   <td className="whitespace-nowrap p-1.5 text-right">
-                    <button className="btn btn-primary px-2.5 py-1 text-[12px]" onClick={saveEdit}>Save</button>
-                    <button className="ml-1.5 text-xs text-inksoft underline" onClick={() => setEditId(null)}>cancel</button>
+                    <button className="btn btn-primary min-h-[44px] px-3 text-[13px]" onClick={saveEdit}>Save</button>
+                    <button className="ml-1.5 inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline" onClick={() => setEditId(null)}>cancel</button>
                   </td>
                 </tr>
               ) : (
@@ -234,9 +234,11 @@ export default function Items() {
                   </td>
                   <td className="p-2.5 font-mono text-xs">{it.unit}</td>
                   <td className="p-2.5 text-right font-mono">{fmt(Number(it.unit_price))}</td>
-                  <td className="whitespace-nowrap p-2.5 text-right">
-                    <button className="text-xs text-inksoft" title="Edit this item" onClick={() => startEdit(it)}>✎</button>
-                    <button className="ml-2 text-xs text-alert" title="Remove this item" onClick={() => del(it.id)}>✕</button>
+                  <td className="whitespace-nowrap p-1.5 text-right">
+                    <RowActions items={[
+                      { label: "Edit item", onSelect: () => startEdit(it) },
+                      { label: "Delete item", destructive: true, onSelect: () => del(it.id) },
+                    ]} />
                   </td>
                 </tr>
               )

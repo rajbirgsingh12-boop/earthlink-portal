@@ -83,11 +83,11 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
         <div className="mx-auto flex max-w-5xl items-baseline justify-between">
           <div>
             <div className="font-display text-2xl font-bold uppercase leading-none">Earth Link</div>
-            <div className="text-[10px] uppercase tracking-[.25em] text-[#A9A69C]">Field Office</div>
+            <div className="text-[11px] uppercase tracking-[.25em] text-[#A9A69C]">Field Office</div>
           </div>
           <div className="flex items-center gap-3 text-xs text-[#A9A69C]">
             <span>{profile?.name || ""} · {profile?.role || ""}</span>
-            <button className="underline" onClick={async () => { clearMyProfile(); try { localStorage.removeItem("elgc-profile"); } catch {} await sb().auth.signOut(); window.location.href = "/login"; }}>Sign out</button>
+            <button className="inline-flex min-h-[44px] items-center text-[13px] underline" onClick={async () => { clearMyProfile(); try { localStorage.removeItem("elgc-profile"); } catch {} await sb().auth.signOut(); window.location.href = "/login"; }}>Sign out</button>
           </div>
         </div>
       </div>
@@ -113,7 +113,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
                   onPointerEnter={(ev) => { if (ev.pointerType === "mouse") openAt(g.key, ev.currentTarget); }}
                   onClick={(ev) => (menu === g.key ? setMenu(null) : openAt(g.key, ev.currentTarget))}>
                   {g.label}
-                  <span className={`text-[10px] transition-transform duration-150 ${menu === g.key ? "rotate-180" : ""}`}>▾</span>
+                  <span className={`text-[11px] transition-transform duration-150 ${menu === g.key ? "rotate-180" : ""}`}>▾</span>
                 </button>
               );
             })}

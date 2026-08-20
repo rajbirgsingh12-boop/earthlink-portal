@@ -7,6 +7,7 @@ import { sb } from "@/lib/supabase";
 import { myProfile } from "@/lib/profile";
 import { prettyDate, addDays, localISO } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
+import PageHeader from "@/components/PageHeader";
 import ContractPicker, { contractLabel } from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
 import type { Contract } from "@/lib/types";
@@ -234,14 +235,11 @@ export default function Schedule() {
   return (
     <div>
       {msg && <div className="mb-3 rounded-sm border border-work bg-work/10 p-2.5 text-sm">{msg}</div>}
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div className="font-display text-2xl font-bold uppercase">Schedule</div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button className={`btn ${day === localISO() ? "btn-primary" : ""}`} onClick={() => setDay(localISO())}>Today</button>
-          <button className={`btn ${day === addDays(localISO(), 1) ? "btn-primary" : ""}`} onClick={() => setDay(addDays(localISO(), 1))}>Tomorrow</button>
-          <input type="date" className="field w-44" value={day} onChange={(e) => e.target.value && setDay(e.target.value)} />
-        </div>
-      </div>
+      <PageHeader title="Schedule">
+        <button className={`btn min-h-[44px] ${day === localISO() ? "btn-primary" : ""}`} onClick={() => setDay(localISO())}>Today</button>
+        <button className={`btn min-h-[44px] ${day === addDays(localISO(), 1) ? "btn-primary" : ""}`} onClick={() => setDay(addDays(localISO(), 1))}>Tomorrow</button>
+        <input type="date" className="field w-44" value={day} onChange={(e) => e.target.value && setDay(e.target.value)} />
+      </PageHeader>
       <div className="mb-1 text-[13px] text-inksoft">
         Scheduling for <b className="text-ink">{prettyDate(day)}</b> — add a release, write the description, add workers, then <b className="text-ink">Assign &amp; text</b> messages the whole crew at once
         {machine ? " from the company number." : " (opens a group text on this phone)."}
@@ -303,7 +301,7 @@ export default function Schedule() {
                 value={addrBuf[rel.id] ?? addrOf(rel.id)} readOnly={!canEdit}
                 onChange={(e) => setAddrBuf((p) => ({ ...p, [rel.id]: e.target.value }))}
                 onBlur={() => canEdit && saveAddr(rel.id)} />
-              {canEdit && <button className="btn shrink-0 px-3" title="Find it on the map" onClick={() => openMap(rel.id)}>🗺 Map</button>}
+              {canEdit && <button className="btn min-h-[44px] shrink-0 px-3" title="Find it on the map" onClick={() => openMap(rel.id)}>Map</button>}
             </div>
             {assigned.map((row) => {
               const emp = emps.find((e) => e.id === row.employee_id);
@@ -315,7 +313,7 @@ export default function Schedule() {
                   {row.texted && (canEdit
                     // a stamp that landed without a text really going out (e.g. the
                     // group message was never hit send on) can be tapped off
-                    ? <button title="Tap to clear if the text never actually went out" onClick={async () => {
+                    ? <button className="btn-stamp" title="Tap to clear if the text never actually went out" onClick={async () => {
                         if (!window.confirm(`Clear the TEXTED mark for ${emp.name.split(" ")[0]}? Do this if the message never really went out.`)) return;
                         setRows((prev) => prev.map((x) => (x.id === row.id ? { ...x, texted: false } : x)));
                         await sb().from("schedule_days").update({ texted: false }).eq("id", row.id);
@@ -324,12 +322,12 @@ export default function Schedule() {
                   {!ok && <span className="text-[11px] text-inksoft">no number in the crew list</span>}
                   <span className="ml-auto flex items-center gap-2.5">
                     {ok && !machine && (
-                      <a className="text-[11px] text-inksoft underline" title="Opens their text on this phone"
+                      <a className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline" title="Opens their text on this phone"
                         href={smsHref(emp.phone || "", msgFor(rel, rel.id, emp.name.split(" ")[0]))}
                         onClick={() => setTimeout(() => { if (window.confirm(`Did the text to ${emp.name.split(" ")[0]} send? OK stamps TEXTED ✓`)) markTexted(row.id); }, 600)}>resend</a>
                     )}
                     {ok && machine && canEdit && (
-                      <button className="text-[11px] text-inksoft underline" title="Resend from the company number"
+                      <button className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline" title="Resend from the company number"
                         onClick={async () => {
                           const res = await sendServerTexts(
                             [{ to: cleanPhone(emp.phone || ""), body: msgFor(rel, rel.id, emp.name.split(" ")[0]), id: row.id }],
@@ -338,7 +336,7 @@ export default function Schedule() {
                           else flash(res.failed?.[0]?.error || res.error || "Couldn't send");
                         }}>resend</button>
                     )}
-                    {canEdit && <button className="text-xs text-alert" title="Remove from this day" onClick={() => { if (row.texted && !window.confirm(`${emp.name.split(" ")[0]} was already texted about this job — remove them anyway? They won't be told automatically.`)) return; unassign(row.id); }}>✕</button>}
+                    {canEdit && <button className="btn-icon border-0 bg-transparent text-[15px] text-alert shadow-none" title="Remove from this day" onClick={() => { if (row.texted && !window.confirm(`${emp.name.split(" ")[0]} was already texted about this job — remove them anyway? They won't be told automatically.`)) return; unassign(row.id); }}>✕</button>}
                   </span>
                 </div>
               );
@@ -363,11 +361,11 @@ export default function Schedule() {
             )}
             {canEdit && addFor !== rel.id && (
               <div className="mt-2 flex flex-wrap gap-2">
-                <button className="btn px-3 py-1.5 text-[13px]" onClick={() => { setAddFor(rel.id); setAddQ(""); }}>+ Add worker</button>
+                <button className="btn min-h-[44px] px-3 text-[13px]" onClick={() => { setAddFor(rel.id); setAddQ(""); }}>+ Add worker</button>
                 {assigned.length > 0 && (
-                  <button className="btn btn-primary px-3 py-1.5 text-[13px]" disabled={sending === rel.id}
+                  <button className="btn btn-primary min-h-[44px] px-3 text-[13px]" disabled={sending === rel.id}
                     onClick={() => textCrew(rel)}>
-                    {sending === rel.id ? "Sending…" : `Assign & text ${assigned.length === 1 ? "worker" : "crew"} 📱`}
+                    {sending === rel.id ? "Sending…" : `Assign & text ${assigned.length === 1 ? "worker" : "crew"}`}
                   </button>
                 )}
               </div>

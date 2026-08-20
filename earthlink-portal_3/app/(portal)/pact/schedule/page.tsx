@@ -5,6 +5,7 @@ import { sb } from "@/lib/supabase";
 import { myProfile } from "@/lib/profile";
 import { useLive } from "@/lib/useLive";
 import Stamp from "@/components/Stamp";
+import PageHeader from "@/components/PageHeader";
 
 interface Job {
   id: string; partner: string; po_number?: string; job_number: string; address?: string;
@@ -56,7 +57,7 @@ export default function PactSchedule() {
           <div className="max-w-[420px] truncate text-[11px] text-inksoft">{j.partner}{j.description ? ` · ${j.description}` : ""}</div>
         </div>
         {canEdit ? (
-          <button onClick={() => save(j, { work_done: !j.work_done })}>
+          <button className="btn-stamp" onClick={() => save(j, { work_done: !j.work_done })}>
             <Stamp label={j.work_done ? "COMPLETE ✓" : "MARK COMPLETE"} tone={j.work_done ? "ok" : "mute"} />
           </button>
         ) : (
@@ -64,11 +65,11 @@ export default function PactSchedule() {
         )}
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2">
-        <label className="flex items-center gap-1.5 text-[10px] uppercase tracking-widest text-inksoft">Start
+        <label className="flex items-center gap-1.5 text-[11px] uppercase tracking-widest text-inksoft">Start
           <input type="date" className="rounded-sm border border-rulesoft bg-white p-1.5 font-mono text-xs" value={j.start_date || ""} readOnly={!canEdit}
             onChange={(e) => canEdit && save(j, { start_date: e.target.value })} />
         </label>
-        <label className="flex items-center gap-1.5 text-[10px] uppercase tracking-widest text-inksoft">Finish
+        <label className="flex items-center gap-1.5 text-[11px] uppercase tracking-widest text-inksoft">Finish
           <input type="date" className="rounded-sm border border-rulesoft bg-white p-1.5 font-mono text-xs" value={j.finish_date || ""} readOnly={!canEdit}
             onChange={(e) => canEdit && save(j, { finish_date: e.target.value })} />
         </label>
@@ -83,13 +84,9 @@ export default function PactSchedule() {
 
   return (
     <div>
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <div className="font-display text-2xl font-bold uppercase">PACT Schedule</div>
-          <span className="text-xs text-inksoft">{scheduled.length} scheduled · {needsDates.length} need dates · {done.length} complete</span>
-        </div>
-        <Link className="btn btn-ghost" href="/pact">📋 Jobs</Link>
-      </div>
+      <PageHeader title="PACT Schedule" sub={`${scheduled.length} scheduled · ${needsDates.length} need dates · ${done.length} complete`}>
+        <Link className="btn btn-ghost min-h-[44px]" href="/pact">Jobs</Link>
+      </PageHeader>
       <input className="field mb-3" placeholder="Search PO #, partner, address…" value={q} onChange={(e) => setQ(e.target.value)} />
 
       {needsDates.length > 0 && (

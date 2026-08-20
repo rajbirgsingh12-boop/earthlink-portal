@@ -8,6 +8,11 @@ import { fmt, parseNum, askFileName } from "@/lib/format";
 import { prettyDate, localISO, type Org } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
 import PrintShell from "@/components/PrintShell";
+import ActionMenu, { RowActions } from "@/components/ActionMenu";
+import PageHeader from "@/components/PageHeader";
+import CardToolbar from "@/components/CardToolbar";
+import Modal from "@/components/Modal";
+import Disclosure from "@/components/Disclosure";
 import Letterhead from "@/components/Letterhead";
 import { useLive } from "@/lib/useLive";
 import { COMPANY } from "@/lib/company";
@@ -59,7 +64,10 @@ export default function Pact() {
   const [attachJob, setAttachJob] = useState<Job | null>(null);
   const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
   const [invJob, setInvJob] = useState<Job | null>(null);
-  const [showDetails, setShowDetails] = useState(false);
+  // which jobs show their details panel — per job, so opening one job's
+  // details never flips another's, and closing a job doesn't forget it
+  const [detailsOpen, setDetailsOpen] = useState<Record<string, boolean>>({});
+  const showDetailsFor = (id: string) => setDetailsOpen((p) => ({ ...p, [id]: true }));
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
@@ -269,7 +277,7 @@ export default function Pact() {
     return out.filter((it) => it.description.trim());
   };
 
-  // "⚡ Price from list" on a job already here
+  // "Price from list" on a job already here
   const fillFromList = async (j: Job) => {
     setBusy(true);
     try {
@@ -618,7 +626,7 @@ export default function Pact() {
         if (hit) {
           setBusy(false);
           await load();
-          setOpenId(hit.id); setShowDetails(true);
+          setOpenId(hit.id); showDetailsFor(hit.id);
           flash("That proposal is already here — opened it (nothing new was created)");
           return;
         }
@@ -635,7 +643,7 @@ export default function Pact() {
           }
           setBusy(false);
           await load();
-          setOpenId(dupe.id); setShowDetails(true);
+          setOpenId(dupe.id); showDetailsFor(dupe.id);
           flash(`PO ${f.po} is already here — opened it (nothing new was created)`);
           return;
         }
@@ -681,14 +689,14 @@ export default function Pact() {
       await load();
       // open the fresh job with its details showing so what was read is on screen
       setOpenId((job as Job).id);
-      setShowDetails(true);
+      showDetailsFor((job as Job).id);
       // the finished job, with the lines the price list filled in — and if
       // that read comes back empty, the job we just made is still the truth
       const { data: fresh } = await sb().from("pact_jobs").select("*").eq("id", (job as Job).id).single();
       const ready = (fresh as Job | null)?.id ? (fresh as Job) : (job as Job);
       if (!unreadable) setOneShot({ id: ready.id, job: ready, note: f.po ? `PO ${f.po}` : "PO read" });
       flash(ue
-        ? `Job created, but the PDF didn't attach (${/bucket/i.test(ue.message) ? "storage not set up — run supabase/upgrade_invoices_aging_docs.sql" : ue.message.slice(0, 80)}) — add it from the Documents button`
+        ? `Job created, but the PDF didn't attach (${/bucket/i.test(ue.message) ? "storage not set up — run supabase/upgrade_invoices_aging_docs.sql" : ue.message.slice(0, 80)}) — open the job → ⋯ → Documents`
         : unreadable
           ? isDocx
             ? "File attached, but the proposal couldn't be read — type the partner, address and description below"
@@ -1118,7 +1126,7 @@ export default function Pact() {
     setBusy(true);
     try {
       const out = await buildPackageBytes(j, theOrg);
-      if (!out) { flash("Fill in the invoice lines first (open the job → Invoice)"); setBusy(false); return; }
+      if (!out) { flash("Fill in the invoice lines first (open the job → Papers → Edit invoice)"); setBusy(false); return; }
       const blob = new Blob([out.buffer as ArrayBuffer], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
       const aEl = document.createElement("a");
@@ -1155,12 +1163,9 @@ export default function Pact() {
 
   return (
     <div>
-      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-        <div className="font-display text-2xl font-bold uppercase">PACT</div>
-        <div className="flex flex-wrap gap-2">
-          <Link className="btn btn-ghost" href="/pact/schedule">📅 Schedule</Link>
-        </div>
-      </div>
+      <PageHeader title="PACT">
+        <Link className="btn btn-ghost" href="/pact/schedule">📅 Schedule</Link>
+      </PageHeader>
       <input ref={poRef} type="file" accept="application/pdf,.pdf,.docx" className="hidden" onChange={handlePo} />
       {/* a folder (or multi-select) of proposal letters, read in one go */}
       {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
@@ -1185,17 +1190,22 @@ export default function Pact() {
                 : priced ? ". Check the lines below before you send anything."
                   : ". The lines have no prices yet — fill them in below first."}
             </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {canInvoice && billable.length > 0 && (
+            <CardToolbar className="mt-3"
+              primary={canInvoice && billable.length > 0 ? (
                 <button className="btn btn-primary" disabled={busy} onClick={() => saveBoth(j)}>
                   {busy ? "Working…" : "⬇ Proposal + invoice"}
                 </button>
-              )}
-              <button className="btn" disabled={busy} onClick={() => viewProposal(j)}>👁 View proposal</button>
-              <button className={billable.length > 0 ? "btn" : "btn btn-primary"} disabled={busy} onClick={() => saveProposalPdfFor(j)}>📝 Proposal only</button>
-              {canInvoice && <button className="btn" disabled={busy || billable.length === 0} title={billable.length === 0 ? "The job needs a work line first" : ""} onClick={() => saveInvoiceFor(j)}>🧾 Invoice only</button>}
-              <button className="btn btn-ghost" disabled={busy} onClick={() => setOneShot(null)}>Done</button>
-            </div>
+              ) : undefined}
+              secondary={<button className="btn btn-ghost" disabled={busy} onClick={() => setOneShot(null)}>Done</button>}
+              menuLabel="Papers"
+              menu={[
+                { label: "View proposal", disabled: busy, title: "Read the proposal letter on screen first", onSelect: () => viewProposal(j) },
+                { label: "⬇ Proposal (PDF)", disabled: busy, title: "The proposal to send — opens the same everywhere", onSelect: () => saveProposalPdfFor(j) },
+                // this one saves the invoice PDF alone — the full zip lives on the job's Papers menu
+                { label: "⬇ Invoice (PDF)", hidden: !canInvoice, disabled: busy || billable.length === 0,
+                  title: billable.length === 0 ? "The job needs a work line first" : "Just the invoice, as a PDF",
+                  onSelect: () => saveInvoiceFor(j) },
+              ]} />
           </div>
         );
       })()}
@@ -1216,7 +1226,7 @@ export default function Pact() {
             )}
             {canInvoice && (
               <button className="btn" onClick={downloadFolderProposals} disabled={busy || folderResult.made.length === 0}>
-                {busy ? "Working…" : `📝 Download all ${folderResult.made.length} proposals (zip)`}
+                {busy ? "Working…" : `⬇ Download all ${folderResult.made.length} proposals (zip)`}
               </button>
             )}
             <button className="btn btn-ghost" disabled={busy} onClick={() => setFolderResult(null)}>Not now</button>
@@ -1250,7 +1260,7 @@ export default function Pact() {
         <div className="mb-3 grid grid-cols-3 gap-2">
           {([["PACT total", fmt(tot), "text-ink"], ["Received", fmt(rec), "text-ok"], ["Outstanding", fmt(tot - rec), "text-work"]] as [string, string, string][]).map(([l, v, cls]) => (
             <div key={l} className="card p-3">
-              <div className="text-[10px] uppercase tracking-[.12em] text-inksoft">{l}</div>
+              <div className="text-[11px] uppercase tracking-[.12em] text-inksoft">{l}</div>
               <div className={`font-mono text-base font-semibold ${cls}`}>{v}</div>
             </div>
           ))}
@@ -1263,11 +1273,13 @@ export default function Pact() {
             <b>Got a purchase order?</b>{" "}
             <span className="text-inksoft">Upload the PDF — the job builds itself with the address, contacts, work lines and amount.</span>
           </div>
-          <div className="flex shrink-0 gap-2">
+          <div className="flex shrink-0 flex-wrap gap-2">
             <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy} title="A partner PO (PDF) or one of our proposal letters (Word)">📄 Upload PO / proposal</button>
-            <button className="btn whitespace-nowrap" onClick={() => folderRef.current?.click()} disabled={busy} title="Pick a folder of proposal letters — every one becomes a job, then all the invoices download in one zip">📁 Proposal folder</button>
-            {canInvoice && <button className="btn btn-ghost whitespace-nowrap" onClick={blankProposal} disabled={busy} title="A blank proposal letter in our layout — fill it in, and uploading it back here builds the job and the invoice">📝 Proposal template</button>}
-            <button className="btn btn-ghost" onClick={() => setAddOpen(!addOpen)}>+ Manual</button>
+            <ActionMenu label="More ways to add" items={[
+              { label: "Upload a folder of proposals", disabled: busy, title: "Pick a folder of proposal letters — every one becomes a job, then all the invoices download in one zip", onSelect: () => folderRef.current?.click() },
+              { label: "Proposal template", hidden: !canInvoice, disabled: busy, title: "A blank proposal letter in our layout — fill it in, and uploading it back here builds the job and the invoice", onSelect: blankProposal },
+              { label: "Add a job manually", onSelect: () => setAddOpen(!addOpen) },
+            ]} />
           </div>
         </div>
       )}
@@ -1277,7 +1289,7 @@ export default function Pact() {
         {list.map((j) => (
           <div key={j.id} className={`p-3.5 ${j.canceled ? "opacity-50" : ""}`}>
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <button className="min-w-0 text-left" onClick={() => { setOpenId(openId === j.id ? null : j.id); setShowDetails(false); }}>
+              <button className="min-w-0 text-left" onClick={() => setOpenId(openId === j.id ? null : j.id)}>
                 <div className={`text-[14px] font-semibold ${j.canceled ? "line-through" : ""}`}>
                   {shortSite(j)}
                   {(j.po_number || j.job_number) ? <span className="ml-1.5 font-mono text-xs text-inksoft">PO {j.po_number || j.job_number}</span> : null}
@@ -1289,19 +1301,23 @@ export default function Pact() {
                   return (
                     <div className="mt-1 flex flex-wrap items-center gap-1">
                       {stages.map(([l, done], i) => (
-                        <span key={l} className={`rounded-[2px] border px-1 py-px font-mono text-[9px] font-semibold ${done ? "border-ok bg-ok/10 text-ok" : i === current ? "border-work text-work" : "border-rulesoft text-rule"}`}>{l}</span>
+                        <span key={l} className={`chip rounded-[2px] border px-1 py-px font-semibold ${done ? "border-ok bg-ok/10 text-ok" : i === current ? "border-work text-work" : "border-rulesoft text-rule"}`}>{l}</span>
                       ))}
-                      {j.proposal_sent && !j.approved && <span className="ml-1 font-mono text-[10px] text-work">{days(j.proposal_sent)}d waiting</span>}
-                      {canInvoice && j.invoice_sent && !j.received && <span className="ml-1 font-mono text-[10px] text-inksoft">{days(j.invoice_sent)}d out</span>}
+                      {j.proposal_sent && !j.approved && <span className="chip ml-1 text-work">{days(j.proposal_sent)}d waiting</span>}
+                      {canInvoice && j.invoice_sent && !j.received && <span className="chip ml-1 text-inksoft">{days(j.invoice_sent)}d out</span>}
                     </div>
                   );
                 })()}
               </button>
               <div className="flex shrink-0 items-center gap-2">
                 {canPrice && <span className="font-mono text-sm font-semibold">{fmt(Number(j.amount) || invTotal(j))}</span>}
-                <button className="text-inksoft" title="Documents & photos" onClick={() => setAttachJob(j)}>📎{(j.attachments || []).length > 0 ? <span className="font-mono text-[10px]">{(j.attachments || []).length}</span> : null}</button>
-                {canEdit && j.canceled && <button className="text-ok" title="Restore" onClick={() => patch(j, { canceled: false })}>↺</button>}
-                {canEdit && <button className="text-alert" title="Delete job" onClick={() => deleteJob(j)}>✕</button>}
+                {(j.attachments || []).length > 0 && <span className="chip text-inksoft" title="Documents & photos">📎 {(j.attachments || []).length}</span>}
+                <RowActions items={[
+                  { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },
+                  { label: "Restore", glyph: "↺", hidden: !canEdit || !j.canceled, onSelect: () => patch(j, { canceled: false }) },
+                  // deleteJob asks its own window.confirm — no second prompt here
+                  { label: "Delete job…", hidden: !canEdit, destructive: true, onSelect: () => deleteJob(j) },
+                ]} />
               </div>
             </div>
             {openId === j.id && !j.canceled && (() => {
@@ -1309,13 +1325,13 @@ export default function Pact() {
               const afterN = (j.attachments || []).filter((a) => isImg(a.name) && a.name.toLowerCase().startsWith("after")).length;
               return (
               <div className="mt-3 border-t border-rulesoft pt-3">
-                <div className="mb-2.5 flex flex-wrap gap-2">
-                  {canEdit && <button className="btn px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "before")} disabled={busy}>📷 Before{beforeN > 0 ? ` · ${beforeN}` : ""}</button>}
-                  {canEdit && <button className="btn px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "after")} disabled={busy}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}
-                  {(beforeN > 0 || afterN > 0 || (j.attachments || []).length > 0) && (
-                    <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => setAttachJob(j)}>📎 Files{(j.attachments || []).length > 0 ? ` · ${(j.attachments || []).length}` : ""}</button>
-                  )}
-                  {canEdit && <button className="btn px-3 py-1.5 text-[13px]" onClick={() => openNotify(j)}>📱 Text worker</button>}
+                <div className="mb-2.5 flex flex-wrap items-center gap-2">
+                  {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "before")} disabled={busy}>📷 Before{beforeN > 0 ? ` · ${beforeN}` : ""}</button>}
+                  {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "after")} disabled={busy}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}
+                  <RowActions items={[
+                    { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },
+                    { label: "Text worker", hidden: !canEdit, onSelect: () => openNotify(j) },
+                  ]} />
                 </div>
                 {notifyJob === j.id && (() => {
                   const desc = notifyDesc.trim();
@@ -1343,7 +1359,7 @@ export default function Pact() {
                                 value={buf} onChange={(ev) => setPhoneBuf((p) => ({ ...p, [e.id]: ev.target.value }))}
                                 onBlur={() => { if (cleanPhone(buf) !== cleanPhone(e.phone || "")) savePhone(e.id, buf); }} />
                               {ok
-                                ? <a className="btn px-3 py-1.5 text-[13px]" href={smsHref(buf, msgFor(e.name.split(" ")[0]))}>Text 📱</a>
+                                ? <a className="btn min-h-[44px] px-3 py-1.5 text-[13px]" href={smsHref(buf, msgFor(e.name.split(" ")[0]))}>Text</a>
                                 : <span className="text-[11px] text-inksoft">add a number to text them</span>}
                             </div>
                           );
@@ -1351,7 +1367,7 @@ export default function Pact() {
                         {match.length === 0 && <div className="py-2 text-[13px] text-inksoft">No one matches “{crewQ}”.</div>}
                       </div>
                       <div className="mt-1.5 flex flex-wrap items-center gap-2 border-t border-rulesoft pt-2">
-                        <button className="btn btn-ghost px-3 py-1.5 text-[12px]"
+                        <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]"
                           onClick={() => { navigator.clipboard?.writeText(msgFor()); flash("Message copied — paste it into any group chat"); }}>
                           Copy message
                         </button>
@@ -1362,15 +1378,14 @@ export default function Pact() {
                 })()}
                 {canEdit && (
                 <div className="mb-2.5 flex flex-wrap gap-2">
-                  <button onClick={() => patch(j, j.proposal_sent ? { proposal_sent: null } : { proposal_sent: today() })}><Stamp label={j.proposal_sent ? `PROPOSAL SENT ${prettyDate(j.proposal_sent)}` : "MARK PROPOSAL SENT"} tone={j.proposal_sent ? "ok" : "mute"} /></button>
-                  <button onClick={() => patch(j, { approved: !j.approved })}><Stamp label={j.approved ? "APPROVED ✓" : "MARK APPROVED"} tone={j.approved ? "ok" : "mute"} /></button>
-                  <button onClick={() => patch(j, { work_done: !j.work_done })}><Stamp label={j.work_done ? "WORK DONE ✓" : "MARK WORK DONE"} tone={j.work_done ? "ok" : "mute"} /></button>
-                  {canInvoice && <button onClick={() => patch(j, j.received ? { received: false, paid_date: null } : { received: true, paid_date: today() })}><Stamp label={j.received ? `PAID ${prettyDate(j.paid_date)}` : "MARK PAID"} tone={j.received ? "ok" : "work"} /></button>}
+                  <button className="btn-stamp" onClick={() => patch(j, j.proposal_sent ? { proposal_sent: null } : { proposal_sent: today() })}><Stamp label={j.proposal_sent ? `PROPOSAL SENT ${prettyDate(j.proposal_sent)}` : "MARK PROPOSAL SENT"} tone={j.proposal_sent ? "ok" : "mute"} /></button>
+                  <button className="btn-stamp" onClick={() => patch(j, { approved: !j.approved })}><Stamp label={j.approved ? "APPROVED ✓" : "MARK APPROVED"} tone={j.approved ? "ok" : "mute"} /></button>
+                  <button className="btn-stamp" onClick={() => patch(j, { work_done: !j.work_done })}><Stamp label={j.work_done ? "WORK DONE ✓" : "MARK WORK DONE"} tone={j.work_done ? "ok" : "mute"} /></button>
+                  {canInvoice && <button className="btn-stamp" onClick={() => patch(j, j.received ? { received: false, paid_date: null } : { received: true, paid_date: today() })}><Stamp label={j.received ? `PAID ${prettyDate(j.paid_date)}` : "MARK PAID"} tone={j.received ? "ok" : "work"} /></button>}
                 </div>
                 )}
-                <button className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-inksoft hover:text-ink"
-                  onClick={() => setShowDetails(!showDetails)}>{showDetails ? "▴ Hide details" : "▾ Details (partner, PO #, contact…)"}</button>
-                {showDetails && (
+                <Disclosure label="Job details" sublabel="partner, PO #, contact" open={!!detailsOpen[j.id]}
+                  onToggle={() => setDetailsOpen((p) => ({ ...p, [j.id]: !p[j.id] }))}>
                 <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
                   {([["partner", "Partner"], ["address", "Work address (ship to)"], ["po_number", "PO #"], ...(canInvoice ? [["invoice_number", "Invoice #"]] : []), ["property_unit", "Property unit"], ["contact", "Contact"], ["description", "Work description"]] as ["partner" | "address" | "po_number" | "invoice_number" | "property_unit" | "contact" | "description", string][]).map(([k, label]) => (
                     <div key={k} className={k === "description" || k === "address" ? "col-span-2" : ""}><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
@@ -1378,7 +1393,7 @@ export default function Pact() {
                         onBlur={(e) => canEdit && patch(j, { [k]: e.target.value } as Partial<Job>)} /></div>
                   ))}
                 </div>
-                )}
+                </Disclosure>
                 {/* the PO seeds one line — add more when the job runs past what's listed (excess materials etc.) */}
                 <div className="mt-3">
                   <div className="mb-1.5 text-[11px] uppercase tracking-widest text-inksoft">Work lines — what gets billed for this job</div>
@@ -1389,54 +1404,49 @@ export default function Pact() {
                     </div>
                   ))}
                   {!canEdit && itemsOf(j).length === 0 && <div className="text-xs text-inksoft">No lines yet.</div>}
-                  {canEdit && (() => {
-                    const cols = canPrice ? "minmax(150px,1fr) 52px 52px 72px 72px 18px" : "minmax(150px,1fr) 52px 52px 18px";
-                    return (
-                      <div className="overflow-x-auto">
-                        <div className={canPrice ? "min-w-[460px]" : ""}>
-                          {itemsOf(j).length > 0 && (
-                            <div className="mb-1 grid gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-inksoft" style={{ gridTemplateColumns: cols }}>
-                              <span>Description of work</span><span className="text-right">Qty</span><span className="text-center">Unit</span>
-                              {canPrice && <span className="text-right">Price</span>}
-                              {canPrice && <span className="text-right">Total</span>}
-                              <span />
-                            </div>
-                          )}
-                          {itemsOf(j).map((it, i) => (
-                            <div key={i} className="mb-1.5 grid items-center gap-1.5" style={{ gridTemplateColumns: cols }}>
-                              <input className="field" placeholder="What was done — door, plaster, paint…" value={it.description}
-                                onChange={(e) => {
-                                  const next = [...itemsOf(j)];
-                                  const auto = unitFor(e.target.value);
-                                  next[i] = { ...it, description: e.target.value, unit: it.unit === unitFor(it.description) || !it.unit ? auto : it.unit };
-                                  setItems(j, next);
-                                }}
-                                onBlur={() => setItems(j, itemsOf(j), true)} />
-                              <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="decimal" title="Quantity"
-                                {...num(`${j.id}:wl${i}:q`, Number(it.qty) || 0,
-                                  (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next); },
-                                  (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next, true); })} />
-                              <input className="field px-1 py-1.5 text-center font-mono" title="Unit of measure" value={it.unit}
-                                onChange={(e) => { const next = [...itemsOf(j)]; next[i] = { ...it, unit: e.target.value }; setItems(j, next); }}
-                                onBlur={() => setItems(j, itemsOf(j), true)} />
-                              {canPrice && (
-                                <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="decimal" title="Price per unit"
-                                  {...num(`${j.id}:wl${i}:p`, Number(it.unit_price) || 0,
-                                    (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next); },
-                                    (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next, true); })} />
-                              )}
-                              {canPrice && <span className="text-right font-mono text-[12px]">{fmt((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</span>}
-                              <button className="text-alert" title="Remove line" onClick={() => setItems(j, itemsOf(j).filter((_, x) => x !== i), true)}>✕</button>
-                            </div>
-                          ))}
-                        </div>
+                  {/* each line stacks: the description on its own row, the numbers
+                      in a fixed grid under it — nothing scrolls sideways */}
+                  {canEdit && itemsOf(j).map((it, i) => (
+                    <div key={i} className="mb-2 rounded-sm border border-rulesoft p-2">
+                      <div className="flex items-start gap-1.5">
+                        <input className="field flex-1" placeholder="What was done — door, plaster, paint…" value={it.description}
+                          onChange={(e) => {
+                            const next = [...itemsOf(j)];
+                            const auto = unitFor(e.target.value);
+                            next[i] = { ...it, description: e.target.value, unit: it.unit === unitFor(it.description) || !it.unit ? auto : it.unit };
+                            setItems(j, next);
+                          }}
+                          onBlur={() => setItems(j, itemsOf(j), true)} />
+                        <button className="btn-icon border-0 bg-transparent shadow-none text-alert" title="Remove line" onClick={() => setItems(j, itemsOf(j).filter((_, x) => x !== i), true)}>✕</button>
                       </div>
-                    );
-                  })()}
+                      <div className={`mt-1.5 grid items-end gap-1.5 ${canPrice ? "grid-cols-4" : "grid-cols-2"}`}>
+                        <div><div className="text-[11px] uppercase text-inksoft">Qty</div>
+                          <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="decimal" title="Quantity"
+                            {...num(`${j.id}:wl${i}:q`, Number(it.qty) || 0,
+                              (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next); },
+                              (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next, true); })} /></div>
+                        <div><div className="text-[11px] uppercase text-inksoft">Unit</div>
+                          <input className="field px-1 py-1.5 text-center font-mono" title="Unit of measure" value={it.unit}
+                            onChange={(e) => { const next = [...itemsOf(j)]; next[i] = { ...it, unit: e.target.value }; setItems(j, next); }}
+                            onBlur={() => setItems(j, itemsOf(j), true)} /></div>
+                        {canPrice && (
+                          <div><div className="text-[11px] uppercase text-inksoft">Price</div>
+                            <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="decimal" title="Price per unit"
+                              {...num(`${j.id}:wl${i}:p`, Number(it.unit_price) || 0,
+                                (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next); },
+                                (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next, true); })} /></div>
+                        )}
+                        {canPrice && (
+                          <div><div className="text-[11px] uppercase text-inksoft">Total</div>
+                            <div className="py-1.5 text-right font-mono text-[13px]">{fmt((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</div></div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
                   {canEdit && (
                     <div className="flex flex-wrap gap-2">
-                      <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => setItems(j, [...itemsOf(j), { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>
-                      <button className="btn btn-ghost px-3 py-1.5 text-[13px]" disabled={busy} title="Fill the lines and prices from the partner price list — plaster brings its primer and paint" onClick={() => fillFromList(j)}>⚡ Price from list</button>
+                      <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => setItems(j, [...itemsOf(j), { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>
+                      <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" disabled={busy} title="Fill the lines and prices from the partner price list — plaster brings its primer and paint" onClick={() => fillFromList(j)}>Price from list</button>
                       {canPrice && (
                         <label className="flex items-center gap-1 text-[12px] text-inksoft" title="The sales tax printed on the proposal and the invoice">
                           Sales tax
@@ -1453,24 +1463,19 @@ export default function Pact() {
                     </div>
                   )}
                 </div>
-                {canInvoice && (
-                  <div className="mt-3 border-t border-rulesoft pt-3">
-                    <div className="mb-1.5 text-[10px] uppercase tracking-[.15em] text-inksoft">Papers</div>
-                    <div className="flex flex-wrap gap-2">
-                      <button className="btn px-3 py-1.5 text-[13px]" disabled={busy} title="Read the proposal letter on screen first" onClick={() => viewProposal(j)}>👁 View proposal</button>
-                      <button className="btn btn-primary px-3 py-1.5 text-[13px]" disabled={busy} title="The proposal to send — opens the same everywhere" onClick={() => makeProposalPdf(j)}>⬇ Proposal (PDF)</button>
-                      <button className="btn px-3 py-1.5 text-[13px]" disabled={busy} title="The same letter as a Word file, to edit before sending" onClick={() => makeProposal(j)}>⬇ Word</button>
-                      <button className="btn px-3 py-1.5 text-[13px]" title="The invoice lines, tax and total" onClick={() => setInvJob(j)}>🧾 Invoice</button>
-                      <button className="btn btn-primary px-3 py-1.5 text-[13px]" disabled={busy} title="Invoice, the PO and the before/after photos in one PDF" onClick={() => buildPackage(j)}>📦 Invoice package</button>
-                    </div>
-                  </div>
-                )}
-                <div className="mt-3 flex justify-end">
-                  <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => {
+                <CardToolbar className="mt-3 justify-end border-t border-rulesoft pt-3"
+                  primary={<button className="btn btn-primary" onClick={() => {
                     (document.activeElement as HTMLElement | null)?.blur?.();
-                    setOpenId(null); setShowDetails(false);
-                  }}>Save & close</button>
-                </div>
+                    setOpenId(null);
+                  }}>Save & close</button>}
+                  menuLabel="Papers"
+                  menu={canInvoice ? [
+                    { label: "View proposal", disabled: busy, title: "Read the proposal letter on screen first", onSelect: () => viewProposal(j) },
+                    { label: "⬇ Proposal (PDF)", disabled: busy, title: "The proposal to send — opens the same everywhere", onSelect: () => makeProposalPdf(j) },
+                    { label: "⬇ Proposal (Word)", disabled: busy, title: "The same letter as a Word file, to edit before sending", onSelect: () => makeProposal(j) },
+                    { label: "⬇ Invoice package (zip)", disabled: busy, title: "Invoice, the PO and the before/after photos in one PDF", onSelect: () => buildPackage(j) },
+                    { label: "Edit invoice", title: "The invoice lines, tax and total", onSelect: () => setInvJob(j) },
+                  ] : []} />
               </div>
               );
             })()}
@@ -1484,9 +1489,13 @@ export default function Pact() {
         const j = jobs.find((x) => x.id === invJob.id) || invJob;
         const items = itemsOf(j);
         return (
-          <div className="fixed inset-0 z-40 overflow-y-auto bg-ink/50 px-2 py-6">
-            <div className="card mx-auto max-w-3xl border-work bg-card p-4">
-              <div className="mb-1 font-display text-lg font-bold uppercase">Invoice · PO {j.po_number || j.job_number}</div>
+          <Modal wide title={`Invoice · PO ${j.po_number || j.job_number}`} onClose={() => setInvJob(null)}
+            footer={<CardToolbar className="justify-end"
+              secondary={<button className="btn btn-ghost" disabled={busy} onClick={() => { setInvJob(null); buildPackage(j); }}>⬇ Invoice package (zip)</button>}
+              primary={<button className="btn btn-primary" onClick={() => {
+                (document.activeElement as HTMLElement | null)?.blur?.();
+                setInvJob(null);
+              }}>Save & close</button>} />}>
               <div className="mb-3 text-[13px] text-inksoft">{j.partner} · {j.address}{j.property_unit ? ` · Unit ${j.property_unit}` : ""}</div>
               <div className="mb-3 grid grid-cols-2 gap-2.5 md:grid-cols-4">
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Invoice #</div>
@@ -1515,38 +1524,30 @@ export default function Pact() {
                         setItems(j, next);
                       }}
                       onBlur={() => setItems(j, items, true)} />
-                    <button className="mt-2 text-alert" onClick={() => setItems(j, items.filter((_, x) => x !== i), true)}>✕</button>
+                    <button className="btn-icon border-0 bg-transparent shadow-none text-alert" title="Remove line" onClick={() => setItems(j, items.filter((_, x) => x !== i), true)}>✕</button>
                   </div>
                   <div className="mt-2 grid grid-cols-4 gap-2">
-                    <div><div className="text-[10px] uppercase text-inksoft">Qty</div>
+                    <div><div className="text-[11px] uppercase text-inksoft">Qty</div>
                       <input className="field px-2 py-1.5 text-right font-mono" inputMode="decimal"
                         {...num(`${j.id}:inv${i}:q`, Number(it.qty) || 0,
                           (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next); },
                           (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next, true); })} /></div>
-                    <div><div className="text-[10px] uppercase text-inksoft">Unit</div>
+                    <div><div className="text-[11px] uppercase text-inksoft">Unit</div>
                       <input className="field px-2 py-1.5 text-center font-mono" value={it.unit}
                         onChange={(e) => { const next = [...items]; next[i] = { ...it, unit: e.target.value }; setItems(j, next); }}
                         onBlur={() => setItems(j, items, true)} /></div>
-                    <div><div className="text-[10px] uppercase text-inksoft">Unit price</div>
+                    <div><div className="text-[11px] uppercase text-inksoft">Unit price</div>
                       <input className="field px-2 py-1.5 text-right font-mono" inputMode="decimal"
                         {...num(`${j.id}:inv${i}:p`, Number(it.unit_price) || 0,
                           (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next); },
                           (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next, true); })} /></div>
-                    <div><div className="text-[10px] uppercase text-inksoft">Amount</div>
+                    <div><div className="text-[11px] uppercase text-inksoft">Amount</div>
                       <div className="field bg-paper px-2 py-1.5 text-right font-mono">{fmt((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</div></div>
                   </div>
                 </div>
               ))}
-              <button className="btn btn-ghost mb-3" onClick={() => setItems(j, [...items, { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>
-              <div className="flex justify-end gap-2">
-                <button className="btn" onClick={() => { setInvJob(null); buildPackage(j); }} disabled={busy}>📦 Download package</button>
-                <button className="btn btn-primary" onClick={() => {
-                  (document.activeElement as HTMLElement | null)?.blur?.();
-                  setInvJob(null);
-                }}>Save & close</button>
-              </div>
-            </div>
-          </div>
+              <button className="btn btn-ghost" onClick={() => setItems(j, [...items, { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>
+          </Modal>
         );
       })()}
 
@@ -1623,10 +1624,12 @@ export default function Pact() {
                 <div className="mt-6 border-t border-rulesoft pt-2 text-center text-[10px] text-inksoft">{COMPANY.letterhead.footer}</div>
               </div>
               <div className="no-print mx-auto mt-3 flex max-w-3xl flex-wrap justify-end gap-2">
-                <button className="btn bg-white" disabled={busy} onClick={() => saveProposalPdfFor(j)}>⬇ Download PDF</button>
-                <button className="btn bg-white" disabled={busy} onClick={() => saveProposalFor(j)}>⬇ Word</button>
-                <button className="btn bg-white" onClick={() => window.print()}>Print / Save as PDF</button>
+                <button className="btn btn-primary" disabled={busy} onClick={() => saveProposalPdfFor(j)}>⬇ Proposal (PDF)</button>
                 <button className="btn btn-ghost bg-white" onClick={() => setViewJob(null)}>Close</button>
+                <ActionMenu label="⋯" items={[
+                  { label: "⬇ Proposal (Word)", disabled: busy, title: "The same letter as a Word file, to edit before sending", onSelect: () => saveProposalFor(j) },
+                  { label: "Print / Save as PDF", onSelect: () => window.print() },
+                ]} />
               </div>
             </div>
           </PrintShell>
@@ -1634,9 +1637,14 @@ export default function Pact() {
       })()}
 
       {attachJob && (
-        <div className="fixed inset-0 z-40 overflow-y-auto bg-ink/50 px-2 py-10" onClick={() => setAttachJob(null)}>
-          <div className="card mx-auto max-w-md bg-card p-4" onClick={(e) => e.stopPropagation()}>
-            <div className="mb-3 font-display text-base font-bold uppercase">Documents · PO {attachJob.po_number || attachJob.job_number || ""}</div>
+        <Modal title={`Documents · PO ${attachJob.po_number || attachJob.job_number || ""}`} onClose={() => setAttachJob(null)}
+          footer={canEdit ? (
+            <div className="flex flex-wrap gap-2">
+              <button className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "before")} disabled={busy}>📷 Before</button>
+              <button className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "after")} disabled={busy}>📷 After</button>
+              <button className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy}>Upload file</button>
+            </div>
+          ) : undefined}>
             {(["before", "after"] as const).map((kind) => {
               const photos = (attachJob.attachments || []).filter((a) => isImg(a.name) && a.name.toLowerCase().startsWith(kind));
               return (
@@ -1689,14 +1697,7 @@ export default function Pact() {
                 {canEdit && <button className="shrink-0 px-1 text-xs text-alert" onClick={() => removeAttachment(attachJob, a.path)}>✕</button>}
               </div>
             ))}
-            <div className="mt-3 flex flex-wrap gap-2">
-              {canEdit && <button className="btn btn-primary" onClick={() => snapPhotos(attachJob, "before")} disabled={busy}>📷 Before</button>}
-              {canEdit && <button className="btn btn-primary" onClick={() => snapPhotos(attachJob, "after")} disabled={busy}>📷 After</button>}
-              {canEdit && <button className="btn" onClick={() => fileRef.current?.click()} disabled={busy}>Upload file</button>}
-              <button className="btn btn-ghost" onClick={() => setAttachJob(null)}>Close</button>
-            </div>
-          </div>
-        </div>
+        </Modal>
       )}
       <input ref={fileRef} type="file" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f && attachJob) attachFile(attachJob, f); e.target.value = ""; }} />
       <input ref={photoRef} type="file" accept="image/*" capture="environment" multiple className="hidden"

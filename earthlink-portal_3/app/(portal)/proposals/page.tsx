@@ -13,6 +13,8 @@ import ContractPicker from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
 import PrintShell from "@/components/PrintShell";
 import Letterhead from "@/components/Letterhead";
+import ActionMenu, { RowActions } from "@/components/ActionMenu";
+import Disclosure from "@/components/Disclosure";
 
 interface Proposal {
   id: string; number: string; client_name: string; job: string; date: string; tax_pct: number; status: string; notes: string;
@@ -231,7 +233,7 @@ export default function Proposals() {
     const { error } = await sb().from("proposals").update({ qty_map: map, total }).eq("id", doc.id);
     if (error) { setSaveState(""); flash(upgradeHint(error.message)); return; }
     await materialize();
-    setSaveState("saved"); flash("Saved");
+    setSaveState("saved"); // the Saved ✓ indicator is the signal — no toast on top
     setTimeout(() => setSaveState(""), 1500);
     load();
   };
@@ -474,9 +476,10 @@ export default function Proposals() {
           </div>
           <div className="flex flex-wrap gap-2">
             <button className="btn btn-primary" onClick={async () => { await saveNow(); setDoc(null); setItems([]); }}>Save & close</button>
-            <button className="btn" onClick={() => { setPrintOpen(true); setTimeout(() => window.print(), 400); }}>View PDF</button>
-            <button className="btn" onClick={exportWalkSheet}>Excel</button>
-            {(catalog || []).length === 0 && <button className="btn btn-ghost" onClick={() => sheetRef.current?.click()}>Upload price book</button>}
+            <ActionMenu label="⋯" items={[
+              { label: "View PDF", onSelect: () => { setPrintOpen(true); setTimeout(() => window.print(), 400); } },
+              { label: "⬇ Walk sheet (Excel)", onSelect: exportWalkSheet },
+            ]} />
           </div>
         </div>
         <input ref={sheetRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleContractSheet} />
@@ -488,14 +491,13 @@ export default function Proposals() {
                 onChange={(e) => setDoc({ ...doc, job: e.target.value })} onBlur={(e) => saveDoc({ job: e.target.value }, true)} /></div>
             <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Contract / PO</div>
               <ContractPicker contracts={contracts} value={doc.contract_id || ""} onChange={(id) => saveDoc({ contract_id: id }, true)} /></div>
-            <button className="self-end pb-2 text-left text-[11px] font-semibold uppercase tracking-widest text-inksoft hover:text-ink"
-              onClick={() => setShowHead(!showHead)}>{showHead ? "▴ Hide sheet header" : "▾ Sheet header (dates, staff, apt…)"}</button>
             <div className="col-span-2"><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Address of the location</div>
               <input className="field" placeholder="e.g. 21-10 41st Ave, Queensbridge" value={doc.address || ""}
                 onChange={(e) => setDoc({ ...doc, address: e.target.value })} onBlur={(e) => saveDoc({ address: e.target.value }, true)} /></div>
           </div>
-          {showHead && (
-            <div className="mt-2.5 grid grid-cols-2 gap-2.5 border-t border-rulesoft pt-2.5 md:grid-cols-4">
+          <Disclosure className="mt-1.5 border-t border-rulesoft pt-1" label="Sheet header" sublabel="dates, staff, apt, release #"
+            open={showHead} onToggle={() => setShowHead(!showHead)}>
+            <div className="grid grid-cols-2 gap-2.5 pt-1.5 md:grid-cols-4">
               {HEAD_FIELDS.map(([k, label]) => (
                 <div key={k}><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
                   <input className="field" type={/date/.test(k) ? "date" : "text"} value={doc[k] || ""}
@@ -503,18 +505,22 @@ export default function Proposals() {
                     onBlur={(e) => saveDoc({ [k]: e.target.value } as Partial<Proposal>, true)} /></div>
               ))}
             </div>
-          )}
+          </Disclosure>
         </div>
 
         {(catalog || []).length === 0 ? (
-          <div className="card border-work p-4 text-sm text-inksoft">
-            No price book loaded for contract {c?.number} yet. Tap <b>Upload price book</b> and pick the contract price sheet —
-            the xlsx with Line / Item / Category / Description / UOM / Price columns (a blank walk sheet works). One time per contract.
+          <div className="card border-work p-4">
+            <div className="text-sm text-inksoft">
+              No price book loaded for contract {c?.number} yet. Tap <b>Upload price book</b> and pick the contract price sheet —
+              the xlsx with Line / Item / Category / Description / UOM / Price columns (a blank walk sheet works). One time per contract.
+            </div>
+            <button className="btn btn-primary mt-3" onClick={() => sheetRef.current?.click()}>Upload price book</button>
           </div>
         ) : (
           <>
-            <input className="field mb-3" placeholder={`Search ${catalog!.length} lines — line #, item code, or any word (“cabinet”)…`}
+            <input className="field mb-1" placeholder="Search line #, code, or word…"
               value={search} onChange={(e) => setSearch(e.target.value)} />
+            <div className="mb-3 text-[11px] text-inksoft">{catalog!.length} lines in this price book</div>
             {groups.map((g, gi) => {
               const isOpen = !!search || !collapsed.has(g.category);
               const filled = g.rows.filter((ci) => parseNum(qty[ci.code] || "") > 0).length;
@@ -561,40 +567,48 @@ export default function Proposals() {
           <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
             <div className="printable mx-auto max-w-4xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
               <Letterhead />
-              <div className="border-2 border-ink bg-paper p-2 text-center font-display text-xl font-bold uppercase">Proposal — NYCHA Walk Sheet</div>
-              <div className="my-4 grid gap-y-1.5 border border-rulesoft p-3 text-[14px]">
+              {/* same band-and-rule look as the PACT proposal letter */}
+              <div className="mt-4 flex items-end justify-between border-b-[3px] border-work pb-2">
+                <div className="font-display text-2xl font-bold uppercase tracking-wide text-work">Proposal — NYCHA Walk Sheet</div>
+                <div className="text-right text-[12px] leading-tight">
+                  <div><span className="text-[11px] uppercase tracking-widest text-inksoft">Sheet # </span><b className="font-mono">{doc.number}</b></div>
+                </div>
+              </div>
+              <div className="mt-4 bg-card px-3 py-2 text-[13px]">
                 {([["Contract #", c?.number], ["Development", doc.development],
                   ["Address", [doc.address, doc.apt && `Apt ${doc.apt}`].filter(Boolean).join(" · ")],
                   ["For", doc.job]] as [string, string | undefined][]).map(([l, v]) => (
-                  <div key={l} className="flex gap-3 border-b border-rulesoft py-1"><span className="w-28 shrink-0 font-semibold uppercase text-[11px] tracking-wider text-inksoft">{l}</span><span>{v || "—"}</span></div>
+                  <div key={l} className="flex gap-3 py-0.5"><span className="w-28 shrink-0 text-[11px] uppercase tracking-widest text-inksoft">{l}</span><b>{v || "—"}</b></div>
                 ))}
               </div>
-              <table className="w-full border-collapse border border-ink text-[12px]">
-                <thead><tr className="bg-paper text-left font-display text-[10px] uppercase tracking-widest">
-                  <th className="border border-ink p-1.5">Line</th><th className="border border-ink p-1.5">Item</th><th className="border border-ink p-1.5">Category</th>
-                  <th className="border border-ink p-1.5">Description</th><th className="border border-ink p-1.5">UOM</th>
-                  <th className="border border-ink p-1.5 text-right">Qty</th><th className="border border-ink p-1.5 text-right">Price</th><th className="border border-ink p-1.5 text-right">Total</th>
+              <table className="mt-4 w-full border-collapse text-[12px]">
+                <thead><tr className="border-b-2 border-work bg-card text-left font-display text-[11px] uppercase tracking-widest text-inksoft">
+                  <th className="p-1.5">Line</th><th className="p-1.5">Item</th><th className="p-1.5">Category</th>
+                  <th className="p-1.5">Description</th><th className="p-1.5">UOM</th>
+                  <th className="p-1.5 text-right">Qty</th><th className="p-1.5 text-right">Price</th><th className="p-1.5 text-right">Total</th>
                 </tr></thead>
                 <tbody>
                   {billed.map((it, i) => (
-                    <tr key={i} className="align-top">
-                      <td className="border border-rulesoft p-1.5 font-mono">{it.line}</td>
-                      <td className="border border-rulesoft p-1.5 font-mono">{it.code}</td>
-                      <td className="border border-rulesoft p-1.5 text-[11px]">{it.category}</td>
-                      <td className="border border-rulesoft p-1.5">{it.description}</td>
-                      <td className="border border-rulesoft p-1.5 font-mono text-[11px]">{it.unit}</td>
-                      <td className="border border-rulesoft p-1.5 text-right font-mono">{it.qty}</td>
-                      <td className="border border-rulesoft p-1.5 text-right font-mono">{fmt(it.unit_price)}</td>
-                      <td className="border border-rulesoft p-1.5 text-right font-mono font-semibold">{fmt(it.qty * it.unit_price)}</td>
+                    <tr key={i} className="align-top border-b border-rulesoft">
+                      <td className="p-1.5 font-mono text-inksoft">{it.line}</td>
+                      <td className="p-1.5 font-mono text-inksoft">{it.code}</td>
+                      <td className="p-1.5 text-[11px] text-inksoft">{it.category}</td>
+                      <td className="p-1.5">{it.description}</td>
+                      <td className="p-1.5 font-mono text-[11px] text-inksoft">{it.unit}</td>
+                      <td className="p-1.5 text-right font-mono">{it.qty}</td>
+                      <td className="p-1.5 text-right font-mono text-inksoft">{fmt(it.unit_price)}</td>
+                      <td className="p-1.5 text-right font-mono font-semibold">{fmt(it.qty * it.unit_price)}</td>
                     </tr>
                   ))}
-                  <tr><td colSpan={7} className="border border-ink p-1.5 text-right font-display font-bold uppercase">Total</td>
-                    <td className="border border-ink p-1.5 text-right font-mono text-base font-bold">{fmt(grand)}</td></tr>
                 </tbody>
               </table>
+              <div className="mt-2 flex items-center justify-end gap-4 bg-work px-3 py-2 text-white">
+                <div className="font-display text-[13px] font-bold uppercase tracking-widest">Total</div>
+                <div className="font-mono text-base font-bold">{fmt(grand)}</div>
+              </div>
             </div>
-            <div className="no-print mx-auto mt-3 flex max-w-4xl justify-end gap-2">
-              <button className="btn bg-white" onClick={exportWalkSheet}>Download Excel</button>
+            <div className="no-print mx-auto mt-3 flex max-w-4xl flex-wrap justify-end gap-2">
+              <button className="btn btn-primary" onClick={exportWalkSheet}>⬇ Walk sheet (Excel)</button>
               <button className="btn bg-white" onClick={() => window.print()}>Print / Save as PDF</button>
               <button className="btn btn-ghost bg-white" onClick={() => setPrintOpen(false)}>Close</button>
             </div>
@@ -663,7 +677,7 @@ export default function Proposals() {
         </div>
       )}
       <div className="mb-3 flex flex-wrap gap-2">
-        {([["all", `All (${list.length})`], ["draft", `Drafts (${list.filter((p) => p.status === "draft").length})`], ["approved", `Released (${list.filter((p) => p.status === "approved").length})`]] as ["all" | "draft" | "approved", string][]).map(([f, l]) => (
+        {([["all", `All (${list.length})`], ["draft", `Drafts (${list.filter((p) => p.status === "draft").length})`], ["approved", `In a release (${list.filter((p) => p.status === "approved").length})`]] as ["all" | "draft" | "approved", string][]).map(([f, l]) => (
           <button key={f} className={`btn ${listFilter === f ? "btn-primary" : "btn-ghost"} px-3 py-1.5 text-[13px]`} onClick={() => setListFilter(f)}>{l}</button>
         ))}
       </div>
@@ -678,8 +692,8 @@ export default function Proposals() {
               .toLowerCase().includes(listQ.toLowerCase());
           })
           .map((p) => (
-          <div key={p.id} className="p-3.5">
-            <button className="flex w-full items-center justify-between gap-2 text-left" onClick={() => openEditor(p)}>
+          <div key={p.id} className="flex items-center gap-2 p-3.5">
+            <button className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left" onClick={() => openEditor(p)}>
               <div className="min-w-0">
                 <div className="text-[14px] font-semibold">
                   {(p.development || p.address || p.job)
@@ -697,10 +711,10 @@ export default function Proposals() {
                 <Stamp label={p.status.toUpperCase()} tone={tone(p.status) as "ok"} />
               </div>
             </button>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {p.contract_id && <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => addToRelease(p)}>→ Add to release</button>}
-              <button className="btn btn-ghost px-3 py-1.5 text-[13px] text-alert" onClick={() => deleteProposal(p)}>Delete</button>
-            </div>
+            <RowActions items={[
+              { label: "Add to release…", hidden: !p.contract_id, onSelect: () => addToRelease(p) },
+              { label: "Delete…", destructive: true, onSelect: () => deleteProposal(p) }, // deleteProposal keeps its own confirm
+            ]} />
           </div>
         ))}
         {list.length === 0 && <div className="p-5 text-sm text-inksoft">No walk sheets yet. Tap + New NYCHA walk sheet, load the contract price book once, and fill quantities as you walk the unit.</div>}

@@ -7,6 +7,7 @@ import { prettyDate, localISO } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged } from "@/lib/labor";
 import { useLive } from "@/lib/useLive";
 import Stamp from "@/components/Stamp";
+import PageHeader from "@/components/PageHeader";
 import type { Contract } from "@/lib/types";
 
 interface Row {
@@ -123,14 +124,13 @@ export default function Home() {
 
   return (
     <div>
-      <div className="mb-3 font-display text-2xl font-bold uppercase">The Board</div>
+      <PageHeader title="The Board" />
       {/* plain-language launcher — jump straight to the everyday jobs */}
       <div className="mb-4 grid grid-cols-2 gap-2.5 md:grid-cols-4">
-        {([["⏱", "Enter today's hours", "/payroll"], ["📋", "Fill out a walk sheet", "/proposals"],
-           ["🧾", "Make an invoice", "/package"], ["📄", "See the releases", "/releases"]] as [string, string, string][]).map(([icon, label, href]) => (
-          <Link key={href} href={href} className="card flex items-center gap-2.5 p-3.5 transition-shadow hover:shadow">
-            <span className="text-xl">{icon}</span>
-            <span className="font-display text-[14px] font-semibold uppercase leading-tight tracking-wide">{label}</span>
+        {([["Enter today's hours", "/payroll"], ["Fill out a walk sheet", "/proposals"],
+           ["Make an invoice", "/package"], ["See the releases", "/releases"]] as [string, string][]).map(([label, href]) => (
+          <Link key={href} href={href} className="card flex min-h-[44px] items-center gap-2.5 p-3.5 transition-shadow hover:shadow">
+            <span className="font-display text-[14px] font-semibold uppercase leading-tight tracking-wide">{label} →</span>
           </Link>
         ))}
       </div>
@@ -157,18 +157,18 @@ export default function Home() {
         <>
           {payrollNudge && (
             <Link href="/payroll" className="card mb-2.5 block border-alert p-3 text-[14px]">
-              ⏱ <b>No hours entered for this week yet.</b> Tap here, hit Make payroll, and punch them in before Friday.
+              ⚠ <b>No hours entered for this week yet.</b> Tap here, hit Make payroll, and punch them in before Friday.
             </Link>
           )}
           {stale.length > 0 && (
             <Link href="/package" className="card mb-2.5 block border-work p-3 text-[14px]">
-              🧾 <b>{stale.length} invoice{stale.length === 1 ? "" : "s"} out over 45 days</b> — worth a call. Tap to see who owes what.
+              ⚠ <b>{stale.length} invoice{stale.length === 1 ? "" : "s"} out over 45 days</b> — worth a call. Tap to see who owes what.
             </Link>
           )}
           <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
             {cards.map(([l, v, cls]) => (
               <div key={l} className="card p-3.5">
-                <div className="text-[10px] uppercase tracking-[.12em] text-inksoft">{l}</div>
+                <div className="text-[11px] uppercase tracking-[.12em] text-inksoft">{l}</div>
                 <div className={`font-mono text-lg font-semibold ${cls}`}>{v}</div>
               </div>
             ))}
@@ -178,7 +178,7 @@ export default function Home() {
             <div className="card p-3.5">
               <div className="mb-2 flex items-baseline justify-between">
                 <div className="font-display text-sm font-bold uppercase">Chase these first</div>
-                <Link href="/package" className="text-xs text-inksoft underline">Invoice Package →</Link>
+                <Link href="/package" className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline">Invoice Package →</Link>
               </div>
               {oldest.map((r) => (
                 <div key={r.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
@@ -196,7 +196,7 @@ export default function Home() {
             <div className="card p-3.5">
               <div className="mb-2 flex items-baseline justify-between">
                 <div className="font-display text-sm font-bold uppercase">Walk sheets undelivered</div>
-                <Link href="/proposals" className="text-xs text-inksoft underline">Proposals →</Link>
+                <Link href="/proposals" className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline">Proposals →</Link>
               </div>
               {walks.slice(0, 5).map((p) => (
                 <div key={p.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
@@ -204,14 +204,14 @@ export default function Home() {
                   <span className="shrink-0 font-mono">{fmt(Number(p.total) || 0)}</span>
                 </div>
               ))}
-              {walks.length === 0 && <div className="py-2 text-[13px] text-inksoft">Every walk sheet has been delivered. 🎉</div>}
+              {walks.length === 0 && <div className="py-2 text-[13px] text-inksoft">Every walk sheet has been delivered.</div>}
               {walks.length > 5 && <div className="mt-1 border-t border-rulesoft pt-2 text-xs text-inksoft">+{walks.length - 5} more drafts</div>}
             </div>
 
             <div className="card p-3.5">
               <div className="mb-2 flex items-baseline justify-between">
                 <div className="font-display text-sm font-bold uppercase">Payroll short</div>
-                <Link href="/payroll" className="text-xs text-inksoft underline">Payroll →</Link>
+                <Link href="/payroll" className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline">Payroll →</Link>
               </div>
               {shorts.map(({ r, missing }) => (
                 <div key={r.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">

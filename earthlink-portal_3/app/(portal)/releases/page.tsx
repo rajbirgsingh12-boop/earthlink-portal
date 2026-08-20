@@ -23,6 +23,10 @@ import { COMPANY } from "@/lib/company";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { planFolder, isReleaseFileName, parseReleaseFileName, contractKey, type FileMatch } from "@/lib/matchRelease";
+import ActionMenu, { RowActions } from "@/components/ActionMenu";
+import PageHeader from "@/components/PageHeader";
+import CardToolbar from "@/components/CardToolbar";
+import Modal from "@/components/Modal";
 
 type Filter = "all" | "chase" | "payroll" | "received" | "canceled" | "hours";
 // "007" and "7" are the same release — a database lookup is exact, so it has to
@@ -194,6 +198,9 @@ export default function Releases() {
   const [relItems, setRelItems] = useState<RelItemRow[] | null>(null);
 
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
+  // long run summaries (folder attach, duplicate fixes) land in a card that
+  // stays until dismissed — a 2.5s toast is gone before it can be read
+  const [result, setResult] = useState("");
   const numBuf = useNumBuffer();
   // accountants can look but not touch — their writes would be silent no-ops under RLS
   const [role, setRole] = useState("");
@@ -1051,7 +1058,7 @@ export default function Releases() {
     setFolderProgress(""); setBusy(false);
     await loadContracts();
     if (active) await loadRows(active);
-    flash(
+    setResult(
       merged + contractsMerged + attCopies === 0
         ? "No duplicates found anywhere — everything is clean"
         : `All contracts cleaned — ${merged} duplicate release${merged === 1 ? "" : "s"} merged away${contractsMerged ? `, ${contractsMerged} twin contract${contractsMerged === 1 ? "" : "s"} merged` : ""}${attCopies ? `, ${attCopies} duplicate file cop${attCopies === 1 ? "y" : "ies"} removed` : ""}${blocked ? `, ${blocked} moved to Canceled (payroll linked)` : ""}${keptRecv ? `, ${keptRecv} received duplicate${keptRecv === 1 ? "" : "s"} left alone` : ""}.`
@@ -1072,7 +1079,7 @@ export default function Releases() {
     await loadContracts();
     setActive(res.keeperContractId);
     await loadRows(res.keeperContractId);
-    flash(
+    setResult(
       res.dupGroups === 0 && res.contractsMerged === 0
         ? "No duplicates found — this contract is clean"
         : `Done — ${res.merged} duplicate release${res.merged === 1 ? "" : "s"} merged away${res.contractsMerged ? `, ${res.contractsMerged} twin contract${res.contractsMerged === 1 ? "" : "s"} merged` : ""}${res.attCopies ? `, ${res.attCopies} duplicate file cop${res.attCopies === 1 ? "y" : "ies"} removed` : ""}${res.blocked ? `, ${res.blocked} moved to Canceled (payroll hours linked)` : ""}${res.keptReceivedDupes ? `, ${res.keptReceivedDupes} received duplicate${res.keptReceivedDupes === 1 ? "" : "s"} left alone` : ""}. Totals are back to the real numbers.`
@@ -1507,7 +1514,7 @@ export default function Releases() {
     setFolderProgress(""); setBusy(false);
     if (target && target !== active) { await loadContracts(); setActive(target); }
     if (target) await loadRows(target, true); // lights up the SOS / Invoice buttons
-    flash(
+    setResult(
       `Attached ${ok} file${ok === 1 ? "" : "s"} to ${byRel.size} release${byRel.size === 1 ? "" : "s"}`
       + (made ? ` · ${made} new release${made === 1 ? "" : "s"} created` : "")
       + (reused ? ` · ${reused} already existed — files attached to the originals instead` : "")
@@ -1792,7 +1799,7 @@ export default function Releases() {
         await sb().from("releases").update({ invoice_sent: localISO() }).eq("id", relId).then(() => loadRows(contract.id));
         flash(`Release ${saved.rel} saved — invoice package downloaded (one PDF: invoice + 4 documents)`);
       } catch {
-        flash(`Release ${saved.rel} saved — package couldn't be built right now, use 📦 Package on the Invoice Package tab`);
+        flash(`Release ${saved.rel} saved — package couldn't be built right now, use ⬇ Invoice package (zip) on the Invoice Package tab`);
       }
     }
   };
@@ -1812,16 +1819,19 @@ export default function Releases() {
 
   return (
     <div>
-      <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
-        <div className="font-display text-2xl font-bold uppercase">Releases</div>
-        <div className="flex flex-wrap justify-end gap-2">
-          {!readOnly && <button className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" onClick={() => pdfRef.current?.click()}>+ From PDF(s)</button>}
-          {!readOnly && <button className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" onClick={() => folderRef.current?.click()}>📁 Attach folder</button>}
-          {!readOnly && contracts.length > 0 && <button className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" onClick={fixDuplicatesEverywhere} disabled={busy}>🧹 Fix all duplicates</button>}
-          {!readOnly && <button className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" onClick={() => fileRef.current?.click()}>Upload sheet</button>}
-          {rows.length > 0 && <button className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" onClick={exportSheet}>Download</button>}
-        </div>
-      </div>
+      <PageHeader title="Releases"
+        primary={!readOnly ? (
+          <ActionMenu label="Add" variant="primary" items={[
+            { label: "+ From PDF(s)", onSelect: () => pdfRef.current?.click() },
+            { label: "Attach folder of PDFs", glyph: "📄", onSelect: () => folderRef.current?.click() },
+            { label: "Import contract sheet (xlsx)", onSelect: () => fileRef.current?.click() },
+          ]} />
+        ) : undefined}
+        menuLabel="Tools"
+        menu={[
+          { label: "Export Excel", hidden: rows.length === 0, onSelect: exportSheet },
+          { label: "Fix duplicates in all contracts…", destructive: true, hidden: readOnly || contracts.length === 0, disabled: busy, onSelect: fixDuplicatesEverywhere },
+        ]} />
       <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFile} />
       <input ref={pdfRef} type="file" accept="application/pdf" multiple className="hidden" onChange={handlePdf} />
       {/* folder picker — webkitdirectory isn't in React's types, hence the cast */}
@@ -1833,6 +1843,14 @@ export default function Releases() {
         <div className="card mb-4 border-work p-4 text-sm">
           <b>{folderProgress}</b>
           <div className="text-[12px] text-inksoft">Working — leave this tab open until it finishes.</div>
+        </div>
+      )}
+
+      {/* the summary of a long run stays on screen until it's been read */}
+      {result && (
+        <div className="card mb-4 flex items-start gap-2 border-ok p-4 text-sm">
+          <div className="min-w-0 flex-1 pt-2">{result}</div>
+          <button type="button" aria-label="Dismiss" className="btn-icon border-0 shadow-none text-inksoft hover:text-ink" onClick={() => setResult("")}>✕</button>
         </div>
       )}
 
@@ -1900,7 +1918,7 @@ export default function Releases() {
                 <select className="field w-60 px-2 py-1.5 text-[13px]"
                   value={row.relId || (row.willCreate ? "__new__" : "")}
                   onChange={(e) => { setRow(i, e.target.value); setFolderEdit((p) => { const n = new Set(p); n.delete(i); return n; }); }}>
-                  {row.newRel && <option value="__new__">➕ Make release #{row.newRel.rel} (from this PDF)</option>}
+                  {row.newRel && <option value="__new__">+ Make release #{row.newRel.rel} (from this PDF)</option>}
                   <option value="">— skip this file —</option>
                   {relOptions.map((o) => (
                     <option key={o.id} value={o.id}>
@@ -1927,7 +1945,7 @@ export default function Releases() {
                       </div>
                       {folderEdit.has(i)
                         ? picker(i, r)
-                        : <button className="btn px-2.5 py-1 text-[12px]" onClick={() => setFolderEdit((prev) => new Set(prev).add(i))}>pick release</button>}
+                        : <button className="btn min-h-[44px] px-2.5 py-1 text-[13px]" onClick={() => setFolderEdit((prev) => new Set(prev).add(i))}>pick release</button>}
                     </div>
                   ))}
                   {needs.length > SHOWN && (
@@ -1945,7 +1963,7 @@ export default function Releases() {
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-[13px]">
                           <b className="font-mono">#{relNo ?? "?"}</b>
-                          {!r.relId && r.willCreate && <span className="ml-1 rounded-[2px] border border-work px-1 py-px font-mono text-[9px] font-semibold text-work">NEW</span>}
+                          {!r.relId && r.willCreate && <span className="chip ml-1 rounded-[2px] border border-work px-1 py-px font-semibold text-work">NEW</span>}
                           <span className="text-inksoft"> · </span>{r.name}
                         </div>
                         <div className="truncate text-[11px] text-inksoft">{r.why}</div>
@@ -1953,7 +1971,7 @@ export default function Releases() {
                       {folderEdit.has(i)
                         ? picker(i, r)
                         : (
-                          <button className="text-[11px] text-inksoft underline"
+                          <button className="min-h-[44px] px-2 text-[13px] text-inksoft underline"
                             onClick={() => setFolderEdit((p) => new Set(p).add(i))}>change</button>
                         )}
                     </div>
@@ -2090,7 +2108,7 @@ export default function Releases() {
                 if (error) { flash(error.message); return; }
                 setContracts((prev) => prev.map((x) => (x.id === c.id ? { ...x, name: clean } : x)));
                 flash("Contract name saved");
-              }}>✎ Name</button>
+              }}>Rename</button>
           )}
         </div>
       )}
@@ -2114,8 +2132,8 @@ export default function Releases() {
               {devs.length > 0 && <> · {devs.slice(0, 4).join(", ")}{devs.length > 4 ? `, +${devs.length - 4} more` : ""}</>}
             </span>
             {hasDupes && !readOnly && (
-              <button className="btn btn-ghost px-2.5 py-1 text-[11px] text-alert" onClick={fixDuplicates} disabled={busy}>
-                🧹 Fix duplicates{dupNums > 0 ? ` (${dupNums} release #s doubled)` : twinCount > 1 ? " (contract listed twice)" : ""}
+              <button className="btn btn-ghost min-h-[44px] px-2.5 py-1 text-[13px] text-alert" onClick={fixDuplicates} disabled={busy}>
+                Fix duplicates in this contract{dupNums > 0 ? ` (${dupNums} release #s doubled)` : twinCount > 1 ? " (contract listed twice)" : ""}
               </button>
             )}
           </div>
@@ -2130,7 +2148,7 @@ export default function Releases() {
           <div className="card mb-3 p-3">
             <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-mono text-[13px]">
               {([["Released", fmt(tot), "text-ink"], [`Received ${pct}%`, fmt(rec), "text-ok"], ["Waiting", fmt(outst), "text-work"], ["Chase", fmt(notR.reduce((s, r) => s + Number(r.amount), 0)), "text-work"], ["Payroll left", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
-                <span key={l} className={cls}><span className="mr-1 text-[10px] uppercase tracking-[.12em] text-inksoft">{l}</span><b>{v}</b></span>
+                <span key={l} className={cls}><span className="mr-1 text-[11px] uppercase tracking-[.12em] text-inksoft">{l}</span><b>{v}</b></span>
               ))}
             </div>
             <div className="mt-2 h-1.5 overflow-hidden rounded-sm bg-rulesoft">
@@ -2140,9 +2158,9 @@ export default function Releases() {
         );
       })()}
 
-      <div className="mb-3 flex flex-wrap gap-2">
+      <div className="mb-3 flex snap-x gap-2 overflow-x-auto pb-1">
         {([["all", "Open"], ["chase", `Chase (${notR.length})`], ["payroll", `Payroll (${prPend.length})`], ["received", `Received (${receivedRows.length})`], ["canceled", `Canceled (${canceledRows.length})`], ["hours", "Hours"]] as [Filter, string][]).map(([f, l]) => (
-          <button key={f} className={`btn ${filter === f ? "btn-primary" : "btn-ghost"} px-3 py-1.5 text-[13px]`} onClick={() => { setFilter(f); setLimit(100); if (f === "hours" && !logged) loadLogged(); }}>{l}</button>
+          <button key={f} className={`btn ${filter === f ? "btn-primary" : "btn-ghost"} min-h-[44px] snap-start whitespace-nowrap px-3 py-1.5 text-[13px]`} onClick={() => { setFilter(f); setLimit(100); if (f === "hours" && !logged) loadLogged(); }}>{l}</button>
         ))}
       </div>
 
@@ -2180,88 +2198,87 @@ export default function Releases() {
           </table>
         </div>
       )}
-      {filter !== "hours" && <div className="card overflow-x-auto">
-        <table className="w-full border-collapse text-sm" style={{ minWidth: 560 }}>
-          <thead>
-            <tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
-              <th className="p-2.5">Rel</th><th className="min-w-[210px] p-2.5">Location</th><th className="p-2.5 text-right">Amount</th>
-              <th className="p-2.5 text-center">Payroll</th><th className="p-2.5 text-center">Received</th><th className="p-2.5"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {shown.map((r) => (
-              <tr key={r.id} className={`border-b border-rulesoft ${r.canceled ? "opacity-50" : ""}`}>
-                <td className="p-2.5 font-mono text-xs">{r.rel_number}</td>
-                <td className={`p-2.5 ${r.canceled ? "line-through" : ""}`}>
+      {filter !== "hours" && <div className="card divide-y divide-rulesoft">
+        {shown.map((r) => {
+          const att = (r.attachments || []).length;
+          return (
+            <div key={r.id} className={`flex items-start gap-3 p-3 ${r.canceled ? "opacity-50" : ""}`}>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="font-mono text-[13px] font-semibold">#{r.rel_number}</span>
+                  <span className={`font-mono text-[13px] ${r.canceled ? "line-through" : ""}`}>{fmt(Number(r.amount))}</span>
+                </div>
+                <div className={`text-sm ${r.canceled ? "line-through" : ""}`}>
                   {r.location}
-                  <div className="max-w-[240px] truncate text-[11px] text-inksoft">{r.buildings}{r.ticket ? ` · ${r.ticket}` : ""}</div>
-                  {!r.canceled && (() => {
-                    const stages = pipeline(r);
-                    const current = stages.findIndex(([, done]) => !done);
-                    const got = logged?.[r.id] || 0;
-                    const need = Number(r.labor_hours) || 0;
-                    return (
-                      <div className="mt-1 flex flex-wrap items-center gap-1">
-                        {stages.map(([l, done], i) => (
-                          <span key={l} title={l} className={`rounded-[2px] border px-1 py-px font-mono text-[9px] font-semibold tracking-wide ${
-                            done ? "border-ok bg-ok/10 text-ok" : i === current ? "border-work text-work" : "border-rulesoft text-rule"
-                          }`}>{l}</span>
-                        ))}
-                        {(need > 0 || got > 0) && (
-                          <span className={`ml-1 font-mono text-[10px] ${need > 0 && got >= need ? "text-ok" : "text-work"}`}
-                            title="Payroll hours logged vs the release minimum — live from the Payroll tab">
-                            ⏱ {got}{need > 0 ? `/${need}` : ""}h{need > 0 && got >= need ? " ✓" : ""}
-                          </span>
-                        )}
-                        {relCounts[String(r.rel_number).trim()] > 1 && (
-                          <span className="ml-1 rounded-[2px] border border-alert px-1 py-px font-mono text-[9px] font-semibold text-alert" title="This release number appears more than once on this contract — cancel or delete the extra copy">DUPLICATE</span>
-                        )}
-                      </div>
-                    );
-                  })()}
-                </td>
-                <td className={`p-2.5 text-right font-mono ${r.canceled ? "line-through" : ""}`}>{fmt(Number(r.amount))}</td>
-                <td className="p-2.5 text-center">
-                  {!r.canceled && (readOnly ? <Stamp label={r.payroll_done ? "DONE" : "TO DO"} tone={r.payroll_done ? "ok" : "alert"} /> :
-                    <button onClick={() => togglePayroll(r)}><Stamp label={r.payroll_done ? "DONE" : "TO DO"} tone={r.payroll_done ? "ok" : "alert"} /></button>)}
-                </td>
-                <td className="p-2.5 text-center">
+                  <div className="truncate text-[11px] text-inksoft">{r.buildings}{r.ticket ? ` · ${r.ticket}` : ""}</div>
+                </div>
+                {!r.canceled && (() => {
+                  const stages = pipeline(r);
+                  const current = stages.findIndex(([, done]) => !done);
+                  const got = logged?.[r.id] || 0;
+                  const need = Number(r.labor_hours) || 0;
+                  return (
+                    <div className="mt-1 flex flex-wrap items-center gap-1">
+                      {stages.map(([l, done], i) => (
+                        <span key={l} title={l} className={`chip rounded-[2px] border px-1 py-px font-semibold ${
+                          done ? "border-ok bg-ok/10 text-ok" : i === current ? "border-work text-work" : "border-rulesoft text-rule"
+                        }`}>{l}</span>
+                      ))}
+                      {(need > 0 || got > 0) && (
+                        <span className={`chip ml-1 ${need > 0 && got >= need ? "text-ok" : "text-work"}`}
+                          title="Payroll hours logged vs the release minimum — live from the Payroll tab">
+                          {got}{need > 0 ? `/${need}` : ""}h{need > 0 && got >= need ? " ✓" : ""}
+                        </span>
+                      )}
+                      {att > 0 && <span className="chip ml-1 text-inksoft" title="Attached documents">📎 {att}</span>}
+                      {relCounts[String(r.rel_number).trim()] > 1 && (
+                        <span className="chip ml-1 rounded-[2px] border border-alert px-1 py-px font-semibold text-alert" title="This release number appears more than once on this contract — cancel or delete the extra copy">DUPLICATE</span>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+              <div className="flex shrink-0 items-start gap-2">
+                {!r.canceled && (
+                  <div className="flex flex-col items-center gap-0.5">
+                    <span className="text-[11px] uppercase tracking-widest text-inksoft">Payroll</span>
+                    {readOnly ? <Stamp label={r.payroll_done ? "DONE" : "TO DO"} tone={r.payroll_done ? "ok" : "alert"} /> :
+                      <button className="btn-stamp" onClick={() => togglePayroll(r)}><Stamp label={r.payroll_done ? "DONE" : "TO DO"} tone={r.payroll_done ? "ok" : "alert"} /></button>}
+                  </div>
+                )}
+                <div className="flex flex-col items-center gap-0.5">
+                  {!r.canceled && <span className="text-[11px] uppercase tracking-widest text-inksoft">Received</span>}
                   {r.canceled ? <Stamp label="CANCELED" tone="mute" /> : readOnly ? <Stamp label={r.received ? "YES" : "NO"} tone={r.received ? "ok" : "work"} /> :
-                    <button onClick={() => {
+                    <button className="btn-stamp" onClick={() => {
                       if (r.received && !window.confirm(`Release ${r.rel_number} is marked received${r.paid_date ? ` (paid ${prettyDate(r.paid_date)})` : ""} — switch it back to NOT received? The paid date is cleared.`)) return;
                       toggle(r, { received: !r.received, paid_date: !r.received ? localISO() : null });
                     }}><Stamp label={r.received ? "YES" : "NO"} tone={r.received ? "ok" : "work"} /></button>}
-                </td>
-                <td className="p-2.5">
-                  <div className="flex items-center justify-end gap-2 whitespace-nowrap">
-                    {!r.canceled && !readOnly && <button className="font-mono text-xs font-semibold text-inksoft underline" title="Edit this release's line items" onClick={() => openItems(r)}>Items</button>}
-                    {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-work underline" title="Make the NYCHA invoice" onClick={() => genInvoice(r)}>Invoice</button>}
-                    {!r.canceled && sosReady.has(r.id) && <button className="font-mono text-xs font-semibold text-carbon underline" title="Make the Statement of Services form" onClick={() => genSOS(r)}>SOS form</button>}
-                    <button className="p-1.5 text-inksoft" title="Documents" onClick={() => setAttachRel(r)}>📎{(r.attachments || []).length > 0 ? <span className="font-mono text-[10px]">{(r.attachments || []).length}</span> : null}</button>
-                    {!readOnly && <button className={`${r.canceled ? "text-ok" : "text-alert"} p-1.5`} title={r.canceled ? "Restore" : "Mark canceled"} onClick={() => {
-                      if (!r.canceled && !window.confirm(`Cancel release ${r.rel_number}? It moves to the Canceled tab — you can restore it any time.`)) return;
-                      toggle(r, { canceled: !r.canceled });
-                    }}>{r.canceled ? "↺" : "✕"}</button>}
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {shown.length === 0 && busy && [0, 1, 2, 3, 4].map((i) => (
-              /* the table's shape, shimmering, while the contract loads */
-              <tr key={`sk${i}`} className="border-b border-rulesoft">
-                <td className="p-2.5"><div className="skeleton h-4 w-8" /></td>
-                <td className="p-2.5"><div className="skeleton h-4 w-40" /></td>
-                <td className="p-2.5"><div className="skeleton ml-auto h-4 w-20" /></td>
-                <td className="p-2.5"><div className="skeleton mx-auto h-4 w-12" /></td>
-                <td className="p-2.5"><div className="skeleton mx-auto h-4 w-12" /></td>
-                <td className="p-2.5"><div className="skeleton ml-auto h-4 w-24" /></td>
-              </tr>
-            ))}
-            {shown.length === 0 && !busy && (
-              <tr><td colSpan={6} className="p-4 text-inksoft">{contracts.length === 0 ? "Upload a contract sheet to get started — it reads your columns as-is." : "Nothing matches. If this is the chase list — that's the goal."}</td></tr>
-            )}
-          </tbody>
-        </table>
+                </div>
+                <RowActions items={[
+                  { label: "Line items", hidden: r.canceled || readOnly, title: "Edit this release's line items", onSelect: () => openItems(r) },
+                  { label: "Invoice", hidden: r.canceled || !sosReady.has(r.id), title: "Make the NYCHA invoice", onSelect: () => genInvoice(r) },
+                  { label: "SOS form", hidden: r.canceled || !sosReady.has(r.id), title: "Make the Statement of Services form", onSelect: () => genSOS(r) },
+                  { label: att > 0 ? `Documents (📎 ${att})` : "Documents", onSelect: () => setAttachRel(r) },
+                  { label: "Restore", glyph: "↺", hidden: readOnly || !r.canceled, onSelect: () => toggle(r, { canceled: false }) },
+                  { label: "Cancel release…", destructive: true, hidden: readOnly || r.canceled, confirm: `Cancel release ${r.rel_number}? It moves to the Canceled tab — you can restore it any time.`, onSelect: () => toggle(r, { canceled: true }) },
+                ]} />
+              </div>
+            </div>
+          );
+        })}
+        {shown.length === 0 && busy && [0, 1, 2, 3, 4].map((i) => (
+          /* the list's shape, shimmering, while the contract loads */
+          <div key={`sk${i}`} className="p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="skeleton h-4 w-14" />
+              <div className="skeleton h-4 w-20" />
+            </div>
+            <div className="skeleton mt-2 h-4 w-40" />
+          </div>
+        ))}
+        {shown.length === 0 && !busy && (
+          <div className="p-4 text-sm text-inksoft">{contracts.length === 0 ? "Import a contract sheet to get started — it reads your columns as-is." : "Nothing matches. If this is the chase list — that's the goal."}</div>
+        )}
       </div>}
       {filter !== "hours" && list.length > limit && (
         <div className="mt-3 text-center"><button className="btn btn-ghost" onClick={() => setLimit(limit + 200)}>Show more ({list.length - limit} left)</button></div>
@@ -2274,40 +2291,37 @@ export default function Releases() {
 
       {/* ---------- attachments panel ---------- */}
       {attachRel && (
-        <div className="fixed inset-0 z-40 overflow-y-auto bg-ink/50 px-2 py-10" onClick={() => setAttachRel(null)}>
-          <div className="card mx-auto max-w-md bg-card p-4" onClick={(e) => e.stopPropagation()}>
-            <div className="mb-3 font-display text-base font-bold uppercase">Documents · Release {attachRel.rel_number}</div>
-            {(attachRel.attachments || []).length === 0 && <div className="mb-3 text-sm text-inksoft">Nothing attached yet. Release PDFs and proposal sheets imported with “+ From PDF” attach themselves automatically — and job photos land here too.</div>}
-            {(attachRel.attachments || []).filter((a) => isImg(a.name)).length > 0 && (
-              <div className="mb-3 grid grid-cols-3 gap-1.5">
-                {(attachRel.attachments || []).filter((a) => isImg(a.name)).map((a) => (
-                  <div key={a.path} className="relative">
-                    <button className="block w-full" onClick={() => openAttachment(a.path)} title={a.name}>
-                      {photoUrls[a.path]
-                        // eslint-disable-next-line @next/next/no-img-element
-                        ? <img src={photoUrls[a.path]} alt={a.name} className="h-24 w-full rounded-sm border border-rulesoft object-cover" />
-                        : <div className="grid h-24 w-full place-items-center rounded-sm border border-rulesoft text-xs text-inksoft">…</div>}
-                    </button>
-                    {!readOnly && <button className="absolute right-1 top-1 rounded-sm bg-ink/70 px-1.5 text-xs text-paper" title="Delete photo" onClick={() => removeAttachment(attachRel, a.path)}>✕</button>}
-                  </div>
-                ))}
-              </div>
-            )}
-            {(attachRel.attachments || []).filter((a) => !isImg(a.name)).map((a) => (
-              <div key={a.path} className="mb-1.5 flex items-center gap-1">
-                <button className="block w-full rounded-sm border border-rulesoft p-2.5 text-left text-sm hover:border-work" onClick={() => openAttachment(a.path)}>
-                  📄 {a.name}
-                </button>
-                {!readOnly && <button className="shrink-0 px-1 text-xs text-alert" title="Delete file" onClick={() => removeAttachment(attachRel, a.path)}>✕</button>}
-              </div>
-            ))}
-            <div className="mt-3 flex flex-wrap gap-2">
-              {!readOnly && <button className="btn btn-primary" onClick={() => photoInputRef.current?.click()} disabled={busy}>📷 Take photo</button>}
-              {!readOnly && <button className="btn" onClick={() => attachInputRef.current?.click()} disabled={busy}>Upload file</button>}
-              <button className="btn btn-ghost" onClick={() => setAttachRel(null)}>Close</button>
+        <Modal title={`Documents · Release ${attachRel.rel_number}`} onClose={() => setAttachRel(null)}
+          footer={!readOnly ? (
+            <CardToolbar
+              primary={<button className="btn btn-primary" onClick={() => photoInputRef.current?.click()} disabled={busy}>📷 Take photo</button>}
+              secondary={<button className="btn btn-ghost" onClick={() => attachInputRef.current?.click()} disabled={busy}>Upload file</button>} />
+          ) : undefined}>
+          {(attachRel.attachments || []).length === 0 && <div className="mb-3 text-sm text-inksoft">Nothing attached yet. Release PDFs and proposal sheets imported with “+ From PDF” attach themselves automatically — and job photos land here too.</div>}
+          {(attachRel.attachments || []).filter((a) => isImg(a.name)).length > 0 && (
+            <div className="mb-3 grid grid-cols-3 gap-1.5">
+              {(attachRel.attachments || []).filter((a) => isImg(a.name)).map((a) => (
+                <div key={a.path} className="relative">
+                  <button className="block w-full" onClick={() => openAttachment(a.path)} title={a.name}>
+                    {photoUrls[a.path]
+                      // eslint-disable-next-line @next/next/no-img-element
+                      ? <img src={photoUrls[a.path]} alt={a.name} className="h-24 w-full rounded-sm border border-rulesoft object-cover" />
+                      : <div className="grid h-24 w-full place-items-center rounded-sm border border-rulesoft text-xs text-inksoft">…</div>}
+                  </button>
+                  {!readOnly && <button className="absolute right-1 top-1 rounded-sm bg-ink/70 px-1.5 text-xs text-paper" title="Delete photo" onClick={() => removeAttachment(attachRel, a.path)}>✕</button>}
+                </div>
+              ))}
             </div>
-          </div>
-        </div>
+          )}
+          {(attachRel.attachments || []).filter((a) => !isImg(a.name)).map((a) => (
+            <div key={a.path} className="mb-1.5 flex items-center gap-1">
+              <button className="block w-full rounded-sm border border-rulesoft p-2.5 text-left text-sm hover:border-work" onClick={() => openAttachment(a.path)}>
+                📄 {a.name}
+              </button>
+              {!readOnly && <button className="shrink-0 px-1 text-xs text-alert" title="Delete file" onClick={() => removeAttachment(attachRel, a.path)}>✕</button>}
+            </div>
+          ))}
+        </Modal>
       )}
       <input ref={attachInputRef} type="file" className="hidden"
         onChange={(e) => { const f = e.target.files?.[0]; if (f && attachRel) attachFile(attachRel, f); e.target.value = ""; }} />
@@ -2332,10 +2346,10 @@ export default function Releases() {
         const lineTable = (list: "labor" | "materials", title: string, note: string) => (
           <div className="mt-3">
             <div className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">{title}</div>
-            {note && <div className="mb-1 text-[10px] italic text-inksoft">{note}</div>}
+            {note && <div className="mb-1 text-[11px] italic text-inksoft">{note}</div>}
             <div className="overflow-x-auto">
               <table className="w-full border-collapse" style={{ minWidth: 520 }}>
-                <thead><tr className="text-left text-[10px] uppercase tracking-widest text-inksoft">
+                <thead><tr className="text-left text-[11px] uppercase tracking-widest text-inksoft">
                   <th className="p-1">Description</th><th className="p-1">Qty</th><th className="p-1">UOM</th><th className="p-1">Unit price/rate</th><th className="p-1">Total line cost</th></tr></thead>
                 <tbody>
                   {d[list].map((l, i) => (
@@ -2359,18 +2373,18 @@ export default function Releases() {
               <div className="mb-3 text-[12px] text-inksoft">This fills the official NYCHA form (042.726) exactly as filed — check the numbers, describe the work, download, sign, send.</div>
               <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
                 {([["poRelease", "PO Number / Release #"], ["workOrder", "Work Order #"], ["dateOfServices", "Date of services (M/D/YY)"]] as [keyof SosData, string][]).map(([k, l]) => (
-                  <label key={k} className="block"><span className="text-[10px] uppercase tracking-widest text-inksoft">{l}</span>
+                  <label key={k} className="block"><span className="text-[11px] uppercase tracking-widest text-inksoft">{l}</span>
                     <input className="field px-2 py-2 text-sm" value={String(d[k] ?? "")} onChange={(e) => set({ [k]: e.target.value } as Partial<SosData>)} /></label>
                 ))}
               </div>
-              <label className="mt-2 block"><span className="text-[10px] uppercase tracking-widest text-inksoft">Services performed — describe the work</span>
+              <label className="mt-2 block"><span className="text-[11px] uppercase tracking-widest text-inksoft">Services performed — describe the work</span>
                 <textarea className="field min-h-[70px] px-2 py-2 text-sm" placeholder="e.g. Repair apartment and basement doors and all related accessories"
                   value={d.description} onChange={(e) => set({ description: e.target.value })} /></label>
               {lineTable("labor", "Itemized labor (include all titles used)", "Prefilled from this release's contract line items — the form fits 7 lines.")}
               {lineTable("materials", "Itemized list of materials", "")}
               <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-3">
                 {([["overhead", "Overhead $"], ["profit", "Profit $"], ["totalCost", "Total cost $"], ["vendorNameTitle", "Vendor name & title"], ["dateSigned", "Date signed (M/D/YY)"]] as [keyof SosData, string][]).map(([k, l]) => (
-                  <label key={k} className="block"><span className="text-[10px] uppercase tracking-widest text-inksoft">{l}</span>
+                  <label key={k} className="block"><span className="text-[11px] uppercase tracking-widest text-inksoft">{l}</span>
                     <input className="field px-2 py-2 text-sm" value={String(d[k] ?? "")} onChange={(e) => set({ [k]: e.target.value } as Partial<SosData>)} /></label>
                 ))}
               </div>
@@ -2380,7 +2394,7 @@ export default function Releases() {
                   if (!fname) return;
                   try { await downloadSosPdf(d, fname); flash("Official SOS form downloaded — ready to sign and send"); }
                   catch { flash("Couldn't build the form — check your signal and try again"); }
-                }}>⬇ Download SOS (official form)</button>
+                }}>⬇ SOS form</button>
                 <button className="btn btn-ghost" onClick={() => setSosEdit(null)}>Close</button>
               </div>
             </div>
@@ -2404,7 +2418,7 @@ export default function Releases() {
                 <>
                   <div className="overflow-x-auto">
                     <div className="min-w-[680px]">
-                      <div className="mb-1 grid gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-inksoft" style={{ gridTemplateColumns: COLS }}>
+                      <div className="mb-1 grid gap-1.5 text-[11px] font-semibold uppercase tracking-widest text-inksoft" style={{ gridTemplateColumns: COLS }}>
                         <span>Line</span><span>Item code</span><span>Description of work</span><span>UOM</span>
                         <span className="text-right">Qty</span><span className="text-right">Price</span><span className="text-right">Total</span><span />
                       </div>

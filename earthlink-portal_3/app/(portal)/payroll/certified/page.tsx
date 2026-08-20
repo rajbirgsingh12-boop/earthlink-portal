@@ -9,6 +9,7 @@ import Link from "next/link";
 import { parseCertifiedPayroll, buildCsv, lcmWarnings, blankRow, dayLabels, splitReportByRelease, workerKey, type ReleaseHours, type CpReport, type CpRow, type CpLine, type Cell } from "@/lib/certifiedPayroll";
 import { askFileName } from "@/lib/format";
 import { sb } from "@/lib/supabase";
+import PageHeader from "@/components/PageHeader";
 
 interface PdfDocLite { destroy?: () => Promise<void> }
 
@@ -232,19 +233,15 @@ export default function CertifiedPayroll() {
 
   return (
     <div>
-      <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
-        <div>
-          <div className="font-display text-2xl font-bold uppercase">eComply CSV</div>
-          <div className="text-[11px] text-inksoft">Certified payroll PDF → CSV for upload. Nothing on this page is saved anywhere.</div>
-        </div>
-        <div className="flex flex-wrap justify-end gap-2">
-          <Link className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" href="/payroll">← Payroll</Link>
-          <button className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" onClick={() => setReports((p) => [...p, emptyReport()])}>+ Type one in</button>
-          <button className="btn btn-primary whitespace-nowrap px-3 py-2 text-[13px]" onClick={() => fileRef.current?.click()} disabled={busy}>
+      <PageHeader title="eComply CSV" sub="Certified payroll PDF → CSV for upload. Nothing on this page is saved anywhere."
+        primary={
+          <button className="btn btn-primary min-h-[44px] whitespace-nowrap px-3 py-2 text-[13px]" onClick={() => fileRef.current?.click()} disabled={busy}>
             {busy ? "Reading…" : "📄 Upload payroll PDF(s)"}
           </button>
-        </div>
-      </div>
+        }>
+        <Link className="btn btn-ghost min-h-[44px] whitespace-nowrap px-3 py-2 text-[13px]" href="/payroll">← Payroll</Link>
+        <button className="btn btn-ghost min-h-[44px] whitespace-nowrap px-3 py-2 text-[13px]" onClick={() => setReports((p) => [...p, emptyReport()])}>+ Type one in</button>
+      </PageHeader>
       <input ref={fileRef} type="file" accept="application/pdf" multiple className="hidden" onChange={handleFiles} />
 
       {reports.length === 0 && (
@@ -265,9 +262,9 @@ export default function CertifiedPayroll() {
             <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
               <div className="font-display text-base font-bold uppercase">Week {rep.weekEnding || "?"} <span className="ml-1 text-[11px] font-normal normal-case text-inksoft">from {rep.fileName}</span></div>
               <div className="flex gap-2">
-                <button className="btn btn-ghost px-3 py-1.5 text-[13px]" title="One CSV per release, hours split from the portal's timesheets — how NYCHA wants it" onClick={() => downloadByRelease(ri, rep)} disabled={busy}>⬇ CSV per release</button>
-                <button className="btn btn-primary px-3 py-1.5 text-[13px]" onClick={() => download([rep], `ecomply_${(rep.payrollNo || "payroll")}_${rep.weekEnding.replace(/\//g, "-") || "week"}.csv`)}>⬇ CSV for this week</button>
-                <button className="text-xs text-alert" title="Remove this report" onClick={() => { if (window.confirm("Remove this report from the page? (Nothing was saved anywhere.)")) setReports((p) => p.filter((_, x) => x !== ri)); }}>✕</button>
+                <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" title="One CSV per release, hours split from the portal's timesheets — how NYCHA wants it" onClick={() => downloadByRelease(ri, rep)} disabled={busy}>⬇ CSV per release</button>
+                <button className="btn btn-primary min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => download([rep], `ecomply_${(rep.payrollNo || "payroll")}_${rep.weekEnding.replace(/\//g, "-") || "week"}.csv`)}>⬇ CSV for this week</button>
+                <button className="btn-icon text-alert" title="Remove this report" onClick={() => { if (window.confirm("Remove this report from the page? (Nothing was saved anywhere.)")) setReports((p) => p.filter((_, x) => x !== ri)); }}>✕</button>
               </div>
             </div>
             {rep.notes.length > 0 && (
@@ -278,7 +275,7 @@ export default function CertifiedPayroll() {
             <div className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-5">
               {([["payrollNo", "Payroll #"], ["weekEnding", "Week ending (MM/DD/YYYY)"], ["contractNo", "Contract / PO #"], ["project", "Project / development"], ["contractor", "Contractor"]] as [keyof CpReport, string][]).map(([k, label]) => (
                 <label key={k} className="block">
-                  <span className="text-[10px] uppercase tracking-widest text-inksoft">{label}</span>
+                  <span className="text-[11px] uppercase tracking-widest text-inksoft">{label}</span>
                   <input className="field px-2 py-2 text-sm" value={String(rep[k] ?? "")} onChange={(e) => setRep(ri, { [k]: e.target.value })} />
                 </label>
               ))}
@@ -287,7 +284,7 @@ export default function CertifiedPayroll() {
             <div className="card overflow-x-auto">
               <table className="w-full border-collapse text-[13px]" style={{ minWidth: 1180 }}>
                 <thead>
-                  <tr className="border-b-[1.5px] border-ink text-left font-display text-[10px] uppercase tracking-widest text-inksoft">
+                  <tr className="border-b-[1.5px] border-ink text-left font-display text-[11px] uppercase tracking-widest text-inksoft">
                     <th className="min-w-[210px] p-2">Worker</th>
                     <th className="p-2">SSN<div className="font-normal">last 4 or full</div></th>
                     <th className="min-w-[120px] p-2">Classification</th>
@@ -342,14 +339,14 @@ export default function CertifiedPayroll() {
                         {moneyFields.map(([k]) => (
                           <td key={String(k)} className="p-1"><input className="field w-20 px-1.5 py-1.5 text-right font-mono text-[12px]" inputMode="decimal" value={String(w[k] ?? "")} onChange={(e) => setRow(ri, wi, { [k]: e.target.value } as Partial<CpRow>)} /></td>
                         ))}
-                        <td className="p-2"><button className="text-xs text-alert" title="Remove worker" onClick={() => setRep(ri, { rows: rep.rows.filter((_, y) => y !== wi) })}>✕</button></td>
+                        <td className="p-2"><button className="btn-icon text-alert" title="Remove worker" onClick={() => setRep(ri, { rows: rep.rows.filter((_, y) => y !== wi) })}>✕</button></td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
             </div>
-            <button className="btn btn-ghost mt-2 px-3 py-1.5 text-[13px]" onClick={() => setRep(ri, { rows: [...rep.rows, blankRow()] })}>+ Add worker</button>
+            <button className="btn btn-ghost min-h-[44px] mt-2 px-3 py-1.5 text-[13px]" onClick={() => setRep(ri, { rows: [...rep.rows, blankRow()] })}>+ Add worker</button>
           </div>
         );
       })}

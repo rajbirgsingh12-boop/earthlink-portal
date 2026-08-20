@@ -10,6 +10,9 @@ import { fmt, askFileName } from "@/lib/format";
 import { Org, prettyDate, localISO } from "@/lib/docs";
 import type { Contract, Release } from "@/lib/types";
 import ContractPicker from "@/components/ContractPicker";
+import PageHeader from "@/components/PageHeader";
+import CardToolbar from "@/components/CardToolbar";
+import { RowActions } from "@/components/ActionMenu";
 import { useLive } from "@/lib/useLive";
 import NychaInvoicePrint from "@/components/NychaInvoicePrint";
 import { gatherReleaseDoc, buildInvoiceXlsx, buildInvoiceBytes, buildInvoicePdfBytes, type DocRow } from "@/lib/releaseDoc";
@@ -352,7 +355,7 @@ export default function InvoicePackage() {
 
   return (
     <div>
-      <div className="mb-3 font-display text-2xl font-bold uppercase">Invoice Package</div>
+      <PageHeader title="Invoice Package" />
       <div className="mb-3"><ContractPicker contracts={contracts} value={sel} onChange={setSel} /></div>
       <input ref={upRef} type="file" accept="application/pdf,.pdf" className="hidden" onChange={onUpload} />
       {contract && (
@@ -382,20 +385,20 @@ export default function InvoicePackage() {
                       </td>
                       <td className={`p-2.5 text-right font-mono ${d !== null && d > 60 ? "text-alert" : ""}`}>{d === null ? "—" : d}</td>
                       <td className="p-2.5 text-right font-mono font-semibold">{fmt(Number(r.amount))}</td>
-                      <td className="p-2.5 text-right">
-                        <div className="flex justify-end gap-2.5 whitespace-nowrap">
-                          <button className="font-mono text-xs font-semibold text-work underline" title="Make the NYCHA invoice" onClick={() => genInvoice(r)}>Invoice</button>
-                          <button className="font-mono text-xs font-semibold text-ok underline disabled:opacity-50" disabled={!!pkgBusy}
-                            title="Invoice + affidavit + REP + hiring summary + equal opportunity report, one PDF"
-                            onClick={() => downloadPackage(r)}>{pkgBusy === r.id ? "Making…" : "📦 Package"}</button>
-                        </div>
+                      <td className="p-1.5 text-right">
+                        <RowActions items={[
+                          { label: "Invoice", title: "Make the NYCHA invoice", onSelect: () => genInvoice(r) },
+                          { label: pkgBusy === r.id ? "Making…" : "Invoice package (zip)", glyph: "⬇", disabled: !!pkgBusy,
+                            title: "Invoice + affidavit + REP + hiring summary + equal opportunity report, one PDF",
+                            onSelect: () => downloadPackage(r) },
+                        ]} />
                       </td>
                     </tr>
                   );
                 })}
                 {sorted.length === 0 && <tr><td colSpan={6} className="p-4 text-inksoft">{stubs.length > 0
                   ? `${stubs.length} open release${stubs.length === 1 ? "" : "s"} totaling ${fmt(stubs.reduce((s, r) => s + Number(r.amount), 0))} ${stubs.length === 1 ? "is" : "are"} waiting on release data — import the release PDF or fill a walk sheet to put ${stubs.length === 1 ? "it" : "them"} on the statement.`
-                  : `Nothing outstanding on contract ${contract.number}. All square. 🎉`}</td></tr>}
+                  : `Nothing outstanding on contract ${contract.number}. All square.`}</td></tr>}
                 {sorted.length > 0 && <tr><td colSpan={5} className="p-2.5 font-display font-bold uppercase">Total due</td><td className="p-2.5 text-right font-mono text-base font-bold">{fmt(total)}</td></tr>}
               </tbody>
             </table>
@@ -408,28 +411,31 @@ export default function InvoicePackage() {
               <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-5">
                 {[...buckets, ["Not invoiced", notInvoiced] as [string, number]].map(([b, v]) => (
                   <div key={b} className="card p-2.5 text-center">
-                    <div className="text-[10px] uppercase tracking-widest text-inksoft">{b}{b !== "Not invoiced" ? " days" : ""}</div>
+                    <div className="text-[11px] uppercase tracking-widest text-inksoft">{b}{b !== "Not invoiced" ? " days" : ""}</div>
                     <div className={`font-mono text-[13px] font-semibold ${b === "90+" && v > 0 ? "text-alert" : ""}`}>{fmt(v)}</div>
                   </div>
                 ))}
               </div>
-              <div className="mt-3.5 flex flex-wrap gap-2">
-                <button className="btn btn-primary" onClick={downloadAllPackages} disabled={allPkgBusy} title="Every outstanding release's full package — invoice + the 4 documents merged into one PDF each — in one zip">
-                  {allPkgBusy ? "Making packages…" : `⬇ All packages (${sorted.length}) zip`}
-                </button>
-                <button className="btn" onClick={() => { setInvPreview(null); setPrintOpen(true); }}>Preview statement</button>
-                <button className="btn" onClick={downloadExcel}>Statement Excel</button>
-                <button className="btn" onClick={downloadAllInvoices} disabled={zipBusy} title="Every outstanding invoice on this contract, regenerated in the template format, in one zip">
-                  {zipBusy ? "Making invoices…" : `⬇ All invoices (${sorted.length}) zip`}
-                </button>
-              </div>
+              <CardToolbar className="mt-3.5"
+                primary={
+                  <button className="btn btn-primary min-h-[44px]" onClick={downloadAllPackages} disabled={allPkgBusy} title="Every outstanding release's full package — invoice + the 4 documents merged into one PDF each — in one zip">
+                    {allPkgBusy ? "Making packages…" : `⬇ All packages (${sorted.length}) zip`}
+                  </button>
+                }
+                secondary={<button className="btn min-h-[44px]" onClick={() => { setInvPreview(null); setPrintOpen(true); }}>Preview statement</button>}
+                menu={[
+                  { label: "Statement (Excel)", glyph: "⬇", onSelect: downloadExcel },
+                  { label: zipBusy ? "Making invoices…" : `All invoices (${sorted.length}) zip`, glyph: "⬇", disabled: zipBusy,
+                    title: "Every outstanding invoice on this contract, regenerated in the template format, in one zip",
+                    onSelect: downloadAllInvoices },
+                ]} />
             </>
           )}
           {/* the paperwork that rides along with every invoice on this contract */}
           <div className="card mt-4 p-3.5">
             <div className="mb-1 font-display text-sm font-semibold uppercase tracking-wide">Package documents — contract {contract.number}</div>
             <div className="mb-2.5 text-xs text-inksoft">
-              Every 📦 Package download is one PDF: the invoice plus these four. Contracts 2536683, 2536686,
+              Every ⬇ Invoice package (zip) download is one PDF: the invoice plus these four. Contracts 2536683, 2536686,
               2215867 and 2442583 use their own signed copies built in; anything else gets the standard copies
               with the contract number filled in. Upload a PDF here to replace a document for this contract.
             </div>
@@ -447,8 +453,8 @@ export default function InvoicePackage() {
                     </div>
                     {!readOnly && (
                       <div className="flex gap-2">
-                        <button className="btn px-2.5 py-1.5 text-xs" onClick={() => pickUpload(s)}>{custom ? "Replace" : "Upload this contract's copy"}</button>
-                        {custom && <button className="btn btn-ghost px-2.5 py-1.5 text-xs" onClick={() => onRemoveOverride(s)}>Use standard</button>}
+                        <button className="btn min-h-[44px] px-2.5 text-[13px]" onClick={() => pickUpload(s)}>{custom ? "Replace" : "Upload this contract's copy"}</button>
+                        {custom && <button className="btn btn-ghost min-h-[44px] px-2.5 text-[13px]" onClick={() => onRemoveOverride(s)}>Use standard</button>}
                       </div>
                     )}
                   </div>
@@ -500,9 +506,9 @@ export default function InvoicePackage() {
                 </div>
               </div>
               <div className="no-print mx-auto mt-3 flex max-w-3xl justify-end gap-2">
-                <button className="btn bg-white" onClick={downloadExcel}>Download Excel</button>
-                <button className="btn bg-white" onClick={() => window.print()}>Print / Save as PDF</button>
-                <button className="btn btn-ghost bg-white" onClick={() => setPrintOpen(false)}>Close</button>
+                <button className="btn min-h-[44px] bg-white" onClick={downloadExcel}>⬇ Statement (Excel)</button>
+                <button className="btn min-h-[44px] bg-white" onClick={() => window.print()}>Print / Save as PDF</button>
+                <button className="btn btn-ghost min-h-[44px] bg-white" onClick={() => setPrintOpen(false)}>Close</button>
               </div>
             </div>
             </PrintShell>

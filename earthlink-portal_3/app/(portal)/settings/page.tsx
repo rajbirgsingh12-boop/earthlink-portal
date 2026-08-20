@@ -1,6 +1,9 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
+import { RowActions } from "@/components/ActionMenu";
+import Disclosure from "@/components/Disclosure";
+import SaveBar from "@/components/SaveBar";
 // the export engine is heavy — it loads on demand, never with the page itself
 let XLSX!: typeof import("xlsx-js-style");
 const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
@@ -279,7 +282,6 @@ export default function Settings() {
 
   // sending someone a reset link — the only way to change another person's
   // password without a Supabase visit
-  const [resetEmail, setResetEmail] = useState("");
   const [resetBusy, setResetBusy] = useState(false);
   const sendResetTo = async (raw: string) => {
     const email = raw.trim();
@@ -288,10 +290,8 @@ export default function Settings() {
     const { error } = await sb().auth.resetPasswordForEmail(email, { redirectTo: `${window.location.origin}/reset` });
     setResetBusy(false);
     if (error) { flash(error.message); return; }
-    setResetEmail((cur) => (cur.trim() === email ? "" : cur));
     flash(`Reset link sent to ${email} — they open it and pick a new password`);
   };
-  const sendReset = () => sendResetTo(resetEmail);
 
   const [addOpen, setAddOpen] = useState(false);
   const [newUser, setNewUser] = useState({ name: "", email: "", password: "", role: "office" as Role });
@@ -473,23 +473,23 @@ export default function Settings() {
 
   if (!org) return <div className="text-sm text-inksoft">Loading…</div>;
   return (
-    <div>
+    <div className="pb-24">
       <div className="mb-3 font-display text-2xl font-bold uppercase">Settings</div>
 
-      <div className="mb-2 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Company letterhead</div>
-      <div className="card grid gap-3 p-4 md:grid-cols-2">
-        {FIELDS.map(([k, label]) => (
-          <div key={k}>
-            <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
-            <input className="field" value={org[k] || ""} onChange={(e) => setOrg({ ...org, [k]: e.target.value })} onBlur={(e) => save(k, e.target.value)} />
-          </div>
-        ))}
-      </div>
-      <div className="mt-2 text-xs text-inksoft">Every proposal, SOS, and statement carries this letterhead. Fields save when you tap out of them.</div>
+      <Disclosure label="Company letterhead" sublabel="name, address, license" defaultOpen>
+        <div className="card grid gap-3 p-4 md:grid-cols-2">
+          {FIELDS.map(([k, label]) => (
+            <div key={k}>
+              <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
+              <input className="field" value={org[k] || ""} onChange={(e) => setOrg({ ...org, [k]: e.target.value })} onBlur={(e) => save(k, e.target.value)} />
+            </div>
+          ))}
+        </div>
+        <div className="mt-2 text-xs text-inksoft">Every proposal, SOS, and statement carries this letterhead. Fields save when you tap out of them.</div>
+      </Disclosure>
 
       {contracts.length > 0 && (
-        <>
-          <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Contract names</div>
+        <Disclosure label="Contract names" sublabel="what the dropdowns call them" className="mt-4">
           <div className="card divide-y divide-rulesoft">
             {contracts.map((c) => (
               <div key={c.id} className="flex items-center gap-3 p-3">
@@ -500,10 +500,10 @@ export default function Settings() {
             ))}
           </div>
           <div className="mt-2 text-xs text-inksoft">Give contracts a name you recognize — dropdowns everywhere show the name instead of just the number. Leave blank to show the number.</div>
-        </>
+        </Disclosure>
       )}
 
-      <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Crew phone numbers</div>
+      <Disclosure label="Crew" sublabel="phone numbers for tap-to-text" className="mt-4">
       <div className="card p-3.5">
         <div className="mb-2 text-xs text-inksoft">The numbers the Schedule tab texts. Numbers save when you tap out of the field.</div>
         {me?.role !== "accountant" && (
@@ -524,7 +524,7 @@ export default function Settings() {
                   <input className="field w-44 px-2 py-1.5 text-[13px]" placeholder="Phone number" inputMode="tel" readOnly={me?.role === "accountant"}
                     value={buf} onChange={(ev) => setPhoneBuf((p) => ({ ...p, [e.id]: ev.target.value }))}
                     onBlur={() => { if (cleanPhone(buf) !== cleanPhone(e.phone || "")) savePhone(e.id, buf); }} />
-                  {me?.role !== "accountant" && <button className="text-xs text-alert" title="Remove from the crew list" onClick={async () => { await sb().from("employees").update({ active: false }).eq("id", e.id); loadEmps(); }}>✕</button>}
+                  {me?.role !== "accountant" && <button className="btn-icon text-alert" title="Remove from the crew list" onClick={async () => { if (!window.confirm(`Remove ${e.name} from the crew?`)) return; await sb().from("employees").update({ active: false }).eq("id", e.id); loadEmps(); }}>✕</button>}
                 </span>
               </div>
             );
@@ -532,10 +532,10 @@ export default function Settings() {
           {emps.filter((e) => e.active !== false).length === 0 && <div className="py-3 text-sm text-inksoft">No crew yet — add workers above.</div>}
         </div>
       </div>
+      </Disclosure>
 
       {contracts.length > 0 && me?.role !== "accountant" && (
-        <>
-          <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Invoice package details</div>
+        <Disclosure label="Invoice package details" sublabel="wording on the package documents" className="mt-4">
           <div className="card p-4">
             <div className="mb-3 text-xs text-inksoft">
               What gets written onto the package documents (REP, Section 3 hiring summary, Equal Opportunity report)
@@ -574,25 +574,24 @@ export default function Settings() {
               <span className="text-xs text-inksoft">The affidavit and full replacement PDFs upload on the Invoice Package tab.</span>
             </div>
           </div>
-        </>
+        </Disclosure>
       )}
 
       {/* the PACT price book and addressee price every PACT paper — Admin 1's alone,
           same as the PACT tab itself */}
       {me && me.role === "admin" && (
-        <>
-          <div className="mb-2 mt-6 flex flex-wrap items-baseline justify-between gap-2">
-            <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Line items &amp; prices</div>
-            <button className="text-[11px] uppercase tracking-widest text-inksoft underline" onClick={() => setShowWords(!showWords)}>
-              {showWords ? "hide PO wording" : "edit PO wording"}
-            </button>
-          </div>
+        <Disclosure label="Line items & prices" sublabel="what a PO turns into" className="mt-4">
           <div className="card p-4">
-            <div className="mb-3 text-xs text-inksoft">
+            <div className="mb-1 text-xs text-inksoft">
               These are the lines a PO gets turned into — the prices quoted to Fairstead and Boulevard, plus anything you
               add of your own. Upload a PO and whatever it asks for lands on the job and on the proposal, priced from
               here. Plaster brings its primer and paint along with it. Painting is priced per apartment, one coat or two.
               {showWords ? " The wording box is what a PO has to say to pick that line — plain words, separated by commas." : ""}
+            </div>
+            <div className="mb-2 flex justify-end">
+              <button className="min-h-[44px] text-[13px] uppercase tracking-widest text-inksoft underline" onClick={() => setShowWords(!showWords)}>
+                {showWords ? "hide PO wording" : "edit PO wording"}
+              </button>
             </div>
             {[...PRICE_GROUPS, CUSTOM_GROUP].map((g) => {
               const rows = g === CUSTOM_GROUP ? [] : PRICE_BOOK.filter((p) => p.group === g);
@@ -606,27 +605,28 @@ export default function Settings() {
                       const off = !!o.off;
                       return (
                         <div key={p.key} className={`p-2.5 ${off ? "opacity-45" : ""}`}>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <input className="min-w-[170px] flex-1 field px-2 py-1.5 text-[13px]" value={o.description ?? p.description}
-                              placeholder={p.description} onChange={(e) => setOv(p.key, { description: e.target.value })} />
-                            <select className="field w-[74px] px-1 py-1.5 text-center text-[11px]" title="How it's measured"
+                          {/* two fixed rows: the words, then the numbers — everything lines up */}
+                          <input className="field w-full px-2 py-1.5 text-[13px]" value={o.description ?? p.description}
+                            placeholder={p.description} onChange={(e) => setOv(p.key, { description: e.target.value })} />
+                          <div className="mt-1.5 grid grid-cols-[76px_1fr_1fr_52px] items-center gap-2">
+                            <select className="field w-full px-1 py-1.5 text-center text-[11px]" title="How it's measured"
                               value={o.unit ?? p.unit} onChange={(e) => setOv(p.key, { unit: e.target.value })}>
                               {UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
                             </select>
-                            <label className="flex items-center gap-1">
+                            <label className="flex min-w-0 items-center gap-1">
                               {p.price2 !== undefined && <span className="text-[11px] text-inksoft">1 coat</span>}
                               <span className="text-sm">$</span>
-                              <input className="field w-24 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" {...moneyBox(`${p.key}:price`, o.price, p.price)} />
+                              <input className="field w-full min-w-0 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" {...moneyBox(`${p.key}:price`, o.price, p.price)} />
                             </label>
-                            {p.price2 !== undefined && (
-                              <label className="flex items-center gap-1">
+                            {p.price2 !== undefined ? (
+                              <label className="flex min-w-0 items-center gap-1">
                                 <span className="text-[11px] text-inksoft">2 coat</span>
                                 <span className="text-sm">$</span>
-                                <input className="field w-24 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" {...moneyBox(`${p.key}:price2`, o.price2, p.price2)} />
+                                <input className="field w-full min-w-0 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" {...moneyBox(`${p.key}:price2`, o.price2, p.price2)} />
                               </label>
-                            )}
-                            <button className={`text-xs ${off ? "text-work" : "text-inksoft"}`} title={off ? "Use this line again" : "Stop using this line"}
-                              onClick={() => setOv(p.key, { off: !off })}>{off ? "off" : "✕"}</button>
+                            ) : <span />}
+                            <button className={`min-h-[44px] text-[13px] font-semibold uppercase ${off ? "text-work" : "text-inksoft"}`} title={off ? "Use this line again" : "Stop using this line"}
+                              onClick={() => setOv(p.key, { off: !off })}>{off ? "off" : "on"}</button>
                           </div>
                           {showWords && (
                             <input className="field mt-1.5 px-2 py-1.5 text-[12px]" value={o.extra || ""}
@@ -638,18 +638,20 @@ export default function Settings() {
                     })}
                     {g === CUSTOM_GROUP && store.custom.map((c) => (
                       <div key={c.key} className="p-2.5">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <input className="min-w-[170px] flex-1 field px-2 py-1.5 text-[13px]" value={c.description}
-                            placeholder="What the line says on the invoice" onChange={(e) => setCustom(c.key, { description: e.target.value })} />
-                          <select className="field w-[74px] px-1 py-1.5 text-center text-[11px]" title="How it's measured"
+                        <input className="field w-full px-2 py-1.5 text-[13px]" value={c.description}
+                          placeholder="What the line says on the invoice" onChange={(e) => setCustom(c.key, { description: e.target.value })} />
+                        <div className="mt-1.5 grid grid-cols-[76px_1fr_1fr_52px] items-center gap-2">
+                          <select className="field w-full px-1 py-1.5 text-center text-[11px]" title="How it's measured"
                             value={c.unit} onChange={(e) => setCustom(c.key, { unit: e.target.value })}>
                             {UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
                           </select>
-                          <label className="flex items-center gap-1">
+                          <label className="flex min-w-0 items-center gap-1">
                             <span className="text-sm">$</span>
-                            <input className="field w-24 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" {...moneyBox(`${c.key}:price`, c.price || undefined, 0)} />
+                            <input className="field w-full min-w-0 px-2 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" {...moneyBox(`${c.key}:price`, c.price || undefined, 0)} />
                           </label>
-                          <button className="text-xs text-alert" title="Remove this line item" onClick={() => removeCustom(c.key)}>✕</button>
+                          <span />
+                          <button className="btn-icon text-alert" title="Remove this line item"
+                            onClick={() => { if (window.confirm("Remove this line item?")) removeCustom(c.key); }}>✕</button>
                         </div>
                         <input className={`field mt-1.5 px-2 py-1.5 text-[12px] ${c.description.trim() && !keywordsRe(c.words) ? "border-work" : ""}`} value={c.words}
                           placeholder={`what a PO says for this — plain words, commas between: "move out, moveout clean"`}
@@ -685,21 +687,20 @@ export default function Settings() {
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <button className="btn btn-primary" onClick={savePriceList} disabled={priceSaving || !priceLoaded}>{priceSaving ? "Saving…" : priceLoaded ? "Save line items" : "Reading saved list…"}</button>
               {priceLoadErr && (
                 <button className="btn" onClick={readList}>Couldn&apos;t read the saved list — try again</button>
               )}
               <button className="btn btn-ghost" disabled={!priceLoaded} onClick={() => { setStore(EMPTY_STORE); setPriceText({}); setPriceTouched(true); flash("Back to the sheet as it came — save to keep it"); }}>Reset to the sheet</button>
+              <span className="text-xs text-inksoft">Changes save from the bar below once you touch something.</span>
             </div>
           </div>
-        </>
+        </Disclosure>
       )}
 
       {me?.role === "admin" && (
-        <>
-          <div className="mb-2 mt-6 flex items-baseline justify-between">
-            <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Users &amp; roles</div>
-            <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={() => setAddOpen(!addOpen)}>+ Add user</button>
+        <Disclosure label="Users & roles" sublabel="who can sign in, and as what" className="mt-4">
+          <div className="mb-2 flex justify-end">
+            <button className="btn btn-ghost min-h-[44px] px-3 text-[13px]" onClick={() => setAddOpen(!addOpen)}>+ Add user</button>
           </div>
           {addOpen && (
             <div className="card mb-3 border-work p-3.5">
@@ -709,7 +710,8 @@ export default function Settings() {
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Email</div>
                   <input className="field" inputMode="email" autoCapitalize="none" value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} /></div>
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Password</div>
-                  <input className="field" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} /></div>
+                  <input className="field" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} />
+                  <div className="mt-1 text-[11px] text-inksoft">Shown so you can read it to them.</div></div>
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Role</div>
                   <select className="field" value={newUser.role} onChange={(e) => setNewUser({ ...newUser, role: e.target.value as Role })}>
                     {ROLE_OPTIONS.map(([r, label]) => <option key={r} value={r}>{label}</option>)}
@@ -746,40 +748,35 @@ export default function Settings() {
                   {!ROLE_OPTIONS.some(([r]) => r === p.role) && <option value={p.role}>{p.role} (legacy)</option>}
                 </select>
                 {p.email && (
-                  <button className="btn btn-ghost whitespace-nowrap px-3 py-1.5 text-[13px]" disabled={resetBusy}
-                    title="Sends them a link to pick a new password"
-                    onClick={() => sendResetTo(p.email || "")}>
-                    Reset password
-                  </button>
+                  <RowActions items={[{
+                    label: "Reset password",
+                    title: "Sends them a link to pick a new password",
+                    disabled: resetBusy,
+                    onSelect: () => sendResetTo(p.email || ""),
+                  }]} />
                 )}
               </div>
             ))}
           </div>
-          <div className="card mt-2 p-3">
-            <div className="text-[11px] uppercase tracking-widest text-inksoft">Change someone&apos;s password</div>
-            <div className="mt-1 text-xs text-inksoft">Sends them a link to pick a new one. Works for an account that already exists — including your own.</div>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <input className="field max-w-xs flex-1" type="email" inputMode="email" placeholder="their email address"
-                value={resetEmail} onChange={(e) => setResetEmail(e.target.value)} />
-              <button className="btn" onClick={sendReset} disabled={resetBusy}>{resetBusy ? "Sending…" : "Send reset link"}</button>
-            </div>
-          </div>
-          <div className="mt-2 text-xs text-inksoft">
-            New people: use + Add user above (email, password, role). They can sign in straight away.
-          </div>
-        </>
+        </Disclosure>
       )}
 
-      <div className="mb-2 mt-6 flex items-baseline justify-between">
-        <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">File storage</div>
-        <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={checkStorage} disabled={storageBusy}>{storageBusy ? "Measuring…" : "Check storage"}</button>
-      </div>
-      <div className="card p-3.5 text-sm">
+      {/* one System card: storage, backup, health check — three rows, one place */}
+      <Disclosure label="System" sublabel="storage, backup, health check" className="mt-4">
+      <div className="card divide-y divide-rulesoft">
+      <div className="p-3.5 text-sm">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="font-semibold">File storage</div>
+            <div className="text-xs text-inksoft">How full the photo &amp; document storage is.</div>
+          </div>
+          <button className="btn btn-ghost min-h-[44px] whitespace-nowrap px-3 text-[13px]" onClick={checkStorage} disabled={storageBusy}>{storageBusy ? "Measuring…" : "Check storage"}</button>
+        </div>
         {storage === null && !storageBusy && (
-          <div className="text-inksoft">How full is the photo &amp; document storage — tap Check storage. The free Supabase plan includes 1 GB; upgrade only when this gets near the top.</div>
+          <div className="mt-2 text-xs text-inksoft">The free Supabase plan includes 1 GB; upgrade only when this gets near the top.</div>
         )}
         {storage === "missing" && (
-          <div className="text-inksoft">Run <span className="font-mono">supabase/upgrade_storage_meter.sql</span> (it&apos;s in RUN_ME.sql too) to turn on the storage meter.</div>
+          <div className="mt-2 text-inksoft">Run <span className="font-mono">supabase/upgrade_storage_meter.sql</span> (it&apos;s in RUN_ME.sql too) to turn on the storage meter.</div>
         )}
         {storage !== null && storage !== "missing" && (() => {
           const gb = 1024 * 1024 * 1024;
@@ -788,7 +785,7 @@ export default function Settings() {
           const tone = pct < 60 ? "text-ok" : pct < 85 ? "text-work" : "text-alert";
           return (
             <>
-              <div className="mb-1.5 flex items-baseline justify-between">
+              <div className="mb-1.5 mt-2.5 flex items-baseline justify-between">
                 <span className="font-mono font-semibold">{mb < 1024 ? `${mb} MB` : `${(mb / 1024).toFixed(2)} GB`} of 1 GB</span>
                 <span className={`font-mono text-xs font-semibold ${tone}`}>{pct}% · {storage.files.toLocaleString()} files</span>
               </div>
@@ -806,26 +803,31 @@ export default function Settings() {
         })()}
       </div>
 
-      <div className="mb-2 mt-6 flex items-baseline justify-between">
-        <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Backup</div>
-        <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={downloadBackup} disabled={backingUp}>{backingUp ? "Building…" : "Download full backup (xlsx)"}</button>
-      </div>
-      <div className="card p-3.5 text-sm text-inksoft">
-        One Excel workbook with everything — contracts, releases (with payments), every payroll week, the crew, PACT jobs, and walk sheets. Worth downloading every Friday and keeping somewhere safe.
+      <div className="p-3.5 text-sm">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="font-semibold">Backup</div>
+            <div className="text-xs text-inksoft">One Excel workbook with everything — worth downloading every Friday and keeping somewhere safe.</div>
+          </div>
+          <button className="btn btn-ghost min-h-[44px] whitespace-nowrap px-3 text-[13px]" onClick={downloadBackup} disabled={backingUp}>{backingUp ? "Building…" : "Download full backup (xlsx)"}</button>
+        </div>
       </div>
 
-      <div className="mb-2 mt-6 flex items-baseline justify-between">
-        <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">System check</div>
-        <button className="btn btn-ghost px-3 py-1.5 text-[13px]" onClick={runSystemCheck} disabled={checking}>{checking ? "Checking…" : "Run system check"}</button>
-      </div>
-      <div className="card p-3.5">
-        {checks === null && !checking && <div className="text-sm text-inksoft">Verifies the database has every upgrade. If something&apos;s missing it names the exact SQL file to paste into Supabase — or just run <span className="font-mono">supabase/RUN_ME.sql</span> to apply everything at once.</div>}
-        {checking && <div className="text-sm text-inksoft">Checking…</div>}
+      <div className="p-3.5">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold">System check</div>
+            <div className="text-xs text-inksoft">Verifies the database has every upgrade in place.</div>
+          </div>
+          <button className="btn btn-ghost min-h-[44px] whitespace-nowrap px-3 text-[13px]" onClick={runSystemCheck} disabled={checking}>{checking ? "Checking…" : "Run system check"}</button>
+        </div>
+        {checks === null && !checking && <div className="mt-2 text-xs text-inksoft">If something&apos;s missing it names the exact SQL file to paste into Supabase — or just run <span className="font-mono">supabase/RUN_ME.sql</span> to apply everything at once.</div>}
+        {checking && <div className="mt-2 text-sm text-inksoft">Checking…</div>}
         {checks !== null && (
-          <>
+          <div className="mt-2">
             {checks.map((c) => (
               <div key={c.label} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-sm first:border-t-0">
-                <span>{c.ok ? "✅" : "❌"} {c.label}</span>
+                <span><span className={c.ok ? "text-ok" : "text-alert"}>{c.ok ? "✓" : "✕"}</span> {c.label}</span>
                 {!c.ok && <span className="font-mono text-xs text-alert">run {c.fix}</span>}
               </div>
             ))}
@@ -835,9 +837,15 @@ export default function Settings() {
                 : <span className="text-alert">{checks.filter((c) => !c.ok).length} item(s) missing — easiest fix: paste supabase/RUN_ME.sql into the Supabase SQL Editor and Run.</span>}
             </div>
             <div className="mt-1 text-xs text-inksoft">Live updates can&apos;t be auto-verified from here — if screens don&apos;t refresh on their own after everything above is green, run upgrade_realtime.sql (it&apos;s included in RUN_ME.sql).</div>
-          </>
+          </div>
         )}
       </div>
+      </div>
+      </Disclosure>
+
+      {/* the Save button can never scroll out of reach while prices are dirty */}
+      <SaveBar visible={priceTouched} label="Save line items" saving={priceSaving}
+        onSave={savePriceList} hint={priceLoaded ? "Line items & prices — not saved yet" : "Still reading the saved list…"} />
 
       {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
     </div>

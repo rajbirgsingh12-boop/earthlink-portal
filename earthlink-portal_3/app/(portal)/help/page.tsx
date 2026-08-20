@@ -1,9 +1,9 @@
 "use client";
 
 // Plain-language guide — written for someone opening the app for the first time.
-const SECTIONS: { icon: string; title: string; lines: string[] }[] = [
+const SECTIONS: { icon?: string; title: string; lines: string[] }[] = [
   {
-    icon: "🏠", title: "Home",
+    title: "Home",
     lines: [
       "The big buttons at the top jump you straight to everyday jobs — hours, walk sheets, invoices, releases.",
       "Below them, the Board shows what needs attention: money to chase, walk sheets not delivered, and payroll that's short.",
@@ -12,12 +12,12 @@ const SECTIONS: { icon: string; title: string; lines: string[] }[] = [
   {
     icon: "📄", title: "Releases",
     lines: [
-      "Every NYCHA release lives here. Tap “+ From PDF(s)” and pick the release PDFs — the app reads them and fills everything in.",
-      "📁 Attach folder takes a whole contract folder at once. It opens each PDF to read which release it actually is and files it on that release. You get a list to check — and fix anything it wasn't sure about — before a single file uploads.",
+      "Every NYCHA release lives here. Tap Add → “+ From PDF(s)” and pick the release PDFs — the app reads them and fills everything in.",
+      "Attach folder of PDFs (also under Add) takes a whole contract folder at once. It opens each PDF to read which release it actually is and files it on that release. You get a list to check — and fix anything it wasn't sure about — before a single file uploads.",
       "If a release in the folder isn't in the app yet, it gets created from its own PDF — development, amount, work order and required hours and all. Those show as NEW in the list before you press Attach.",
-      "Attaching also reads the line items out of each release PDF, so the SOS form and Invoice buttons light up by themselves. Releases that are already paid are left exactly as they are, and line items you've already got (or edited by hand) are never overwritten.",
+      "Attaching also reads the line items out of each release PDF, so SOS form and Invoice light up by themselves in the row's ⋯ menu. Releases that are already paid are left exactly as they are, and line items you've already got (or edited by hand) are never overwritten.",
       "The little green chips on each row show how far along it is: walk sheet → release → work done → payroll → invoiced → paid.",
-      "The ⏱ number is payroll hours worked vs. required — it updates by itself as hours are entered on the Payroll tab.",
+      "The hrs number is payroll hours worked vs. required — it updates by itself as hours are entered on the Payroll tab.",
       "When NYCHA pays, tap the Received stamp. Paid releases move to the Received list to keep the screen clean.",
     ],
   },
@@ -31,31 +31,31 @@ const SECTIONS: { icon: string; title: string; lines: string[] }[] = [
     icon: "📋", title: "Proposals (walk sheets)",
     lines: [
       "For pricing a job during a walk-through. Start a sheet, pick the contract, and type quantities next to the work items — it saves as you go.",
-      "Search for any item by name (“cabinet”, “paint”). Preview shows the finished sheet; Excel downloads it in the NYCHA layout.",
-      "“→ Add to release” turns the walk sheet into a release when the work is approved.",
+      "Search for any item by name (“cabinet”, “paint”). View PDF shows the finished sheet; ⬇ Walk sheet (Excel) downloads it in the NYCHA layout.",
+      "“Add to release…” (in a sheet's ⋯ menu) turns the walk sheet into a release when the work is approved.",
     ],
   },
   {
     icon: "🏢", title: "PACT",
     lines: [
-      "Private partner work. Tap “+ Upload PO (PDF)” and the job builds itself from the purchase order.",
+      "Private partner work. Tap “📄 Upload PO / proposal” and the job builds itself from the purchase order.",
       "Take 📷 Before photos when you start and 📷 After photos when you finish.",
       "Work lines are what gets billed — add a line if the job runs past what the PO listed.",
-      "📦 Package makes one PDF with the invoice, the PO, and all photos — ready to send. PACT has its own Schedule under the PACT menu.",
-      "📱 Text worker opens a ready-made text with the job's address and work description — pick the worker and hit send.",
+      "⬇ Invoice package (zip) — under the job's Papers menu — makes one PDF with the invoice, the PO, and all photos, ready to send. PACT has its own Schedule under the PACT menu.",
+      "Text worker (in the job's ⋯ menu) opens a ready-made text with the job's address and work description — pick the worker and hit send.",
     ],
   },
   {
     icon: "📅", title: "Schedule",
     lines: [
       "Pick the day (Today / Tomorrow / any date), add a release, write the work description, then + Add worker for everyone going.",
-      "🗺 Map opens a mini map window — type the address, check the pin, tap Use this location. The workers' texts then include a tap-to-navigate map link.",
+      "Map opens a mini map window — type the address, check the pin, tap Use this location. The workers' texts then include a tap-to-navigate map link.",
       "Assign & text messages the whole crew in one tap — date, release #, address with map link, and the work description.",
       "With the company number connected (Twilio keys in Vercel), texts send silently from that number; otherwise a group text opens on your phone. TEXTED ✓ shows who's been told; “resend” re-sends one person.",
     ],
   },
   {
-    icon: "⏱", title: "Payroll",
+    title: "Payroll",
     lines: [
       "Tap the one big button — Make payroll. It opens this week and brings the crew over from last week.",
       "The week opens on today: type each person's hours, one number each. Tap a name to link their hours to a release or change their classification.",
@@ -68,18 +68,18 @@ const SECTIONS: { icon: string; title: string; lines: string[] }[] = [
     icon: "🧾", title: "Invoices & Statements",
     lines: [
       "Pick a contract to see everything NYCHA still owes on it, with how many days each invoice has been out.",
-      "“Invoice” makes the NYCHA invoice for a release. Preview shows the Statement of Account; every document can be printed to PDF or downloaded as Excel.",
+      "“Invoice” (in a release row's ⋯ menu) makes the NYCHA invoice for a release. Preview shows the Statement of Account; every document can be printed to PDF or downloaded as Excel.",
     ],
   },
   {
-    icon: "⚙️", title: "Settings",
+    title: "Settings",
     lines: [
       "Company letterhead info, contract nicknames, and user accounts (Admin 1 sees everything; Admin 2 sees everything except PACT).",
       "“Run system check” verifies the database — every row should be green.",
     ],
   },
   {
-    icon: "💡", title: "Good to know",
+    title: "Good to know",
     lines: [
       "Everything saves by itself as you type — Save & close is just a quick way out.",
       "Everything updates live: if someone enters hours on their phone, you see it on yours without refreshing.",
@@ -95,7 +95,7 @@ export default function Help() {
       <div className="mb-4 text-sm text-inksoft">The whole app in plain language — one section per tab.</div>
       {SECTIONS.map((s) => (
         <div key={s.title} className="card mb-3 p-4">
-          <div className="mb-1.5 font-display text-base font-bold uppercase">{s.icon} {s.title}</div>
+          <div className="mb-1.5 font-display text-base font-bold uppercase">{s.icon ? `${s.icon} ` : ""}{s.title}</div>
           {s.lines.map((l, i) => <p key={i} className="mb-1 text-[14px] leading-relaxed text-ink">{l}</p>)}
         </div>
       ))}

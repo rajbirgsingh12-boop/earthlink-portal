@@ -16,6 +16,9 @@ import { useLive } from "@/lib/useLive";
 import type { Contract } from "@/lib/types";
 import { TEMPLATE_CREW } from "@/lib/crew";
 import { useNumBuffer } from "@/lib/numBuffer";
+import PageHeader from "@/components/PageHeader";
+import Disclosure from "@/components/Disclosure";
+import { RowActions } from "@/components/ActionMenu";
 
 interface Emp { id: string; name: string; trade: string; base_rate: number; active: boolean; phone?: string | null; }
 interface Week { id: string; week_ending: string; paid_map?: Record<string, string> | null; }
@@ -529,15 +532,15 @@ export default function Payroll() {
       <div>
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2.5">
-            <button className="btn btn-ghost" onClick={() => { openReq.current += 1; setOpenWeek(null); setEntries([]); setWeekCheck([]); load(); }}>← Weeks</button>
+            <button className="btn btn-ghost min-h-[44px]" onClick={() => { openReq.current += 1; setOpenWeek(null); setEntries([]); setWeekCheck([]); load(); }}>← Weeks</button>
             <div>
               <div className="font-display text-lg font-bold uppercase leading-tight">Week of {range}</div>
               <div className="text-[11px] text-inksoft">Sat & Sun count as overtime</div>
             </div>
           </div>
           <div className="flex gap-2">
-            <button className="btn" onClick={exportTemplate}>Weekly sheet (xlsx)</button>
-            <button className="btn btn-primary" onClick={() => {
+            <button className="btn min-h-[44px]" onClick={exportTemplate}>Weekly sheet (xlsx)</button>
+            <button className="btn btn-primary min-h-[44px]" onClick={() => {
               // blur fires the focused field's save synchronously, then close right away
               (document.activeElement as HTMLElement | null)?.blur?.();
               openReq.current += 1; setOpenWeek(null); setEntries([]); setWeekCheck([]); load();
@@ -568,7 +571,7 @@ export default function Payroll() {
                   ))}
                 <button className="block w-full p-2.5 text-left text-sm text-inksoft"
                   onMouseDown={(ev) => { ev.preventDefault(); setExtraSections((prev) => (prev.some((x) => x.release_id === null) ? prev : [...prev, { release_id: null, label: "" }])); setRelPickQ(""); setAddFor("none"); setAddQ(""); }}>
-                  ＋ Hours without a release (shop, misc…)
+                  + Hours without a release (shop, misc)
                 </button>
               </div>
             )}
@@ -679,13 +682,13 @@ export default function Payroll() {
                             value={en.trade ?? ""} onChange={(e) => set({ trade: e.target.value })} onBlur={() => saveTrade(en)} />
                           {clsText !== "" && reqClasses.length > 0 && (fits ? <Stamp label={`✓ ${canon}`} tone="ok" /> : <Stamp label={`no ${canon} req`} tone="work" />)}
                           <span className="font-mono text-xs text-inksoft">{hrs}h</span>
-                          {!readOnly && <button className="text-xs text-alert" title="Remove from this release" onClick={() => { if (hrs > 0 && !window.confirm(`Remove ${emp?.name || "this worker"} from this release? Their ${hrs}h here will be deleted.`)) return; delEntry(en.id!); }}>✕</button>}
+                          {!readOnly && <button className="btn-icon text-alert" title="Remove from this release" onClick={() => { if (hrs > 0 && !window.confirm(`Remove ${emp?.name || "this worker"} from this release? Their ${hrs}h here will be deleted.`)) return; delEntry(en.id!); }}>✕</button>}
                         </div>
                       </div>
                       <div className="grid grid-cols-7 gap-1.5">
                         {DAYS.map((d, i) => (
                           <div key={d}>
-                            <div className={`text-center text-[10px] uppercase tracking-wide ${empDayTot[i] > 8 ? "font-semibold text-alert" : i < 2 ? "font-semibold text-work" : "text-inksoft"}`}>{d}{i < 2 ? "·OT" : ""}</div>
+                            <div className={`text-center text-[11px] uppercase tracking-wide ${empDayTot[i] > 8 ? "font-semibold text-alert" : i < 2 ? "font-semibold text-work" : "text-inksoft"}`}>{d}{i < 2 ? "·OT" : ""}</div>
                             <input className={`field px-1 py-2 text-center font-mono ${empDayTot[i] > 8 ? "bg-alert/10 ring-1 ring-alert" : i < 2 ? "bg-work/5" : ""}`} inputMode="decimal" placeholder="0" readOnly={readOnly}
                               {...num(`${en.id}:h${i}`, Number(en.hours[i]) || 0,
                                 (n) => { const hours = [...en.hours]; hours[i] = n; set({ hours }); },
@@ -742,9 +745,13 @@ export default function Payroll() {
                       <td className={`p-2.5 text-right font-mono ${x.ot > 0 ? "text-work" : ""}`}>{x.ot}</td>
                       <td className="p-2.5 text-right font-mono font-semibold">{x.hrs}h</td>
                       <td className="p-2.5 text-center">
-                        <button disabled={readOnly} onClick={() => togglePaid(x.eid)} title={readOnly ? "" : paidOn ? `Paid ${prettyDate(paidOn)}` : "Mark paid"}>
+                        {readOnly ? (
                           <Stamp label={paidOn ? "PAID" : "NOT PAID"} tone={paidOn ? "ok" : "work"} />
-                        </button>
+                        ) : (
+                          <button className="btn-stamp" onClick={() => togglePaid(x.eid)} title={paidOn ? `Paid ${prettyDate(paidOn)}` : "Mark paid"}>
+                            <Stamp label={paidOn ? "PAID" : "NOT PAID"} tone={paidOn ? "ok" : "work"} />
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );
@@ -762,13 +769,10 @@ export default function Payroll() {
 
   return (
     <div>
-      <div className="mb-3 flex items-baseline justify-between">
-        <div className="font-display text-2xl font-bold uppercase">Payroll</div>
-        <div className="flex flex-wrap justify-end gap-2">
-          <Link className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" href="/payroll/certified" title="Turn certified payroll PDFs into a CSV for eComply">📄 eComply CSV</Link>
-          <Link className="btn btn-ghost whitespace-nowrap px-3 py-2 text-[13px]" href="/settings" title="Crew list and phone numbers now live in Settings">Crew ({emps.filter((e) => e.active !== false).length}) →</Link>
-        </div>
-      </div>
+      <PageHeader title="Payroll">
+        <Link className="btn btn-ghost min-h-[44px] whitespace-nowrap px-3 py-2 text-[13px]" href="/payroll/certified" title="Turn certified payroll PDFs into a CSV for eComply">eComply CSV</Link>
+        <Link className="btn btn-ghost min-h-[44px] whitespace-nowrap px-3 py-2 text-[13px]" href="/settings" title="Crew list and phone numbers now live in Settings">Crew ({emps.filter((e) => e.active !== false).length}) →</Link>
+      </PageHeader>
 
       {!readOnly && (() => {
         const we = fridayOf(localISO());
@@ -777,11 +781,13 @@ export default function Payroll() {
             <button className="btn btn-primary w-full py-3.5 text-base" onClick={() => makePayroll()}>
               Make payroll · {prettyDate(addDays(we, -6))} – {prettyDate(we)}
             </button>
-            <div className="mt-2.5 flex flex-wrap items-center gap-2">
-              <span className="text-[11px] uppercase tracking-widest text-inksoft">Different week? Pick any day in it</span>
-              <input type="date" className="field w-44" value={pickDate} onChange={(e) => setPickDate(e.target.value)} />
-              <button className="btn" disabled={!pickDate} onClick={() => makePayroll(pickDate)}>Open that week</button>
-            </div>
+            <Disclosure label="Open a different week" className="mt-1.5">
+              <div className="flex flex-wrap items-center gap-2 pb-1.5">
+                <span className="text-[12px] text-inksoft">Pick any day in the week</span>
+                <input type="date" className="field w-44" value={pickDate} onChange={(e) => setPickDate(e.target.value)} />
+                <button className="btn min-h-[44px]" disabled={!pickDate} onClick={() => makePayroll(pickDate)}>Open that week</button>
+              </div>
+            </Disclosure>
           </div>
         );
       })()}
@@ -791,10 +797,10 @@ export default function Payroll() {
           <div key={w.id} className="flex items-center justify-between gap-3 p-3.5">
             <button className="flex-1 text-left" onClick={() => openW(w)}>
               <span className="font-mono text-[13px] font-semibold">{prettyDate(addDays(w.week_ending, -6))} – {prettyDate(w.week_ending)}</span>
-              {weCounts[w.week_ending] > 1 && <span className="ml-2 rounded-[2px] border border-alert px-1 py-px font-mono text-[9px] font-semibold text-alert" title="Two payroll weeks cover the same dates — delete the one you don't need, its hours go with it">DUPLICATE</span>}
+              {weCounts[w.week_ending] > 1 && <span className="chip ml-2 rounded-[2px] border border-alert px-1 py-px font-semibold text-alert" title="Two payroll weeks cover the same dates — delete the one you don't need, its hours go with it">DUPLICATE</span>}
               <span className="ml-2 text-xs text-inksoft">open →</span>
             </button>
-            {!readOnly && <button className="text-xs text-alert" title="Delete this week" onClick={() => deleteWeek(w)}>✕</button>}
+            {!readOnly && <RowActions items={[{ label: "Delete week…", destructive: true, onSelect: () => deleteWeek(w) }]} />}
           </div>
         )); })()}
         {weeks.length === 0 && <div className="p-5 text-sm text-inksoft">No payroll weeks yet. Add the crew, start a week, punch hours, download the weekly sheet.</div>}

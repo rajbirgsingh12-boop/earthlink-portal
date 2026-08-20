@@ -41,6 +41,15 @@ body { padding-bottom: env(safe-area-inset-bottom); }
   background-repeat: no-repeat;
   background-attachment: local, local, scroll, scroll;
 }
+/* ---- action menus: the one dropdown pattern for grouped actions ---- */
+.menu { @apply rounded-sm border-[1.5px] border-ink bg-white py-1 shadow-xl; min-width: 220px; max-width: calc(100vw - 2rem); }
+.menu-item { @apply block w-full min-h-[44px] px-4 py-2.5 text-left text-[15px] transition-colors hover:bg-paper disabled:opacity-50; }
+.menu-item-danger { @apply text-alert; }
+.btn-icon { @apply grid h-11 w-11 shrink-0 cursor-pointer select-none place-items-center rounded-sm border-[1.5px] border-ink bg-white shadow-sm transition-all duration-150 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50; }
+/* small info chips (pipeline states, counts) — never below 11px */
+.chip { @apply font-mono text-[11px] tracking-wide; }
+/* a stamp that is really a button says so on touch */
+.btn-stamp { @apply cursor-pointer select-none transition-all active:translate-y-px hover:brightness-95; }
 .stamp { @apply inline-block border-2 rounded-sm px-2.5 py-0.5 font-display uppercase tracking-widest text-[12px] font-semibold; }
 .btn { @apply cursor-pointer select-none rounded-sm border-[1.5px] border-ink bg-white px-4 py-2.5 font-display uppercase tracking-wider text-[15px] font-semibold shadow-sm transition-all duration-150 hover:shadow active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50; }
 /* a touch deeper than the accent orange — white text reads at 4.9:1 (AA) */

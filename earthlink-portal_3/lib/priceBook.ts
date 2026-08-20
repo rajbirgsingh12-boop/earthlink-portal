@@ -39,7 +39,7 @@ export const PRICE_BOOK: PriceItem[] = [
   // a fire escape, a floor, a sticker and an apartment being repainted are all
   // somebody else's line, and pricing them as plaster invents money nobody
   // agreed to.
-  { key: "plaster", description: "Plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "\\bscrap(?:e|es|ed|ing)\\b(?=[^.]{0,30}\\b(?:walls?|ceilings?|plaster|skim|sheet\\s*rock|sheetrock|dry\\s*wall|drywall)\\b)|\\bplaster(?:ing)?\\b|\\bskim(?:\\s*coat)?\\b|\\bspackl(?:e|ing)\\b|\\bpatch(?:ing|es)?\\b|\\btape\\s*(?:and|&)\\s*spackle\\b|\\bscratch\\s*coat\\b" },
+  { key: "plaster", description: "Plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "\\bscrap(?:e|es|ed|ing)\\b(?=[^.]{0,30}\\b(?:walls?|ceilings?|plaster|skim|sheet\\s*rock|sheetrock|dry\\s*wall|drywall)\\b)|\\b(?:walls?|c(?:ei|ie|e|i)l+ings?)\\b|\\bplaster(?:ing)?\\b|\\bskim(?:\\s*coat)?\\b|\\bspackl(?:e|ing)\\b|\\bpatch(?:ing|es)?\\b|\\btape\\s*(?:and|&)\\s*spackle\\b|\\bscratch\\s*coat\\b" },
   { key: "popcorn", description: "Popcorn ceiling removal", unit: "SF", price: 5, group: "Plaster & walls", words: "popcorn|textured?\\s*ceilings?|stipple" },
   { key: "wall_repair", description: "Wall repair", unit: "SF", price: 6, group: "Plaster & walls", words: "wall\\s*repair|repair[^.\\n]{0,12}walls?|hole[s]?\\s*in\\s*the\\s*walls?" },
   { key: "sheetrock", description: "Sheet rock", unit: "SF", price: 12, group: "Plaster & walls", words: "sheet\\s*rock|sheetrock|dry\\s*wall|drywall|gypsum|blue\\s*board|rock\\s*the\\s*walls?" },
@@ -294,6 +294,15 @@ const BEATS: [string, string][] = [["wall_repair", "plaster"], ["popcorn", "plas
 const ON_A_DOOR = /lock|closer|hinge|chime|door\s*bell|strike|panic|push\s*bar/i;
 // the wording that means the wall gets scraped before it gets plastered
 const SCRAPED = /\bscrap(?:e|es|ed|ing)\b/i;
+// A wall or a ceiling on its own says nothing — what is being DONE to it is
+// what makes it the plaster job. These three decide it:
+//   the trade, said outright
+const PLASTER_SAID = /\b(?:plaster\w*|skim\w*|spackl\w*|patch\w*|scratch\s*coat|scrap(?:e|es|ed|ing))\b/i;
+//   something being done to the surface itself
+const SURFACE_WORK = /\b(?:damage\w*|water|crack\w*|holes?|peel\w*|chip\w*|flak\w*|prep\w*|repair\w*|fix\w*|re-?d(?:o|one|oing)|resurfac\w*|smooth\w*|done|finish\w*|restor\w*|seal\w*)\b/i;
+//   …and the things that merely HANG on a wall or a ceiling, which are somebody
+//   else's trade however broken they are
+const ON_A_SURFACE = /\b(?:fans?|lights?|lighting|fixtures?|outlets?|sockets?|switch\w*|a\/?c|air\s*condition\w*|radiators?|pipes?|sprinklers?|smoke|detectors?|cameras?|intercoms?|cabinets?|doors?|windows?|tiles?|floors?|mount\w*|shelf|shelves|tvs?|televisions?)\b/i;
 
 interface Hit { key: string; qty: number; said: boolean; at: number; scrape?: boolean }
 
@@ -349,7 +358,7 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
       else if (alen === blen && !bothSheet && (a.own !== b.own ? a.own : i < j)) shadowed.add(j);
     }));
 
-    const pend: { key: string; at: number; hit: string; unit: string; qty: number; cl: number }[] = [];
+    const pend: { key: string; at: number; hit: string; unit: string; qty: number; cl: number; scrape: boolean }[] = [];
     for (let ci = 0; ci < ranges.length; ci++) {
       const cl = ranges[ci];
       const inClause = found.filter((f, i) => f.cl === ci && !shadowed.has(i));
@@ -357,6 +366,10 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
       const drop = new Set<string>();
       // a door named next to its hardware is where the hardware goes
       if (has("door") && ON_A_DOOR.test(cl.s)) drop.add("door");
+      // a clause that only ever said "wall" or "ceiling" bills the plaster job
+      // when something is being done to the surface — and never when what is
+      // wrong is the fan hanging off it
+      if (has("plaster") && !PLASTER_SAID.test(cl.s) && (!SURFACE_WORK.test(cl.s) || ON_A_SURFACE.test(cl.s))) drop.add("plaster");
       // one location wins — but only when both variants matched: if one is
       // switched off in Settings, the other stands on its own
       if (has("hinge_lobby") && has("hinge_apt")) drop.add(/lobby/i.test(cl.s) ? "hinge_apt" : "hinge_lobby");
@@ -385,7 +398,10 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
             if (a) qty = n(a[1]);
           }
         }
-        pend.push({ key: x.key, at: x.at, hit: x.hit, unit: p.unit, qty, cl: ci });
+        // whether the PO said scrape is read off the clause, not off the word
+        // that happened to match first — "kitchen ceiling scrape plaster" is a
+        // scrape job even though "ceiling" is what the reader saw first
+        pend.push({ key: x.key, at: x.at, hit: x.hit, unit: p.unit, qty, cl: ci, scrape: SCRAPED.test(cl.s) });
       }
     }
     // each measurement in the sentence belongs to the work nearest it, and is
@@ -415,7 +431,7 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
     }
     // it only says "scrape and plaster" when the PO said scrape — a plaster
     // line that came along behind sheetrock never claims it
-    hits.push(...pend.map((x) => ({ key: x.key, qty: x.qty || 1, said: x.qty > 0, at: sent.at + x.at, scrape: SCRAPED.test(x.hit) })));
+    hits.push(...pend.map((x) => ({ key: x.key, qty: x.qty || 1, said: x.qty > 0, at: sent.at + x.at, scrape: x.scrape })));
   }
 
   // the same work named more than once: counts the PO gave add up; when it

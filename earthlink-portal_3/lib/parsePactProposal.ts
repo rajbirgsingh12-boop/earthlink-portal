@@ -80,10 +80,15 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
   // to the address until the letter moves on to the work
   let svc = t.match(/Service Address[ \t]*:?[ \t]*([^\n]*)/i)?.[1]?.trim() || "";
   {
+    // a finished address ends with a zip or an apartment; anything else (a
+    // trailing comma, a cut-off street name) means the band wrapped and the
+    // next line is still address — but ONLY then, because in a letter with no
+    // ATTN block the line right under the band is the billing address
+    const finished = (a: string) => !/,\s*$/.test(a) && (/\d{5}(?:-\d{4})?\s*$/.test(a) || /(?:Apartment|Apt\.?|Unit)\s*#?\s*[\dA-Za-z-]+\s*$/i.test(a));
     const at = lines.findIndex((l) => /service address/i.test(l));
-    for (let k = at + 1; at >= 0 && k < Math.min(at + 3, lines.length); k++) {
+    for (let k = at + 1; at >= 0 && k < Math.min(at + 3, lines.length) && !finished(svc); k++) {
       const cont = lines[k].trim();
-      if (!cont || cont.includes("$") || HEADINGISH.test(cont) || /scope of work/i.test(cont)) break;
+      if (!cont || cont.includes("$") || HEADINGISH.test(cont) || /^attn\b/i.test(cont) || /scope of work/i.test(cont)) break;
       svc = `${svc} ${cont}`.trim();
     }
   }

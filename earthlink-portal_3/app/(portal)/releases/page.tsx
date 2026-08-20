@@ -1635,7 +1635,7 @@ export default function Releases() {
         const parsed = parseReleasePdfText(text);
         if (!parsed) {
           flash(/Purchase Order No/i.test(text)
-            ? "That's a PACT purchase order — it goes in on the PACT tab (that's Admin 1's side). Releases only takes NYCHA release PDFs."
+            ? "That's a PACT purchase order — upload it on the PACT tab (📄 Upload PO / proposal). Releases only takes NYCHA release PDFs."
             : "Couldn't read this PDF — is it a NYCHA blanket release?");
           setBusy(false); return;
         }

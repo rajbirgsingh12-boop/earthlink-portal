@@ -187,15 +187,17 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
     para("", { rule: BRAND, ruleW: 18, space: 260 }),
     titleRow,
     gap(260),
+    // the property is the headline — the one fact everything else hangs off,
+    // set apart at the top so it cannot be missed
+    table([cell(paraOf(run("Service Address:  ", { sz: 16, b: true, color: MUTED, caps: true, track: 24 })
+      + run(f.serviceAddress || "—", { sz: 21, b: true }), { space: 0 }),
+      W, { shade: BAND, pad: [130, 160, 130, 160] })], [W]),
+    gap(260),
     attnBlock,
     gap(260),
     para(`Dear ${dearName || "Sir or Madam"},`, { sz: 21, space: 180 }),
     para(`${L.name} is pleased to submit this proposal for the following work${site ? ` at ${site}` : ""}.`,
       { sz: 21, space: 220 }),
-    // the one fact everything else hangs off, set apart so it cannot be missed
-    table([cell(paraOf(run("Service Address:  ", { sz: 16, b: true, color: MUTED, caps: true, track: 24 })
-      + run(f.serviceAddress || "—", { sz: 21, b: true }), { space: 0 }),
-      W, { shade: BAND, pad: [130, 160, 130, 160] })], [W]),
     gap(300),
     para("Scope of Work", { b: true, sz: 18, color: BRAND, caps: true, track: 34, space: 90 }),
     table([headRow, ...bodyRows], COLS),
@@ -293,7 +295,7 @@ export const BLANK_PROPOSAL: ProposalFields = {
   serviceAddress: "123 EXAMPLE STREET, Brooklyn, NY 11207, Apartment 4B",
   lines: [
     { description: "Scrape and plaster", qty: 100, unit: "SF", unit_price: 6 },
-    { description: "Primer — 1 coat", qty: 1, unit: "ROOM", unit_price: 125 },
+    { description: "Primer", qty: 1, unit: "ROOM", unit_price: 125 },
     { description: "Paint", qty: 1, unit: "ROOM", unit_price: 220 },
   ],
 };

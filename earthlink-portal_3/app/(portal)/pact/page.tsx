@@ -49,14 +49,14 @@ const unitFor = (desc: string): string => {
 export default function Pact() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [org, setOrg] = useState<Org | null>(null);
-  // Admin 1 (admin) sees everything; Admin 2 (office) has no PACT at all and is
-  // turned away below; accountants can look but not edit (matches the policies)
+  // Admin 1 (admin) sees everything. Admin 2 (office) works the field side —
+  // POs in, photos, square feet — and never sees a price, an amount, an
+  // invoice or a proposal. Accountants can look but not edit.
   const [role, setRole] = useState("");
   const canInvoice = role === "admin";
   const canEdit = role === "admin" || role === "office";
-  // PACT is Admin 1's; the office side keeps NYCHA — releases, price book,
-  // proposals and the invoice package — as before
-  const canPrice = canEdit;
+  // prices, totals and the sales tax are Admin 1's alone
+  const canPrice = role === "admin";
   const [q, setQ] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [draft, setDraft] = useState({ ...BLANK });
@@ -278,24 +278,40 @@ export default function Pact() {
   };
 
   // "Price from list" on a job already here
-  const fillFromList = async (j: Job) => {
-    setBusy(true);
+  const fillFromList = async (j: Job, auto = false) => {
+    if (!auto) setBusy(true);
     try {
       // the job's own words only — feeding our generated line text back in
-      // would let "Primer — 1 coat" read as a fresh painting order
+      // would let "Primer" read as a fresh painting order
       const before = itemsOf(j);
       const next = await priceFromList(j.description || "", before, { refresh: true });
       const added = next.length - before.length;
       const changed = next.filter((n, i) => i < before.length && n.unit_price !== before[i].unit_price).length;
       if (added === 0 && changed === 0) {
-        flash("Already matching the price list — nothing to change");
+        if (!auto) flash("Already matching the price list — nothing to change");
         return;
       }
       setItems(j, next, true);
-      flash([added > 0 ? `${added} line${added === 1 ? "" : "s"} added` : "", changed > 0 ? `${changed} re-priced` : ""]
-        .filter(Boolean).join(" · ") + " from the price list — check them before invoicing");
-    } finally { setBusy(false); }
+      flash(auto
+        ? "Priced off the quantities on the job — check the lines before invoicing"
+        : [added > 0 ? `${added} line${added === 1 ? "" : "s"} added` : "", changed > 0 ? `${changed} re-priced` : ""]
+            .filter(Boolean).join(" · ") + " from the price list — check them before invoicing");
+    } finally { if (!auto) setBusy(false); }
   };
+
+  // Admin 2 enters the square feet out in the field; the moment Admin 1 opens
+  // the job, the prices fill themselves in from the list — no button to
+  // remember. A line that already carries a real price is never touched.
+  const autoPriced = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!openId || role !== "admin" || autoPriced.current.has(openId)) return;
+    const j = jobs.find((x) => x.id === openId);
+    if (!j) return;
+    const needs = itemsOf(j).some((it) => Number(it.qty) > 0 && it.description.trim() && !realPrice(it.unit_price));
+    if (!needs) return;
+    autoPriced.current.add(openId);
+    fillFromList(j, true);
+  }, [openId, role, jobs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------- the proposal letter ----------
   const logoBytes = async (): Promise<Uint8Array | undefined> => {
@@ -1155,11 +1171,9 @@ export default function Pact() {
     ...(canInvoice ? ([["INVOICED", !!j.invoice_sent], ["PAID", j.received]] as [string, boolean][]) : []),
   ];
 
-  // Admin 2 has no PACT menu, so the page is shut to them by address too.
-  // Until the profile answers, nothing renders — the gate must not fail open
-  // and flash every partner and PO at an account that is about to be turned away.
+  // Until the profile answers, nothing renders — the money on this page must
+  // not flash at an account that isn't allowed to see it.
   if (!role) return <div className="card p-4 text-sm text-inksoft">Checking your account…</div>;
-  if (role === "office") return <div className="text-sm text-inksoft">PACT is Admin 1&rsquo;s. Nothing here for this account.</div>;
 
   return (
     <div>
@@ -1244,8 +1258,8 @@ export default function Pact() {
               <input className="field" value={draft.development} onChange={(e) => setDraft({ ...draft, development: e.target.value })} /></div>
             <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Job / PO #</div>
               <input className="field" value={draft.job_number} onChange={(e) => setDraft({ ...draft, job_number: e.target.value })} /></div>
-            <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Amount</div>
-              <input className="field" inputMode="decimal" value={draft.amount} onChange={(e) => setDraft({ ...draft, amount: e.target.value })} /></div>
+            {canPrice && <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Amount</div>
+              <input className="field" inputMode="decimal" value={draft.amount} onChange={(e) => setDraft({ ...draft, amount: e.target.value })} /></div>}
             <div className="col-span-2 md:col-span-1"><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Description</div>
               <input className="field" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></div>
           </div>
@@ -1276,7 +1290,7 @@ export default function Pact() {
           <div className="flex shrink-0 flex-wrap gap-2">
             <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy} title="A partner PO (PDF) or one of our proposal letters (Word)">📄 Upload PO / proposal</button>
             <ActionMenu label="More ways to add" items={[
-              { label: "Upload a folder of proposals", disabled: busy, title: "Pick a folder of proposal letters — every one becomes a job, then all the invoices download in one zip", onSelect: () => folderRef.current?.click() },
+              { label: "Upload a folder of proposals", hidden: !canInvoice, disabled: busy, title: "Pick a folder of proposal letters — every one becomes a job, then all the invoices download in one zip", onSelect: () => folderRef.current?.click() },
               { label: "Proposal template", hidden: !canInvoice, disabled: busy, title: "A blank proposal letter in our layout — fill it in, and uploading it back here builds the job and the invoice", onSelect: blankProposal },
               { label: "Add a job manually", onSelect: () => setAddOpen(!addOpen) },
             ]} />
@@ -1446,7 +1460,7 @@ export default function Pact() {
                   {canEdit && (
                     <div className="flex flex-wrap gap-2">
                       <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => setItems(j, [...itemsOf(j), { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>
-                      <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" disabled={busy} title="Fill the lines and prices from the partner price list — plaster brings its primer and paint" onClick={() => fillFromList(j)}>Price from list</button>
+                      {canPrice && <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" disabled={busy} title="Fill the lines and prices from the partner price list — plaster brings its primer and paint" onClick={() => fillFromList(j)}>Price from list</button>}
                       {canPrice && (
                         <label className="flex items-center gap-1 text-[12px] text-inksoft" title="The sales tax printed on the proposal and the invoice">
                           Sales tax
@@ -1470,6 +1484,7 @@ export default function Pact() {
                   }}>Save & close</button>}
                   menuLabel="Papers"
                   menu={canInvoice ? [
+                    { label: "⬇ Proposal + invoice", disabled: busy, title: "Both files in one tap — the proposal PDF and the invoice PDF", onSelect: () => saveBoth(j) },
                     { label: "View proposal", disabled: busy, title: "Read the proposal letter on screen first", onSelect: () => viewProposal(j) },
                     { label: "⬇ Proposal (PDF)", disabled: busy, title: "The proposal to send — opens the same everywhere", onSelect: () => makeProposalPdf(j) },
                     { label: "⬇ Proposal (Word)", disabled: busy, title: "The same letter as a Word file, to edit before sending", onSelect: () => makeProposal(j) },
@@ -1570,6 +1585,10 @@ export default function Pact() {
                     <div><span className="text-[10px] uppercase tracking-widest text-inksoft">Date </span><b>{f.date}</b></div>
                   </div>
                 </div>
+                <div className="mt-4 bg-card px-3 py-2 text-[13px]">
+                  <span className="text-[10px] uppercase tracking-widest text-inksoft">Service Address: </span>
+                  <b>{f.serviceAddress || "—"}</b>
+                </div>
                 <div className="mt-4 text-[13px] leading-relaxed">
                   {f.attn && <div className="font-semibold">ATTN: {f.attn}</div>}
                   {f.attnTitle && <div className="text-inksoft">{f.attnTitle}</div>}
@@ -1579,10 +1598,6 @@ export default function Pact() {
                     {COMPANY.letterhead.name} is pleased to submit this proposal for the following work
                     {(f.serviceAddress || "").split(",")[0].trim() ? ` at ${(f.serviceAddress || "").split(",")[0].trim()}` : ""}.
                   </div>
-                </div>
-                <div className="mt-3 bg-card px-3 py-2 text-[13px]">
-                  <span className="text-[10px] uppercase tracking-widest text-inksoft">Service Address: </span>
-                  <b>{f.serviceAddress || "—"}</b>
                 </div>
                 <div className="mt-4 font-display text-[13px] font-bold uppercase tracking-widest text-work">Scope of Work</div>
                 <table className="mt-1 w-full border-collapse text-[12px]">

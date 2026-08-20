@@ -154,6 +154,16 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
   meta("DATE", f.date || "");
   y -= S.afterMeta;
 
+  // ---- the service address leads, in its own band (wrapping — a long
+  // development name must not run off the page edge) ----
+  const labW = trackW("SERVICE ADDRESS:", 8, bold, 1.2);
+  const addrX = M + 10 + labW + 8;
+  const addrLines = wrap(f.serviceAddress || "—", RIGHT - 10 - addrX, 10.5, bold);
+  page.drawRectangle({ x: M, y: y - 8 - (addrLines.length - 1) * 14, width: W, height: 26 + (addrLines.length - 1) * 14, color: C(BAND) });
+  track("SERVICE ADDRESS:", M + 10, 8, bold, MUTED, 1.2, y);
+  addrLines.forEach((ln, i) => putAt(ln, addrX, y - i * 14, 10.5, bold));
+  y -= S.afterBand + (addrLines.length - 1) * 14;
+
   // ---- who it is going to ----
   if (f.attn) { put(`ATTN: ${f.attn}`, M, 10.5, bold); y -= S.attn; }
   if (f.attnTitle) { put(f.attnTitle, M, 10, helv, MUTED); y -= S.line; }
@@ -168,16 +178,6 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
     put(ln, M, 10.5); y -= S.introLine;
   }
   y -= S.afterIntro;
-
-  // ---- the service address, in its own band (wrapping — a long development
-  // name must not run off the page edge) ----
-  const labW = trackW("SERVICE ADDRESS:", 8, bold, 1.2);
-  const addrX = M + 10 + labW + 8;
-  const addrLines = wrap(f.serviceAddress || "—", RIGHT - 10 - addrX, 10.5, bold);
-  page.drawRectangle({ x: M, y: y - 8 - (addrLines.length - 1) * 14, width: W, height: 26 + (addrLines.length - 1) * 14, color: C(BAND) });
-  track("SERVICE ADDRESS:", M + 10, 8, bold, MUTED, 1.2, y);
-  addrLines.forEach((ln, i) => putAt(ln, addrX, y - i * 14, 10.5, bold));
-  y -= S.afterBand + (addrLines.length - 1) * 14;
 
   // ---- the work ----
   track("SCOPE OF WORK", M, 9, bold, BRAND, 1.7);

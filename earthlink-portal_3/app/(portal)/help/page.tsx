@@ -74,7 +74,7 @@ const SECTIONS: { icon?: string; title: string; lines: string[] }[] = [
   {
     title: "Settings",
     lines: [
-      "Company letterhead info, contract nicknames, and user accounts (Admin 1 sees everything; Admin 2 sees everything except PACT).",
+      "Company letterhead info, contract nicknames, and user accounts (Admin 1 sees everything; Admin 2 works PACT without prices — POs, photos and quantities, no money).",
       "“Run system check” verifies the database — every row should be green.",
     ],
   },

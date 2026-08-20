@@ -17,14 +17,15 @@ import { PRICE_BOOK, PRICE_GROUPS, CUSTOM_GROUP, EMPTY_STORE, DEFAULT_ATTN, blan
   type PriceOverride, type PriceStore, type CustomItem } from "@/lib/priceBook";
 import { cleanPhone, prettyPhone } from "@/lib/notify";
 
-// the two roles: Admin 1 sees everything; Admin 2 sees everything except
-// PACT (internally these are the existing admin/office roles)
+// the two roles: Admin 1 sees everything; Admin 2 works PACT without ever
+// seeing a price, an amount, an invoice or a proposal
+// (internally these are the existing admin/office roles)
 // how a line is measured: counted, by the square foot, by the room, or by the hour
 const UNITS = ["EACH", "SF", "ROOM", "HOUR"];
 
 const ROLE_OPTIONS: [Role, string][] = [
   ["admin", "Admin 1 — full access"],
-  ["office", "Admin 2 — no PACT"],
+  ["office", "Admin 2 — PACT without prices"],
 ];
 
 const FIELDS: [keyof Org, string][] = [

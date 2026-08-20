@@ -77,10 +77,8 @@ export default function PactSchedule() {
     </div>
   );
 
-  // shut to Admin 2 the same way the jobs page is — and closed, not open,
-  // while the profile is still loading
+  // closed, not open, while the profile is still loading
   if (!role) return <div className="card p-4 text-sm text-inksoft">Checking your account…</div>;
-  if (role === "office") return <div className="text-sm text-inksoft">PACT is Admin 1&rsquo;s. Nothing here for this account.</div>;
 
   return (
     <div>

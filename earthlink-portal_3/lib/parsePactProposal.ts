@@ -142,7 +142,7 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
 
   const desc = rows[0]?.description || t.match(/proposal for the property/i)?.[0] || "";
   return {
-    po, poDate, desc, scope: rows.map((r) => r.description).join(". ").slice(0, 600), partner: "", address, billBlock, contact: contactName, punit,
+    po, poDate, desc, scope: rows.map((r) => r.description).join(". ").slice(0, 600), partner: "", address, billBlock, contact: contactName, punit, rowsAddUp: true,
     amount: grand || (sub > 0 ? Math.round(sub * (1 + (taxPct ?? 8.875) / 100) * 100) / 100 : 0),
     rows, readable: rows.length > 0 || !!po || !!svc, taxPct,
   };

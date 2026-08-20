@@ -34,8 +34,13 @@ export const PRICE_BOOK: PriceItem[] = [
   { key: "hinge_lobby", description: "Lobby door hinges", unit: "EACH", price: 350, group: "Doors & hardware", words: "\\bhinges?\\b" },
   { key: "hinge_apt", description: "Apartment entrance door hinges", unit: "EACH", price: 150, group: "Doors & hardware", words: "\\bhinges?\\b" },
   // ---- plaster & walls (measured) ----
-  { key: "plaster", description: "Plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "\\bplaster(?:ing)?\\b|\\bskim(?:\\s*coat)?\\b|\\bspackl(?:e|ing)\\b|\\bpatch(?:ing|es)?\\b|\\btape\\s*(?:and|&)\\s*spackle\\b|\\bscratch\\s*coat\\b" },
-  { key: "popcorn", description: "Popcorn ceiling removal", unit: "SF", price: 5, group: "Plaster & walls", words: "popcorn|textured?\\s*ceilings?|stipple|scrape\\s*(?:the\\s*)?ceilings?" },
+  // scraping a wall is the front half of plastering it — a PO that says scrape
+  // is asking for the whole job. It has to say WHAT is being scraped, though:
+  // a fire escape, a floor, a sticker and an apartment being repainted are all
+  // somebody else's line, and pricing them as plaster invents money nobody
+  // agreed to.
+  { key: "plaster", description: "Plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "\\bscrap(?:e|es|ed|ing)\\b(?=[^.]{0,30}\\b(?:walls?|ceilings?|plaster|skim|sheet\\s*rock|sheetrock|dry\\s*wall|drywall)\\b)|\\bplaster(?:ing)?\\b|\\bskim(?:\\s*coat)?\\b|\\bspackl(?:e|ing)\\b|\\bpatch(?:ing|es)?\\b|\\btape\\s*(?:and|&)\\s*spackle\\b|\\bscratch\\s*coat\\b" },
+  { key: "popcorn", description: "Popcorn ceiling removal", unit: "SF", price: 5, group: "Plaster & walls", words: "popcorn|textured?\\s*ceilings?|stipple" },
   { key: "wall_repair", description: "Wall repair", unit: "SF", price: 6, group: "Plaster & walls", words: "wall\\s*repair|repair[^.\\n]{0,12}walls?|hole[s]?\\s*in\\s*the\\s*walls?" },
   { key: "sheetrock", description: "Sheet rock", unit: "SF", price: 12, group: "Plaster & walls", words: "sheet\\s*rock|sheetrock|dry\\s*wall|drywall|gypsum|blue\\s*board|rock\\s*the\\s*walls?" },
   { key: "hourly", description: "Additional services", unit: "HOUR", price: 12, group: "Plaster & walls", words: "additional\\s*services?|time\\s*(?:and|&)\\s*materials?\\b|\\bt\\s*&\\s*m\\b|labou?r\\s*only|\\bhourly\\s*(?:work|labou?r|rate\\s*work)\\b" },
@@ -46,7 +51,9 @@ export const PRICE_BOOK: PriceItem[] = [
   { key: "paint_4br", description: "Paint 4 bedroom 1.5 bath apartment", unit: "EACH", price: 1900, price2: 2250, group: "Painting", words: "4\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
   // priming and painting are priced by the room, not by the square foot
   { key: "primer", description: "Primer — 1 coat", unit: "ROOM", price: 125, group: "Painting", words: "primer|prime\\b|priming|seal(?:er|ing)?\\s*coat" },
-  { key: "paint_sf", description: "Paint — 2 coats", unit: "ROOM", price: 220, group: "Painting", words: "paint(?:ing|ed)?\\b|re\\s*paint|finish\\s*coat|two\\s*coats?|2\\s*coats?" },
+  // just "Paint" — they don't do two coats. The two-coat wording stays in the
+  // trigger words so a letter already sent out still reads back as this line.
+  { key: "paint_sf", description: "Paint", unit: "ROOM", price: 220, group: "Painting", words: "paint(?:ing|ed)?\\b|re\\s*paint|finish\\s*coat|two\\s*coats?|2\\s*coats?" },
 ];
 
 // Wet trades carry their prep with them: nobody plasters a wall and leaves it
@@ -278,21 +285,24 @@ export interface PriceMatchOpts {
 
 // a narrower line wins over the general one it would double up with — but only
 // inside the same clause, so other work in the PO is never quietly deleted
-const BEATS: [string, string][] = [["wall_repair", "plaster"]];
+// a popcorn ceiling has its own price — scraping one is that job, not plastering
+const BEATS: [string, string][] = [["wall_repair", "plaster"], ["popcorn", "plaster"]];
 // hardware that names a door as the place it goes, not a door being ordered
 const ON_A_DOOR = /lock|closer|hinge|chime|door\s*bell|strike|panic|push\s*bar/i;
+// the wording that means the wall gets scraped before it gets plastered
+const SCRAPED = /\bscrap(?:e|es|ed|ing)\b/i;
 
-interface Hit { key: string; qty: number; said: boolean; at: number }
+interface Hit { key: string; qty: number; said: boolean; at: number; scrape?: boolean }
 
 export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLineOut[] {
   const book = opts.book || PRICE_BOOK;
   const bundle = opts.bundle ?? true;
   const raw = flatten(text || "").trim();
   if (!raw) return [];
-  // "one coat" on the PO means the one-coat price
-  const oneCoat = /\b(?:1|one|single)\s*coat\b/i.test(raw) && !/\b(?:2|two)\s*coats?\b/i.test(raw)
-    && !/\bprim(?:e|er)[^.]{0,12}\b(?:1|one)\s*coat\b/i.test(raw);
-  const coats: 1 | 2 = opts.coats ?? (oneCoat ? 1 : 2);
+  // they don't do two coats — one is what an apartment is quoted at, unless the
+  // PO itself asks for two and is paying for two
+  const twoCoat = /\b(?:2|two)\s*coats?\b/i.test(raw);
+  const coats: 1 | 2 = opts.coats ?? (twoCoat ? 2 : 1);
   const byKey = new Map(book.map((p) => [p.key, p]));
   const hits: Hit[] = [];
 
@@ -400,7 +410,9 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
         if (owner) { owner.qty += mm.v; mm.used = true; }
       }
     }
-    hits.push(...pend.map((x) => ({ key: x.key, qty: x.qty || 1, said: x.qty > 0, at: sent.at + x.at })));
+    // it only says "scrape and plaster" when the PO said scrape — a plaster
+    // line that came along behind sheetrock never claims it
+    hits.push(...pend.map((x) => ({ key: x.key, qty: x.qty || 1, said: x.qty > 0, at: sent.at + x.at, scrape: SCRAPED.test(x.hit) })));
   }
 
   // the same work named more than once: counts the PO gave add up; when it
@@ -412,6 +424,7 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
     if (h.said && had.said) had.qty = Math.round((had.qty + h.qty) * 100) / 100;
     else if (h.said) { had.qty = h.qty; had.said = true; }
     had.at = Math.min(had.at, h.at);
+    had.scrape = had.scrape || h.scrape;
   }
   // plaster work brings its own primer and paint by the room — a whole-
   // apartment repaint price on top of that is just noise
@@ -453,7 +466,11 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
     .map((h) => {
       const p = byKey.get(h.key)!;
       const price = p.price2 !== undefined && coats === 2 ? p.price2 : p.price;
-      const desc = p.price2 !== undefined ? `${p.description} — ${coats} coat${coats > 1 ? "s" : ""}` : p.description;
+      // a PO that says scrape is asking for the scraping too, so the line says so
+      const lead = h.scrape && h.key === "plaster"
+        ? `Scrape and ${/^[A-Z][a-z]/.test(p.description) ? p.description[0].toLowerCase() + p.description.slice(1) : p.description}`
+        : p.description;
+      const desc = p.price2 !== undefined ? `${lead} — ${coats} coat${coats > 1 ? "s" : ""}` : lead;
       return { key: h.key, description: desc, qty: h.qty, unit: p.unit, unit_price: price };
     });
 }

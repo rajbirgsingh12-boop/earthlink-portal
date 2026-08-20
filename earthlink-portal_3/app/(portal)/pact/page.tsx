@@ -14,10 +14,13 @@ import { COMPANY } from "@/lib/company";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
-import { parsePactPoText, type PactPoFields } from "@/lib/parsePactPo";
+import { parsePactPoText, type PactPoFields, type PoItem } from "@/lib/parsePactPo";
 import { priceLinesFor, soleKey, normUnit, loadPrices, type PriceItem } from "@/lib/priceBook";
 
-interface Item { description: string; qty: number; unit: string; unit_price: number; key?: string; }
+// `base` is a PO row's wording before its wrapped line was added — a wrap can
+// name a second trade ("…and paint"), and then the row no longer reads as the
+// one price-list line it is. Kept so the list still recognises it.
+interface Item { description: string; qty: number; unit: string; unit_price: number; key?: string; base?: string; }
 interface Job {
   id: string; partner: string; development: string; job_number: string; description: string;
   amount: number; approved: boolean; work_done: boolean; invoice_sent: string | null;
@@ -206,7 +209,10 @@ export default function Pact() {
       // a line that IS one of the price-list lines, word for word, covers that
       // one and nothing else — before falling back to reading its wording
       const exact = bk.find((p) => sameText(p.description, it.description))?.key;
-      const k = it.key || exact || soleKey(it.description, bk);
+      // its own wording first; failing that, the wording it had before its
+      // wrapped line was added — otherwise a row reading "plaster … and paint"
+      // matches nothing and the list bills the plaster a second time
+      const k = it.key || exact || soleKey(it.description, bk) || (it.base ? soleKey(it.base, bk) : null);
       if (k && !covered.has(k)) covered.set(k, i);
     });
     const out = [...existing];
@@ -475,26 +481,41 @@ export default function Pact() {
       } else how = "file too big for the server — read on this device";
       // the server answering with nothing usable counts as a miss too
       if (!isDocx && fields && !fields.po && !fields.partner && !fields.desc) fields = null;
+      // …and so does an answer whose work lines don't add up to the total the PO
+      // printed: the server's PDF engine can run two figures together on a tight
+      // table, and the line it then drops is a line nobody would get paid for.
+      // The phone reads it with a different engine, so it's worth asking.
+      const serverShort = !isDocx && !!fields && !fields.rowsAddUp;
+      const serverFields = fields;
+      if (serverShort) fields = null;
       // 2) browser fallback
-      if (!fields && isDocx) fields = { po: "", poDate: "", desc: "", scope: "", partner: "", address: "", billBlock: "", contact: "", punit: "", amount: 0, rows: [], readable: false };
+      if (!fields && isDocx) fields = { po: "", poDate: "", desc: "", scope: "", partner: "", address: "", billBlock: "", contact: "", punit: "", amount: 0, rows: [], rowsAddUp: true, readable: false };
       if (!fields) {
         try {
           const pdfjs = await import("pdfjs-dist");
           pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
           const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
-          let raw = "";
+          const { parsePactPoPages } = await import("@/lib/parsePactPo");
+          const pages: PoItem[][] = [];
           for (let pg = 1; pg <= doc.numPages; pg++) {
             const tc = await (await doc.getPage(pg)).getTextContent();
-            const { textFromItems } = await import("@/lib/parsePactPo");
-            raw += textFromItems(tc.items as { str?: string; transform?: number[] }[]) + "\n";
+            pages.push(tc.items as PoItem[]);
           }
-          fields = parsePactPoText(raw);
+          fields = parsePactPoPages(pages);
+          // whichever read explains the PO's own total is the one to believe —
+          // but a read that found NO work rows explains nothing, so it never
+          // replaces one that found priced lines
+          if (serverShort && serverFields
+            && (serverFields.rows.length > fields.rows.length
+              || (!fields.rowsAddUp && serverFields.rows.length >= fields.rows.length))) fields = serverFields;
         } catch {
-          fields = parsePactPoText(""); // truly unreadable here — job still gets created
+          fields = serverFields || parsePactPoText(""); // truly unreadable here — job still gets created
         }
       }
       const f = fields;
       const unreadable = !f.po && !f.partner && !f.desc;
+      // an unreadable PDF must not smuggle in a dollar amount from a stray "Total $" hit
+      const amount = unreadable ? 0 : f.amount;
       // this PO may already be a job — uploading it again must not make a second
       // one (a hand-typed job carries the PO in job_number, so check both)
       // a letter with no PO number is still the same job if it's the same
@@ -527,11 +548,9 @@ export default function Pact() {
           return;
         }
       }
-      // an unreadable PDF must not smuggle in a dollar amount from a stray "Total $" hit
-      const amount = unreadable ? 0 : f.amount;
       const seed: Item[] = unreadable ? []
         : f.rows.length > 0
-          ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: normUnit(r.uom || unitFor(r.description)), unit_price: r.unit_price }))
+          ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: normUnit(r.uom || unitFor(r.description)), unit_price: r.unit_price, ...(r.base ? { base: r.base } : {}) }))
           : (f.desc || f.scope) ? [{ description: (f.desc || f.scope).slice(0, 120), qty: 1, unit: unitFor(f.desc || f.scope), unit_price: 0 }] : [];
       // What is this PO for? Whatever the price list already answers — plaster
       // brings its primer and paint with it — gets filled in, priced. A price
@@ -732,7 +751,7 @@ export default function Pact() {
             if (hit) partner = hit.partner;
           }
           seq += 1;
-          const seed: Item[] = parsed.rows.map((r) => ({ description: r.description, qty: r.qty, unit: r.uom || unitFor(r.description), unit_price: r.unit_price }));
+          const seed: Item[] = parsed.rows.map((r) => ({ description: r.description, qty: r.qty, unit: r.uom || unitFor(r.description), unit_price: r.unit_price, ...(r.base ? { base: r.base } : {}) }));
           const { data: job, error } = await sb().from("pact_jobs").insert({
             partner, development: "", job_number: parsed.po, description: parsed.desc, amount: parsed.amount,
             po_number: parsed.po, po_date: parsed.poDate, address: parsed.address, property_unit: parsed.punit,

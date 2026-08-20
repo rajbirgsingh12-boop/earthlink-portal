@@ -150,14 +150,14 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
   // between the lines is enough, and it reads as a document rather than a form.
   const COLS = [5180, 1300, 1700, 1900];
   const headCell = (t: string, i: number) =>
-    cell(para(t, { b: true, sz: 16, color: MUTED, caps: true, track: 24, space: 0, align: i ? "right" : "left" }),
+    cell(para(t, { b: true, sz: 16, color: MUTED, caps: true, track: 24, space: 0, align: i === 1 ? "center" : i ? "right" : "left" }),
       COLS[i], { shade: BAND, bottom: BRAND, bw: 12, pad: [80, 110, 80, 110] });
   const headRow = ["Description", "Qty", "Unit price", "Amount"].map(headCell).join("");
   const bodyRows = f.lines.map((l) => {
     const qty = `${l.qty}${l.unit && l.unit.toUpperCase() !== "EACH" ? ` ${l.unit.toUpperCase()}` : ""}`;
-    const c = (inner: string, i: number) => cell(inner, COLS[i], { bottom: HAIR, pad: [110, 110, 110, 110] });
+    const c = (inner: string, i: number) => cell(inner, COLS[i], { bottom: HAIR, pad: [130, 110, 130, 110] });
     return c(para(l.description, { sz: 20, space: 0 }), 0)
-      + c(para(qty, { sz: 20, space: 0, align: "right", color: MUTED }), 1)
+      + c(para(qty, { sz: 20, space: 0, align: "center", color: MUTED }), 1)
       + c(para(money(cents(l.unit_price)), { sz: 20, space: 0, align: "right", color: MUTED }), 2)
       + c(para(money(lineTotal(l)), { sz: 20, space: 0, align: "right" }), 3);
   });

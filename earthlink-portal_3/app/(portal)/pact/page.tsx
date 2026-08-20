@@ -1611,15 +1611,15 @@ export default function Pact() {
                 <table className="mt-1 w-full border-collapse text-[12px]">
                   <thead><tr className="border-b-2 border-work bg-card text-left font-display text-[10px] uppercase tracking-widest text-inksoft">
                     <th className="p-1.5">Description</th>
-                    <th className="p-1.5 text-right">Qty</th>
+                    <th className="p-1.5 text-center">Qty</th>
                     <th className="p-1.5 text-right">Unit price</th>
                     <th className="p-1.5 text-right">Amount</th>
                   </tr></thead>
                   <tbody>
                     {f.lines.map((l, i) => (
-                      <tr key={i} className="align-top border-b border-rulesoft">
+                      <tr key={i} className="align-top border-b border-rulesoft [&>td]:py-2">
                         <td className="p-1.5">{l.description}</td>
-                        <td className="p-1.5 text-right font-mono text-inksoft">{l.qty}{l.unit && l.unit.toUpperCase() !== "EACH" ? ` ${l.unit.toUpperCase()}` : ""}</td>
+                        <td className="p-1.5 text-center font-mono text-inksoft">{l.qty}{l.unit && l.unit.toUpperCase() !== "EACH" ? ` ${l.unit.toUpperCase()}` : ""}</td>
                         <td className="p-1.5 text-right font-mono text-inksoft">{fmt(l.unit_price)}</td>
                         <td className="p-1.5 text-right font-mono font-semibold">{fmt(l.qty * l.unit_price)}</td>
                       </tr>

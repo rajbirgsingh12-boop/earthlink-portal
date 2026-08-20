@@ -36,20 +36,20 @@ const NORMAL: Space = {
   headRule: 54, afterRule: 26, metaRow: 15, afterMeta: 32,
   attn: 14, line: 13, afterBill: 14, afterDear: 22,
   introLine: 14, afterIntro: 12, afterBand: 32, afterScope: 16,
-  afterHead: 22, rowLine: 13, rowGap: 5,
+  afterHead: 22, rowLine: 13, rowGap: 7,
   preTot: 12, totRow: 16, preGrand: 30, postGrand: 34,
   preSign: 48, signLab: 12, postSign: 38, regards: 26, signerLine: 14,
 };
 const MID: Space = {
   ...NORMAL,
   headRule: 52, afterRule: 23, afterMeta: 28, afterBill: 12, afterDear: 20,
-  afterIntro: 10, afterBand: 30, afterScope: 14, afterHead: 21, rowGap: 4,
+  afterIntro: 10, afterBand: 30, afterScope: 14, afterHead: 21, rowGap: 6,
   preTot: 11, preGrand: 28, postGrand: 32, preSign: 44, postSign: 34, regards: 24,
 };
 const XTIGHT: Space = {
   headRule: 50, afterRule: 18, metaRow: 14, afterMeta: 22, attn: 12, line: 11.5,
   afterBill: 9, afterDear: 16, introLine: 12.5, afterIntro: 7, afterBand: 26,
-  afterScope: 12, afterHead: 19, rowLine: 12.5, rowGap: 3,
+  afterScope: 12, afterHead: 19, rowLine: 12.5, rowGap: 5,
   preTot: 9, totRow: 14, preGrand: 24, postGrand: 28,
   preSign: 34, signLab: 10, postSign: 26, regards: 20, signerLine: 12,
 };
@@ -57,7 +57,7 @@ const TIGHT: Space = {
   ...NORMAL,
   headRule: 50, afterRule: 20, afterMeta: 24, attn: 13, line: 12,
   afterBill: 10, afterDear: 18, introLine: 13, afterIntro: 8, afterBand: 28,
-  afterScope: 13, afterHead: 20, rowGap: 4,
+  afterScope: 13, afterHead: 20, rowGap: 6,
   preTot: 10, totRow: 15, preGrand: 26, postGrand: 30,
   preSign: 40, signLab: 11, postSign: 30, regards: 22, signerLine: 13,
 };
@@ -196,13 +196,13 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
   // ---- the work ----
   track("SCOPE OF WORK", M, 9, bold, BRAND, 1.7);
   y -= S.afterScope;
-  const QX = 392, UX = 470, AX = RIGHT;      // right edges of qty / unit price / amount
-  const DW = 300;                             // the description column
+  const CQ = 374, UX = 470, AX = RIGHT;      // qty column CENTER / right edges of unit price and amount
+  const DW = 290;                             // the description column
   const tableHead = (label: string) => {
     page.drawRectangle({ x: M, y: y - 7, width: W, height: 20, color: C(BAND) });
     page.drawLine({ start: { x: M, y: y - 7 }, end: { x: RIGHT, y: y - 7 }, thickness: 1.4, color: C(BRAND) });
     track(label, M + 8, 8, bold, MUTED, 1.2);
-    track("QTY", QX - trackW("QTY", 8, bold, 1.2), 8, bold, MUTED, 1.2);
+    track("QTY", CQ - trackW("QTY", 8, bold, 1.2) / 2, 8, bold, MUTED, 1.2);
     track("UNIT PRICE", UX - trackW("UNIT PRICE", 8, bold, 1.2), 8, bold, MUTED, 1.2);
     track("AMOUNT", AX - trackW("AMOUNT", 8, bold, 1.2), 8, bold, MUTED, 1.2);
     y -= S.afterHead;
@@ -221,14 +221,14 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
       if (y < 96) { page = doc.addPage([612, 792]); y = 738; tableHead("DESCRIPTION (continued)"); }
       put(rt, M + 8, 10);
       if (i === 0) {
-        putR(qty, QX, 10, helv, MUTED);
+        put(qty, CQ - helv.widthOfTextAtSize(qty, 10) / 2, 10, helv, MUTED);
         putR(money(cents(l.unit_price)), UX, 10, helv, MUTED);
         putR(money(lineTotal(l)), AX, 10);
       }
       y -= S.rowLine;
     });
     y -= S.rowGap;
-    rule(y + 8, 0.6);
+    rule(y + (S.rowLine + S.rowGap + 4.7) / 2, 0.6);
   }
 
   // ---- the totals ----

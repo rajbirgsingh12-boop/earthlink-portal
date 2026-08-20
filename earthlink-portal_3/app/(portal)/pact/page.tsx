@@ -15,7 +15,7 @@ import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
 import { parsePactPoText, type PactPoFields, type PoItem } from "@/lib/parsePactPo";
-import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, type PriceItem } from "@/lib/priceBook";
+import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, attnFrom, DEFAULT_ATTN, type PriceItem } from "@/lib/priceBook";
 
 // `base` is a PO row's wording before its wrapped line was added — a wrap can
 // name a second trade ("…and paint"), and then the row no longer reads as the
@@ -180,8 +180,8 @@ export default function Pact() {
   const [book, setBook] = useState<{ items: PriceItem[]; at: number } | null>(null);
   // who proposals are addressed to, as set in Settings — a partner's PO prints
   // their office, not the person at it
-  const [attnSaved, setAttnSaved] = useState<{ name?: string; title?: string }>({});
-  useEffect(() => { loadPrices().then(({ store, ok }) => { if (ok && store.attn) setAttnSaved(store.attn); }).catch(() => null); }, []);
+  const [attnSaved, setAttnSaved] = useState<{ name: string; title: string }>(DEFAULT_ATTN);
+  useEffect(() => { loadPrices().then(({ store, ok }) => { if (ok) setAttnSaved(attnFrom(store)); }).catch(() => null); }, []);
   // Their partner's purchase orders price every line at $1.00 — that is the
   // form's placeholder, not an agreement. A dollar is not a price.
   const PLACEHOLDER = 1;
@@ -207,7 +207,7 @@ export default function Pact() {
   const priceBook = async (): Promise<PriceItem[]> => {
     if (book && Date.now() - book.at < 30_000) return book.items;
     const { items, ok, store } = await loadPrices();
-    if (ok && store.attn) setAttnSaved(store.attn);
+    if (ok) setAttnSaved(attnFrom(store));
     if (!ok) {
       // the saved list couldn't be read: say so rather than quietly pricing
       // from the standard sheet with their own line items missing

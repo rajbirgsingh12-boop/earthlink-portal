@@ -90,6 +90,13 @@ export interface CustomItem { key: string; description: string; unit: string; pr
 export interface ProposalContact { name?: string; title?: string }
 export interface PriceStore { overrides: PriceOverrides; custom: CustomItem[]; attn?: ProposalContact }
 export const EMPTY_STORE: PriceStore = { overrides: {}, custom: [] };
+// who these letters go to unless Settings says otherwise — the partner's POs
+// print the office, never the person at it
+export const DEFAULT_ATTN: Required<ProposalContact> = { name: "Marsha Rhule-Allen", title: "Purchasing Manager" };
+export const attnFrom = (store: PriceStore | null | undefined): Required<ProposalContact> =>
+  // once they have set it, what they set is what it is — including blank, which
+  // means "leave the letter unaddressed"
+  (store?.attn ? { name: store.attn.name || "", title: store.attn.title || "" } : DEFAULT_ATTN);
 export const CUSTOM_GROUP = "Our own line items";
 
 // Word turns "-" into a dash and "\'" into a curly quote, and people write

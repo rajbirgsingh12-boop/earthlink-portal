@@ -10,7 +10,7 @@ import { askFileName } from "@/lib/format";
 import type { Org } from "@/lib/docs";
 import type { Contract, Profile, Role } from "@/lib/types";
 import { PKG_DEFAULTS, type PkgInfo, loadPkgInfo, savePkgInfo } from "@/lib/packageDocs";
-import { PRICE_BOOK, PRICE_GROUPS, CUSTOM_GROUP, EMPTY_STORE, blankCustom, bookFrom, keywordsRe, loadPrices, savePrices,
+import { PRICE_BOOK, PRICE_GROUPS, CUSTOM_GROUP, EMPTY_STORE, DEFAULT_ATTN, blankCustom, bookFrom, keywordsRe, loadPrices, savePrices,
   type PriceOverride, type PriceStore, type CustomItem } from "@/lib/priceBook";
 import { cleanPhone, prettyPhone } from "@/lib/notify";
 
@@ -214,8 +214,12 @@ export default function Settings() {
       // their own lines have no sheet price behind them, so an empty box is 0
       .map((c) => ({ ...c, description: c.description.trim(), words: c.words.trim(), price: priceText[`${c.key}:price`] !== undefined ? (typedNum(`${c.key}:price`, c.price) ?? 0) : (c.price ?? 0) }))
       .filter((c) => c.description.trim() && c.words.trim());
-    const attnName = (store.attn?.name || "").trim(), attnTitle = (store.attn?.title || "").trim();
-    const next: PriceStore = { overrides, custom, ...(attnName || attnTitle ? { attn: { name: attnName, title: attnTitle } } : {}) };
+    // saved as typed — including deliberately blank, so proposals can be left
+    // unaddressed rather than falling back to the built-in name
+    const attn = store.attn
+      ? { name: (store.attn.name ?? DEFAULT_ATTN.name).trim(), title: (store.attn.title ?? DEFAULT_ATTN.title).trim() }
+      : undefined;
+    const next: PriceStore = { overrides, custom, ...(attn ? { attn } : {}) };
     const err = await savePrices(next);
     setPriceSaving(false);
     if (err) { flash(err); return; }
@@ -636,14 +640,14 @@ export default function Settings() {
                 doesn't name anybody */}
             <div className="mb-3 border-t border-rulesoft pt-3">
               <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Proposals are addressed to</div>
-              <div className="mt-1 text-[12px] text-inksoft">Whoever the PO names comes first — this is the fallback.</div>
+              <div className="mt-1 text-[12px] text-inksoft">Whoever the PO names at the office comes first — this is who it goes to otherwise. Clear both to leave proposals unaddressed.</div>
               <div className="mt-2 flex flex-wrap gap-2">
-                <input className="field w-56" placeholder="Marsha Rhule-Allen"
-                  value={store.attn?.name ?? ""}
-                  onChange={(e) => { setStore((p) => ({ ...p, attn: { ...(p.attn || {}), name: e.target.value } })); setPriceTouched(true); }} />
-                <input className="field w-56" placeholder="Purchasing Manager"
-                  value={store.attn?.title ?? ""}
-                  onChange={(e) => { setStore((p) => ({ ...p, attn: { ...(p.attn || {}), title: e.target.value } })); setPriceTouched(true); }} />
+                <input className="field w-56" placeholder="Name" aria-label="Proposals are addressed to — name"
+                  value={store.attn?.name ?? DEFAULT_ATTN.name}
+                  onChange={(e) => { setStore((p) => ({ ...p, attn: { title: DEFAULT_ATTN.title, ...(p.attn || {}), name: e.target.value } })); setPriceTouched(true); }} />
+                <input className="field w-56" placeholder="Title" aria-label="Proposals are addressed to — title"
+                  value={store.attn?.title ?? DEFAULT_ATTN.title}
+                  onChange={(e) => { setStore((p) => ({ ...p, attn: { name: DEFAULT_ATTN.name, ...(p.attn || {}), title: e.target.value } })); setPriceTouched(true); }} />
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">

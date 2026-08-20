@@ -28,8 +28,11 @@ const money = (s: string) => parseFloat(s.replace(/[$,\s]/g, "")) || 0;
 
 export interface PactProposalExtra { taxPct?: number }
 
-// is this letter-style text one of our proposals? (vs a partner PO pdf)
-export const looksLikeProposal = (t: string) => /service address/i.test(t) && /scope of work/i.test(t);
+// is this letter-style text one of our proposals? (vs a partner PO pdf) — the
+// ones the portal writes carry a Scope of Work heading; the ones the owner
+// types by hand just run the work under "pleased to submit"
+export const looksLikeProposal = (t: string) =>
+  /service address/i.test(t) && (/scope of work/i.test(t) || /pleased to submit/i.test(t));
 
 export function parsePactProposalText(raw: string): PactPoFields & PactProposalExtra {
   const lines = raw.split("\n").map((l) => l.replace(/\s+/g, " ").trim());
@@ -40,12 +43,24 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
 
   // ATTN block: the person, their title, and the office address lines under it
   const attnIdx = lines.findIndex((l) => /^ATTN\b/i.test(l));
-  const contactName = attnIdx >= 0 ? lines[attnIdx].replace(/^ATTN\s*:?\s*/i, "").trim() : "";
+  const attnLine = attnIdx >= 0 ? lines[attnIdx].replace(/^ATTN\s*:?\s*/i, "").trim() : "";
+  // a letter that keeps its heading in a table hands the whole block over on
+  // one line — the name ends where their job title or their street number begins
+  const TITLE_WORD = /\b(?:manager|director|supervisor|coordinator|purchasing|superintendent|administrator|agent|officer|assistant|president|owner)\b/i;
+  const cutAt = (() => {
+    const ends = [attnLine.search(TITLE_WORD), attnLine.search(/\d/)].filter((x) => x > 0);
+    return ends.length ? Math.min(...ends) : -1;
+  })();
+  const contactName = (cutAt > 0 ? attnLine.slice(0, cutAt) : attnLine).replace(/[\s,]+$/, "").trim();
   const billLines: string[] = [];
-  for (let i = attnIdx + 1; attnIdx >= 0 && i < lines.length && billLines.length < 3; i++) {
+  if (cutAt > 0) { const rest = attnLine.slice(cutAt).trim(); if (rest) billLines.push(rest); }
+  // the office block sits under the ATTN line — or, on a letter that names
+  // nobody, between the date and the greeting
+  const blockFrom = attnIdx >= 0 ? attnIdx + 1 : lines.findIndex((l) => /^date\b\s*:?/i.test(l)) + 1;
+  for (let i = blockFrom; blockFrom > 0 && i < lines.length && billLines.length < 3; i++) {
     const l = lines[i];
-    if (!l) break;
-    if (/^dear\b|service address/i.test(l)) break;
+    if (!l) { if (attnIdx >= 0) break; continue; }
+    if (/^dear\b|service address|^po\s*#|pleased to submit/i.test(l)) break;
     billLines.push(l);
   }
   const billBlock = [contactName, ...billLines].filter(Boolean).join(", ");

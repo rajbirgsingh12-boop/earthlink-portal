@@ -464,7 +464,8 @@ export function parsePactPoText(raw: string, structured?: PoLine[]): PactPoField
   const amount = grand.length > 0 ? grand[grand.length - 1] : rowSum;
   const rowsAddUp = grand.length === 0 || rows.length === 0 || Math.abs(rowSum - amount) < 0.02;
   const aptIn = (a: string) => a.match(/\b(?:apartment|apt\.?|unit|#)\s*([\dA-Za-z][\dA-Za-z -]{0,8}?)(?=\s*(?:,|Brooklyn|Bronx|Queens|Manhattan|Staten|New York|NY\b|$))/i)?.[1]?.trim() || "";
-  const punit = aptIn(address) || (rows[0]?.property
+  const apt = aptIn(address);
+  const punit = apt || (rows[0]?.property
     ? `${rows[0].property}${rows[0].unit ? ` ${rows[0].unit}` : ""}`
     : t.match(/\$\s*[\d.,]+\s+([0-9]+-[0-9]+)/)?.[1] || "");
   const phone = contacts[0] || t.match(/([A-Z][a-z]+ [A-Z][a-z]+)\s+(\d{3}[-.]?\d{3}[-.]?\d{4})/)?.slice(1, 3).join(" ") || "";
@@ -488,7 +489,11 @@ export function parsePactPoText(raw: string, structured?: PoLine[]): PactPoField
   const scope = cleanWork(scopeLines.join(". ")).slice(0, 400);
 
   return {
-    po, poDate, desc, scope, partner, address, billBlock, contact, punit, amount, rows, rowsAddUp,
+    po, poDate, desc, scope, partner,
+    // the apartment is carried in its own field, so it isn't printed twice
+    // when the letter puts it back on the end of the address
+    address: apt ? address.replace(new RegExp(`\\s*,?\\s*\\b(?:apartment|apt\\.?|unit|#)\\s*${apt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"), "").replace(/\s*,\s*,/g, ",").replace(/^[,\s]+|[,\s]+$/g, "") : address,
+    billBlock, contact, punit, amount, rows, rowsAddUp,
     readable: t.trim().length > 20,
   };
 }

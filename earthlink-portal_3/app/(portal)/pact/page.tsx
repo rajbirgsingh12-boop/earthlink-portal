@@ -15,7 +15,7 @@ import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
 import { parsePactPoText, type PactPoFields, type PoItem } from "@/lib/parsePactPo";
-import { priceLinesFor, soleKey, normUnit, loadPrices, type PriceItem } from "@/lib/priceBook";
+import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, type PriceItem } from "@/lib/priceBook";
 
 // `base` is a PO row's wording before its wrapped line was added — a wrap can
 // name a second trade ("…and paint"), and then the row no longer reads as the
@@ -178,9 +178,36 @@ export default function Pact() {
   // so a price changed on another phone is used on the very next PO (a folder
   // of proposals still only reads it once)
   const [book, setBook] = useState<{ items: PriceItem[]; at: number } | null>(null);
+  // who proposals are addressed to, as set in Settings — a partner's PO prints
+  // their office, not the person at it
+  const [attnSaved, setAttnSaved] = useState<{ name?: string; title?: string }>({});
+  useEffect(() => { loadPrices().then(({ store, ok }) => { if (ok && store.attn) setAttnSaved(store.attn); }).catch(() => null); }, []);
+  // Their partner's purchase orders price every line at $1.00 — that is the
+  // form's placeholder, not an agreement. A dollar is not a price.
+  const PLACEHOLDER = 1;
+  const realPrice = (n: unknown) => Number(n) > PLACEHOLDER;
+  // "8G" is an apartment; "13-02" and "0807-08G" are the partner's own property
+  // codes, and calling one of those an apartment on a letter is just wrong
+  const isPropertyCode = (v: string) => /^\d+\s*-\s*\w+$/.test(v);
+  const unitLabel = (u: string) => {
+    const v = (u || "").trim();
+    if (!v) return "";
+    return `${isPropertyCode(v) ? "Unit" : "Apartment"} ${v.toUpperCase()}`;
+  };
+  const aptOnly = (u: string) => {
+    const v = (u || "").trim();
+    return !v || isPropertyCode(v) ? "" : `Apartment ${v.toUpperCase()}`;
+  };
+  // the person the PO names at the office, if it names one at all
+  const poPerson = (j: Job) => {
+    const seg = (j.contact || "").split("·").map((x) => x.trim());
+    const named = seg[0] && !/\d[\d\s().-]{6,}/.test(seg[0]) ? seg[0] : "";
+    return { name: named, title: named ? seg[1] || "" : "" };
+  };
   const priceBook = async (): Promise<PriceItem[]> => {
     if (book && Date.now() - book.at < 30_000) return book.items;
-    const { items, ok } = await loadPrices();
+    const { items, ok, store } = await loadPrices();
+    if (ok && store.attn) setAttnSaved(store.attn);
     if (!ok) {
       // the saved list couldn't be read: say so rather than quietly pricing
       // from the standard sheet with their own line items missing
@@ -231,7 +258,7 @@ export default function Pact() {
       const it = out[at];
       // a line the portal put there follows the list; a price the PO stated
       // stays the PO's, because that one is the agreement
-      if (Number(it.unit_price) > 0) {
+      if (realPrice(it.unit_price)) {
         // a line that already carries a price of its own is the PO's or theirs
         // — re-pricing only touches lines the portal itself wrote
         if (opts.refresh && it.key) out[at] = { ...it, unit: l.unit, unit_price: l.unit_price };
@@ -293,11 +320,27 @@ export default function Pact() {
     return {
       poNumber: j.po_number || j.job_number || "",
       date: prettyDate(today()),
-      attn: (j.contact || "").split("·")[0].replace(/\s*\d[\d\s().-]{6,}$/, "").trim(),
-      // the partner's office as the PO writes it — name, title, street, suite,
-      // city — with the company at the top
-      billTo: [...new Set([j.partner, ...(j.bill_to || "").split(/,\s*/)].map((x) => (x || "").trim()).filter(Boolean))].slice(0, 6),
-      serviceAddress: [j.address, j.property_unit ? `Apartment ${j.property_unit}` : ""].filter(Boolean).join(", "),
+      // whoever the PO named at the office, otherwise whoever Settings says
+      // these go to. A "Contact info" name with a phone beside it is the super
+      // who lets the crew in — not who a proposal is addressed to.
+      attn: poPerson(j).name || attnSaved.name || "",
+      attnTitle: poPerson(j).name ? poPerson(j).title : attnSaved.title || "",
+      // the partner's office, the way their own letters print it: the address
+      // on one line, with no company name above it — the letter is going TO a
+      // person, and the company is named on the purchase order already
+      billTo: (() => {
+        const seen = new Set<string>();
+        const same = (a: string, b: string) => a.toLowerCase().replace(/[^a-z0-9]/g, "") === b.toLowerCase().replace(/[^a-z0-9]/g, "");
+        const attnName = (j.contact || "").split("·")[0].replace(/\s*\d[\d\s().-]{6,}$/, "").trim();
+        const attnRole = (j.contact || "").split("·")[1]?.trim() || "";
+        const parts = (j.bill_to || "").split(/,\s*/).map((x) => (x || "").trim()).filter(Boolean)
+          .filter((x) => !same(x, j.partner || "") && !same(x, attnName) && !same(x, attnRole))
+          .filter((x) => { const k = x.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+        return parts.length > 0 ? [parts.join(", ")] : [];
+      })(),
+      // their own letters print the street and the apartment. The partner's
+      // property code ("13-02") is their internal filing, not part of an address
+      serviceAddress: [j.address, aptOnly(j.property_unit || "")].filter(Boolean).join(", "),
       lines,
       taxPct: taxRate(j),
     };
@@ -548,23 +591,34 @@ export default function Pact() {
           return;
         }
       }
+      const bkNow = await priceBook();
       const seed: Item[] = unreadable ? []
         : f.rows.length > 0
           ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: normUnit(r.uom || unitFor(r.description)), unit_price: r.unit_price, ...(r.base ? { base: r.base } : {}) }))
+            // a placeholder row that names more than one trade ("scrape plaster
+            // paint") is dropped: keeping it would leave a dollar line sitting
+            // beside the three real lines it stands for
+            .filter((it) => realPrice(it.unit_price) || keysIn(it.description, bkNow).length < 2)
           : (f.desc || f.scope) ? [{ description: (f.desc || f.scope).slice(0, 120), qty: 1, unit: unitFor(f.desc || f.scope), unit_price: 0 }] : [];
       // What is this PO for? Whatever the price list already answers — plaster
       // brings its primer and paint with it — gets filled in, priced. A price
       // the PO itself states is never touched: that one is the agreement.
       // when the PO priced its own lines, that IS the deal — fill the gaps but
       // never add prep work it didn't ask for
-      const poPriced = seed.some((it) => Number(it.unit_price) > 0);
+      const poPriced = seed.some((it) => realPrice(it.unit_price));
       // the same words must only be priced once — a PO often repeats its
       // description as its scope, and counting both doubles every quantity
       const said = [...new Set([f.desc, f.scope, f.rows.map((r) => r.description).join(" ")]
         .map((x) => (x || "").trim()).filter(Boolean))];
-      const priced = await priceFromList(said.join(". "), seed, { fillOnly: poPriced, prepOnly: poPriced });
+      const priced = (await priceFromList(said.join(". "), seed, { fillOnly: poPriced, prepOnly: poPriced }))
+        // a placeholder the list had no answer for is work still to be priced —
+        // showing it as a dollar would put "$1.00" on a proposal
+        .map((it) => (Number(it.unit_price) === PLACEHOLDER ? { ...it, unit_price: 0 } : it));
+      // a PO that totals a dollar hasn't told us the money — the priced lines have
+      const lineSub = priced.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
+      const amountOut = amount > PLACEHOLDER || lineSub <= 0 ? amount : Math.round(lineSub * 1.08875 * 100) / 100;
       const { data: job, error } = await sb().from("pact_jobs").insert({
-        partner: f.partner, development: "", job_number: f.po, description: (f.desc || f.scope).slice(0, 120), amount,
+        partner: f.partner, development: "", job_number: f.po, description: (f.desc || f.scope).slice(0, 120), amount: amountOut,
         po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,
         contact: f.contact, bill_to: f.billBlock, items: priced, invoice_number: await nextInvoiceNo(),
         ...(taxFromDoc !== undefined ? { tax_pct: taxFromDoc } : {}),
@@ -884,7 +938,7 @@ export default function Pact() {
         ? (j.bill_to || "").slice(j.partner.length)
         : (j.bill_to || "");
       const billLines = [j.partner, ...billRest.trim().split(/(?<=\d{5})\s|,\s*/).filter(Boolean)].filter(Boolean).slice(0, 4) as string[];
-      const siteLines = [j.address || "", j.property_unit && `Unit ${j.property_unit}`].filter(Boolean) as string[];
+      const siteLines = [j.address || "", unitLabel(j.property_unit || "")].filter(Boolean) as string[];
       const startY = y;
       billLines.forEach((s, i) => put(String(s).slice(0, 48), L, startY - i * 12, 9.5, i === 0 ? bold : helv));
       siteLines.forEach((s, i) => put(String(s).slice(0, 46), 330, startY - i * 12, 9.5, i === 0 ? bold : helv));

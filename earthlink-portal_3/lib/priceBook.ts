@@ -85,7 +85,10 @@ export interface PriceOverride {
 export type PriceOverrides = Record<string, PriceOverride>;
 // a line item they wrote themselves
 export interface CustomItem { key: string; description: string; unit: string; price: number; group: string; words: string }
-export interface PriceStore { overrides: PriceOverrides; custom: CustomItem[] }
+// who a PACT proposal is addressed to when the purchase order doesn't name
+// anybody — the partner's POs print the office, not the person at it
+export interface ProposalContact { name?: string; title?: string }
+export interface PriceStore { overrides: PriceOverrides; custom: CustomItem[]; attn?: ProposalContact }
 export const EMPTY_STORE: PriceStore = { overrides: {}, custom: [] };
 export const CUSTOM_GROUP = "Our own line items";
 
@@ -177,7 +180,7 @@ async function readStore(): Promise<{ store: PriceStore; ok: boolean; from: stri
     const raw = JSON.parse(await data.text()) as Partial<PriceStore> & PriceOverrides;
     // the first version of this file was just {key: {price}} — still readable
     const store: PriceStore = raw && (raw.overrides || raw.custom)
-      ? { overrides: raw.overrides || {}, custom: Array.isArray(raw.custom) ? raw.custom : [] }
+      ? { overrides: raw.overrides || {}, custom: Array.isArray(raw.custom) ? raw.custom : [], ...(raw.attn ? { attn: raw.attn } : {}) }
       : { overrides: (raw || {}) as PriceOverrides, custom: [] };
     return { store, ok: true, from: path, older: newest === "list.json" ? older : [...older, ...(listed.some((f) => f.name === "list.json") ? [LEGACY] : [])] };
   } catch { return { store: EMPTY_STORE, ok: false, from: null, older: [] }; }

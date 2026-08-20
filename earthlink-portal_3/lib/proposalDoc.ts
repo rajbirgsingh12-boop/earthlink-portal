@@ -10,6 +10,7 @@ export interface ProposalFields {
   poNumber?: string;
   date?: string;            // MM/DD/YYYY
   attn?: string;            // the person at the partner
+  attnTitle?: string;       // what they do there
   billTo?: string[];        // their office lines under the ATTN
   serviceAddress?: string;  // the job site, apartment and all
   lines: ProposalLine[];
@@ -100,26 +101,43 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
     cell(para(money(cents(l.unit_price)), { sz: 20, space: 0, align: "right" }), widths[2]) +
     cell(para(money(lineTotal(l)), { sz: 20, space: 0, align: "right" }), widths[3]));
 
+  // the totals, right-aligned against the work table so the figures line up
+  const TOT = [6700, 2660];
+  const totalRow = (label: string, amount: string, b = false) =>
+    cell(para(label, { sz: b ? 22 : 20, b, space: 0, align: "right" }), TOT[0], { border: false }) +
+    cell(para(amount, { sz: b ? 22 : 20, b, space: 0, align: "right" }), TOT[1], { border: false });
+  // "…for the following work at 758 Stanley Avenue."
+  const site = (f.serviceAddress || "").split(",")[0].trim();
+  const dearName = (f.attn || "").split(/[\s,]+/)[0] || "";
+
   const body = [
     head,
     para("", { rule: true, space: 160 }),
     para(`Date: ${f.date || ""}`, { sz: 20 }),
-    f.poNumber ? para(`PO #: ${f.poNumber}`, { sz: 20 }) : "",
-    f.attn || billLines.length > 0 ? para(`ATTN: ${f.attn || ""}`, { sz: 20 }) : "",
+    // the letter is addressed to the person at the partner's office — their
+    // company name belongs on the purchase order, not at the top of our letter
+    f.attn ? para(`ATTN: ${f.attn}`, { sz: 20 }) : "",
+    f.attnTitle ? para(f.attnTitle, { sz: 20 }) : "",
     ...billLines.map((b) => para(b, { sz: 20 })),
     para("", { space: 120 }),
-    para(`Dear ${f.attn || "Sir or Madam"},`, { sz: 20 }),
-    para("We are pleased to submit our proposal for the property below.", { sz: 20, space: 120 }),
-    para(`Service Address: ${f.serviceAddress || "—"}`, { sz: 20, space: 160 }),
+    para(`Dear ${dearName || "Sir or Madam"},`, { sz: 20, space: 120 }),
+    para(`Service Address: ${f.serviceAddress || "—"}`, { sz: 20 }),
+    f.poNumber ? para(`PO #: ${f.poNumber}`, { sz: 20 }) : "",
+    para(`${L.name} is pleased to submit this proposal for the following work${site ? ` at ${site}` : ""}.`,
+      { sz: 20, space: 200 }),
     para("Scope of Work", { b: true, sz: 24, space: 80 }),
     table([headRow, ...bodyRows], true, widths),
-    para("", { space: 120 }),
-    para(`Total Cost: ${money(sub)}`, { sz: 20 }),
-    para(`Sales Tax (${taxPct}%): ${money(tax)}`, { sz: 20 }),
-    para(`Grand Total: ${money(grand)}`, { b: true, sz: 22, space: 200 }),
-    para("Thank you for the opportunity. Please sign and return a copy to authorize the work.", { sz: 20, space: 200 }),
-    para("Best regards,", { sz: 20, space: 40 }),
-    para(f.signer || L.name, { b: true, sz: 20, space: 0 }),
+    para("", { space: 160 }),
+    table([
+      totalRow("Total Cost — labor and materials:", money(sub)),
+      totalRow(`Sales Tax (${taxPct}%):`, money(tax)),
+      totalRow("Grand Total:", money(grand), true),
+    ], false, TOT),
+    para("Please sign and return a copy of this proposal to authorize the work.", { sz: 20, space: 240 }),
+    para("Best regards,", { sz: 20, space: 60 }),
+    para(f.signer || L.signer, { b: true, sz: 20, space: 0 }),
+    para(L.signerTitle, { sz: 20, space: 0 }),
+    para(L.name, { sz: 20, space: 0 }),
     para(L.phones.replace(/^Phone:\s*/, ""), { sz: 18 }),
   ].join("");
 

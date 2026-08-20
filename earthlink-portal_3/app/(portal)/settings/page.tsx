@@ -214,7 +214,8 @@ export default function Settings() {
       // their own lines have no sheet price behind them, so an empty box is 0
       .map((c) => ({ ...c, description: c.description.trim(), words: c.words.trim(), price: priceText[`${c.key}:price`] !== undefined ? (typedNum(`${c.key}:price`, c.price) ?? 0) : (c.price ?? 0) }))
       .filter((c) => c.description.trim() && c.words.trim());
-    const next: PriceStore = { overrides, custom };
+    const attnName = (store.attn?.name || "").trim(), attnTitle = (store.attn?.title || "").trim();
+    const next: PriceStore = { overrides, custom, ...(attnName || attnTitle ? { attn: { name: attnName, title: attnTitle } } : {}) };
     const err = await savePrices(next);
     setPriceSaving(false);
     if (err) { flash(err); return; }
@@ -630,6 +631,21 @@ export default function Settings() {
                 </div>
               );
             })}
+            {/* a partner's purchase order prints their office, not the person
+                at it — this is who a proposal is addressed to when the PO
+                doesn't name anybody */}
+            <div className="mb-3 border-t border-rulesoft pt-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Proposals are addressed to</div>
+              <div className="mt-1 text-[12px] text-inksoft">Whoever the PO names comes first — this is the fallback.</div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <input className="field w-56" placeholder="Marsha Rhule-Allen"
+                  value={store.attn?.name ?? ""}
+                  onChange={(e) => { setStore((p) => ({ ...p, attn: { ...(p.attn || {}), name: e.target.value } })); setPriceTouched(true); }} />
+                <input className="field w-56" placeholder="Purchasing Manager"
+                  value={store.attn?.title ?? ""}
+                  onChange={(e) => { setStore((p) => ({ ...p, attn: { ...(p.attn || {}), title: e.target.value } })); setPriceTouched(true); }} />
+              </div>
+            </div>
             <div className="flex flex-wrap items-center gap-2">
               <button className="btn btn-primary" onClick={savePriceList} disabled={priceSaving || !priceLoaded}>{priceSaving ? "Saving…" : priceLoaded ? "Save line items" : "Reading saved list…"}</button>
               {priceLoadErr && (

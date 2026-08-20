@@ -18,6 +18,9 @@ export const COMPANY = {
     address: "117-01 Atlantic Avenue, Richmond Hill, NY 11418",
     phones: "Phone: (917) 509-6427 | Office: (718) 316-9098",
     emails: "Email: earthlink99@gmail.com | Office Email: info@earthlinkgc.com",
+    // how the owner signs a proposal letter
+    signer: "Harpinder Singh",
+    signerTitle: "President",
   },
   // filing details used on NYCHA paperwork (Statement of Services, invoices)
   fax: "718-766-8010",

@@ -19,7 +19,7 @@ import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
 import { parsePactPoText, type PactPoFields, type PoItem } from "@/lib/parsePactPo";
-import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, attnFrom, DEFAULT_ATTN, type PriceItem } from "@/lib/priceBook";
+import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, attnFrom, DEFAULT_ATTN, type PriceItem, cleanLineWording } from "@/lib/priceBook";
 
 // `base` is a PO row's wording before its wrapped line was added — a wrap can
 // name a second trade ("…and paint"), and then the row no longer reads as the
@@ -316,7 +316,15 @@ export default function Pact() {
     (async () => {
       const { data } = await sb().from("pact_jobs").select("*").eq("id", openId).single();
       if (closed || !data) return;
-      const fresh = data as Job;
+      let fresh = data as Job;
+      // old wording on the lines heals here, against the row just fetched —
+      // so the jobs already in the portal pick up the cleanup one by one
+      // even before RUN_ME.sql sweeps the rest
+      const cleaned = cleanLineWording(itemsOf(fresh));
+      if (cleaned.changed && (role === "admin" || role === "office")) {
+        fresh = { ...fresh, items: cleaned.items };
+        sb().from("pact_jobs").update({ items: cleaned.items }).eq("id", fresh.id).then(() => null);
+      }
       setJobs((prev) => prev.map((x) => (x.id === openId ? { ...x, ...fresh } : x)));
       if (role !== "admin" || autoPriced.current.has(openId)) return;
       const needs = itemsOf(fresh).some((it) => Number(it.qty) > 0 && it.description.trim() && !realPrice(it.unit_price));
@@ -348,7 +356,7 @@ export default function Pact() {
   // so a signed copy coming back makes the invoice without retyping anything
   // everything the proposal letter says, for the view and the file alike
   const proposalFields = async (j: Job) => {
-    let lines = itemsOf(j)
+    let lines = cleanLineWording(itemsOf(j)).items
       .filter((it) => it.description.trim() && Number(it.qty) > 0)
       .map((it) => ({ description: it.description, qty: Number(it.qty), unit: it.unit, unit_price: Number(it.unit_price) || 0 }));
     if (lines.length === 0) {
@@ -968,7 +976,7 @@ export default function Pact() {
   const buildPackageBytes = async (j: Job, org2: Org): Promise<Uint8Array | null> => {
     const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
     const { money: usd } = await import("@/lib/proposalDoc");
-    const items = itemsOf(j).filter((it) => Number(it.qty) > 0 && it.description.trim());
+    const items = cleanLineWording(itemsOf(j)).items.filter((it) => Number(it.qty) > 0 && it.description.trim());
     if (items.length === 0) return null;
       const pkg = await PDFDocument.create();
       const helv = await pkg.embedFont(StandardFonts.Helvetica);

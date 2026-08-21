@@ -504,6 +504,22 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
     });
 }
 
+// The wording cleanup RUN_ME.sql applies to the database, for rows the SQL
+// has not reached yet: "Wall repair" reads "Scrape and plaster" and the
+// "— N coat(s)" tails come off. Papers built from an old job read the new
+// way immediately, and a job heals in place the first time it is opened.
+export const cleanLineWording = <T extends { description: string }>(items: T[]): { items: T[]; changed: boolean } => {
+  let changed = false;
+  const out = items.map((it) => {
+    let d = it.description === "Wall repair" ? "Scrape and plaster" : it.description;
+    d = d.replace(/\s*—\s*[12]\s*coats?\s*$/i, "");
+    if (d === it.description) return it;
+    changed = true;
+    return { ...it, description: d };
+  });
+  return { items: changed ? out : items, changed };
+};
+
 // which price-list lines a description already stands for — so work a PO
 // priced in its own words never gets a second, list-priced copy beside it
 export const keysIn = (description: string, book?: PriceItem[]): string[] =>

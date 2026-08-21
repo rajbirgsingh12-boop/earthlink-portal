@@ -41,7 +41,7 @@ export const PRICE_BOOK: PriceItem[] = [
   // agreed to.
   { key: "plaster", description: "Plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "\\bscrap(?:e|es|ed|ing)\\b(?=[^.]{0,30}\\b(?:walls?|ceilings?|plaster|skim|sheet\\s*rock|sheetrock|dry\\s*wall|drywall)\\b)|\\b(?:walls?|c(?:ei|ie|e|i)l+ings?)\\b|\\bplaster(?:ing)?\\b|\\bskim(?:\\s*coat)?\\b|\\bspackl(?:e|ing)\\b|\\bpatch(?:ing|es)?\\b|\\btape\\s*(?:and|&)\\s*spackle\\b|\\bscratch\\s*coat\\b" },
   { key: "popcorn", description: "Popcorn ceiling removal", unit: "SF", price: 5, group: "Plaster & walls", words: "popcorn|textured?\\s*ceilings?|stipple" },
-  { key: "wall_repair", description: "Wall repair", unit: "SF", price: 6, group: "Plaster & walls", words: "wall\\s*repair|repair[^.\\n]{0,12}walls?|hole[s]?\\s*in\\s*the\\s*walls?" },
+  { key: "wall_repair", description: "Scrape and plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "wall\\s*repair|repair[^.\\n]{0,12}walls?|hole[s]?\\s*in\\s*the\\s*walls?" },
   { key: "sheetrock", description: "Sheet rock", unit: "SF", price: 12, group: "Plaster & walls", words: "sheet\\s*rock|sheetrock|dry\\s*wall|drywall|gypsum|blue\\s*board|rock\\s*the\\s*walls?" },
   { key: "hourly", description: "Additional services", unit: "HOUR", price: 12, group: "Plaster & walls", words: "additional\\s*services?|time\\s*(?:and|&)\\s*materials?\\b|\\bt\\s*&\\s*m\\b|labou?r\\s*only|\\bhourly\\s*(?:work|labou?r|rate\\s*work)\\b" },
   // ---- painting (per apartment: 1 coat / 2 coat) ----
@@ -301,8 +301,10 @@ export interface PriceMatchOpts {
 const BEATS: [string, string][] = [["wall_repair", "plaster"], ["popcorn", "plaster"]];
 // hardware that names a door as the place it goes, not a door being ordered
 const ON_A_DOOR = /lock|closer|hinge|chime|door\s*bell|strike|panic|push\s*bar/i;
-// the wording that means the wall gets scraped before it gets plastered
-const SCRAPED = /\bscrap(?:e|es|ed|ing)\b/i;
+// the wording that means the wall gets scraped before it gets plastered —
+// and repair talk means the same thing: damaged, cracked, peeling or
+// water-hit plaster comes off before new plaster goes on
+const SCRAPED = /\bscrap(?:e|es|ed|ing)\b|\brepair\w*\b|\bdamag\w*\b|\bcrack\w*\b|\bholes?\b|\bpeel\w*\b|\bchip\w*\b|\bflak\w*\b|\bwater\b|\brestor\w*\b|\bresurfac\w*\b/i;
 // A wall or a ceiling on its own says nothing — what is being DONE to it is
 // what makes it the plaster job. These three decide it:
 //   the trade, said outright
@@ -498,8 +500,7 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
       const lead = h.scrape && h.key === "plaster"
         ? `Scrape and ${/^[A-Z][a-z]/.test(p.description) ? p.description[0].toLowerCase() + p.description.slice(1) : p.description}`
         : p.description;
-      const desc = p.price2 !== undefined ? `${lead} — ${coats} coat${coats > 1 ? "s" : ""}` : lead;
-      return { key: h.key, description: desc, qty: h.qty, unit: p.unit, unit_price: price };
+      return { key: h.key, description: lead, qty: h.qty, unit: p.unit, unit_price: price };
     });
 }
 

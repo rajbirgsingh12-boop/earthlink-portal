@@ -478,3 +478,20 @@ update pact_jobs
  where jsonb_typeof(items) = 'array'
    and jsonb_array_length(items) > 0
    and (items::text ~ '—\s*[12]\s*coats?' or items::text like '%Wall repair%');
+
+-- 12) A paper trail for PACT jobs, same as releases have had all along.
+--     Every change to a job keeps its before-and-after in audit_log (minus
+--     the bulky attachments list) — so if lines are ever lost again, what
+--     they said is one query away instead of gone.
+create or replace function public.audit_pact_jobs() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  insert into audit_log (user_id, action, table_name, record_id, before, after)
+  values (auth.uid(), TG_OP, 'pact_jobs', coalesce(new.id, old.id),
+          to_jsonb(old) - 'attachments', to_jsonb(new) - 'attachments');
+  return coalesce(new, old);
+end $$;
+drop trigger if exists pact_jobs_audit on pact_jobs;
+create trigger pact_jobs_audit
+  after insert or update or delete on pact_jobs
+  for each row execute function public.audit_pact_jobs();

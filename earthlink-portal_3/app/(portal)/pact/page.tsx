@@ -280,17 +280,22 @@ export default function Pact() {
   const fillFromList = async (j: Job, auto = false) => {
     if (!auto) setBusy(true);
     try {
+      // Price against the database's copy, never this page's. A tab that sat
+      // open while the other admin entered lines holds an old array — saving
+      // from it would wipe their work, which is exactly what happened once.
+      const { data: liveRow } = await sb().from("pact_jobs").select("items,description,tax_pct").eq("id", j.id).single();
+      const live = liveRow ? { ...j, ...(liveRow as Partial<Job>) } : j;
       // the job's own words only — feeding our generated line text back in
       // would let "Primer" read as a fresh painting order
-      const before = itemsOf(j);
-      const next = await priceFromList(j.description || "", before, { refresh: true });
+      const before = itemsOf(live);
+      const next = await priceFromList(live.description || "", before, { refresh: true });
       const added = next.length - before.length;
       const changed = next.filter((n, i) => i < before.length && n.unit_price !== before[i].unit_price).length;
       if (added === 0 && changed === 0) {
         if (!auto) flash("Already matching the price list — nothing to change");
         return;
       }
-      setItems(j, next, true);
+      setItems(live, next, true);
       flash(auto
         ? "Priced off the quantities on the job — check the lines before invoicing"
         : [added > 0 ? `${added} line${added === 1 ? "" : "s"} added` : "", changed > 0 ? `${changed} re-priced` : ""]
@@ -298,19 +303,29 @@ export default function Pact() {
     } finally { if (!auto) setBusy(false); }
   };
 
-  // Admin 2 enters the square feet out in the field; the moment Admin 1 opens
-  // the job, the prices fill themselves in from the list — no button to
+  // Opening a job pulls its CURRENT row before anything else happens — a page
+  // that sat open on one phone while the other admin worked holds yesterday's
+  // lines, and any save from that copy would erase today's. Once the fresh
+  // row is in hand: Admin 2 entered the square feet out in the field, so for
+  // Admin 1 the prices fill themselves in from the list — no button to
   // remember. A line that already carries a real price is never touched.
   const autoPriced = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!openId || role !== "admin" || autoPriced.current.has(openId)) return;
-    const j = jobs.find((x) => x.id === openId);
-    if (!j) return;
-    const needs = itemsOf(j).some((it) => Number(it.qty) > 0 && it.description.trim() && !realPrice(it.unit_price));
-    if (!needs) return;
-    autoPriced.current.add(openId);
-    fillFromList(j, true);
-  }, [openId, role, jobs]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!openId) return;
+    let closed = false;
+    (async () => {
+      const { data } = await sb().from("pact_jobs").select("*").eq("id", openId).single();
+      if (closed || !data) return;
+      const fresh = data as Job;
+      setJobs((prev) => prev.map((x) => (x.id === openId ? { ...x, ...fresh } : x)));
+      if (role !== "admin" || autoPriced.current.has(openId)) return;
+      const needs = itemsOf(fresh).some((it) => Number(it.qty) > 0 && it.description.trim() && !realPrice(it.unit_price));
+      if (!needs) return;
+      autoPriced.current.add(openId);
+      await fillFromList(fresh, true);
+    })();
+    return () => { closed = true; };
+  }, [openId, role]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------- the proposal letter ----------
   const logoBytes = async (): Promise<Uint8Array | undefined> => {

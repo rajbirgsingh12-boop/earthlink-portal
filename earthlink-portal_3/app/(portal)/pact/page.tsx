@@ -273,7 +273,7 @@ export default function Pact() {
       if (realPrice(it.unit_price)) {
         // a line that already carries a price of its own is the PO's or theirs
         // — re-pricing only touches lines the portal itself wrote
-        if (opts.refresh && it.key) out[at] = { ...it, description: l.description, unit: l.unit, unit_price: l.unit_price };
+        if (opts.refresh && it.key) out[at] = { ...it, description: l.description, unit: l.unit, unit_price: l.unit_price, qty: Number(it.qty) > 1 ? it.qty : l.qty };
         // a hand-typed "Plaster" that someone also priced by hand still takes
         // the list's wording ("Scrape and plaster") — the typed price stays
         else if (opts.refresh && takesName) out[at] = { ...it, description: l.description, key: it.key || l.key };
@@ -687,7 +687,7 @@ export default function Pact() {
         }
       }
       if (f.po) {
-        const { data: dupes } = await sb().from("pact_jobs").select("id,attachments").or(`po_number.eq.${f.po},job_number.eq.${f.po}`).limit(1);
+        const { data: dupes } = await sb().from("pact_jobs").select("id,attachments,description").or(`po_number.eq.${f.po},job_number.eq.${f.po}`).limit(1);
         const dupe = (dupes || [])[0] as Job | undefined;
         if (dupe) {
           const atts = dupe.attachments || [];
@@ -696,10 +696,21 @@ export default function Pact() {
             const { error: de } = await sb().storage.from("docs").upload(dpath, file, { upsert: true });
             if (!de) await sb().from("pact_jobs").update({ attachments: [...atts, { name: file.name, path: dpath }] }).eq("id", dupe.id);
           }
+          // A job made before the reader learned this PO's shape may hold only
+          // half the description. When the fresh read carries MORE of the same
+          // words, the job takes the fuller wording — a description someone
+          // rewrote by hand matches nothing and is left alone.
+          const oldD = (dupe.description || "").replace(/\s+/g, " ").trim();
+          const newD = (f.desc || "").replace(/\s+/g, " ").trim();
+          const grew = !!newD && newD.toLowerCase() !== oldD.toLowerCase()
+            && (oldD === "" || newD.toLowerCase().includes(oldD.toLowerCase()));
+          if (grew) await sb().from("pact_jobs").update({ description: newD }).eq("id", dupe.id);
           setBusy(false);
           await load();
           setOpenId(dupe.id); showDetailsFor(dupe.id);
-          flash(`PO ${f.po} is already here — opened it (nothing new was created)`);
+          flash(grew
+            ? `PO ${f.po} is already here — picked up the PO's full wording (tap Price from list to refresh the lines)`
+            : `PO ${f.po} is already here — opened it (nothing new was created)`);
           return;
         }
       }

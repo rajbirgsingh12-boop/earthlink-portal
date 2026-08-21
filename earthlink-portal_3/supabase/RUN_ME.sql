@@ -20,8 +20,9 @@
 -- Aug 20 additions: the proposal-sent date on PACT jobs,
 -- PACT invoicing locked to Admin 1 in the database itself,
 -- everyone's email on their profile row (Settings shows it),
--- and the login fix for accounts stuck waiting on Supabase
--- emails that never arrive.
+-- the login fix for accounts stuck waiting on Supabase
+-- emails that never arrive, and the work-line wording
+-- cleanup applied to every job already in the portal.
 -- ============================================================
 
 -- ---------- from upgrade_invoices_aging_docs.sql ----------
@@ -458,3 +459,22 @@ update auth.users
 -- update auth.users
 --    set encrypted_password = extensions.crypt('THE_NEW_PASSWORD', extensions.gen_salt('bf'))
 --  where email = 'info@earthlinkgc.com';
+
+-- 11) The wording fix, applied to every job ALREADY in the portal — not just
+--     the ones uploaded from now on. "Primer — 1 coat" becomes "Primer",
+--     any "— 1 coat / — 2 coats" tail comes off, and "Wall repair" reads
+--     "Scrape and plaster". Prices and quantities are not touched.
+update pact_jobs
+   set items = (
+     select coalesce(jsonb_agg(
+       jsonb_set(t.it, '{description}', to_jsonb(
+         case when t.it->>'description' = 'Wall repair' then 'Scrape and plaster'
+              else regexp_replace(t.it->>'description', '\s*—\s*[12]\s*coats?\s*$', '')
+         end
+       )) order by t.ord
+     ), '[]'::jsonb)
+     from jsonb_array_elements(items) with ordinality as t(it, ord)
+   )
+ where jsonb_typeof(items) = 'array'
+   and jsonb_array_length(items) > 0
+   and (items::text ~ '—\s*[12]\s*coats?' or items::text like '%Wall repair%');

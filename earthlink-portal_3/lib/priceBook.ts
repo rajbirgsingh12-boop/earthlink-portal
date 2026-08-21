@@ -496,8 +496,12 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
     .map((h) => {
       const p = byKey.get(h.key)!;
       const price = p.price2 !== undefined && coats === 2 ? p.price2 : p.price;
-      // a PO that says scrape is asking for the scraping too, so the line says so
-      const lead = h.scrape && h.key === "plaster"
+      // A PO that says scrape is asking for the scraping too, so the line says
+      // so. The scrape words may sit in a different sentence than the plaster
+      // ("Bathroom to be repaired… / Plaster, 130 SF") — repair talk anywhere
+      // on the PO means the old surface comes off first, so the lead reads
+      // the whole description, not just the clause the plaster sat in.
+      const lead = (h.scrape || SCRAPED.test(text)) && h.key === "plaster"
         ? `Scrape and ${/^[A-Z][a-z]/.test(p.description) ? p.description[0].toLowerCase() + p.description.slice(1) : p.description}`
         : p.description;
       return { key: h.key, description: lead, qty: h.qty, unit: p.unit, unit_price: price };

@@ -263,15 +263,20 @@ export default function Pact() {
         continue;
       }
       const it = out[at];
+      // a line that says nothing but the trade's own name follows the list's
+      // wording — that is how "Plaster" picks up its "Scrape and" on a repair
+      // job. A PO's own sentence matches neither name and keeps its words.
+      const bkName = bk.find((b) => b.key === l.key)?.description || "";
+      const takesName = !!it.key || sameText(it.description, bkName) || sameText(it.description, l.description);
       // a line the portal put there follows the list; a price the PO stated
       // stays the PO's, because that one is the agreement
       if (realPrice(it.unit_price)) {
         // a line that already carries a price of its own is the PO's or theirs
         // — re-pricing only touches lines the portal itself wrote
-        if (opts.refresh && it.key) out[at] = { ...it, unit: l.unit, unit_price: l.unit_price };
+        if (opts.refresh && it.key) out[at] = { ...it, description: l.description, unit: l.unit, unit_price: l.unit_price };
         continue;
       }
-      out[at] = { ...it, unit: it.unit || l.unit, unit_price: l.unit_price, qty: Number(it.qty) > 1 ? it.qty : l.qty, key: it.key || l.key };
+      out[at] = { ...it, description: takesName ? l.description : it.description, unit: it.unit || l.unit, unit_price: l.unit_price, qty: Number(it.qty) > 1 ? it.qty : l.qty, key: it.key || l.key };
     }
     return out.filter((it) => it.description.trim());
   };
@@ -285,10 +290,17 @@ export default function Pact() {
       // from it would wipe their work, which is exactly what happened once.
       const { data: liveRow } = await sb().from("pact_jobs").select("items,description,tax_pct").eq("id", j.id).single();
       const live = liveRow ? { ...j, ...(liveRow as Partial<Job>) } : j;
-      // the job's own words only — feeding our generated line text back in
-      // would let "Primer" read as a fresh painting order
       const before = itemsOf(live);
-      const next = await priceFromList(live.description || "", before, { refresh: true });
+      // What gets priced: the PO's words PLUS any line a person typed in by
+      // hand that has no price yet — Admin 2 writing "Plaster" over 130 SF is
+      // asking for the plaster job, primer and paint included. Lines the
+      // portal itself wrote (they carry a key) and lines the PO priced are
+      // NOT fed back in, so "Primer" can never read as a fresh painting order.
+      const typed = before
+        .filter((it) => !it.key && it.description.trim() && !realPrice(it.unit_price))
+        .map((it) => it.description);
+      const text = [live.description || "", ...typed].filter(Boolean).join(". ");
+      const next = await priceFromList(text, before, { refresh: true });
       const added = next.length - before.length;
       const changed = next.filter((n, i) => i < before.length && n.unit_price !== before[i].unit_price).length;
       if (added === 0 && changed === 0) {

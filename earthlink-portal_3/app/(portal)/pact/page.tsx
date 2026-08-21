@@ -274,6 +274,9 @@ export default function Pact() {
         // a line that already carries a price of its own is the PO's or theirs
         // — re-pricing only touches lines the portal itself wrote
         if (opts.refresh && it.key) out[at] = { ...it, description: l.description, unit: l.unit, unit_price: l.unit_price };
+        // a hand-typed "Plaster" that someone also priced by hand still takes
+        // the list's wording ("Scrape and plaster") — the typed price stays
+        else if (opts.refresh && takesName) out[at] = { ...it, description: l.description, key: it.key || l.key };
         continue;
       }
       out[at] = { ...it, description: takesName ? l.description : it.description, unit: it.unit || l.unit, unit_price: l.unit_price, qty: Number(it.qty) > 1 ? it.qty : l.qty, key: it.key || l.key };
@@ -291,18 +294,20 @@ export default function Pact() {
       const { data: liveRow } = await sb().from("pact_jobs").select("items,description,tax_pct").eq("id", j.id).single();
       const live = liveRow ? { ...j, ...(liveRow as Partial<Job>) } : j;
       const before = itemsOf(live);
-      // What gets priced: the PO's words PLUS any line a person typed in by
-      // hand that has no price yet — Admin 2 writing "Plaster" over 130 SF is
-      // asking for the plaster job, primer and paint included. Lines the
-      // portal itself wrote (they carry a key) and lines the PO priced are
-      // NOT fed back in, so "Primer" can never read as a fresh painting order.
+      // What gets priced: the PO's words PLUS every line a person typed in by
+      // hand — Admin 2 writing "Plaster" over 130 SF is asking for the plaster
+      // job, primer and paint included, and that stays true when someone
+      // typed the $6 in themselves. Only lines the portal itself wrote (they
+      // carry a key) stay out, so "Primer" can never read as a fresh painting
+      // order. A priced line's own PRICE is never changed by this — see the
+      // merge — only its wording and what belongs beside it.
       const typed = before
-        .filter((it) => !it.key && it.description.trim() && !realPrice(it.unit_price))
+        .filter((it) => !it.key && it.description.trim())
         .map((it) => it.description);
       const text = [live.description || "", ...typed].filter(Boolean).join(". ");
       const next = await priceFromList(text, before, { refresh: true });
       const added = next.length - before.length;
-      const changed = next.filter((n, i) => i < before.length && n.unit_price !== before[i].unit_price).length;
+      const changed = next.filter((n, i) => i < before.length && (n.unit_price !== before[i].unit_price || n.description !== before[i].description)).length;
       if (added === 0 && changed === 0) {
         if (!auto) flash("Already matching the price list — nothing to change");
         return;

@@ -313,11 +313,16 @@ export function parsePactPoText(raw: string, structured?: PoLine[]): PactPoField
     const x0 = L.segs[dseg].x;
     descParts.push(cellFrom(L, x0).replace(/^description\b\s*:?\s*/i, ""));
     let lastY = L.y;
+    // Boulevard floats the scope a blank line or two BELOW the Description
+    // field ("Description: Court Ordered Repairs" … "bathroom and bedroom
+    // scrape plaster paint") — the gap allows for that, and the extra stops
+    // keep the access date and anything dated out of the work's words.
     for (let j = di + 1, took = 0; j < tableAt && took < 3 && descParts.join(" ").length < 220; j++) {
       const N = src[j];
-      if (N.page !== L.page || lastY - N.y > 1.6 * pitch) break;
+      if (N.page !== L.page || lastY - N.y > 2.8 * pitch) break;
       if (SITE_LABEL.test(N.text) || BILL_LABEL.test(N.text) || STOP_LABEL.test(N.text)
-        || TOTALISH.test(N.text) || FORM_HEAD.test(N.text) || readRow(N.text)) break;
+        || TOTALISH.test(N.text) || FORM_HEAD.test(N.text) || readRow(N.text)
+        || /^access\s*date\b/i.test(N.text) || /^\d{1,2}\/\d{1,2}\/\d{2,4}\s*$/.test(N.text.trim())) break;
       const cell = cellFrom(N, x0);
       if (!cell) break;
       descParts.push(cell); lastY = N.y; took += 1;

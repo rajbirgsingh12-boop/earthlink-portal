@@ -28,6 +28,7 @@ export default function CertifiedPayroll() {
       const loaded = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
       doc = loaded as unknown as PdfDocLite;
       const lines: CpLine[] = [];
+      let sawText = 0;
       for (let pg = 1; pg <= loaded.numPages; pg++) {
         const tc = await (await loaded.getPage(pg)).getTextContent();
         const words: { x: number; y: number; w: number; s: string }[] = [];
@@ -37,6 +38,7 @@ export default function CertifiedPayroll() {
           // how WIDE the word is matters as much as where it starts: a payroll
           // that right-aligns "8" in the Wednesday box starts it near Thursday
           words.push({ x: t[4], y: t[5], w: Number((it as { width?: number }).width) || 0, s: it.str.trim() });
+          sawText += 1;
         }
         // cluster into rows: same line = y within 3pt. Where each word sits
         // across the page is kept too — on a WH-347 grid that's the only way
@@ -52,6 +54,9 @@ export default function CertifiedPayroll() {
           lines[lines.length - 1].ws = sorted.map((v) => v.w);
         }
       }
+      // a real PDF that renders pages but carries NO text is a scan — a photo
+      // of paper, or an email attachment run through "print to PDF"
+      if (sawText === 0) throw new Error("scan");
       return lines;
     } finally {
       await doc?.destroy?.().catch(() => null);
@@ -64,15 +69,26 @@ export default function CertifiedPayroll() {
     if (files.length === 0) return;
     setBusy(true);
     try {
-      const pdfjs = await import("pdfjs-dist");
-      pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+      // the PDF reader loads on demand — right after an update goes out, a page
+      // that's been sitting open can fail to fetch it. That is NOT a scan.
+      let pdfjs: typeof import("pdfjs-dist");
+      try {
+        pdfjs = await import("pdfjs-dist");
+        pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+      } catch {
+        flash("The PDF reader didn't load — the portal was probably just updated. Pull down to refresh the page and upload again.");
+        return;
+      }
       const parsed: CpReport[] = [];
       for (const f of files) {
         try {
           const lines = await extractLines(f, pdfjs);
           parsed.push(parseCertifiedPayroll(f.name, lines));
-        } catch {
-          parsed.push({ ...emptyReport(), fileName: f.name, notes: [`Couldn't read ${f.name} — if it's a scan (a photo of paper), type the rows in below.`] });
+        } catch (err) {
+          const scan = err instanceof Error && err.message === "scan";
+          parsed.push({ ...emptyReport(), fileName: f.name, notes: [scan
+            ? `${f.name} is a scan — a photo of paper with no real text in it. Upload the ORIGINAL PDF from the payroll company's email (forward the email and save its attachment), not a printed or photographed copy — or type the rows in below.`
+            : `Couldn't read ${f.name} — refresh the page and try once more; if it still fails, type the rows in below.`] });
         }
       }
       setReports((prev) => [...prev, ...parsed]);

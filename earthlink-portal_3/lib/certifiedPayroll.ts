@@ -710,11 +710,19 @@ export function lcmWarnings(reports: CpReport[]): string[] {
     const wk = rep.weekEnding || "?";
     if (!/^\d{2}\/\d{2}\/\d{4}$/.test(rep.weekEnding || ""))
       out.push(`Week "${wk}": the week-ending date must look like 08/01/2026 (MM/DD/YYYY).`);
+    // some payroll companies leave the PAYROLL NO. box empty — eComply keys
+    // every row on it, so an empty one bounces the whole file
+    if (!String(rep.payrollNo || "").trim())
+      out.push(`Week ${wk}: no payroll number — type it in above (1 for the first week on this project, 2 for the next…).`);
+    // the Fed ID note from the parse is a rejection waiting to happen — say it
+    // again at download time, where it can still be fixed
+    for (const n of rep.notes || []) if (/Fed ID/i.test(n)) out.push(n);
     rep.rows.forEach((r, i) => {
       const who = r.name || `worker ${i + 1}`;
       if (r.ssn4.trim() && !lcmSsn(r.ssn4)) out.push(`Week ${wk} \u00B7 ${who}: SSN "${r.ssn4}" isn't 4 or 9 digits \u2014 it would go out blank.`);
       if (!r.ssn4.trim()) out.push(`Week ${wk} \u00B7 ${who}: no SSN \u2014 their upload requires one (last 4 is enough).`);
       if (!r.ethnicity) out.push(`Week ${wk} \u00B7 ${who}: no ethnicity code \u2014 their upload requires one (pick it in the worker's row).`);
+      if (!(r.address || "").trim()) out.push(`Week ${wk} \u00B7 ${who}: no street address \u2014 type it into the worker's row (payrolls from the payroll company don't print them).`);
       if (!splitName(r.name).last) out.push(`Week ${wk} \u00B7 ${who}: needs a first AND last name.`);
     });
   }

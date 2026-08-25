@@ -27,7 +27,8 @@ export const COMPANY = {
   // filing details used on NYCHA paperwork (Statement of Services, invoices)
   fax: "718-766-8010",
   supplierNo: "104638",
-  fedTaxId: "11-3511520",
+  // the payroll company prints this one on the federal forms — that is the filing of record
+  fedTaxId: "11-3515520",
   principal: "HARPINDER SINGH.",
   principalTitle: "PRESIDENT",
   blurb:

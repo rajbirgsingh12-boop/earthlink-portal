@@ -297,71 +297,85 @@ export default function CertifiedPayroll() {
               ))}
             </div>
 
-            <div className="card overflow-x-auto">
-              <table className="w-full border-collapse text-[13px]" style={{ minWidth: 1180 }}>
-                <thead>
-                  <tr className="border-b-[1.5px] border-ink text-left font-display text-[11px] uppercase tracking-widest text-inksoft">
-                    <th className="min-w-[210px] p-2">Worker</th>
-                    <th className="p-2">SSN<div className="font-normal">last 4 or full</div></th>
-                    <th className="min-w-[120px] p-2">Classification</th>
-                    {days.map((d, i) => <th key={i} className="p-2 text-center">{d}<div className="font-normal">ST / OT</div></th>)}
-                    <th className="p-2 text-right">Hours</th>
-                    {moneyFields.map(([k, label]) => <th key={String(k)} className="p-2 text-right">{label}</th>)}
-                    <th className="p-2"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rep.rows.map((w, wi) => {
-                    const stT = w.st.reduce<number>((s, h) => s + (Number(h) || 0), 0);
-                    const otT = w.ot.reduce<number>((s, h) => s + (Number(h) || 0), 0);
-                    return (
-                      <tr key={wi} className="border-b border-rulesoft align-top">
-                        <td className="p-1.5">
-                          <input className="field px-2 py-1.5 text-[13px]" placeholder="Last, First" value={w.name} onChange={(e) => setRow(ri, wi, { name: e.target.value })} />
-                          <input className="field mt-1 px-2 py-1.5 text-[12px]" placeholder="Street address" value={w.address} onChange={(e) => setRow(ri, wi, { address: e.target.value })} />
-                          <div className="mt-1 grid grid-cols-3 gap-1">
-                            <input className="field px-1.5 py-1 text-[11px]" placeholder="City" value={w.city} onChange={(e) => setRow(ri, wi, { city: e.target.value })} />
-                            <input className="field px-1.5 py-1 text-[11px]" placeholder="NY" maxLength={2} title="State (blank = read from the address, else NY)" value={w.state} onChange={(e) => setRow(ri, wi, { state: e.target.value.toUpperCase() })} />
-                            <input className="field px-1.5 py-1 text-[11px]" placeholder="Zip" value={w.zip} onChange={(e) => setRow(ri, wi, { zip: e.target.value })} />
-                          </div>
-                          <div className="mt-1 flex gap-1">
-                            <select className="field px-1 py-1 text-[11px]" title="Marital status" value={w.marital} onChange={(e) => setRow(ri, wi, { marital: e.target.value })}>
-                              <option value="S">Single</option><option value="M">Married</option>
-                            </select>
-                            <select className="field px-1 py-1 text-[11px]" title="Gender" value={w.gender} onChange={(e) => setRow(ri, wi, { gender: e.target.value })}>
-                              <option value="">—</option><option value="M">M</option><option value="F">F</option>
-                            </select>
-                            <select className="field px-1 py-1 text-[11px]" title="Journeyman or Apprentice" value={w.trade} onChange={(e) => setRow(ri, wi, { trade: e.target.value })}>
-                              <option value="J">Journeyman</option><option value="A">Apprentice</option>
-                            </select>
-                            <select className="field px-1 py-1 text-[11px]" title="Ethnicity code (their upload wants it)" value={w.ethnicity} onChange={(e) => setRow(ri, wi, { ethnicity: e.target.value })}>
-                              <option value="">Ethn.—</option><option value="1">1 Caucasian</option><option value="2">2 African American</option>
-                              <option value="3">3 Hispanic</option><option value="4">4 Native Am./Alaskan</option>
-                              <option value="5">5 Asian/Pac. Isl.</option><option value="6">6 Other</option>
-                            </select>
-                            <input className="field w-12 px-1 py-1 text-center text-[11px]" title="Tax exemptions claimed (0-99)" inputMode="numeric" maxLength={2}
-                              value={String(w.exemption ?? "")} onChange={(e) => setRow(ri, wi, { exemption: e.target.value.replace(/\D/g, "") })} />
-                          </div>
-                        </td>
-                        <td className="p-1.5"><input className="field w-24 px-2 py-1.5 text-center font-mono text-[13px]" maxLength={11} inputMode="numeric" title="Last 4 (goes out as 000-00-1234) or the full 9 digits" value={w.ssn4} onChange={(e) => setRow(ri, wi, { ssn4: e.target.value.replace(/[^\d-]/g, "") })} /></td>
-                        <td className="p-1.5"><input className="field px-2 py-1.5 text-[13px]" placeholder="Laborer…" value={w.classification} onChange={(e) => setRow(ri, wi, { classification: e.target.value })} /></td>
-                        {days.map((_, di) => (
-                          <td key={di} className="p-1">
-                            <input className="field w-12 px-1 py-1 text-center font-mono text-[12px]" inputMode="decimal" placeholder="0" value={String(w.st[di] ?? "")} onChange={(e) => setDay(ri, wi, "st", di, e.target.value)} />
-                            <input className="field mt-1 w-12 bg-work/5 px-1 py-1 text-center font-mono text-[12px]" inputMode="decimal" placeholder="0" title="Overtime" value={String(w.ot[di] ?? "")} onChange={(e) => setDay(ri, wi, "ot", di, e.target.value)} />
-                          </td>
-                        ))}
-                        <td className="whitespace-nowrap p-2 text-right font-mono text-[12px]">{stT || 0}<div className="text-work">{otT || 0} OT</div></td>
-                        {moneyFields.map(([k]) => (
-                          <td key={String(k)} className="p-1"><input className="field w-20 px-1.5 py-1.5 text-right font-mono text-[12px]" inputMode="decimal" value={String(w[k] ?? "")} onChange={(e) => setRow(ri, wi, { [k]: e.target.value } as Partial<CpRow>)} /></td>
-                        ))}
-                        <td className="p-2"><button className="btn-icon text-alert" title="Remove worker" onClick={() => setRep(ri, { rows: rep.rows.filter((_, y) => y !== wi) })}>✕</button></td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            {/* one card per worker — the sideways 1,180px grid was unreadable on
+                a phone, and a phone is where this gets filled in. Every box is
+                full-size (16px on phones, so nothing zooms), every box has its
+                label, and the days are labeled over each hour. */}
+            {rep.rows.map((w, wi) => {
+              const stT = w.st.reduce<number>((s2, h) => s2 + (Number(h) || 0), 0);
+              const otT = w.ot.reduce<number>((s2, h) => s2 + (Number(h) || 0), 0);
+              const lab = (t: string) => <span className="mb-0.5 block text-[11px] uppercase tracking-widest text-inksoft">{t}</span>;
+              return (
+                <div key={wi} className="card mb-2.5 p-3">
+                  <div className="flex items-start gap-2">
+                    <label className="block flex-1">{lab("Worker")}
+                      <input className="field" placeholder="Last, First" value={w.name} onChange={(e) => setRow(ri, wi, { name: e.target.value })} /></label>
+                    <label className="block w-28">{lab("SSN last 4")}
+                      <input className="field text-center font-mono" maxLength={11} inputMode="numeric" title="Last 4 (goes out as 000-00-1234) or the full 9 digits" value={w.ssn4} onChange={(e) => setRow(ri, wi, { ssn4: e.target.value.replace(/[^\d-]/g, "") })} /></label>
+                    <button className="btn-icon mt-5 text-alert" title="Remove worker" onClick={() => { if (window.confirm(`Remove ${w.name || "this worker"} from this payroll?`)) setRep(ri, { rows: rep.rows.filter((_, y) => y !== wi) }); }}>✕</button>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <label className="block">{lab("Classification")}
+                      <input className="field" placeholder="Laborer…" value={w.classification} onChange={(e) => setRow(ri, wi, { classification: e.target.value })} /></label>
+                    <label className="block">{lab("Journeyman / Apprentice")}
+                      <select className="field" value={w.trade} onChange={(e) => setRow(ri, wi, { trade: e.target.value })}>
+                        <option value="J">Journeyman</option><option value="A">Apprentice</option>
+                      </select></label>
+                  </div>
+                  <label className="mt-2 block">{lab("Street address")}
+                    <input className="field" placeholder="123 Main Street" value={w.address} onChange={(e) => setRow(ri, wi, { address: e.target.value })} /></label>
+                  <div className="mt-2 grid grid-cols-3 gap-2">
+                    <label className="block">{lab("City")}
+                      <input className="field" value={w.city} onChange={(e) => setRow(ri, wi, { city: e.target.value })} /></label>
+                    <label className="block">{lab("State")}
+                      <input className="field text-center" maxLength={2} placeholder="NY" value={w.state} onChange={(e) => setRow(ri, wi, { state: e.target.value.toUpperCase() })} /></label>
+                    <label className="block">{lab("Zip")}
+                      <input className="field" inputMode="numeric" value={w.zip} onChange={(e) => setRow(ri, wi, { zip: e.target.value })} /></label>
+                  </div>
+                  <div className="mt-2 grid grid-cols-3 gap-2">
+                    <label className="block">{lab("Married?")}
+                      <select className="field" value={w.marital} onChange={(e) => setRow(ri, wi, { marital: e.target.value })}>
+                        <option value="S">Single</option><option value="M">Married</option>
+                      </select></label>
+                    <label className="block">{lab("Ethnicity")}
+                      <select className="field" title="Ethnicity code (their upload wants it)" value={w.ethnicity} onChange={(e) => setRow(ri, wi, { ethnicity: e.target.value })}>
+                        <option value="">—</option><option value="1">1 Caucasian</option><option value="2">2 African American</option>
+                        <option value="3">3 Hispanic</option><option value="4">4 Native Am./Alaskan</option>
+                        <option value="5">5 Asian/Pac. Isl.</option><option value="6">6 Other</option>
+                      </select></label>
+                    <label className="block">{lab("Exemptions")}
+                      <input className="field text-center" inputMode="numeric" maxLength={2} title="Tax exemptions claimed (0-99)"
+                        value={String(w.exemption ?? "")} onChange={(e) => setRow(ri, wi, { exemption: e.target.value.replace(/\D/g, "") })} /></label>
+                  </div>
+                  <div className="mt-3 text-[11px] font-semibold uppercase tracking-widest text-inksoft">Hours — straight time</div>
+                  <div className="mt-1 grid grid-cols-7 gap-1">
+                    {days.map((d, di) => (
+                      <label key={di} className="block text-center">
+                        <span className="block text-[11px] text-inksoft">{d}</span>
+                        <input className="field px-1 py-2 text-center font-mono" inputMode="decimal" placeholder="0" value={String(w.st[di] ?? "")} onChange={(e) => setDay(ri, wi, "st", di, e.target.value)} />
+                      </label>
+                    ))}
+                  </div>
+                  <div className="mt-2 text-[11px] font-semibold uppercase tracking-widest text-work">Hours — overtime</div>
+                  <div className="mt-1 grid grid-cols-7 gap-1">
+                    {days.map((d, di) => (
+                      <label key={di} className="block text-center">
+                        <span className="block text-[11px] text-inksoft">{d}</span>
+                        <input className="field bg-work/5 px-1 py-2 text-center font-mono" inputMode="decimal" placeholder="0" title="Overtime" value={String(w.ot[di] ?? "")} onChange={(e) => setDay(ri, wi, "ot", di, e.target.value)} />
+                      </label>
+                    ))}
+                  </div>
+                  <div className="mt-1.5 text-right font-mono text-[13px]">{stT || 0} hours{otT ? <span className="text-work"> · {otT} OT</span> : null}</div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-5">
+                    {moneyFields.map(([k, label]) => (
+                      <label key={String(k)} className="block">{lab(label)}
+                        <input className="field text-right font-mono" inputMode="decimal" value={String(w[k] ?? "")} onChange={(e) => setRow(ri, wi, { [k]: e.target.value } as Partial<CpRow>)} />
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
             <button className="btn btn-ghost min-h-[44px] mt-2 px-3 py-1.5 text-[13px]" onClick={() => setRep(ri, { rows: [...rep.rows, blankRow()] })}>+ Add worker</button>
           </div>
         );

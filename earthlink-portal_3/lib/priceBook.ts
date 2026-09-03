@@ -39,7 +39,7 @@ export const PRICE_BOOK: PriceItem[] = [
   // a fire escape, a floor, a sticker and an apartment being repainted are all
   // somebody else's line, and pricing them as plaster invents money nobody
   // agreed to.
-  { key: "plaster", description: "Plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "\\bscrap(?:e|es|ed|ing)\\b(?=[^.]{0,30}\\b(?:walls?|ceilings?|plaster|skim|sheet\\s*rock|sheetrock|dry\\s*wall|drywall)\\b)|\\b(?:walls?|c(?:ei|ie|e|i)l+ings?)\\b|\\bplaster(?:ing)?\\b|\\bskim(?:\\s*coat)?\\b|\\bspackl(?:e|ing)\\b|\\bpatch(?:ing|es)?\\b|\\btape\\s*(?:and|&)\\s*spackle\\b|\\bscratch\\s*coat\\b" },
+  { key: "plaster", description: "Plaster", unit: "SF", price: 5, group: "Plaster & walls", words: "\\bscrap(?:e|es|ed|ing)\\b(?=[^.]{0,30}\\b(?:walls?|ceilings?|plaster|skim|sheet\\s*rock|sheetrock|dry\\s*wall|drywall)\\b)|\\b(?:walls?|c(?:ei|ie|e|i)l+ings?)\\b|\\bplaster(?:ing)?\\b|\\bskim(?:\\s*coat)?\\b|\\bspackl(?:e|ing)\\b|\\bpatch(?:ing|es)?\\b|\\btape\\s*(?:and|&)\\s*spackle\\b|\\bscratch\\s*coat\\b" },
   { key: "popcorn", description: "Popcorn ceiling removal", unit: "SF", price: 5, group: "Plaster & walls", words: "popcorn|textured?\\s*ceilings?|stipple" },
   { key: "wall_repair", description: "Scrape and plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "wall\\s*repair|repair[^.\\n]{0,12}walls?|hole[s]?\\s*in\\s*the\\s*walls?" },
   { key: "sheetrock", description: "Sheet rock", unit: "SF", price: 12, group: "Plaster & walls", words: "sheet\\s*rock|sheetrock|dry\\s*wall|drywall|gypsum|blue\\s*board|rock\\s*the\\s*walls?" },
@@ -48,6 +48,7 @@ export const PRICE_BOOK: PriceItem[] = [
   { key: "paint_1br", description: "Paint 1 bedroom 1 bath apartment", unit: "EACH", price: 1190, price2: 1490, group: "Painting", words: "1\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
   { key: "paint_2br", description: "Paint 2 bedroom 1 bath apartment", unit: "EACH", price: 1350, price2: 1650, group: "Painting", words: "2\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
   { key: "paint_3br", description: "Paint 3 bedroom 1 bath apartment", unit: "EACH", price: 1550, price2: 1900, group: "Painting", words: "3\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
+  { key: "paint_4br", description: "Paint 4 bedroom 1.5 bath apartment", unit: "EACH", price: 1900, price2: 2250, group: "Painting", words: "4\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
   { key: "paint_4br", description: "Paint 4 bedroom 1.5 bath apartment", unit: "EACH", price: 1900, price2: 2250, group: "Painting", words: "4\\s*(?:bed\\s*rooms?|br|bdrm)\\b" },
   // priming and painting are priced by the room, not by the square foot
   // the coat count is how WE price, not something the customer is told —
@@ -495,13 +496,19 @@ export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLin
     .sort((a, b) => a.at - b.at)
     .map((h) => {
       const p = byKey.get(h.key)!;
-      const price = p.price2 !== undefined && coats === 2 ? p.price2 : p.price;
+      let price = p.price2 !== undefined && coats === 2 ? p.price2 : p.price;
+      // The partners' list prices plain plaster at $5 and wall REPAIR at $6 —
+      // scrape wording means the repair job, so it bills the repair rate.
+      // Never LESS than a price the office set by hand though: a plaster
+      // price raised in Settings still wins over the list's split.
+      const scraped = (h.scrape || SCRAPED.test(text)) && h.key === "plaster";
+      if (scraped) price = Math.max(price, byKey.get("wall_repair")?.price ?? 0);
       // A PO that says scrape is asking for the scraping too, so the line says
       // so. The scrape words may sit in a different sentence than the plaster
       // ("Bathroom to be repaired… / Plaster, 130 SF") — repair talk anywhere
       // on the PO means the old surface comes off first, so the lead reads
       // the whole description, not just the clause the plaster sat in.
-      const lead = (h.scrape || SCRAPED.test(text)) && h.key === "plaster"
+      const lead = scraped
         ? `Scrape and ${/^[A-Z][a-z]/.test(p.description) ? p.description[0].toLowerCase() + p.description.slice(1) : p.description}`
         : p.description;
       return { key: h.key, description: lead, qty: h.qty, unit: p.unit, unit_price: price };

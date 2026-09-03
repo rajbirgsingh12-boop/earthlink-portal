@@ -5,7 +5,7 @@
 import { zipSync, strToU8 } from "fflate";
 import { COMPANY } from "./company";
 
-export interface ProposalLine { description: string; qty: number; unit: string; unit_price: number }
+export interface ProposalLine { description: string; qty: number; unit: string; unit_price: number; section?: string }
 export interface ProposalFields {
   poNumber?: string;
   date?: string;            // MM/DD/YYYY
@@ -60,11 +60,11 @@ const para = (text: string, o: ParaOpts = {}) => paraOf(text ? run(text, o) : ""
 // a blank line of a chosen height, for spacing that a margin can't give
 const gap = (h: number) => `<w:p><w:pPr><w:spacing w:after="0" w:line="${h}" w:lineRule="exact"/></w:pPr></w:p>`;
 
-interface CellOpts { shade?: string; pad?: [number, number, number, number]; top?: string; bottom?: string; bw?: number; valign?: string }
+interface CellOpts { shade?: string; pad?: [number, number, number, number]; top?: string; bottom?: string; bw?: number; valign?: string; span?: number }
 const cell = (inner: string, w: number, o: CellOpts = {}) => {
   const [pt, pr, pb, pl] = o.pad ?? [90, 110, 90, 110];
   const side = (n: string, c?: string) => `<w:${n} w:val="${c ? "single" : "nil"}" w:sz="${o.bw ?? 6}" w:space="0" w:color="${c ?? "auto"}"/>`;
-  return `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/>` +
+  return `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/>${o.span ? `<w:gridSpan w:val="${o.span}"/>` : ""}` +
     `<w:tcBorders>${side("top", o.top)}${side("left")}${side("bottom", o.bottom)}${side("right")}</w:tcBorders>` +
     (o.shade ? `<w:shd w:val="clear" w:color="auto" w:fill="${o.shade}"/>` : "") +
     `<w:tcMar><w:top w:w="${pt}" w:type="dxa"/><w:left w:w="${pl}" w:type="dxa"/><w:bottom w:w="${pb}" w:type="dxa"/><w:right w:w="${pr}" w:type="dxa"/></w:tcMar>` +
@@ -153,14 +153,21 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
     cell(para(t, { b: true, sz: 16, color: MUTED, caps: true, track: 24, space: 0, align: i === 1 ? "center" : i ? "right" : "left" }),
       COLS[i], { shade: BAND, bottom: BRAND, bw: 12, pad: [80, 110, 80, 110] });
   const headRow = ["Description", "Qty", "Unit price", "Amount"].map(headCell).join("");
-  const bodyRows = f.lines.map((l) => {
+  const bodyRows: string[] = [];
+  let sect = "";
+  for (const l of f.lines) {
+    if (l.section && l.section !== sect) {
+      sect = l.section;
+      bodyRows.push(cell(para(sect.toUpperCase(), { b: true, sz: 17, color: INK, track: 20, space: 0 }),
+        W, { span: COLS.length, shade: BAND, bottom: HAIR, pad: [90, 110, 90, 110] }));
+    }
     const qty = `${l.qty}${l.unit && l.unit.toUpperCase() !== "EACH" ? ` ${l.unit.toUpperCase()}` : ""}`;
     const c = (inner: string, i: number) => cell(inner, COLS[i], { bottom: HAIR, pad: [130, 110, 130, 110] });
-    return c(para(l.description, { sz: 20, space: 0 }), 0)
+    bodyRows.push(c(para(l.description, { sz: 20, space: 0 }), 0)
       + c(para(qty, { sz: 20, space: 0, align: "center", color: MUTED }), 1)
       + c(para(money(cents(l.unit_price)), { sz: 20, space: 0, align: "right", color: MUTED }), 2)
-      + c(para(money(lineTotal(l)), { sz: 20, space: 0, align: "right" }), 3);
-  });
+      + c(para(money(lineTotal(l)), { sz: 20, space: 0, align: "right" }), 3));
+  }
 
   // ---- the totals, lined up under the amount column, the grand total in a bar
   const TL = W - 1900, TR = 1900;

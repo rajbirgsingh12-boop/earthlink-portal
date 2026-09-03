@@ -68,13 +68,16 @@ const tailHeight = (s: Space) =>
   s.postSign + s.regards + s.signerLine + 92;
 
 export async function buildProposalPdf(f: ProposalFields, logo?: Uint8Array): Promise<Uint8Array> {
-  const first = await render(f, NORMAL, logo);
-  if (first.pages === 1) return first.bytes;
+  // the loosest spacing that yields the fewest pages wins — a letter that can
+  // be two pages instead of three closes up the same way a one-pager does
+  let best = await render(f, NORMAL, logo);
+  if (best.pages === 1) return best.bytes;
   for (const s of [MID, TIGHT, XTIGHT]) {
     const tryIt = await render(f, s, logo);
-    if (tryIt.pages === 1) return tryIt.bytes;
+    if (tryIt.pages < best.pages) best = tryIt;
+    if (best.pages === 1) break;
   }
-  return first.bytes;   // genuinely a multi-page letter — keep it readable
+  return best.bytes;
 }
 
 async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{ bytes: Uint8Array; pages: number }> {
@@ -210,9 +213,19 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
   tableHead("DESCRIPTION");
 
   let sub = 0;
+  let sect = "";
   for (const l of f.lines) {
     const rows = wrap(l.description, DW, 10);
-    if (y - rows.length * S.rowLine < 150) { page = doc.addPage([612, 792]); y = 738; tableHead("DESCRIPTION (continued)"); }
+    const banner = l.section && l.section !== sect ? l.section.toUpperCase() : "";
+    if (y - rows.length * S.rowLine - (banner ? 22 : 0) < 150) { page = doc.addPage([612, 792]); y = 738; tableHead("DESCRIPTION (continued)"); }
+    if (banner) {
+      // the room's name on its own shaded band — UPPERCASED in the text
+      // itself so a signed copy's reader knows a banner from a work line
+      sect = l.section!;
+      page.drawRectangle({ x: M, y: y - 6, width: W, height: 19, color: C(BAND) });
+      track(banner, M + 8, 8.5, bold, INK, 1.4);
+      y -= S.afterHead - 2;
+    }
     const qty = `${l.qty}${l.unit && l.unit.toUpperCase() !== "EACH" ? ` ${l.unit.toUpperCase()}` : ""}`;
     sub += lineTotal(l);
     rows.forEach((rt, i) => {

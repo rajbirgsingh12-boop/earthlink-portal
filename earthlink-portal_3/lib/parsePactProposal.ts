@@ -163,6 +163,9 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
     // a work table's column headings ("Description Qty Unit price Amount")
     // are not a work line — and must not glue themselves to the first one
     if (!l.includes("$") && /^(?:item|description|scope|work)\b/i.test(l) && /\b(?:qty|quantity|unit|price|amount|cost)\b/i.test(l)) { pending = ""; continue; }
+    // a room banner ("BEDROOM 1", "KITCHEN") — short, no money, and printed
+    // in capitals by the letter itself — names the section, not the work
+    if (!l.includes("$") && l.length <= 32 && /[A-Z]/.test(l) && !/[a-z]/.test(l)) continue;
     const monies = [...l.matchAll(amtRe)];
     if (monies.length === 0) { pending = pending ? `${pending} ${l}` : l; continue; }
     // walk the line, pairing each amount with the text before it

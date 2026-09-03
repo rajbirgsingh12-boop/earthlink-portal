@@ -131,25 +131,34 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
     // for. Our own PDF prints the money beside the FIRST fragment and wraps
     // the rest BELOW it, so when a line is a complete row all by itself, the
     // text waiting in `pending` belonged to the row before it.
-    const bare = readRow(l, { allowTotalish: true });
-    if (bare && pending && rows.length > 0) {
-      rows[rows.length - 1].description = `${rows[rows.length - 1].description} ${pending}`.replace(/\s{2,}/g, " ").trim();
-      pending = "";
-    }
-    const row = bare || readRow(`${pending} ${l}`.trim(), { allowTotalish: true });
-    if (row) {
-      pending = "";
-      rows.push({ description: row.description, qty: row.qty, unit_price: row.unit_price, property: "", unit: punit, ...(row.uom ? { uom: row.uom } : {}) });
-      continue;
-    }
-
-    if (stopRe.test(l) || /^total\b/i.test(l)) {
+    // A line with no dollar sign cannot be a work row on one of our letters —
+    // every money column prints a $. Without this, a wrapped description
+    // fragment like "and wall, 30 inch microwave cabinet" reads as a $30 row.
+    const bare = l.includes("$") ? readRow(l, { allowTotalish: true }) : null;
+    // The totals end the work — but only when the line is NOT itself a
+    // complete work row ("Total station survey 1 $500.00 $500.00" is work
+    // that happens to start with Total). A real totals line never carries
+    // row arithmetic, fails that read, and stops the table here — BEFORE the
+    // pending-glue below can weld "Total Cost … $9,565.00" onto a wrapped
+    // fragment and mint a phantom row out of the pair.
+    const stopish = stopRe.test(l) || /^total\b/i.test(l);
+    if (!bare && stopish) {
       // the LAST row's wrapped tail sits in pending when the totals arrive
       if (pending && !pending.includes("$") && rows.length > 0) {
         rows[rows.length - 1].description = `${rows[rows.length - 1].description} ${pending}`.replace(/\s{2,}/g, " ").trim();
         pending = "";
       }
       stopAt = i; break;
+    }
+    if (bare && pending && rows.length > 0) {
+      rows[rows.length - 1].description = `${rows[rows.length - 1].description} ${pending}`.replace(/\s{2,}/g, " ").trim();
+      pending = "";
+    }
+    const row = bare || (l.includes("$") && !stopish ? readRow(`${pending} ${l}`.trim(), { allowTotalish: true }) : null);
+    if (row) {
+      pending = "";
+      rows.push({ description: row.description, qty: row.qty, unit_price: row.unit_price, property: "", unit: punit, ...(row.uom ? { uom: row.uom } : {}) });
+      continue;
     }
     // a work table's column headings ("Description Qty Unit price Amount")
     // are not a work line — and must not glue themselves to the first one

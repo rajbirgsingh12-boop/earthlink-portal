@@ -596,6 +596,23 @@ export default function Pact() {
       let taxFromDoc: number | undefined;
       // our own proposal letters (.docx) read right here on the device
       const isDocx = /\.docx$/i.test(file.name);
+      // a NYCHA blanket release dropped here by mistake would be minced into a
+      // garbage job — its cover page names it, so it gets sent to the right tab
+      if (!isDocx) {
+        try {
+          const pdfjs = await import("pdfjs-dist");
+          pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+          const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+          const tc = await (await doc.getPage(1)).getTextContent();
+          const cover = (tc.items as { str?: string }[]).map((it) => it.str || "").join(" ");
+          await doc.destroy();
+          if (/Blanket\s+Release/i.test(cover) && /NYCHA|Supply\s+Management/i.test(cover)) {
+            setBusy(false);
+            flash("That's a NYCHA blanket release — upload it on the Releases tab (Import release PDFs). PACT only takes partner POs and proposal letters.");
+            return;
+          }
+        } catch { /* no text layer or reader hiccup — the real readers below handle it */ }
+      }
       if (isDocx) {
         try {
           const { parsePactProposalDocx } = await import("@/lib/parsePactProposal");

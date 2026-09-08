@@ -895,6 +895,39 @@ export default function Pact() {
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, attachments: list } : x)));
     setAttachJob((prev) => (prev && prev.id === j.id ? { ...prev, attachments: list } : prev));
   };
+  // every picture on the job, as taken, in one download — no PO, no invoice,
+  // no letter. The field side is asked for the photos, so that is all this is.
+  const downloadPhotos = async (j: Job) => {
+    const imgs = (j.attachments || []).filter((a) => isImg(a.name));
+    if (imgs.length === 0) { flash("No photos on this job yet"); return; }
+    setBusy(true);
+    try {
+      const { data, error } = await sb().storage.from("docs").createSignedUrls(imgs.map((a) => a.path), 600);
+      if (error || !data) throw new Error(error?.message || "couldn't reach the photos");
+      const files: Record<string, Uint8Array> = {};
+      let type = "image/jpeg";
+      let missed = 0;
+      for (const a of imgs) {
+        const url = data.find((d) => d.path === a.path)?.signedUrl;
+        const res = url ? await fetch(url).catch(() => null) : null;
+        if (!res || !res.ok) { missed += 1; continue; }
+        type = res.headers.get("content-type") || type;
+        files[a.name] = new Uint8Array(await res.arrayBuffer());
+      }
+      const names = Object.keys(files);
+      if (names.length === 0) throw new Error("none of the photos would download");
+      const label = `PO ${j.po_number || j.job_number || ""}`.trim();
+      if (names.length === 1) saveBytes(files[names[0]], names[0], type);
+      else {
+        // pictures are already compressed — just bundle them, don't squeeze
+        const { zipSync } = await import("fflate");
+        saveBytes(zipSync(files, { level: 0 }), `${label} photos.zip`, "application/zip");
+      }
+      flash(`${names.length} photo${names.length === 1 ? "" : "s"} downloaded${missed ? ` · ${missed} couldn't be fetched` : ""}`);
+    } catch (err) {
+      flash(`Couldn't download the photos (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
+    } finally { setBusy(false); }
+  };
   useEffect(() => {
     const imgs = (attachJob?.attachments || []).filter((a) => isImg(a.name));
     if (imgs.length === 0) { setPhotoUrls({}); return; }
@@ -1395,6 +1428,7 @@ export default function Pact() {
                 {(j.attachments || []).length > 0 && <span className="chip text-inksoft" title="Documents & photos">📎 {(j.attachments || []).length}</span>}
                 <RowActions items={[
                   { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },
+                  { label: "Download photos", glyph: "⬇", hidden: !(j.attachments || []).some((a) => isImg(a.name)), disabled: busy, title: "Just the pictures — no PO, no invoice", onSelect: () => downloadPhotos(j) },
                   { label: "Restore", glyph: "↺", hidden: !canEdit || !j.canceled, onSelect: () => patch(j, { canceled: false }) },
                   // deleteJob asks its own window.confirm — no second prompt here
                   { label: "Delete job…", hidden: !canEdit, destructive: true, onSelect: () => deleteJob(j) },
@@ -1404,11 +1438,13 @@ export default function Pact() {
             {openId === j.id && !j.canceled && (() => {
               const beforeN = (j.attachments || []).filter((a) => isImg(a.name) && a.name.toLowerCase().startsWith("before")).length;
               const afterN = (j.attachments || []).filter((a) => isImg(a.name) && a.name.toLowerCase().startsWith("after")).length;
+              const photoN = (j.attachments || []).filter((a) => isImg(a.name)).length;
               return (
               <div className="mt-3 border-t border-rulesoft pt-3">
                 <div className="mb-2.5 flex flex-wrap items-center gap-2">
                   {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "before")} disabled={busy}>📷 Before{beforeN > 0 ? ` · ${beforeN}` : ""}</button>}
                   {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "after")} disabled={busy}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}
+                  {photoN > 0 && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => downloadPhotos(j)} disabled={busy} title="Just the pictures — no PO, no invoice">⬇ Photos · {photoN}</button>}
                   <RowActions items={[
                     { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },
                     { label: "Text worker", hidden: !canEdit, onSelect: () => openNotify(j) },
@@ -1729,13 +1765,17 @@ export default function Pact() {
 
       {attachJob && (
         <Modal title={`Documents · PO ${attachJob.po_number || attachJob.job_number || ""}`} onClose={() => setAttachJob(null)}
-          footer={canEdit ? (
-            <div className="flex flex-wrap gap-2">
-              <button className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "before")} disabled={busy}>📷 Before</button>
-              <button className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "after")} disabled={busy}>📷 After</button>
-              <button className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy}>Upload file</button>
-            </div>
-          ) : undefined}>
+          footer={(() => {
+            const photoN = (attachJob.attachments || []).filter((a) => isImg(a.name)).length;
+            return canEdit || photoN > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {canEdit && <button className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "before")} disabled={busy}>📷 Before</button>}
+                {canEdit && <button className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "after")} disabled={busy}>📷 After</button>}
+                {canEdit && <button className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy}>Upload file</button>}
+                {photoN > 0 && <button className="btn btn-ghost" onClick={() => downloadPhotos(attachJob)} disabled={busy} title="Just the pictures — no PO, no invoice">⬇ Photos · {photoN}</button>}
+              </div>
+            ) : undefined;
+          })()}>
             {(["before", "after"] as const).map((kind) => {
               const photos = (attachJob.attachments || []).filter((a) => isImg(a.name) && a.name.toLowerCase().startsWith(kind));
               return (

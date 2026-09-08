@@ -364,6 +364,11 @@ export default function Proposals() {
   // ---------- add a proposal to its contract as a release (works from the dashboard) ----------
   const itemsFor = async (p: Proposal): Promise<NychaLineItem[]> => {
     if (doc && doc.id === p.id) return materialize(); // editor open: use live quantities
+    if (!p.contract_id) {
+      // an old free-form proposal keeps its lines saved as rows
+      const { data } = await sb().from("proposal_items").select("*").eq("proposal_id", p.id).order("sort");
+      return ((data || []) as NychaLineItem[]).map((it) => ({ ...it, qty: Number(it.qty) || 0, unit_price: Number(it.unit_price) || 0 }));
+    }
     // list rows travel without qty_map — fetch it for this one sheet
     let qmap = p.qty_map;
     if (qmap === undefined) {
@@ -376,6 +381,32 @@ export default function Proposals() {
       .filter((ci) => Number(map[ci.code]) > 0)
       .map((ci) => ({ line: ci.line, code: ci.code, category: ci.category, description: ci.description, unit: ci.uom, qty: Number(map[ci.code]), unit_price: Number(ci.unit_price) }));
   };
+  // ---------- the sheet as a PDF file, straight from the list ----------
+  const [pdfBusy, setPdfBusy] = useState("");
+  const downloadPdf = async (p: Proposal) => {
+    if (pdfBusy) return;
+    setPdfBusy(p.id);
+    try {
+      const lines = await itemsFor(p);
+      const c = contracts.find((x) => x.id === p.contract_id);
+      const { buildWalkSheetPdf, walkSheetFileName } = await import("@/lib/walkSheetPdf");
+      const logo = await fetch("/logo.png").then((r) => (r.ok ? r.arrayBuffer() : null)).then((b) => (b ? new Uint8Array(b) : undefined)).catch(() => undefined);
+      const fields = {
+        number: p.number, contractNumber: c?.number, development: p.development, address: p.address, apt: p.apt, stairhall: p.stairhall,
+        job: p.job, releaseNumber: p.release_number, walkDate: p.walk_date, nychaStaff: p.nycha_staff, vendorStaff: p.vendor_staff,
+        lines: lines.map((it) => ({ line: it.line, code: it.code, category: it.category, description: it.description, unit: it.unit, qty: Number(it.qty) || 0, unit_price: Number(it.unit_price) || 0 })),
+      };
+      const bytes = await buildWalkSheetPdf(fields, logo);
+      const ab = new ArrayBuffer(bytes.byteLength); new Uint8Array(ab).set(bytes);
+      const url = URL.createObjectURL(new Blob([ab], { type: "application/pdf" }));
+      const a = document.createElement("a"); a.href = url; a.download = walkSheetFileName(fields); a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      flash(lines.length ? `PDF saved — ${lines.length} line${lines.length === 1 ? "" : "s"}` : "PDF saved — no quantities on that sheet yet");
+    } catch (err) {
+      flash(`Couldn't build the PDF (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
+    } finally { setPdfBusy(""); }
+  };
+
   // step 1: ask which release number this walk sheet becomes
   const addToRelease = (p: Proposal) => {
     if (!contracts.find((x) => x.id === p.contract_id)) { flash("That proposal isn't tied to a contract"); return; }
@@ -711,6 +742,8 @@ export default function Proposals() {
                 <Stamp label={p.status.toUpperCase()} tone={tone(p.status) as "ok"} />
               </div>
             </button>
+            <button type="button" className="btn btn-ghost min-h-[44px] px-2.5 text-[12px]" disabled={!!pdfBusy} title="The sheet as a PDF file — no need to open it" onClick={() => downloadPdf(p)}>{pdfBusy === p.id ? "…" : "⬇ PDF"}</button>
+            {p.contract_id && <button type="button" className="btn btn-ghost min-h-[44px] px-2.5 text-[12px]" title="Make (or update) the release on this contract from this sheet" onClick={() => addToRelease(p)}>→ Release</button>}
             <RowActions items={[
               { label: "Add to release…", hidden: !p.contract_id, onSelect: () => addToRelease(p) },
               { label: "Delete…", destructive: true, onSelect: () => deleteProposal(p) }, // deleteProposal keeps its own confirm

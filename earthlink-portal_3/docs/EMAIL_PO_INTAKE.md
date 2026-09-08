@@ -49,6 +49,15 @@ and the rule reader cross-checks it: the PO number must be printed on the page a
 the money must add up, or the rules read is used instead. Every job's note says
 which reader it came from. Without the key, POs read by the rules as before.
 
+## What Claude sees, and what it never sees
+The smart reader is shown **partner PO PDFs only**. Before a PDF is sent, the
+site checks it is a purchase order; a NYCHA release, a certified payroll sheet,
+a balance sheet, a tax form, an invoice, a photo — none of those ever reach it.
+Payroll never goes through this path at all. The PDF is sent to Anthropic's API
+to be read and answered once; Anthropic does not train on API data. Every
+intake call and every press of "Read email now" is written to the site's audit
+trail with the caller's address, and both are rate-limited.
+
 ## What the site does with each PDF
 - **Partner PO** → new job: partner, PO #, address, apartment, description, work lines, the PO's date onto the schedule. PDF attached to the job.
 - **PO already a job** (typed by hand or uploaded from the phone) → the PDF is attached to that job, nothing new is made.

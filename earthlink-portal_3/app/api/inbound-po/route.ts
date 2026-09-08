@@ -15,7 +15,7 @@ import { type PoItem, type PactPoFields } from "@/lib/parsePactPo";
 import { readPoOrProposalPages } from "@/lib/parsePactProposal";
 import { normUnit, unitFor } from "@/lib/priceBook";
 import { findDupe, DUPE_COLS, type PoLike } from "@/lib/po";
-import { readPoSmart } from "@/lib/smartPo";
+import { readPoSmart, SMART_TIMEOUT_MS } from "@/lib/smartPo";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -30,6 +30,27 @@ type Result = { name: string; status: "created" | "duplicate" | "skipped" | "err
 export async function GET() {
   return NextResponse.json({ configured: configured() });
 }
+
+// ---- safety rails ----
+// who is calling, for the log
+const callerIp = (req: Request) => (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || req.headers.get("x-real-ip") || "unknown";
+// no caller may hit the intake more than 120 times an hour — the Gmail
+// script needs a handful; anything past that is a runaway or a stranger
+const calls = new Map<string, number[]>();
+const overLimit = (ip: string, perHour = 120) => {
+  const now = Date.now();
+  const kept = (calls.get(ip) || []).filter((t) => now - t < 3600_000);
+  kept.push(now); calls.set(ip, kept);
+  return kept.length > perHour;
+};
+// every intake call is written to the audit trail (best effort — the table
+// exists once RUN_ME.sql has been run) and to the server log
+const audit = async (action: string, after: Record<string, unknown>, recordId?: string) => {
+  console.log(`[intake] ${action} ${JSON.stringify(after).slice(0, 600)}`);
+  try {
+    await rest("audit_log", { method: "POST", body: JSON.stringify({ user_id: null, action, table_name: "pact_jobs", record_id: recordId || null, before: null, after }) });
+  } catch { /* no audit table yet */ }
+};
 
 // the key is compared in constant time — a guessed prefix must not answer faster
 const keyOk = (given: string) => {
@@ -68,7 +89,7 @@ const nextInvoiceNo = async (): Promise<string> => {
   return String(Math.max(568, ...nums) + 1);
 };
 
-const intakeOne = async (att: Att, mail: Body): Promise<Result> => {
+const intakeOne = async (att: Att, mail: Body, deadline: number): Promise<Result> => {
   const name = safeName(att.name || "");
   let bytes: Uint8Array;
   try { bytes = new Uint8Array(Buffer.from(att.base64 || "", "base64")); } catch { return { name, status: "skipped", reason: "attachment wasn't readable" }; }
@@ -102,8 +123,11 @@ const intakeOne = async (att: Att, mail: Body): Promise<Result> => {
     return { name, status: "skipped", reason: "doesn't look like a partner PO" };
   }
 
-  // rules first, Claude on top when it is switched on and agrees with the page
-  const smart = await readPoSmart(bytes, text, readPoOrProposalPages(pages));
+  // rules first, Claude on top when it is switched on and agrees with the page —
+  // within whatever time this request has left, so a slow read can never
+  // take the PO down with it
+  const left = deadline - Date.now();
+  const smart = await readPoSmart(bytes, text, readPoOrProposalPages(pages), undefined, Math.min(SMART_TIMEOUT_MS, left));
   const f: PactPoFields & { taxPct?: number } = smart.fields;
   if (!f.po || (!f.partner && !f.address && !f.desc)) return { name, status: "skipped", reason: "no PO number / partner found — upload it on the PACT tab to fill in by hand" };
   const po = f.po.trim();
@@ -170,11 +194,22 @@ export async function POST(req: Request) {
   if (!configured()) {
     return NextResponse.json({ configured: false, error: "Email intake isn't set up — add PO_INTAKE_KEY and SUPABASE_SERVICE_ROLE_KEY in Vercel" }, { status: 501 });
   }
-  if (!keyOk(req.headers.get("x-intake-key") || "")) return NextResponse.json({ error: "Wrong intake key" }, { status: 401 });
+  const ip = callerIp(req);
+  if (overLimit(ip)) { console.warn(`[intake] rate limit hit from ${ip}`); return NextResponse.json({ error: "Too many calls — try again in a while" }, { status: 429 }); }
+  if (!keyOk(req.headers.get("x-intake-key") || "")) {
+    console.warn(`[intake] wrong key from ${ip}`);
+    return NextResponse.json({ error: "Wrong intake key" }, { status: 401 });
+  }
   const body = (await req.json().catch(() => null)) as Body | null;
   if (!body) return NextResponse.json({ error: "Send JSON: { from, subject, date, attachments: [{ name, base64 }] }" }, { status: 400 });
   const atts = (body.attachments || []).filter((a) => a && /\.pdf$/i.test(a.name || "") && a.base64);
+  // the whole request must answer inside the server's limit
+  const deadline = Date.now() + 52_000;
   const results: Result[] = [];
-  for (const a of atts.slice(0, 10)) results.push(await intakeOne(a, body));
+  for (const a of atts.slice(0, 10)) results.push(await intakeOne(a, body, deadline));
+  await audit("email_intake", {
+    ip, from: String(body.from || "").slice(0, 80), subject: String(body.subject || "").slice(0, 120), date: String(body.date || "").slice(0, 40),
+    results: results.map((r) => ({ name: r.name, status: r.status, po: r.po, readBy: r.readBy, reason: r.reason })),
+  }, results.find((r) => r.jobId)?.jobId);
   return NextResponse.json({ ok: true, results, note: atts.length === 0 ? "no PDF attachments" : undefined });
 }

@@ -89,14 +89,32 @@ export function mergeSmart(rules: PactPoFields & { taxPct?: number }, s: SmartPo
 
 export const smartConfigured = () => !!process.env.ANTHROPIC_API_KEY;
 
-// the call itself — swapped out in tests
-export async function askClaude(pdf: Uint8Array): Promise<SmartPo | null> {
+// Only a partner purchase order is ever shown to Claude — never a NYCHA
+// release, a payroll sheet, an invoice, a balance sheet, a photo. This is
+// the gate every path goes through before the smart reader is even asked.
+export const looksLikePactPo = (text: string): boolean => {
+  const t = text || "";
+  if (t.trim().length < 20) return false;
+  if (/Blanket\s+Release/i.test(t) && /NYCHA|Supply\s+Management/i.test(t)) return false;
+  if (/certified\s+payroll|WH-347|social\s+security|gross\s+wages|statement\s+of\s+compliance/i.test(t)) return false;
+  if (/balance\s+sheet|profit\s+(?:and|&)\s+loss|income\s+statement|form\s+w-?[29]\b|1099/i.test(t)) return false;
+  return /purchase\s*order|\bP\.?\s*O\.?\s*(?:no|#|number|:)|work\s*order/i.test(t);
+};
+
+// the call itself — swapped out in tests. Time-boxed: the server has 60
+// seconds for the whole request, so a slow read gives way to the rules
+// read rather than taking the PO down with it.
+export const SMART_TIMEOUT_MS = 40_000;
+export async function askClaude(pdf: Uint8Array, timeoutMs: number = SMART_TIMEOUT_MS): Promise<SmartPo | null> {
   const { default: Anthropic } = await import("@anthropic-ai/sdk");
   const { zodOutputFormat } = await import("@anthropic-ai/sdk/helpers/zod");
-  const client = new Anthropic();
+  const client = new Anthropic({ timeout: timeoutMs, maxRetries: 0 });
   const res = await client.messages.parse({
     model: "claude-opus-5",
     max_tokens: 8000,
+    // a form fill from a one-page PO doesn't need deep thought — medium keeps
+    // it well inside the server's time limit
+    output_config: { effort: "medium", format: zodOutputFormat(PoSchema) },
     system: SMART_PO_SYSTEM,
     messages: [{
       role: "user",
@@ -105,7 +123,6 @@ export async function askClaude(pdf: Uint8Array): Promise<SmartPo | null> {
         { type: "text", text: "Fill the form from this purchase order." },
       ],
     }],
-    output_config: { format: zodOutputFormat(PoSchema) },
   });
   if (res.stop_reason === "refusal") return null;
   return res.parsed_output ?? null;
@@ -115,11 +132,18 @@ export async function askClaude(pdf: Uint8Array): Promise<SmartPo | null> {
 // answer agrees with the page. Never throws — a failed smart read is a rules read.
 export async function readPoSmart(
   pdf: Uint8Array, text: string, rules: PactPoFields & { taxPct?: number },
-  ask: (pdf: Uint8Array) => Promise<SmartPo | null> = askClaude,
+  ask: (pdf: Uint8Array, timeoutMs: number) => Promise<SmartPo | null> = askClaude,
+  timeoutMs: number = SMART_TIMEOUT_MS,
 ): Promise<SmartRead> {
   if (!smartConfigured()) return { fields: rules, readBy: "rules" };
+  if (!looksLikePactPo(text)) return { fields: rules, readBy: "rules", note: "not a partner PO — the smart reader is only shown POs" };
+  if (timeoutMs < 8_000) return { fields: rules, readBy: "rules", note: "no time left in this request — use Re-read the PO to read it with Claude" };
   try {
-    const s = await ask(pdf);
+    // the reader's own clock, so a hung call can never outlive the request
+    const s = await Promise.race<SmartPo | null>([
+      ask(pdf, timeoutMs),
+      new Promise<null>((_, rej) => setTimeout(() => rej(new Error("the smart reader took too long")), timeoutMs + 2_000)),
+    ]);
     if (!s) return { fields: rules, readBy: "rules", note: "the smart reader declined — used the rules read" };
     const why = smartAgrees(s, text);
     if (why) return { fields: rules, readBy: "rules", note: `the smart read didn't match the page (${why}) — used the rules read` };

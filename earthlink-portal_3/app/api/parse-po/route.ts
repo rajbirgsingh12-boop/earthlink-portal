@@ -50,8 +50,9 @@ export async function POST(req: Request) {
     const rules = readPoOrProposalPages(pages);
     // our own proposal letters read perfectly by the rules — Claude reads the partners' POs
     const text = pages.map((it) => it.map((x) => x.str || "").join(" ")).join("\n");
-    const smart = /Blanket\s+Release/i.test(text) ? { fields: rules, readBy: "rules" as const }
-      : await readPoSmart(new Uint8Array(buf), text, rules);
+    // readPoSmart only ever shows Claude a partner PO — releases, payroll,
+    // statements and anything else stay with the rules
+    const smart = await readPoSmart(new Uint8Array(buf), text, rules);
     return NextResponse.json({ ok: true, fields: smart.fields, readBy: smart.readBy, ...(smart.note ? { note: smart.note } : {}) });
   } catch (e) {
     return NextResponse.json({ error: `Couldn't open the PDF: ${e instanceof Error ? e.message.slice(0, 120) : "unknown"}` }, { status: 422 });

@@ -495,3 +495,41 @@ drop trigger if exists pact_jobs_audit on pact_jobs;
 create trigger pact_jobs_audit
   after insert or update or delete on pact_jobs
   for each row execute function public.audit_pact_jobs();
+
+-- 13) One PO is one job — the database says so too.
+-- The site checks before it saves, but two uploads landing in the same
+-- second (the phone and the email intake, say) could each pass that check.
+-- This makes the second one fail with a plain message instead. Canceled
+-- jobs don't count, so a PO can be re-made after its job was canceled.
+-- the same stripping the site does: labels off the front ("PO# 09001" →
+-- "9001"), then everything that isn't a letter or digit, then leading zeros
+create or replace function public.norm_po(v text) returns text
+language sql immutable as $$
+  select ltrim(regexp_replace(regexp_replace(lower(coalesce(v, '')),
+    '^\s*(?:(?:purchase\s*order|p\.?\s*o\.?|work\s*order|w\.?o\.?|order|no\.?|number|#)\s*[:#.-]*\s*)+', '', 'i'),
+    '[^a-z0-9]', '', 'g'), '0');
+$$;
+create or replace function public.pact_jobs_no_dupes() returns trigger
+language plpgsql as $$
+declare
+  k text := public.norm_po(new.po_number);
+  twin uuid;
+begin
+  if k = '' then k := public.norm_po(new.job_number); end if;
+  if k = '' or coalesce(new.canceled, false) then return new; end if;
+  select id into twin from pact_jobs
+   where id <> new.id and not coalesce(canceled, false)
+     and (public.norm_po(po_number) = k or public.norm_po(job_number) = k)
+   limit 1;
+  if twin is not null then
+    raise exception 'PO % is already a job (one PO is one job — open that one)', coalesce(nullif(new.po_number, ''), new.job_number)
+      using errcode = 'unique_violation';
+  end if;
+  return new;
+end $$;
+drop trigger if exists pact_jobs_no_dupes on pact_jobs;
+create trigger pact_jobs_no_dupes
+  before insert or update of po_number, job_number, canceled on pact_jobs
+  for each row execute function public.pact_jobs_no_dupes();
+create index if not exists pact_jobs_norm_po on pact_jobs (public.norm_po(po_number));
+create index if not exists pact_jobs_norm_job on pact_jobs (public.norm_po(job_number));

@@ -31,6 +31,13 @@ function setup() {
 }
 
 function checkInbox() {
+  // one run at a time — two overlapping runs could send the same PO twice
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) { Logger.log("Another run is still going — skipped this one."); return; }
+  try { checkInboxNow(); } finally { lock.releaseLock(); }
+}
+
+function checkInboxNow() {
   var label = GmailApp.getUserLabelByName(LABEL) || GmailApp.createLabel(LABEL);
   var threads = GmailApp.search("has:attachment filename:pdf " + LOOKBACK + " -label:\"" + LABEL + "\"", 0, 25);
   threads.forEach(function (thread) {

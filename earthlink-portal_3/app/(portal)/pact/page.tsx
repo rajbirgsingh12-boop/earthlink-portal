@@ -14,6 +14,7 @@ import CardToolbar from "@/components/CardToolbar";
 import Modal from "@/components/Modal";
 import Disclosure from "@/components/Disclosure";
 import { useLive } from "@/lib/useLive";
+import { findDupe, DUPE_COLS } from "@/lib/po";
 import { COMPANY } from "@/lib/company";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
@@ -681,22 +682,14 @@ export default function Pact() {
       const amount = unreadable ? 0 : f.amount;
       // this PO may already be a job — uploading it again must not make a second
       // one (a hand-typed job carries the PO in job_number, so check both)
-      // a letter with no PO number is still the same job if it's the same
-      // address for the same money — otherwise every upload makes a new one
-      if (!f.po && f.address) {
-        const { data: same } = await sb().from("pact_jobs").select("id,amount,address").ilike("address", `${f.address.slice(0, 30)}%`).limit(20);
-        const hit = ((same || []) as Job[]).find((x) => Math.abs(Number(x.amount || 0) - amount) < 0.02);
-        if (hit) {
-          setBusy(false);
-          await load();
-          setOpenId(hit.id); showDetailsFor(hit.id);
-          flash("That proposal is already here — opened it (nothing new was created)");
-          return;
-        }
-      }
-      if (f.po) {
-        const { data: dupes } = await sb().from("pact_jobs").select("id,attachments,description").or(`po_number.eq.${f.po},job_number.eq.${f.po}`).limit(1);
-        const dupe = (dupes || [])[0] as Job | undefined;
+      // one PO is one job: the number is matched in its stripped form ("PO
+      // 8388" = "8388"), and a letter with no number — or a misread one — is
+      // still the same job when it's the same address for the same money.
+      // If the list can't be read, nothing is made rather than risk a twin.
+      {
+        const { data: all, error: le } = await sb().from("pact_jobs").select(DUPE_COLS).order("created_at", { ascending: false }).limit(5000);
+        if (le) { setBusy(false); flash(`Couldn't check for duplicates (${le.message.slice(0, 60)}) — nothing was created, try again`); return; }
+        const dupe = findDupe((all || []) as Job[], { po: f.po, address: f.address, property_unit: f.punit, amount });
         if (dupe) {
           const atts = dupe.attachments || [];
           if (!atts.some((a) => a.name === file.name)) {
@@ -716,9 +709,10 @@ export default function Pact() {
           setBusy(false);
           await load();
           setOpenId(dupe.id); showDetailsFor(dupe.id);
+          const label = f.po ? `PO ${f.po}` : "That proposal";
           flash(grew
-            ? `PO ${f.po} is already here — picked up the PO's full wording (tap Price from list to refresh the lines)`
-            : `PO ${f.po} is already here — opened it (nothing new was created)`);
+            ? `${label} is already here — picked up the PO's full wording (tap Price from list to refresh the lines)`
+            : `${label} is already here${dupe.canceled ? " (canceled)" : ""} — opened it, nothing new was created`);
           return;
         }
       }
@@ -786,6 +780,18 @@ export default function Pact() {
 
   const addJob = async () => {
     if (!draft.partner.trim() || !draft.description.trim()) { flash("Partner and description are the minimum"); return; }
+    // a typed PO number that's already a job opens that job instead
+    if (draft.job_number.trim()) {
+      const { data: all, error: le } = await sb().from("pact_jobs").select(DUPE_COLS).limit(5000);
+      if (le) { flash(`Couldn't check for duplicates (${le.message.slice(0, 60)}) — nothing was created, try again`); return; }
+      const dupe = findDupe((all || []) as Job[], { po: draft.job_number });
+      if (dupe) {
+        setAddOpen(false); await load();
+        setOpenId(dupe.id); showDetailsFor(dupe.id);
+        flash(`PO ${draft.job_number.trim()} is already here${dupe.canceled ? " (canceled)" : ""} — opened it, nothing new was created`);
+        return;
+      }
+    }
     const { error } = await sb().from("pact_jobs").insert({
       partner: draft.partner.trim(), development: draft.development.trim(), job_number: draft.job_number.trim(),
       description: draft.description.trim(), amount: parseNum(draft.amount),
@@ -972,8 +978,9 @@ export default function Pact() {
     try {
       const { parsePactProposalDocx } = await import("@/lib/parsePactProposal");
       // one read up front: dupes, partner lookup, and the invoice number sequence
-      const { data: priorRows } = await sb().from("pact_jobs").select("partner,bill_to,po_number,job_number,invoice_number");
-      const prior = (priorRows || []) as { partner: string; bill_to?: string; po_number?: string; job_number?: string; invoice_number?: string }[];
+      const { data: priorRows, error: le } = await sb().from("pact_jobs").select(`partner,bill_to,invoice_number,${DUPE_COLS}`).limit(5000);
+      if (le) { flash(`Couldn't check for duplicates (${le.message.slice(0, 60)}) — nothing was created, try again`); return; }
+      const prior = (priorRows || []) as (Job & { partner: string; bill_to?: string; invoice_number?: string })[];
       let seq = Math.max(568, ...prior
         .map((p) => (/^\d+$/.test(String(p.invoice_number || "").trim()) ? parseInt(String(p.invoice_number).trim(), 10) : NaN))
         .filter((n) => Number.isFinite(n)));
@@ -985,11 +992,9 @@ export default function Pact() {
         try {
           const parsed = parsePactProposalDocx(await f.arrayBuffer());
           if (!parsed.readable || parsed.rows.length === 0) { failed += 1; continue; }
-          const dupe = parsed.po && (
-            prior.some((p) => p.po_number === parsed.po || p.job_number === parsed.po) ||
-            made.some((m) => m.po_number === parsed.po)
-          );
-          if (dupe) { skipped += 1; continue; }
+          // already a job — on file, or made a moment ago from this same folder
+          const probe = { po: parsed.po, address: parsed.address, property_unit: parsed.punit, amount: parsed.amount };
+          if (findDupe(prior, probe) || findDupe(made, probe)) { skipped += 1; continue; }
           let partner = "";
           const street = parsed.billBlock.match(/\d+\s+[A-Za-z .]+/)?.[0] || "";
           if (street) {

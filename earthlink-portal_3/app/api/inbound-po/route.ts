@@ -14,6 +14,7 @@ import { timingSafeEqual } from "crypto";
 import { type PoItem, type PactPoFields } from "@/lib/parsePactPo";
 import { readPoOrProposalPages } from "@/lib/parsePactProposal";
 import { normUnit, unitFor } from "@/lib/priceBook";
+import { findDupe, DUPE_COLS, type PoLike } from "@/lib/po";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -42,7 +43,7 @@ const auth = () => ({ apikey: env("SUPABASE_SERVICE_ROLE_KEY"), Authorization: `
 const rest = (path: string, init: RequestInit = {}) =>
   fetch(`${base()}/rest/v1/${path}`, { ...init, headers: { ...auth(), "Content-Type": "application/json", ...(init.headers || {}) }, cache: "no-store" });
 
-type JobRow = { id: string; attachments?: { name: string; path: string }[] | null; description?: string };
+type JobRow = PoLike & { id: string; attachments?: { name: string; path: string }[] | null; description?: string };
 
 const safeName = (n: string) => (n || "po.pdf").replace(/[\\/]/g, "_").replace(/\s+/g, " ").trim().slice(0, 120) || "po.pdf";
 
@@ -103,13 +104,18 @@ const intakeOne = async (att: Att, mail: Body): Promise<Result> => {
   if (!f.po || (!f.partner && !f.address && !f.desc)) return { name, status: "skipped", reason: "no PO number / partner found — upload it on the PACT tab to fill in by hand" };
   const po = f.po.trim();
 
-  // this PO may already be a job (typed by hand, or uploaded from the phone)
-  const dq = await rest(`pact_jobs?or=(po_number.eq.${encodeURIComponent(po)},job_number.eq.${encodeURIComponent(po)})&select=id,attachments,description&limit=1`);
-  const dupe = dq.ok ? ((await dq.json()) as JobRow[])[0] : undefined;
+  // this PO may already be a job — typed by hand, uploaded from the phone,
+  // or forwarded twice. The number is matched in its stripped form, and a
+  // misread number still matches on the same address for the same money.
+  // If the list can't be read, nothing is made: a missed job is recoverable
+  // (the email stays unlabeled and comes back next run), a duplicate isn't.
+  const dq = await rest(`pact_jobs?select=${DUPE_COLS}&order=created_at.desc&limit=5000`);
+  if (!dq.ok) return { name, status: "error", po, reason: "couldn't read the job list to check for duplicates — will retry" };
+  const dupe = findDupe((await dq.json()) as JobRow[], { po, address: f.address, property_unit: f.punit, amount: f.amount });
   if (dupe) {
     const atts = dupe.attachments || [];
     if (!atts.some((a) => a.name === name)) await attachPdf(dupe.id, name, bytes, atts);
-    return { name, status: "duplicate", po, jobId: dupe.id, reason: `PO ${po} is already a job — the PDF was attached to it` };
+    return { name, status: "duplicate", po, jobId: dupe.id, reason: `PO ${po} is already job ${dupe.po_number || dupe.job_number || dupe.id} — the PDF was attached to it, nothing new was made` };
   }
 
   const items = f.rows.map((r) => ({

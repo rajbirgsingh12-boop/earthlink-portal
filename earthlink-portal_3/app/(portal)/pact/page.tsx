@@ -716,10 +716,9 @@ export default function Pact() {
           return;
         }
       }
-      const poFlags = [
-        ...(f.poStatus === "NOT APPROVED" ? ["The PO is stamped NOT APPROVED on the partner's system — don't start work until it is"] : []),
-        ...(f.warnings || []),
-      ];
+      // a "NOT APPROVED" stamp is normal — the partner approves after the
+      // work is done — so only real reading calls are flagged
+      const poFlags = [...(f.warnings || [])];
       const bkNow = await priceBook();
       const seed: Item[] = unreadable ? []
         : f.rows.length > 0

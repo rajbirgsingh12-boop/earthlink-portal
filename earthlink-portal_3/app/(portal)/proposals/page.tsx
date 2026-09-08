@@ -682,16 +682,16 @@ export default function Proposals() {
         ))}
       </div>
       <input className="field mb-3" placeholder="Search name, development, address, release #…" value={listQ} onChange={(e) => setListQ(e.target.value)} />
-      <div className="card divide-y divide-rulesoft">
-        {list
+      {(() => {
+        const shown = list
           .filter((p) => listFilter === "all" || p.status === listFilter)
           .filter((p) => {
             if (!listQ) return true;
             const c = contracts.find((x) => x.id === p.contract_id);
             return `${p.number} ${p.job} ${p.client_name} ${p.development || ""} ${p.address || ""} ${p.apt || ""} ${p.stairhall || ""} ${p.release_number || ""} ${c?.number || ""}`
               .toLowerCase().includes(listQ.toLowerCase());
-          })
-          .map((p) => (
+          });
+        const row = (p: Proposal) => (
           <div key={p.id} className="flex items-center gap-2 p-3.5">
             <button className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left" onClick={() => openEditor(p)}>
               <div className="min-w-0">
@@ -716,9 +716,32 @@ export default function Proposals() {
               { label: "Delete…", destructive: true, onSelect: () => deleteProposal(p) }, // deleteProposal keeps its own confirm
             ]} />
           </div>
-        ))}
-        {list.length === 0 && <div className="p-5 text-sm text-inksoft">No walk sheets yet. Tap + New NYCHA walk sheet, load the contract price book once, and fill quantities as you walk the unit.</div>}
-      </div>
+        );
+        // one card per contract, in contract order; anything not tied to a
+        // contract (the old free-form proposals) sits in its own card at the end
+        const groups = [
+          ...[...contracts].sort((a, b) => String(a.number).localeCompare(String(b.number), undefined, { numeric: true })).map((c) => ({ key: c.id, label: c.name && c.name !== c.number ? `Contract ${c.number} · ${c.name}` : `Contract ${c.number}`, rows: shown.filter((p) => p.contract_id === c.id) })),
+          { key: "none", label: "Not tied to a contract", rows: shown.filter((p) => !p.contract_id || !contracts.some((c) => c.id === p.contract_id)) },
+        ].filter((g) => g.rows.length > 0);
+        return (
+          <>
+            {groups.map((g) => (
+              <div key={g.key} className="mb-4">
+                <div className="mb-1.5 flex items-baseline justify-between gap-2">
+                  <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">{g.label}</div>
+                  <div className="font-mono text-[11px] text-inksoft">{g.rows.length} · {fmt(g.rows.reduce((t, p) => t + (Number(p.total) || 0), 0))}</div>
+                </div>
+                <div className="card divide-y divide-rulesoft">{g.rows.map(row)}</div>
+              </div>
+            ))}
+            {groups.length === 0 && (
+              <div className="card p-5 text-sm text-inksoft">
+                {list.length === 0 ? "No walk sheets yet. Tap + New NYCHA walk sheet, load the contract price book once, and fill quantities as you walk the unit." : "Nothing matches that search."}
+              </div>
+            )}
+          </>
+        );
+      })()}
 
       {relAsk && (
         <div className="fixed inset-0 z-40 grid place-items-center bg-ink/50 px-4" onClick={() => setRelAsk(null)}>

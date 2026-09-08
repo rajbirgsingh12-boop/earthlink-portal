@@ -132,10 +132,9 @@ const intakeOne = async (att: Att, mail: Body): Promise<Result> => {
   const when = mail.date ? ` on ${String(mail.date).slice(0, 40)}` : "";
   const who = mail.from ? ` from ${String(mail.from).replace(/<[^>]*>/g, "").trim().slice(0, 60)}` : "";
   const subj = mail.subject ? ` — "${String(mail.subject).slice(0, 80)}"` : "";
-  const flags = [
-    ...(f.poStatus === "NOT APPROVED" ? ["⚠ The PO is stamped NOT APPROVED on the partner's system — don't start work until it is"] : []),
-    ...(f.warnings || []).map((w) => `⚠ ${w}`),
-  ];
+  // (a "NOT APPROVED" stamp is normal — the partner approves after the work
+  // is done — so it is read but never flagged)
+  const flags = (f.warnings || []).map((w) => `⚠ ${w}`);
   const notes = `📧 Came in by email${who}${when}${subj}. Read automatically — check the work lines before pricing or sending anything.${flags.length ? ` ${flags.join(". ")}.` : ""}`;
   const row = {
     partner: f.partner, development: "", job_number: po, description: desc, amount,

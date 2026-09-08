@@ -662,18 +662,17 @@ export default function Pact() {
   const isEmailJob = (j: Job) => (j.notes || "").startsWith("📧");
   // the day the EMAIL arrived, from the note the intake wrote
   const emailDay = (j: Job) => (j.notes || "").match(/\bon (\d{4}-\d{2}-\d{2})/)?.[1] || (j.created_at || "").slice(0, 10);
-  // delete the email imports whose email is older than today — they were
-  // handled by hand before the intake existed
-  const purgeOldEmailJobs = async () => {
-    const old = jobs.filter((j) => isEmailJob(j) && emailDay(j) < today());
-    if (old.length === 0) { flash("No email imports older than today"); return; }
-    const list = old.slice(0, 8).map((j) => `PO ${j.po_number || j.job_number || "?"} (${emailDay(j)})`).join(", ");
-    if (!window.confirm(`Delete ${old.length} email import${old.length === 1 ? "" : "s"} not from today? ${list}${old.length > 8 ? "…" : ""}\n\nThe jobs and their files disappear for good.`)) return;
+  // delete every job that came in by email — a clean slate for the intake
+  const purgeEmailJobs = async () => {
+    const all = jobs.filter(isEmailJob);
+    if (all.length === 0) { flash("No email imports to delete"); return; }
+    const list = all.slice(0, 8).map((j) => `PO ${j.po_number || j.job_number || "?"} (${emailDay(j)})`).join(", ");
+    if (!window.confirm(`Delete all ${all.length} email import${all.length === 1 ? "" : "s"}? ${list}${all.length > 8 ? "…" : ""}\n\nThe jobs and their files disappear for good. Jobs you made by hand or from your phone are not touched.`)) return;
     setBusy(true);
     let done = 0;
-    for (const j of old) if (await deleteJobNow(j)) done += 1;
+    for (const j of all) if (await deleteJobNow(j)) done += 1;
     setBusy(false);
-    flash(`${done} of ${old.length} email import${old.length === 1 ? "" : "s"} deleted`);
+    flash(`${done} of ${all.length} email import${all.length === 1 ? "" : "s"} deleted`);
   };
   // re-read today's email imports from their PDFs with the smart reader
   const rereadTodayEmailJobs = async () => {
@@ -1525,7 +1524,7 @@ export default function Pact() {
               { label: "Proposal template", hidden: !canInvoice, disabled: busy, title: "A blank proposal letter in our layout — fill it in, and uploading it back here builds the job and the invoice", onSelect: blankProposal },
               { label: "Add a job manually", onSelect: () => setAddOpen(!addOpen) },
               { label: `Re-read today's email POs with Claude (${jobs.filter((j) => isEmailJob(j) && emailDay(j) === today() && !j.canceled).length})`, hidden: !canPrice || !jobs.some(isEmailJob), disabled: busy, title: "Every job that came in by email today is rebuilt from its PDF through the smart reader, then the price list", onSelect: rereadTodayEmailJobs },
-              { label: `Delete email imports not from today… (${jobs.filter((j) => isEmailJob(j) && emailDay(j) < today()).length})`, hidden: !canPrice || !jobs.some((j) => isEmailJob(j) && emailDay(j) < today()), disabled: busy, destructive: true, title: "Email imports whose email is older than today — handled by hand before the intake existed", onSelect: purgeOldEmailJobs },
+              { label: `Delete all email imports… (${jobs.filter(isEmailJob).length})`, hidden: !canPrice || !jobs.some(isEmailJob), disabled: busy, destructive: true, title: "Every job that came in by email — hand-made and phone-uploaded jobs are not touched", onSelect: purgeEmailJobs },
             ]} />
           </div>
         </div>

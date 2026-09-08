@@ -691,6 +691,24 @@ export default function Pact() {
     flash(`${claude} re-read by Claude${rules ? `, ${rules} by the rules` : ""}${none ? `, ${none} couldn't be` : ""} — open each and check the lines`);
   };
 
+  // ---------- "Read email now": check the inbox this second ----------
+  const readEmailNow = async () => {
+    setBusy(true);
+    try {
+      const { data: { session } } = await sb().auth.getSession();
+      const r = await fetch("/api/inbound-po/run", { method: "POST", headers: session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {} });
+      const out = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string; threads?: number; created?: number; duplicate?: number; skipped?: number; errors?: number; results?: { name: string; status: string; po?: string; reason?: string }[] };
+      if (!r.ok || !out.ok) { flash(out.error || `Couldn't read the inbox (${r.status})`); return; }
+      await load();
+      const made = out.results?.filter((x) => x.status === "created").map((x) => `PO ${x.po || x.name}`) || [];
+      flash(out.threads === 0
+        ? "Inbox checked — nothing new since the last look"
+        : `Inbox checked — ${out.created} new${made.length ? ` (${made.slice(0, 5).join(", ")}${made.length > 5 ? "…" : ""})` : ""}${out.duplicate ? `, ${out.duplicate} already here` : ""}${out.skipped ? `, ${out.skipped} not POs` : ""}${out.errors ? `, ${out.errors} failed — will retry` : ""}`);
+    } catch (err) {
+      flash(`Couldn't read the inbox (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
+    } finally { setBusy(false); }
+  };
+
   const handlePo = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -1519,6 +1537,7 @@ export default function Pact() {
           </div>
           <div className="flex shrink-0 flex-wrap gap-2">
             <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy} title="A partner PO (PDF) or one of our proposal letters (Word)">📄 Upload PO / proposal</button>
+            <button className="btn btn-ghost min-h-[44px]" onClick={readEmailNow} disabled={busy} title="Check the Gmail inbox for new POs right now instead of waiting for the 10-minute timer">📧 Read email now</button>
             <ActionMenu label="More ways to add" items={[
               { label: "Upload a folder of proposals", hidden: !canInvoice, disabled: busy, title: "Pick a folder of proposal letters — every one becomes a job, then all the invoices download in one zip", onSelect: () => folderRef.current?.click() },
               { label: "Proposal template", hidden: !canInvoice, disabled: busy, title: "A blank proposal letter in our layout — fill it in, and uploading it back here builds the job and the invoice", onSelect: blankProposal },

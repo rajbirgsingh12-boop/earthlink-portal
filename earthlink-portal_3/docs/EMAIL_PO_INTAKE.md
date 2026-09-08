@@ -32,6 +32,16 @@ make it go through again.
 Only emails that arrive from the day you run **setup** onward are looked at —
 everything older is already handled by hand. (Run **setup** again to reset that day.)
 
+## The "📧 Read email now" button
+The PACT tab has a button that checks the inbox right then instead of waiting
+for the timer. It needs the script published as a web address, once:
+1. In the script editor: **Deploy → New deployment** → type **Web app** →
+   Execute as **Me** → Who has access **Anyone** → **Deploy** → copy the Web app URL.
+2. Vercel → Settings → Environment Variables → `GMAIL_INTAKE_URL` = that URL → Redeploy.
+Settings → Health check shows "Read-email button (Gmail web app)" green once it works.
+(Whenever you paste a new version of the script, Deploy → **Manage deployments** →
+edit → New version, so the web address runs the new code.)
+
 ## The smart reader
 With `ANTHROPIC_API_KEY` set in Vercel (Settings → Health check shows "Smart PO
 reader (Claude)" green), Claude reads each PO PDF itself — any partner's layout —

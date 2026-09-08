@@ -8,6 +8,11 @@
 //
 // Setup (once): paste this file, fill SITE and KEY, run "setup" once.
 // Not working? Run "testNow" and read the log (View → Logs / Executions).
+//
+// The "📧 Read email now" button on the site: Deploy → New deployment →
+// Web app → Execute as Me → Who has access: Anyone → Deploy, then put the
+// web app URL in Vercel as GMAIL_INTAKE_URL. The button calls doGet below
+// with the same KEY and the inbox is checked right then.
 // ------------------------------------------------------------------
 
 var SITE = "https://www.earthlink-gc.com";   // the portal's address, no slash at the end
@@ -83,9 +88,27 @@ function checkInbox() {
   try { checkInboxNow(); } finally { lock.releaseLock(); }
 }
 
+// the site's "Read email now" button lands here
+function doGet(e) {
+  var out = { ok: false };
+  var key = (e && e.parameter && e.parameter.key) || "";
+  if (!key || key !== KEY) out.error = "wrong key";
+  else {
+    var lock = LockService.getScriptLock();
+    if (!lock.tryLock(20000)) out.error = "the inbox is already being checked — try again in a minute";
+    else {
+      try { var summary = checkInboxNow(); out = { ok: true, since: sinceDay(), threads: summary.threads, results: summary.results }; }
+      catch (err) { out.error = String(err); }
+      finally { lock.releaseLock(); }
+    }
+  }
+  return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
+}
+
 function checkInboxNow() {
   var label = GmailApp.getUserLabelByName(LABEL) || GmailApp.createLabel(LABEL);
   var threads = GmailApp.search(query(), 0, 25);
+  var summary = { threads: threads.length, results: [] };
   threads.forEach(function (thread) {
     var allOk = true, sentAny = false;
     thread.getMessages().forEach(function (msg) {
@@ -112,8 +135,12 @@ function checkInboxNow() {
       if (!out.ok || !out.results) { allOk = false; return; }
       // a save error leaves the thread unlabeled so the next run tries again
       if (out.results.some(function (r) { return r.status === "error"; })) allOk = false;
-      out.results.forEach(function (r) { Logger.log("    " + r.name + ": " + r.status + (r.po ? " PO " + r.po : "") + (r.startDate ? " → " + r.startDate : "") + (r.reason ? " — " + r.reason : "")); });
+      out.results.forEach(function (r) {
+        Logger.log("    " + r.name + ": " + r.status + (r.po ? " PO " + r.po : "") + (r.startDate ? " → " + r.startDate : "") + (r.reason ? " — " + r.reason : ""));
+        summary.results.push({ name: r.name, status: r.status, po: r.po || "", reason: r.reason || "" });
+      });
     });
     if (sentAny && allOk) thread.addLabel(label);
   });
+  return summary;
 }

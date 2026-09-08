@@ -151,12 +151,15 @@ export default function Pact() {
   const deleteJob = async (j: Job) => {
     const label = [j.po_number || j.job_number, j.partner].filter(Boolean).join(" — ");
     if (!window.confirm(`Delete PO ${label}? The job and its photos/documents disappear for good. This can't be undone.`)) return;
+    await deleteJobNow(j);
+  };
+  const deleteJobNow = async (j: Job): Promise<boolean> => {
     // the row goes first — if its delete fails the files are untouched; and the
     // file list comes fresh from the database, not this device's possibly-stale copy
     const { data: freshRow } = await sb().from("pact_jobs").select("attachments").eq("id", j.id).single();
     const paths = (((freshRow as { attachments?: { path: string }[] } | null)?.attachments) || j.attachments || []).map((a) => a.path);
     const { error } = await sb().from("pact_jobs").delete().eq("id", j.id);
-    if (error) { flash(upgradeHint(error.message)); return; }
+    if (error) { flash(upgradeHint(error.message)); return false; }
     let cleanupFailed = false;
     if (paths.length > 0) {
       const { error: se } = await sb().storage.from("docs").remove(paths);
@@ -167,6 +170,7 @@ export default function Pact() {
     if (invJob?.id === j.id) setInvJob(null);
     setJobs((prev) => prev.filter((x) => x.id !== j.id));
     flash(cleanupFailed ? "Job deleted — some of its files couldn't be cleaned up (they still count toward storage)" : "Job deleted");
+    return true;
   };
 
   // ---------- PO upload: the job builds itself from the partner's PO ----------
@@ -578,6 +582,116 @@ export default function Pact() {
     } finally { setBusy(false); }
   };
 
+  // What a PO's read turns into on the job: its rows as lines, and whatever
+  // the price list already answers — plaster brings its primer and paint with
+  // it — filled in, priced. A price the PO itself states is never touched:
+  // that one is the agreement. A PO that totals a dollar hasn't told us the
+  // money — the priced lines have.
+  const linesFromPo = async (f: PactPoFields, unreadable: boolean, amount: number): Promise<{ items: Item[]; amount: number }> => {
+    const bkNow = await priceBook();
+    const seed: Item[] = unreadable ? []
+      : f.rows.length > 0
+        ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: normUnit(r.uom || unitFor(r.description)), unit_price: r.unit_price, ...(r.base ? { base: r.base } : {}) }))
+          // a placeholder row that names more than one trade ("scrape plaster
+          // paint") is dropped: keeping it would leave a dollar line sitting
+          // beside the three real lines it stands for
+          .filter((it) => realPrice(it.unit_price) || keysIn(it.description, bkNow).length < 2)
+        : (f.desc || f.scope) ? [{ description: (f.desc || f.scope).slice(0, 120), qty: 1, unit: unitFor(f.desc || f.scope), unit_price: 0 }] : [];
+    // when the PO priced its own lines, that IS the deal — fill the gaps but
+    // never add prep work it didn't ask for
+    const poPriced = seed.some((it) => realPrice(it.unit_price));
+    // the same words must only be priced once — a PO often repeats its
+    // description as its scope, and counting both doubles every quantity
+    const said = [...new Set([f.desc, f.scope, f.rows.map((r) => r.description).join(" ")]
+      .map((x) => (x || "").trim()).filter(Boolean))];
+    const priced = (await priceFromList(said.join(". "), seed, { fillOnly: poPriced, prepOnly: poPriced }))
+      // a placeholder the list had no answer for is work still to be priced —
+      // showing it as a dollar would put "$1.00" on a proposal
+      .map((it) => (Number(it.unit_price) === PLACEHOLDER ? { ...it, unit_price: 0 } : it));
+    const lineSub = priced.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
+    return { items: priced, amount: amount > PLACEHOLDER || lineSub <= 0 ? amount : Math.round(lineSub * 1.08875 * 100) / 100 };
+  };
+
+  // ---------- re-read a job's PO from its attached PDF ----------
+  // The job is rebuilt from the PDF the way a fresh upload would build it —
+  // through the server's reader (Claude when it is switched on), then the
+  // price list. Everything the PO says is replaced; photos and the PDF stay.
+  const smartOn = async (): Promise<boolean> => {
+    try { return !!((await (await fetch("/api/parse-po")).json()) as { smart?: boolean }).smart; } catch { return false; }
+  };
+  const rereadJob = async (j: Job, quiet = false): Promise<"claude" | "rules" | "none"> => {
+    const pdf = (j.attachments || []).find((a) => /\.pdf$/i.test(a.name));
+    if (!pdf) { if (!quiet) flash("No PO PDF on this job to re-read"); return "none"; }
+    const { data: signed, error: se } = await sb().storage.from("docs").createSignedUrl(pdf.path, 600);
+    if (se || !signed) { if (!quiet) flash(`Couldn't fetch the PDF (${se?.message || "no link"})`); return "none"; }
+    const res0 = await fetch(signed.signedUrl).catch(() => null);
+    if (!res0 || !res0.ok) { if (!quiet) flash("Couldn't download the PDF"); return "none"; }
+    const bytes = await res0.blob();
+    const { data: { session } } = await sb().auth.getSession();
+    const res = await fetch("/api/parse-po", {
+      method: "POST",
+      headers: { "Content-Type": "application/pdf", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) },
+      body: bytes,
+    });
+    if (!res.ok) { if (!quiet) flash(`The reader said ${res.status}`); return "none"; }
+    const out = (await res.json()) as { fields: PactPoFields & { taxPct?: number }; readBy?: "claude" | "rules"; note?: string };
+    const f = out.fields;
+    const unreadable = !f.po && !f.partner && !f.desc;
+    if (unreadable) { if (!quiet) flash("The PDF couldn't be read — nothing changed"); return "none"; }
+    const amount = f.amount;
+    const { items, amount: amountOut } = await linesFromPo(f, false, amount);
+    const stamp = `${out.readBy === "claude" ? "🔁 Re-read by Claude" : "🔁 Re-read by the rules"} ${prettyDate(localISO(new Date()))}${out.note ? ` (${out.note})` : ""}`;
+    const flags = (f.warnings || []).map((w) => `⚠ ${w}`);
+    const notes = `${(j.notes || "").trim()}${(j.notes || "").trim() ? "\n" : ""}${stamp}${flags.length ? `\n${flags.join("\n")}` : ""}`;
+    const patchRow: Partial<Job> = {
+      description: (f.desc || f.scope).slice(0, 120), amount: amountOut, items,
+      po_date: f.poDate, address: f.address, property_unit: f.punit, contact: f.contact, bill_to: f.billBlock, notes,
+      ...(f.partner ? { partner: f.partner } : {}),
+      ...(f.po ? { po_number: f.po, job_number: f.po } : {}),
+      ...(f.taxPct !== undefined ? { tax_pct: f.taxPct } : {}),
+      ...(f.accessDate && !j.work_done ? { start_date: f.accessDate } : {}),
+    };
+    const { error } = await sb().from("pact_jobs").update(patchRow).eq("id", j.id);
+    if (error) { if (!quiet) flash(upgradeHint(error.message)); return "none"; }
+    setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, ...patchRow } : x)));
+    if (!quiet) flash(`PO ${f.po || ""} re-read ${out.readBy === "claude" ? "by Claude" : "by the rules"} — ${items.length} line${items.length === 1 ? "" : "s"}`);
+    return out.readBy === "claude" ? "claude" : "rules";
+  };
+
+  // ---------- the jobs that came in by email ----------
+  const isEmailJob = (j: Job) => (j.notes || "").startsWith("📧");
+  // the day the EMAIL arrived, from the note the intake wrote
+  const emailDay = (j: Job) => (j.notes || "").match(/\bon (\d{4}-\d{2}-\d{2})/)?.[1] || (j.created_at || "").slice(0, 10);
+  // delete the email imports whose email is older than today — they were
+  // handled by hand before the intake existed
+  const purgeOldEmailJobs = async () => {
+    const old = jobs.filter((j) => isEmailJob(j) && emailDay(j) < today());
+    if (old.length === 0) { flash("No email imports older than today"); return; }
+    const list = old.slice(0, 8).map((j) => `PO ${j.po_number || j.job_number || "?"} (${emailDay(j)})`).join(", ");
+    if (!window.confirm(`Delete ${old.length} email import${old.length === 1 ? "" : "s"} not from today? ${list}${old.length > 8 ? "…" : ""}\n\nThe jobs and their files disappear for good.`)) return;
+    setBusy(true);
+    let done = 0;
+    for (const j of old) if (await deleteJobNow(j)) done += 1;
+    setBusy(false);
+    flash(`${done} of ${old.length} email import${old.length === 1 ? "" : "s"} deleted`);
+  };
+  // re-read today's email imports from their PDFs with the smart reader
+  const rereadTodayEmailJobs = async () => {
+    if (!(await smartOn())) { flash("The smart reader is off — add ANTHROPIC_API_KEY in Vercel and redeploy first (Settings → Health check shows it)"); return; }
+    const mine = jobs.filter((j) => isEmailJob(j) && emailDay(j) === today() && !j.canceled);
+    if (mine.length === 0) { flash("No email imports from today to re-read"); return; }
+    setBusy(true);
+    let claude = 0, rules = 0, none = 0;
+    for (const j of mine) {
+      flash(`Re-reading ${claude + rules + none + 1} of ${mine.length}…`);
+      const r = await rereadJob(j, true);
+      if (r === "claude") claude += 1; else if (r === "rules") rules += 1; else none += 1;
+    }
+    setBusy(false);
+    await load();
+    flash(`${claude} re-read by Claude${rules ? `, ${rules} by the rules` : ""}${none ? `, ${none} couldn't be` : ""} — open each and check the lines`);
+  };
+
   const handlePo = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -731,32 +845,7 @@ export default function Pact() {
       // a "NOT APPROVED" stamp is normal — the partner approves after the
       // work is done — so only real reading calls are flagged
       const poFlags = [...(f.warnings || [])];
-      const bkNow = await priceBook();
-      const seed: Item[] = unreadable ? []
-        : f.rows.length > 0
-          ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: normUnit(r.uom || unitFor(r.description)), unit_price: r.unit_price, ...(r.base ? { base: r.base } : {}) }))
-            // a placeholder row that names more than one trade ("scrape plaster
-            // paint") is dropped: keeping it would leave a dollar line sitting
-            // beside the three real lines it stands for
-            .filter((it) => realPrice(it.unit_price) || keysIn(it.description, bkNow).length < 2)
-          : (f.desc || f.scope) ? [{ description: (f.desc || f.scope).slice(0, 120), qty: 1, unit: unitFor(f.desc || f.scope), unit_price: 0 }] : [];
-      // What is this PO for? Whatever the price list already answers — plaster
-      // brings its primer and paint with it — gets filled in, priced. A price
-      // the PO itself states is never touched: that one is the agreement.
-      // when the PO priced its own lines, that IS the deal — fill the gaps but
-      // never add prep work it didn't ask for
-      const poPriced = seed.some((it) => realPrice(it.unit_price));
-      // the same words must only be priced once — a PO often repeats its
-      // description as its scope, and counting both doubles every quantity
-      const said = [...new Set([f.desc, f.scope, f.rows.map((r) => r.description).join(" ")]
-        .map((x) => (x || "").trim()).filter(Boolean))];
-      const priced = (await priceFromList(said.join(". "), seed, { fillOnly: poPriced, prepOnly: poPriced }))
-        // a placeholder the list had no answer for is work still to be priced —
-        // showing it as a dollar would put "$1.00" on a proposal
-        .map((it) => (Number(it.unit_price) === PLACEHOLDER ? { ...it, unit_price: 0 } : it));
-      // a PO that totals a dollar hasn't told us the money — the priced lines have
-      const lineSub = priced.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
-      const amountOut = amount > PLACEHOLDER || lineSub <= 0 ? amount : Math.round(lineSub * 1.08875 * 100) / 100;
+      const { items: priced, amount: amountOut } = await linesFromPo(f, unreadable, amount);
       const { data: job, error } = await sb().from("pact_jobs").insert({
         partner: f.partner, development: "", job_number: f.po, description: (f.desc || f.scope).slice(0, 120), amount: amountOut,
         po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,
@@ -1435,6 +1524,8 @@ export default function Pact() {
               { label: "Upload a folder of proposals", hidden: !canInvoice, disabled: busy, title: "Pick a folder of proposal letters — every one becomes a job, then all the invoices download in one zip", onSelect: () => folderRef.current?.click() },
               { label: "Proposal template", hidden: !canInvoice, disabled: busy, title: "A blank proposal letter in our layout — fill it in, and uploading it back here builds the job and the invoice", onSelect: blankProposal },
               { label: "Add a job manually", onSelect: () => setAddOpen(!addOpen) },
+              { label: `Re-read today's email POs with Claude (${jobs.filter((j) => isEmailJob(j) && emailDay(j) === today() && !j.canceled).length})`, hidden: !canPrice || !jobs.some(isEmailJob), disabled: busy, title: "Every job that came in by email today is rebuilt from its PDF through the smart reader, then the price list", onSelect: rereadTodayEmailJobs },
+              { label: `Delete email imports not from today… (${jobs.filter((j) => isEmailJob(j) && emailDay(j) < today()).length})`, hidden: !canPrice || !jobs.some((j) => isEmailJob(j) && emailDay(j) < today()), disabled: busy, destructive: true, title: "Email imports whose email is older than today — handled by hand before the intake existed", onSelect: purgeOldEmailJobs },
             ]} />
           </div>
         </div>
@@ -1495,6 +1586,7 @@ export default function Pact() {
                   {photoN > 0 && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => downloadPhotos(j)} disabled={busy} title="Just the pictures — no PO, no invoice">⬇ Photos · {photoN}</button>}
                   <RowActions items={[
                     { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },
+                    { label: "Re-read the PO", glyph: "🔁", hidden: !canPrice || !(j.attachments || []).some((a) => /\.pdf$/i.test(a.name)), disabled: busy, title: "Rebuild this job from its PDF — the reader, then the price list. Photos and documents stay.", confirm: "Re-read this PO? The partner, address, description, work lines and amount are replaced with what the PDF says. Photos and documents stay.", onSelect: async () => { setBusy(true); await rereadJob(j); setBusy(false); } },
                     { label: "Text worker", hidden: !canEdit, onSelect: () => openNotify(j) },
                   ]} />
                 </div>

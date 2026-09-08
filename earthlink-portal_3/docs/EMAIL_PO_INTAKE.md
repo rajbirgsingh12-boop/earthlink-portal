@@ -26,7 +26,7 @@ Settings → Health check in the portal shows "Email PO intake (Gmail)" green on
 4. Pick **setup** in the function dropdown, press **Run**, allow the permissions Google asks for.
 
 That's it. The script checks the inbox every 10 minutes. Threads it has handled
-get the Gmail label **Earth Link/Imported**; remove that label from a thread to
+get the Gmail label **EarthLink-Imported**; remove that label from a thread to
 make it go through again.
 
 ## What the site does with each PDF
@@ -35,5 +35,11 @@ make it go through again.
 - **NYCHA blanket release** → skipped; those go on the Releases tab.
 - **A scan, or not a PO** (a supplier invoice, a flyer) → skipped.
 
-Only senders in the script's `SENDERS` list are looked at (Fairstead and Boulevard
-to start). Add a new partner's name there when one comes on.
+Every email with a PDF is looked at; the site only makes jobs out of real POs.
+To cut noise, put partner names in the script's `SENDERS` list.
+
+## Not working?
+In the script editor pick **testNow** and Run, then open the log (Executions,
+or View → Logs). It says in plain words what's wrong: the site redirecting to
+another address, the intake switched off in Vercel, a key mismatch, or simply
+nothing in the inbox to import.

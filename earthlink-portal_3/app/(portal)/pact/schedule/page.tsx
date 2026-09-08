@@ -82,14 +82,14 @@ export default function PactSchedule() {
 
   return (
     <div>
-      <PageHeader title="PACT Schedule" sub={`${scheduled.length} scheduled · ${needsDates.length} need dates · ${done.length} complete`}>
+      <PageHeader title="PACT Schedule" sub={`${scheduled.length} scheduled · ${needsDates.length} need to schedule · ${done.length} complete`}>
         <Link className="btn btn-ghost min-h-[44px]" href="/pact">Jobs</Link>
       </PageHeader>
       <input className="field mb-3" placeholder="Search PO #, partner, address…" value={q} onChange={(e) => setQ(e.target.value)} />
 
       {needsDates.length > 0 && (
         <>
-          <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Needs dates</div>
+          <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Need to schedule</div>
           <div className="card mb-4">{needsDates.map(card)}</div>
         </>
       )}

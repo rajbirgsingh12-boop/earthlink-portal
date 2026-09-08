@@ -19,7 +19,7 @@ import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
 import { parsePactPoText, type PactPoFields, type PoItem } from "@/lib/parsePactPo";
-import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, attnFrom, DEFAULT_ATTN, type PriceItem, cleanLineWording } from "@/lib/priceBook";
+import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, attnFrom, DEFAULT_ATTN, type PriceItem, cleanLineWording, unitFor } from "@/lib/priceBook";
 
 // `base` is a PO row's wording before its wrapped line was added — a wrap can
 // name a second trade ("…and paint"), and then the row no longer reads as the
@@ -35,15 +35,6 @@ interface Job {
   proposal_sent?: string | null;
 }
 const BLANK = { partner: "", development: "", job_number: "", description: "", amount: "" };
-
-// the unit follows the work: doors are counted, plaster is measured
-const unitFor = (desc: string): string => {
-  const d = desc.toLowerCase();
-  if (/(plaster|paint|primer|prime\b|sheetrock|drywall|skim|tile|floor|wall|ceiling|demo|popcorn)/.test(d)) return "SF";
-  if (/(molding|baseboard|cove|trim|pipe|caulk)/.test(d)) return "LF";
-  if (/(hour|labor)/.test(d)) return "HOUR";
-  return "EACH";
-};
 
 export default function Pact() {
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -762,6 +753,8 @@ export default function Pact() {
         po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,
         contact: f.contact, bill_to: f.billBlock, items: priced, invoice_number: await nextInvoiceNo(),
         ...(taxFromDoc !== undefined ? { tax_pct: taxFromDoc } : {}),
+        // the day the PO set goes straight onto the schedule; no day = Need to schedule
+        ...(f.accessDate ? { start_date: f.accessDate } : {}),
       }).select().single();
       if (error || !job) { setBusy(false); flash(upgradeHint(error?.message || "Save failed")); return; }
       // attach the PO itself
@@ -784,7 +777,7 @@ export default function Pact() {
           ? isDocx
             ? "File attached, but the proposal couldn't be read — type the partner, address and description below"
             : `PDF attached, but no text could be read (scanned copy?${how ? ` · ${how}` : ""}) — type the partner, address and description below`
-          : `PO ${f.po || "imported"} — check the details and work lines below`);
+          : `PO ${f.po || "imported"} — ${f.accessDate ? `set for ${prettyDate(f.accessDate)} per the PO` : "no date on the PO, it's under Need to schedule"} · check the work lines below`);
     } catch (err) {
       setBusy(false);
       flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
@@ -1452,6 +1445,7 @@ export default function Pact() {
               </button>
               <div className="flex shrink-0 items-center gap-2">
                 {canPrice && <span className="font-mono text-sm font-semibold">{fmt(Number(j.amount) || invTotal(j))}</span>}
+                {(j.notes || "").startsWith("📧") && <span className="chip text-inksoft" title={j.notes}>📧 email</span>}
                 {(j.attachments || []).length > 0 && <span className="chip text-inksoft" title="Documents & photos">📎 {(j.attachments || []).length}</span>}
                 <RowActions items={[
                   { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },
@@ -1468,6 +1462,9 @@ export default function Pact() {
               const photoN = (j.attachments || []).filter((a) => isImg(a.name)).length;
               return (
               <div className="mt-3 border-t border-rulesoft pt-3">
+                {(j.notes || "").startsWith("📧") && (
+                  <div className="mb-2.5 rounded-sm border border-rulesoft bg-paper px-3 py-2 text-[12px] text-inksoft">{j.notes}</div>
+                )}
                 <div className="mb-2.5 flex flex-wrap items-center gap-2">
                   {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "before")} disabled={busy}>📷 Before{beforeN > 0 ? ` · ${beforeN}` : ""}</button>}
                   {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "after")} disabled={busy}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}

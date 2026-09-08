@@ -123,6 +123,15 @@ export const keywordsRe = (words: string): string =>
     .map((w) => `${/^[a-z0-9]/i.test(w) ? "\\b" : ""}${w}${/[a-z0-9]$/i.test(w) ? "\\b" : ""}`)
     .join("|");
 
+// the unit follows the work: doors are counted, plaster is measured
+export const unitFor = (desc: string): string => {
+  const d = desc.toLowerCase();
+  if (/(plaster|paint|primer|prime\b|sheetrock|drywall|skim|tile|floor|wall|ceiling|demo|popcorn)/.test(d)) return "SF";
+  if (/(molding|baseboard|cove|trim|pipe|caulk)/.test(d)) return "LF";
+  if (/(hour|labor)/.test(d)) return "HOUR";
+  return "EACH";
+};
+
 // a unit is only meaningful to the reader as EACH, SF or HOUR — however it
 // gets typed
 export const normUnit = (u: string): string => {

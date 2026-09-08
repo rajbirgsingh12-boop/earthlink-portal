@@ -32,7 +32,21 @@ export interface PactPoFields {
   rowsAddUp: boolean;
   rows: { description: string; qty: number; unit_price: number; property: string; unit: string; uom?: string; base?: string }[];
   readable: boolean;    // false = no text in the PDF at all (a scan)
+  // the day the PO says the work is set for ("Access date 8/20/2026",
+  // "Scheduled 08/20/2026") as YYYY-MM-DD — empty when the PO names none
+  accessDate?: string;
 }
+
+// "8/20/26" and "08/20/2026" both become 2026-08-20; anything that isn't a
+// real calendar day comes back empty rather than as a wrong date
+export const isoDate = (v: string): string => {
+  const m = String(v || "").trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (!m) return "";
+  const mo = parseInt(m[1], 10), d = parseInt(m[2], 10);
+  const y = m[3].length === 2 ? 2000 + parseInt(m[3], 10) : parseInt(m[3], 10);
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || y < 2000 || y > 2099) return "";
+  return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+};
 
 const cash = (v: string) => parseFloat(String(v).replace(/[$,\s]/g, "")) || 0;
 const near = (a: number, b: number) => Math.abs(a - b) <= 0.02;
@@ -285,6 +299,10 @@ export function parsePactPoText(raw: string, structured?: PoLine[]): PactPoField
     || labelled(t, "Work\\s*Order") || labelled(t, "\\bOrder")
     || t.match(/Purchase Order\s+([A-Za-z]?\d[\w-]{2,})/i)?.[1] || "";
   const poDate = t.match(/Date Ordered\s*:?\s*([\d/]+)/i)?.[1] || t.match(/\bDate\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i)?.[1] || "";
+  // the day the partner set for the work — only when a date actually follows
+  // the label (a blank "Scheduled: ____" line on the form names no day)
+  const accessDate = isoDate(
+    t.match(/\b(?:access(?:\s*date)?|scheduled(?:\s*(?:date|for|on))?|schedule\s*date|date\s*scheduled|start\s*date|work\s*date)\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i)?.[1] || "");
   // the cell a line holds at a given left edge: the run of words that starts
   // there, and everything butted up against it
   const cellFrom = (L: PoLine, x0: number): string => {
@@ -500,5 +518,6 @@ export function parsePactPoText(raw: string, structured?: PoLine[]): PactPoField
     address: apt ? address.replace(new RegExp(`\\s*,?\\s*\\b(?:apartment|apt\\.?|unit|#)\\s*${apt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"), "").replace(/\s*,\s*,/g, ",").replace(/^[,\s]+|[,\s]+$/g, "") : address,
     billBlock, contact, punit, amount, rows, rowsAddUp,
     readable: t.trim().length > 20,
+    ...(accessDate ? { accessDate } : {}),
   };
 }

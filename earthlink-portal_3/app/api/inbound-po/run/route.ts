@@ -36,7 +36,7 @@ const audit = async (userId: string, after: Record<string, unknown>) => {
 };
 
 type ScriptResult = { name?: string; status?: string; po?: string; reason?: string };
-type ScriptAnswer = { ok?: boolean; error?: string; since?: string; threads?: number; results?: ScriptResult[] };
+type ScriptAnswer = { ok?: boolean; error?: string; since?: string; threads?: number; alreadyImported?: number; results?: ScriptResult[] };
 
 export async function POST(req: Request) {
   if (!configured()) return NextResponse.json({ configured: false, error: "The read-email button isn't set up — publish the Gmail script as a web app and put its address in Vercel as GMAIL_INTAKE_URL" }, { status: 501 });
@@ -71,7 +71,7 @@ export async function POST(req: Request) {
   const count = (s: string) => results.filter((x) => x.status === s).length;
   await audit(user.id || "", { ip, threads: ans.threads ?? 0, created: count("created"), duplicate: count("duplicate"), skipped: count("skipped"), errors: count("error") });
   return NextResponse.json({
-    ok: true, threads: ans.threads ?? 0, since: ans.since || "",
+    ok: true, threads: ans.threads ?? 0, alreadyImported: ans.alreadyImported ?? 0, since: ans.since || "",
     created: count("created"), duplicate: count("duplicate"), skipped: count("skipped"), errors: count("error"), results,
   });
 }

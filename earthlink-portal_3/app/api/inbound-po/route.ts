@@ -168,7 +168,9 @@ const intakeOne = async (att: Att, mail: Body, deadline: number): Promise<Result
   const desc = (f.desc || f.scope).slice(0, 120);
   const seed = items.length > 0 ? items : desc ? [{ description: desc, qty: 1, unit: unitFor(desc), unit_price: 0 }] : [];
   const when = mail.date ? ` on ${String(mail.date).slice(0, 40)}` : "";
-  const who = mail.from ? ` from ${String(mail.from).replace(/<[^>]*>/g, "").trim().slice(0, 60)}` : "";
+  // "Nelyv <n@x.com>" reads as Nelyv; a bare "<cdr@yardi.com>" keeps the address
+  const fromName = String(mail.from || "").replace(/<[^>]*>/g, "").trim() || String(mail.from || "").replace(/[<>]/g, "").trim();
+  const who = fromName ? ` from ${fromName.slice(0, 60)}` : "";
   const subj = mail.subject ? ` — "${String(mail.subject).slice(0, 80)}"` : "";
   // (a "NOT APPROVED" stamp is normal — the partner approves after the work
   // is done — so it is read but never flagged)

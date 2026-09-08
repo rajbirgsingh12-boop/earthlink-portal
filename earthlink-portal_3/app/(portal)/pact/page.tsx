@@ -661,18 +661,25 @@ export default function Pact() {
   // ---------- the jobs that came in by email ----------
   const isEmailJob = (j: Job) => (j.notes || "").startsWith("📧");
   // the day the EMAIL arrived, from the note the intake wrote
-  const emailDay = (j: Job) => (j.notes || "").match(/\bon (\d{4}-\d{2}-\d{2})/)?.[1] || (j.created_at || "").slice(0, 10);
+  // the intake writes the email's full timestamp (UTC); the day it belongs to
+  // is the day HERE — a PO that lands at 9 PM in New York is today's, not
+  // tomorrow's
+  const emailDay = (j: Job) => {
+    const stamp = (j.notes || "").match(/\bon (\d{4}-\d{2}-\d{2}(?:T[\d:.]+Z?)?)/)?.[1] || j.created_at || "";
+    const d = new Date(stamp);
+    return Number.isNaN(d.getTime()) ? stamp.slice(0, 10) : localISO(d);
+  };
   // delete every job that came in by email — a clean slate for the intake
   const purgeEmailJobs = async () => {
     const all = jobs.filter(isEmailJob);
     if (all.length === 0) { flash("No email imports to delete"); return; }
     const list = all.slice(0, 8).map((j) => `PO ${j.po_number || j.job_number || "?"} (${emailDay(j)})`).join(", ");
-    if (!window.confirm(`Delete all ${all.length} email import${all.length === 1 ? "" : "s"}? ${list}${all.length > 8 ? "…" : ""}\n\nThe jobs and their files disappear for good. Jobs you made by hand or from your phone are not touched.`)) return;
+    if (!window.confirm(`Delete all ${all.length} email import${all.length === 1 ? "" : "s"}? ${list}${all.length > 8 ? "…" : ""}\n\nThe jobs and their files disappear for good. Jobs you made by hand or from your phone are not touched.\n\nTo bring one back later: in Gmail, remove the "EarthLink-Imported" label from that email, then tap Read email now.`)) return;
     setBusy(true);
     let done = 0;
     for (const j of all) if (await deleteJobNow(j)) done += 1;
     setBusy(false);
-    flash(`${done} of ${all.length} email import${all.length === 1 ? "" : "s"} deleted`);
+    flash(`${done} of ${all.length} email import${all.length === 1 ? "" : "s"} deleted — to bring one back, remove its "EarthLink-Imported" label in Gmail and tap Read email now`);
   };
   // re-read today's email imports from their PDFs with the smart reader
   const rereadTodayEmailJobs = async () => {
@@ -697,12 +704,12 @@ export default function Pact() {
     try {
       const { data: { session } } = await sb().auth.getSession();
       const r = await fetch("/api/inbound-po/run", { method: "POST", headers: session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {} });
-      const out = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string; threads?: number; created?: number; duplicate?: number; skipped?: number; errors?: number; results?: { name: string; status: string; po?: string; reason?: string }[] };
+      const out = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string; threads?: number; alreadyImported?: number; since?: string; created?: number; duplicate?: number; skipped?: number; errors?: number; results?: { name: string; status: string; po?: string; reason?: string }[] };
       if (!r.ok || !out.ok) { flash(out.error || `Couldn't read the inbox (${r.status})`); return; }
       await load();
       const made = out.results?.filter((x) => x.status === "created").map((x) => `PO ${x.po || x.name}`) || [];
       flash(out.threads === 0
-        ? "Inbox checked — nothing new since the last look"
+        ? `Inbox checked — nothing new since the last look${out.alreadyImported ? ` (${out.alreadyImported} email${out.alreadyImported === 1 ? "" : "s"} with PDFs since ${out.since || "setup"} already imported — remove the EarthLink-Imported label in Gmail to bring one back)` : out.since ? ` (looking at emails from ${out.since} on)` : ""}`
         : `Inbox checked — ${out.created} new${made.length ? ` (${made.slice(0, 5).join(", ")}${made.length > 5 ? "…" : ""})` : ""}${out.duplicate ? `, ${out.duplicate} already here` : ""}${out.skipped ? `, ${out.skipped} not POs` : ""}${out.errors ? `, ${out.errors} failed — will retry` : ""}`);
     } catch (err) {
       flash(`Couldn't read the inbox (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);

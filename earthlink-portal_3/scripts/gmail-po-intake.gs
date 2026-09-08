@@ -24,22 +24,42 @@ var KEY = "PASTE-THE-PO_INTAKE_KEY-HERE";     // same value as PO_INTAKE_KEY in 
 var SENDERS = [];
 
 var LABEL = "EarthLink-Imported";
+var TZ = "America/New_York";   // "today" is today in New York, whatever Google's clock says
 
 // Only emails that arrive from the day "setup" is run onward are looked at —
 // older POs are already handled by hand and must not come in again.
+function todayNY() { return Utilities.formatDate(new Date(), TZ, "yyyy/MM/dd"); }
 function sinceDay() {
   var p = PropertiesService.getScriptProperties();
   var d = p.getProperty("SINCE");
-  if (!d) { d = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy/MM/dd"); p.setProperty("SINCE", d); }
+  if (!d) { d = todayNY(); p.setProperty("SINCE", d); }
   return d;
 }
 
 function setup() {
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger("checkInbox").timeBased().everyMinutes(10).create();
-  PropertiesService.getScriptProperties().setProperty("SINCE", Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy/MM/dd"));
-  Logger.log("Timer set: the inbox is checked every 10 minutes, for emails from " + sinceDay() + " onward.");
+  PropertiesService.getScriptProperties().setProperty("SINCE", todayNY());
+  Logger.log("Timer set: the inbox is checked every 10 minutes, for emails from " + sinceDay() + " (New York) onward.");
   testNow();
+}
+
+// Deleted the email imports on the site and want them back? This takes the
+// "imported" label off every email since the start day and sends them again
+// (the site never makes a second job for a PO it already has).
+function reimportSinceSetup() {
+  var label = GmailApp.getUserLabelByName(LABEL);
+  var threads = label ? GmailApp.search("has:attachment filename:pdf after:" + sinceDay() + " label:" + LABEL, 0, 50) : [];
+  threads.forEach(function (t) { t.removeLabel(label); });
+  Logger.log("Label removed from " + threads.length + " thread(s) — sending them again…");
+  var summary = checkInboxNow();
+  Logger.log("Done: " + JSON.stringify(summary.results));
+}
+
+// how many emails with PDFs since the start day were already imported
+function alreadyImportedCount() {
+  var label = GmailApp.getUserLabelByName(LABEL);
+  return label ? GmailApp.search("has:attachment filename:pdf after:" + sinceDay() + " label:" + LABEL, 0, 100).length : 0;
 }
 
 // Says, in plain words, why POs are or aren't coming through.
@@ -64,14 +84,15 @@ function testNow() {
   // 3) what's in the inbox?
   var q = query();
   var threads = GmailApp.search(q, 0, 25);
-  Logger.log("Gmail search [" + q + "] → " + threads.length + " thread(s) not yet imported.");
+  Logger.log("Today in New York is " + todayNY() + "; looking at emails from " + sinceDay() + " onward.");
+  Logger.log("Gmail search [" + q + "] → " + threads.length + " thread(s) not yet imported; " + alreadyImportedCount() + " already imported (labeled).");
   threads.forEach(function (th) {
     th.getMessages().forEach(function (m) {
       var pdfs = m.getAttachments({ includeInlineImages: false, includeAttachments: true }).filter(function (a) { return /\.pdf$/i.test(a.getName()); });
       Logger.log("  • " + m.getDate().toDateString() + " | from: " + m.getFrom() + " | " + m.getSubject() + " | PDFs: " + pdfs.map(function (a) { return a.getName(); }).join(", ") + (senderOk(m) ? "" : "  (skipped: sender not in SENDERS)"));
     });
   });
-  if (threads.length === 0) Logger.log("Nothing to import right now (only emails from " + sinceDay() + " onward are looked at). Send yourself a PO PDF and run testNow again, or wait for the next one.");
+  if (threads.length === 0) Logger.log("Nothing new to import (only emails from " + sinceDay() + " onward are looked at). If you deleted the imports on the site and want them back, run reimportSinceSetup.");
   else { Logger.log("Sending them now…"); checkInboxNow(); }
 }
 
@@ -97,7 +118,7 @@ function doGet(e) {
     var lock = LockService.getScriptLock();
     if (!lock.tryLock(20000)) out.error = "the inbox is already being checked — try again in a minute";
     else {
-      try { var summary = checkInboxNow(); out = { ok: true, since: sinceDay(), threads: summary.threads, results: summary.results }; }
+      try { var summary = checkInboxNow(); out = { ok: true, since: sinceDay(), threads: summary.threads, alreadyImported: alreadyImportedCount(), results: summary.results }; }
       catch (err) { out.error = String(err); }
       finally { lock.releaseLock(); }
     }

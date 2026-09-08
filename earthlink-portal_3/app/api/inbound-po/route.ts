@@ -15,6 +15,7 @@ import { type PoItem, type PactPoFields } from "@/lib/parsePactPo";
 import { readPoOrProposalPages } from "@/lib/parsePactProposal";
 import { normUnit, unitFor } from "@/lib/priceBook";
 import { findDupe, DUPE_COLS, type PoLike } from "@/lib/po";
+import { readPoSmart } from "@/lib/smartPo";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -24,7 +25,7 @@ const configured = () => !!(env("PO_INTAKE_KEY") && env("SUPABASE_SERVICE_ROLE_K
 
 type Att = { name?: string; base64?: string };
 type Body = { from?: string; subject?: string; date?: string; messageId?: string; attachments?: Att[] };
-type Result = { name: string; status: "created" | "duplicate" | "skipped" | "error"; po?: string; jobId?: string; startDate?: string; reason?: string };
+type Result = { name: string; status: "created" | "duplicate" | "skipped" | "error"; po?: string; jobId?: string; startDate?: string; reason?: string; readBy?: "claude" | "rules" };
 
 export async function GET() {
   return NextResponse.json({ configured: configured() });
@@ -101,7 +102,9 @@ const intakeOne = async (att: Att, mail: Body): Promise<Result> => {
     return { name, status: "skipped", reason: "doesn't look like a partner PO" };
   }
 
-  const f: PactPoFields & { taxPct?: number } = readPoOrProposalPages(pages);
+  // rules first, Claude on top when it is switched on and agrees with the page
+  const smart = await readPoSmart(bytes, text, readPoOrProposalPages(pages));
+  const f: PactPoFields & { taxPct?: number } = smart.fields;
   if (!f.po || (!f.partner && !f.address && !f.desc)) return { name, status: "skipped", reason: "no PO number / partner found — upload it on the PACT tab to fill in by hand" };
   const po = f.po.trim();
 
@@ -146,7 +149,8 @@ const intakeOne = async (att: Att, mail: Body): Promise<Result> => {
   // (a "NOT APPROVED" stamp is normal — the partner approves after the work
   // is done — so it is read but never flagged)
   const flags = (f.warnings || []).map((w) => `⚠ ${w}`);
-  const notes = `📧 Came in by email${who}${when}${subj}. Read automatically — check the work lines before pricing or sending anything.${flags.length ? ` ${flags.join(". ")}.` : ""}`;
+  const how = smart.readBy === "claude" ? "Read by Claude" : `Read by the rules${smart.note ? ` (${smart.note})` : ""}`;
+  const notes = `📧 Came in by email${who}${when}${subj}. ${how} — check the work lines before pricing or sending anything.${flags.length ? ` ${flags.join(". ")}.` : ""}`;
   const row = {
     partner: f.partner, development: "", job_number: po, description: desc, amount,
     po_number: po, po_date: f.poDate, address: f.address, property_unit: f.punit,
@@ -159,7 +163,7 @@ const intakeOne = async (att: Att, mail: Body): Promise<Result> => {
   const made = ((await ins.json()) as JobRow[])[0];
   if (!made?.id) return { name, status: "error", po, reason: "save returned no job" };
   const attached = await attachPdf(made.id, name, bytes, []);
-  return { name, status: "created", po, jobId: made.id, startDate: f.accessDate || "", reason: attached ? undefined : "job made, but the PDF didn't attach" };
+  return { name, status: "created", po, jobId: made.id, startDate: f.accessDate || "", readBy: smart.readBy, reason: attached ? undefined : "job made, but the PDF didn't attach" };
 };
 
 export async function POST(req: Request) {

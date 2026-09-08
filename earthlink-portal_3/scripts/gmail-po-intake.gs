@@ -19,12 +19,21 @@ var KEY = "PASTE-THE-PO_INTAKE_KEY-HERE";     // same value as PO_INTAKE_KEY in 
 var SENDERS = [];
 
 var LABEL = "EarthLink-Imported";
-var LOOKBACK = "newer_than:14d";
+
+// Only emails that arrive from the day "setup" is run onward are looked at —
+// older POs are already handled by hand and must not come in again.
+function sinceDay() {
+  var p = PropertiesService.getScriptProperties();
+  var d = p.getProperty("SINCE");
+  if (!d) { d = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy/MM/dd"); p.setProperty("SINCE", d); }
+  return d;
+}
 
 function setup() {
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger("checkInbox").timeBased().everyMinutes(10).create();
-  Logger.log("Timer set: the inbox is checked every 10 minutes.");
+  PropertiesService.getScriptProperties().setProperty("SINCE", Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy/MM/dd"));
+  Logger.log("Timer set: the inbox is checked every 10 minutes, for emails from " + sinceDay() + " onward.");
   testNow();
 }
 
@@ -57,11 +66,11 @@ function testNow() {
       Logger.log("  • " + m.getDate().toDateString() + " | from: " + m.getFrom() + " | " + m.getSubject() + " | PDFs: " + pdfs.map(function (a) { return a.getName(); }).join(", ") + (senderOk(m) ? "" : "  (skipped: sender not in SENDERS)"));
     });
   });
-  if (threads.length === 0) Logger.log("Nothing to import right now. Send yourself a PO PDF and run testNow again, or wait for the next one.");
+  if (threads.length === 0) Logger.log("Nothing to import right now (only emails from " + sinceDay() + " onward are looked at). Send yourself a PO PDF and run testNow again, or wait for the next one.");
   else { Logger.log("Sending them now…"); checkInboxNow(); }
 }
 
-function query() { return "has:attachment filename:pdf " + LOOKBACK + " -label:" + LABEL; }
+function query() { return "has:attachment filename:pdf after:" + sinceDay() + " -label:" + LABEL; }
 function senderOk(msg) {
   var from = (msg.getFrom() || "").toLowerCase();
   return !SENDERS.length || SENDERS.some(function (s) { return from.indexOf(s.toLowerCase()) >= 0; });

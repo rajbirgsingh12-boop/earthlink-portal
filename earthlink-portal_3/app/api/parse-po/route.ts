@@ -4,9 +4,16 @@
 import { NextResponse } from "next/server";
 import { type PoItem } from "@/lib/parsePactPo";
 import { readPoOrProposalPages } from "@/lib/parsePactProposal";
+import { readPoSmart, smartConfigured } from "@/lib/smartPo";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 const env = (k: string) => process.env[k] || "";
+
+// the Settings health check asks whether the smart reader is switched on
+export async function GET() {
+  return NextResponse.json({ smart: smartConfigured() });
+}
 
 export async function POST(req: Request) {
   // signed-in admin/office users only — same gate as the texting route
@@ -40,7 +47,12 @@ export async function POST(req: Request) {
       pages.push(tc.items as PoItem[]);
     }
     await (doc as unknown as { destroy?: () => Promise<void> }).destroy?.().catch(() => null);
-    return NextResponse.json({ ok: true, fields: readPoOrProposalPages(pages) });
+    const rules = readPoOrProposalPages(pages);
+    // our own proposal letters read perfectly by the rules — Claude reads the partners' POs
+    const text = pages.map((it) => it.map((x) => x.str || "").join(" ")).join("\n");
+    const smart = /Blanket\s+Release/i.test(text) ? { fields: rules, readBy: "rules" as const }
+      : await readPoSmart(new Uint8Array(buf), text, rules);
+    return NextResponse.json({ ok: true, fields: smart.fields, readBy: smart.readBy, ...(smart.note ? { note: smart.note } : {}) });
   } catch (e) {
     return NextResponse.json({ error: `Couldn't open the PDF: ${e instanceof Error ? e.message.slice(0, 120) : "unknown"}` }, { status: 422 });
   }

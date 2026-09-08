@@ -29,6 +29,16 @@ That's it. The script checks the inbox every 10 minutes. Threads it has handled
 get the Gmail label **EarthLink-Imported**; remove that label from a thread to
 make it go through again.
 
+Only emails that arrive from the day you run **setup** onward are looked at —
+everything older is already handled by hand. (Run **setup** again to reset that day.)
+
+## The smart reader
+With `ANTHROPIC_API_KEY` set in Vercel (Settings → Health check shows "Smart PO
+reader (Claude)" green), Claude reads each PO PDF itself — any partner's layout —
+and the rule reader cross-checks it: the PO number must be printed on the page and
+the money must add up, or the rules read is used instead. Every job's note says
+which reader it came from. Without the key, POs read by the rules as before.
+
 ## What the site does with each PDF
 - **Partner PO** → new job: partner, PO #, address, apartment, description, work lines, the PO's date onto the schedule. PDF attached to the job.
 - **PO already a job** (typed by hand or uploaded from the phone) → the PDF is attached to that job, nothing new is made.

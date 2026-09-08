@@ -53,4 +53,4 @@ export function findDupe<T extends PoLike>(rows: T[], probe: PoProbe): T | undef
 }
 
 // the columns findDupe needs — one select shared by every path
-export const DUPE_COLS = "id,po_number,job_number,address,property_unit,amount,canceled,attachments,description";
+export const DUPE_COLS = "id,po_number,job_number,address,property_unit,amount,canceled,attachments,description,start_date,work_done,notes";

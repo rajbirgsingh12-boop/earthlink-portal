@@ -15,6 +15,7 @@ import Modal from "@/components/Modal";
 import Disclosure from "@/components/Disclosure";
 import { useLive } from "@/lib/useLive";
 import { findDupe, DUPE_COLS } from "@/lib/po";
+import JobDates from "@/components/JobDates";
 import { COMPANY } from "@/lib/company";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
@@ -34,6 +35,7 @@ interface Job {
   po_number?: string; po_date?: string; address?: string; property_unit?: string;
   contact?: string; bill_to?: string; items?: Item[] | null; invoice_number?: string; tax_pct?: number | null;
   proposal_sent?: string | null;
+  start_date?: string | null; finish_date?: string | null;
 }
 const BLANK = { partner: "", development: "", job_number: "", description: "", amount: "" };
 
@@ -706,13 +708,23 @@ export default function Pact() {
           const grew = !!newD && newD.toLowerCase() !== oldD.toLowerCase()
             && (oldD === "" || newD.toLowerCase().includes(oldD.toLowerCase()));
           if (grew) await sb().from("pact_jobs").update({ description: newD }).eq("id", dupe.id);
+          // the partner re-issued the PO with a different access date: that IS
+          // the new schedule — unless the work is already done
+          const moved = !!f.accessDate && !dupe.work_done && (dupe.start_date || "") !== f.accessDate;
+          if (moved) {
+            const was = dupe.start_date ? ` (was ${prettyDate(dupe.start_date)})` : "";
+            const line = `📅 Moved to ${prettyDate(f.accessDate!)} by a re-sent PO${was}`;
+            await sb().from("pact_jobs").update({ start_date: f.accessDate, notes: `${(dupe.notes || "").trim()}${(dupe.notes || "").trim() ? "\n" : ""}${line}` }).eq("id", dupe.id);
+          }
           setBusy(false);
           await load();
           setOpenId(dupe.id); showDetailsFor(dupe.id);
           const label = f.po ? `PO ${f.po}` : "That proposal";
-          flash(grew
-            ? `${label} is already here — picked up the PO's full wording (tap Price from list to refresh the lines)`
-            : `${label} is already here${dupe.canceled ? " (canceled)" : ""} — opened it, nothing new was created`);
+          flash(moved
+            ? `${label} is already here — the new PO moves it to ${prettyDate(f.accessDate!)}`
+            : grew
+              ? `${label} is already here — picked up the PO's full wording (tap Price from list to refresh the lines)`
+              : `${label} is already here${dupe.canceled ? " (canceled)" : ""} — opened it, nothing new was created`);
           return;
         }
       }
@@ -1473,9 +1485,10 @@ export default function Pact() {
               const photoN = (j.attachments || []).filter((a) => isImg(a.name)).length;
               return (
               <div className="mt-3 border-t border-rulesoft pt-3">
-                {/^(?:📧|⚠)/.test(j.notes || "") && (
-                  <div className="mb-2.5 rounded-sm border border-rulesoft bg-paper px-3 py-2 text-[12px] text-inksoft">{j.notes}</div>
-                )}
+                {/* when the crew goes — movable with one tap, every move written down */}
+                <div className="mb-3 rounded-sm border border-rulesoft p-3">
+                  <JobDates job={j} canEdit={canEdit} onSave={(p) => patch(j, p as Partial<Job>)} />
+                </div>
                 <div className="mb-2.5 flex flex-wrap items-center gap-2">
                   {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "before")} disabled={busy}>📷 Before{beforeN > 0 ? ` · ${beforeN}` : ""}</button>}
                   {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "after")} disabled={busy}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}

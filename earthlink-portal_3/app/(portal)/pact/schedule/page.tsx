@@ -6,11 +6,12 @@ import { myProfile } from "@/lib/profile";
 import { useLive } from "@/lib/useLive";
 import Stamp from "@/components/Stamp";
 import PageHeader from "@/components/PageHeader";
+import JobDates, { lastNote } from "@/components/JobDates";
 
 interface Job {
   id: string; partner: string; po_number?: string; job_number: string; address?: string;
   property_unit?: string; description: string; work_done: boolean; canceled: boolean;
-  start_date?: string; finish_date?: string;
+  start_date?: string; finish_date?: string; notes?: string;
 }
 
 // The PACT calendar: every PO gets a start and finish date and a complete mark.
@@ -64,15 +65,9 @@ export default function PactSchedule() {
           <Stamp label={j.work_done ? "COMPLETE ✓" : "NOT COMPLETE"} tone={j.work_done ? "ok" : "mute"} />
         )}
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2">
-        <label className="flex items-center gap-1.5 text-[11px] uppercase tracking-widest text-inksoft">Start
-          <input type="date" className="rounded-sm border border-rulesoft bg-white p-1.5 font-mono text-xs" value={j.start_date || ""} readOnly={!canEdit}
-            onChange={(e) => canEdit && save(j, { start_date: e.target.value })} />
-        </label>
-        <label className="flex items-center gap-1.5 text-[11px] uppercase tracking-widest text-inksoft">Finish
-          <input type="date" className="rounded-sm border border-rulesoft bg-white p-1.5 font-mono text-xs" value={j.finish_date || ""} readOnly={!canEdit}
-            onChange={(e) => canEdit && save(j, { finish_date: e.target.value })} />
-        </label>
+      <div className="mt-2">
+        <JobDates job={j} canEdit={canEdit} onSave={(p) => save(j, p as Partial<Job>)} showNotes={false} />
+        {lastNote(j.notes) && <div className="mt-1.5 truncate text-[11px] text-inksoft" title={j.notes || ""}>{lastNote(j.notes)}</div>}
       </div>
     </div>
   );

@@ -43,7 +43,8 @@ const auth = () => ({ apikey: env("SUPABASE_SERVICE_ROLE_KEY"), Authorization: `
 const rest = (path: string, init: RequestInit = {}) =>
   fetch(`${base()}/rest/v1/${path}`, { ...init, headers: { ...auth(), "Content-Type": "application/json", ...(init.headers || {}) }, cache: "no-store" });
 
-type JobRow = PoLike & { id: string; attachments?: { name: string; path: string }[] | null; description?: string };
+type JobRow = PoLike & { id: string; attachments?: { name: string; path: string }[] | null; description?: string; start_date?: string | null; work_done?: boolean | null; notes?: string | null };
+const pretty = (iso: string) => new Date(iso + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 
 const safeName = (n: string) => (n || "po.pdf").replace(/[\\/]/g, "_").replace(/\s+/g, " ").trim().slice(0, 120) || "po.pdf";
 
@@ -115,7 +116,17 @@ const intakeOne = async (att: Att, mail: Body): Promise<Result> => {
   if (dupe) {
     const atts = dupe.attachments || [];
     if (!atts.some((a) => a.name === name)) await attachPdf(dupe.id, name, bytes, atts);
-    return { name, status: "duplicate", po, jobId: dupe.id, reason: `PO ${po} is already job ${dupe.po_number || dupe.job_number || dupe.id} — the PDF was attached to it, nothing new was made` };
+    // the partner re-issued the PO with a different access date: that IS the
+    // new schedule — unless the work is already done
+    const moved = !!f.accessDate && !dupe.work_done && (dupe.start_date || "") !== f.accessDate;
+    if (moved) {
+      const was = dupe.start_date ? ` (was ${pretty(dupe.start_date)})` : "";
+      const line = `📅 Moved to ${pretty(f.accessDate!)} by a re-sent PO email${was}`;
+      const notes = `${(dupe.notes || "").trim()}${(dupe.notes || "").trim() ? "\n" : ""}${line}`;
+      await rest(`pact_jobs?id=eq.${dupe.id}`, { method: "PATCH", body: JSON.stringify({ start_date: f.accessDate, notes }) });
+    }
+    return { name, status: "duplicate", po, jobId: dupe.id, startDate: moved ? f.accessDate : undefined,
+      reason: `PO ${po} is already job ${dupe.po_number || dupe.job_number || dupe.id} — the PDF was attached to it${moved ? `, and its new access date moves the job to ${pretty(f.accessDate!)}` : ""}, nothing new was made` };
   }
 
   // a PO priced at $1.00 is a placeholder, not a price — the lines wait for

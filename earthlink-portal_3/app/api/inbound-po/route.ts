@@ -118,18 +118,27 @@ const intakeOne = async (att: Att, mail: Body): Promise<Result> => {
     return { name, status: "duplicate", po, jobId: dupe.id, reason: `PO ${po} is already job ${dupe.po_number || dupe.job_number || dupe.id} — the PDF was attached to it, nothing new was made` };
   }
 
+  // a PO priced at $1.00 is a placeholder, not a price — the lines wait for
+  // the price list, and the job's money stays blank until then
+  const PLACEHOLDER = 1;
   const items = f.rows.map((r) => ({
-    description: r.description, qty: r.qty, unit: normUnit(r.uom || unitFor(r.description)), unit_price: r.unit_price,
+    description: r.description, qty: r.qty, unit: normUnit(r.uom || unitFor(r.description)),
+    unit_price: Number(r.unit_price) <= PLACEHOLDER ? 0 : r.unit_price,
     ...(r.base ? { base: r.base } : {}),
   }));
+  const amount = f.amount > PLACEHOLDER ? f.amount : 0;
   const desc = (f.desc || f.scope).slice(0, 120);
   const seed = items.length > 0 ? items : desc ? [{ description: desc, qty: 1, unit: unitFor(desc), unit_price: 0 }] : [];
   const when = mail.date ? ` on ${String(mail.date).slice(0, 40)}` : "";
   const who = mail.from ? ` from ${String(mail.from).replace(/<[^>]*>/g, "").trim().slice(0, 60)}` : "";
   const subj = mail.subject ? ` — "${String(mail.subject).slice(0, 80)}"` : "";
-  const notes = `📧 Came in by email${who}${when}${subj}. Read automatically — check the work lines before pricing or sending anything.`;
+  const flags = [
+    ...(f.poStatus === "NOT APPROVED" ? ["⚠ The PO is stamped NOT APPROVED on the partner's system — don't start work until it is"] : []),
+    ...(f.warnings || []).map((w) => `⚠ ${w}`),
+  ];
+  const notes = `📧 Came in by email${who}${when}${subj}. Read automatically — check the work lines before pricing or sending anything.${flags.length ? ` ${flags.join(". ")}.` : ""}`;
   const row = {
-    partner: f.partner, development: "", job_number: po, description: desc, amount: f.amount,
+    partner: f.partner, development: "", job_number: po, description: desc, amount,
     po_number: po, po_date: f.poDate, address: f.address, property_unit: f.punit,
     contact: f.contact, bill_to: f.billBlock, items: seed, invoice_number: await nextInvoiceNo(), notes,
     ...(f.taxPct !== undefined ? { tax_pct: f.taxPct } : {}),

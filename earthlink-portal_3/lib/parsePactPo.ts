@@ -35,6 +35,11 @@ export interface PactPoFields {
   // the day the PO says the work is set for ("Access date 8/20/2026",
   // "Scheduled 08/20/2026") as YYYY-MM-DD — empty when the PO names none
   accessDate?: string;
+  // what the partner's system stamped on it: "NOT APPROVED" / "APPROVED"
+  poStatus?: string;
+  // things a person should know about how this PO was read — a PO that
+  // names two apartments, say — in plain words
+  warnings?: string[];
 }
 
 // "8/20/26" and "08/20/2026" both become 2026-08-20; anything that isn't a
@@ -211,7 +216,7 @@ export function readRowsFrom(src: PoLine[], pitch: number): PactPoFields["rows"]
       if (L.segs.length >= 2) { descX = L.segs[0].x; nextX = L.segs[1].x; lastY = L.y; } else nextX = Infinity;
       continue;
     }
-    if (at < 0 || nextX === Infinity || merges >= 2 || L.segs.length === 0) continue;
+    if (at < 0 || nextX === Infinity || merges >= 4 || L.segs.length === 0) continue;
     // a row's wrap is on the same page as the row — the top of the next page is
     // a fresh letterhead, not the rest of the sentence
     if (L.page !== rowPage) { at = -1; continue; }
@@ -486,11 +491,36 @@ export function parsePactPoText(raw: string, structured?: PoLine[]): PactPoField
   const rowSum = rows.reduce((s, r) => s + r.qty * r.unit_price, 0);
   const amount = grand.length > 0 ? grand[grand.length - 1] : rowSum;
   const rowsAddUp = grand.length === 0 || rows.length === 0 || Math.abs(rowSum - amount) < 0.02;
-  const aptIn = (a: string) => a.match(/\b(?:apartment|apt\.?|unit|#)\s*([\dA-Za-z][\dA-Za-z -]{0,8}?)(?=\s*(?:,|Brooklyn|Bronx|Queens|Manhattan|Staten|New York|NY\b|$))/i)?.[1]?.trim() || "";
-  const apt = aptIn(address);
+  const APT_RE = /\b(?:apartment|apt\.?|unit|#)\s*([\dA-Za-z][\dA-Za-z -]{0,8}?)(?=\s*(?:,|Brooklyn|Bronx|Queens|Manhattan|Staten|New York|NY\b|$))/gi;
+  const aptsIn = (a: string) => [...a.matchAll(APT_RE)].map((m) => m[1].trim()).filter(Boolean);
+  const apts = aptsIn(address);
+  const normApt = (v: string) => v.replace(/[^0-9a-z]/gi, "").replace(/^0+(?=[0-9a-z])/i, "").toUpperCase();
+  // the Unit column ("0884-03A") is the partner's own record: building 884,
+  // apartment 3A. It is believed when its building matches the street number.
+  const unitCode = rows[0]?.unit || "";
+  const um = unitCode.match(/^0*(\d+)-([0-9A-Za-z]+)$/);
+  const streetNo = address.match(/^\s*(\d+)/)?.[1] || "";
+  const unitApt = um && (!streetNo || um[1] === streetNo) ? normApt(um[2]) : "";
+  const warnings: string[] = [];
+  let apt = apts[0] || "";
+  const distinct = [...new Set(apts.map(normApt))];
+  const named = apts.map((a) => a.toUpperCase()).join(" and ");
+  if (unitApt) {
+    // the address block may say one thing and the Unit code another — the
+    // code is the partner's system of record, the address line is often a
+    // stale entry — but a person is told whenever the PO names more than one
+    apt = apts.find((a) => normApt(a) === unitApt) || unitApt;
+    if (distinct.length > 1) warnings.push(`The PO names apartments ${named} — went with ${apt.toUpperCase()}, the one its Unit code ${unitCode} points to`);
+    else if (distinct.length === 1 && distinct[0] !== unitApt) warnings.push(`The PO's address says apartment ${named} but its Unit code ${unitCode} says ${unitApt} — went with ${unitApt}, check which one it is`);
+  } else if (distinct.length > 1) warnings.push(`The PO names apartments ${named} — went with ${apt.toUpperCase()}, check which one it is`);
   const punit = apt || (rows[0]?.property
     ? `${rows[0].property}${rows[0].unit ? ` ${rows[0].unit}` : ""}`
     : t.match(/\$\s*[\d.,]+\s+([0-9]+-[0-9]+)/)?.[1] || "");
+  // the partner's stamp on the PO, when it printed one. "NOT APPROVED" is
+  // unmistakable anywhere; a bare "APPROVED" only counts as its own cell, so
+  // an "Approved by:" form label never passes for a stamp
+  const poStatus = /\bnot\s+approved\b/i.test(t) ? "NOT APPROVED"
+    : src.some((l) => l.segs.length ? l.segs.some((sg) => /^approved$/i.test(sg.text.trim())) : /^approved$/i.test(l.text.trim())) ? "APPROVED" : "";
   const phone = contacts[0] || t.match(/([A-Z][a-z]+ [A-Z][a-z]+)\s+(\d{3}[-.]?\d{3}[-.]?\d{4})/)?.slice(1, 3).join(" ") || "";
   // the person on the PO comes first — that's who the letter is addressed to
   const contact = [person, personTitle, phone && !person ? phone : ""].filter(Boolean).join(" · ")
@@ -515,9 +545,13 @@ export function parsePactPoText(raw: string, structured?: PoLine[]): PactPoField
     po, poDate, desc, scope, partner,
     // the apartment is carried in its own field, so it isn't printed twice
     // when the letter puts it back on the end of the address
-    address: apt ? address.replace(new RegExp(`\\s*,?\\s*\\b(?:apartment|apt\\.?|unit|#)\\s*${apt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"), "").replace(/\s*,\s*,/g, ",").replace(/^[,\s]+|[,\s]+$/g, "") : address,
+    address: apts.length
+      ? address.replace(/\s*,?\s*\b(?:apartment|apt\.?|unit|#)\s*[\dA-Za-z][\dA-Za-z -]{0,8}?(?=\s*(?:,|Brooklyn|Bronx|Queens|Manhattan|Staten|New York|NY\b|$))/gi, "").replace(/\s*,\s*,/g, ",").replace(/^[,\s]+|[,\s]+$/g, "")
+      : address,
     billBlock, contact, punit, amount, rows, rowsAddUp,
     readable: t.trim().length > 20,
     ...(accessDate ? { accessDate } : {}),
+    ...(poStatus ? { poStatus } : {}),
+    ...(warnings.length ? { warnings } : {}),
   };
 }

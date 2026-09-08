@@ -716,6 +716,10 @@ export default function Pact() {
           return;
         }
       }
+      const poFlags = [
+        ...(f.poStatus === "NOT APPROVED" ? ["The PO is stamped NOT APPROVED on the partner's system — don't start work until it is"] : []),
+        ...(f.warnings || []),
+      ];
       const bkNow = await priceBook();
       const seed: Item[] = unreadable ? []
         : f.rows.length > 0
@@ -749,6 +753,8 @@ export default function Pact() {
         ...(taxFromDoc !== undefined ? { tax_pct: taxFromDoc } : {}),
         // the day the PO set goes straight onto the schedule; no day = Need to schedule
         ...(f.accessDate ? { start_date: f.accessDate } : {}),
+        // anything a person should know about how it was read stays on the job
+        ...(poFlags.length ? { notes: `⚠ ${poFlags.join(". ")}.` } : {}),
       }).select().single();
       if (error || !job) { setBusy(false); flash(upgradeHint(error?.message || "Save failed")); return; }
       // attach the PO itself
@@ -771,7 +777,7 @@ export default function Pact() {
           ? isDocx
             ? "File attached, but the proposal couldn't be read — type the partner, address and description below"
             : `PDF attached, but no text could be read (scanned copy?${how ? ` · ${how}` : ""}) — type the partner, address and description below`
-          : `PO ${f.po || "imported"} — ${f.accessDate ? `set for ${prettyDate(f.accessDate)} per the PO` : "no date on the PO, it's under Need to schedule"} · check the work lines below`);
+          : `PO ${f.po || "imported"} — ${f.accessDate ? `set for ${prettyDate(f.accessDate)} per the PO` : "no date on the PO, it's under Need to schedule"}${poFlags.length ? ` · ⚠ ${poFlags[0]}` : ""} · check the work lines below`);
     } catch (err) {
       setBusy(false);
       flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
@@ -1451,6 +1457,7 @@ export default function Pact() {
               <div className="flex shrink-0 items-center gap-2">
                 {canPrice && <span className="font-mono text-sm font-semibold">{fmt(Number(j.amount) || invTotal(j))}</span>}
                 {(j.notes || "").startsWith("📧") && <span className="chip text-inksoft" title={j.notes}>📧 email</span>}
+                {/⚠/.test(j.notes || "") && <span className="chip text-alert" title={j.notes}>⚠ check</span>}
                 {(j.attachments || []).length > 0 && <span className="chip text-inksoft" title="Documents & photos">📎 {(j.attachments || []).length}</span>}
                 <RowActions items={[
                   { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },
@@ -1467,7 +1474,7 @@ export default function Pact() {
               const photoN = (j.attachments || []).filter((a) => isImg(a.name)).length;
               return (
               <div className="mt-3 border-t border-rulesoft pt-3">
-                {(j.notes || "").startsWith("📧") && (
+                {/^(?:📧|⚠)/.test(j.notes || "") && (
                   <div className="mb-2.5 rounded-sm border border-rulesoft bg-paper px-3 py-2 text-[12px] text-inksoft">{j.notes}</div>
                 )}
                 <div className="mb-2.5 flex flex-wrap items-center gap-2">

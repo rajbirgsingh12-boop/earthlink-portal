@@ -872,7 +872,34 @@ export default function Pact() {
     }
     setBusy(false);
   };
-  const attachFile = (j: Job, file: File) => attachFiles(j, [file]);
+  // "Upload files": pictures are shrunk like camera shots, a photos zip (the
+  // one "⬇ Photos" makes) is opened back up into its pictures — their
+  // before_/after_ names survive the round trip, so they land in the right
+  // rows — and anything else (a PO, a letter) is attached as it is
+  const uploadFiles = async (j: Job, files: File[]) => {
+    const out: File[] = [];
+    let zipped = 0;
+    for (const f of files) {
+      if (/\.zip$/i.test(f.name)) {
+        try {
+          const { unzipSync } = await import("fflate");
+          const entries = unzipSync(new Uint8Array(await f.arrayBuffer()));
+          for (const [name, bytes] of Object.entries(entries)) {
+            const base = name.split("/").pop() || "";
+            if (!base || !isImg(base) || bytes.length === 0) continue; // folders, junk, non-pictures
+            const ab = new ArrayBuffer(bytes.byteLength); new Uint8Array(ab).set(bytes);
+            out.push(new File([ab], base, { type: /png$/i.test(base) ? "image/png" : "image/jpeg" }));
+            zipped += 1;
+          }
+        } catch { flash(`${f.name} isn't a zip this phone can open`); }
+        continue;
+      }
+      out.push(isImg(f.name) ? await shrinkImage(f) : f);
+    }
+    if (out.length === 0) { flash("Nothing to attach in that — no pictures or documents found"); return; }
+    await attachFiles(j, out);
+    if (zipped) flash(`${zipped} picture${zipped === 1 ? "" : "s"} unpacked from the zip and attached`);
+  };
   const addPhotos = async (j: Job, files: File[], kind: "before" | "after") => {
     const stamp = new Date().toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "");
     setBusy(true);
@@ -1771,7 +1798,7 @@ export default function Pact() {
               <div className="flex flex-wrap gap-2">
                 {canEdit && <button className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "before")} disabled={busy}>📷 Before</button>}
                 {canEdit && <button className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "after")} disabled={busy}>📷 After</button>}
-                {canEdit && <button className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy}>Upload file</button>}
+                {canEdit && <button className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy} title="Pictures, a photos zip, or a document — several at once">Upload files</button>}
                 {photoN > 0 && <button className="btn btn-ghost" onClick={() => downloadPhotos(attachJob)} disabled={busy} title="Just the pictures — no PO, no invoice">⬇ Photos · {photoN}</button>}
               </div>
             ) : undefined;
@@ -1830,8 +1857,10 @@ export default function Pact() {
             ))}
         </Modal>
       )}
-      <input ref={fileRef} type="file" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f && attachJob) attachFile(attachJob, f); e.target.value = ""; }} />
-      <input ref={photoRef} type="file" accept="image/*" capture="environment" multiple className="hidden"
+      <input ref={fileRef} type="file" multiple className="hidden" onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length && attachJob) uploadFiles(attachJob, fs); e.target.value = ""; }} />
+      {/* no capture= here on purpose: the phone offers the camera AND the photo
+          library, so pictures someone else took (or downloaded) can go up too */}
+      <input ref={photoRef} type="file" accept="image/*" multiple className="hidden"
         onChange={(e) => { const fs = Array.from(e.target.files || []); const t = photoTarget; const j = t ? jobs.find((x) => x.id === t.id) : null; if (fs.length && t && j) addPhotos(j, fs, t.kind); e.target.value = ""; }} />
 
       {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}

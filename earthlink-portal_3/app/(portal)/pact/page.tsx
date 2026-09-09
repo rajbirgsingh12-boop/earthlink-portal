@@ -618,6 +618,68 @@ export default function Pact() {
     flash(`${done} of ${gone.length} deleted — ${kept.length} kept for their photos or prices`);
   };
 
+  // ---------- invoice numbers in a straight line ----------
+  // Invoices count up by one. Deleting jobs (the email imports, say) leaves a
+  // hole — 620, then 631 — and every invoice after it sits ten too high. This
+  // closes the hole: every invoice above the last number before it moves down,
+  // in order, so the sequence reads 620, 621, 622… again. An invoice already
+  // marked sent or paid keeps its number unless the owner says otherwise —
+  // the partner has that number on their side.
+  const renumberInvoices = async () => {
+    type Row = { id: string; invoice_number?: string | null; invoice_sent?: string | null; received?: boolean; canceled?: boolean; po_number?: string; job_number?: string; address?: string; created_at?: string; attachments?: { name: string; path: string }[] | null };
+    const { data, error } = await sb().from("pact_jobs").select("id,invoice_number,invoice_sent,received,canceled,po_number,job_number,address,created_at,attachments");
+    if (error) { flash(upgradeHint(error.message)); return; }
+    const rows = ((data || []) as Row[])
+      .map((r) => ({ r, n: /^\d+$/.test(String(r.invoice_number || "").trim()) ? parseInt(String(r.invoice_number).trim(), 10) : NaN }))
+      .filter((x) => Number.isFinite(x.n))
+      .sort((a, b) => a.n - b.n || String(a.r.created_at || "").localeCompare(String(b.r.created_at || "")));
+    // the last number before the first hole
+    let gapAt = -1;
+    for (let i = 0; i + 1 < rows.length; i++) if (rows[i + 1].n > rows[i].n + 1) { gapAt = i; break; }
+    if (gapAt < 0) { flash("Invoice numbers already go up by one — nothing to fix"); return; }
+    const last = rows[gapAt].n;
+    const above = rows.slice(gapAt + 1);
+    const label = (x: { r: Row; n: number }) => `PO ${x.r.po_number || x.r.job_number || "?"}${x.r.address ? ` · ${x.r.address.split(",")[0]}` : ""}${x.r.canceled ? " (canceled)" : ""}`;
+    const sent = above.filter((x) => x.r.invoice_sent || x.r.received);
+    let keep = new Set<string>();
+    if (sent.length > 0) {
+      const also = window.confirm(`${sent.length} of the invoices after #${last} ${sent.length === 1 ? "was" : "were"} already marked sent or paid:\n\n${sent.slice(0, 10).map((x) => `#${x.n}  ${label(x)}`).join("\n")}${sent.length > 10 ? "\n…" : ""}\n\nOK renumbers those too (tell the partner the new number). Cancel leaves those as they are and renumbers only the rest.`);
+      if (!also) keep = new Set(sent.map((x) => x.r.id));
+    }
+    const kept = new Set(above.filter((x) => keep.has(x.r.id)).map((x) => x.n));
+    const plan: { x: { r: Row; n: number }; to: number }[] = [];
+    let next = last;
+    for (const x of above) {
+      if (keep.has(x.r.id)) continue;
+      do { next += 1; } while (kept.has(next));
+      if (next !== x.n) plan.push({ x, to: next });
+    }
+    const nextNew = Math.max(next, ...kept) + 1;
+    if (plan.length === 0) { flash(`Nothing to move — the next new invoice is #${nextNew}`); return; }
+    const msg = `Close the hole after #${last}? ${plan.length} invoice${plan.length === 1 ? "" : "s"} move${plan.length === 1 ? "s" : ""} down:\n\n${plan.slice(0, 14).map((p) => `#${p.x.n} → #${p.to}  ${label(p.x)}`).join("\n")}${plan.length > 14 ? `\n…and ${plan.length - 14} more` : ""}\n\nThe next new invoice will be #${nextNew}. Invoice PDFs already saved on these jobs are removed — download them again with the new number.`;
+    if (!window.confirm(msg)) return;
+    setBusy(true);
+    let done = 0;
+    // in order of the old numbers: each new number sits below every old number
+    // still to come, so no two jobs ever hold the same one, even for a moment
+    for (const p of plan) {
+      const { error: e } = await sb().from("pact_jobs").update({ invoice_number: String(p.to) }).eq("id", p.x.r.id);
+      if (e) { flash(`Stopped at #${p.x.n}: ${e.message}`); break; }
+      done += 1;
+      // the saved invoice PDF carries the old number in its name — off the
+      // shelf it goes; the next download makes a fresh one
+      const atts = p.x.r.attachments || [];
+      const stale = atts.filter((a) => /^invoice # /i.test(a.name) || /\/made\/invoice /i.test(a.path));
+      if (stale.length) {
+        try { await sb().storage.from("docs").remove(stale.map((a) => a.path)); } catch { /* best effort */ }
+        await sb().from("pact_jobs").update({ attachments: atts.filter((a) => !stale.includes(a)) }).eq("id", p.x.r.id);
+      }
+    }
+    setBusy(false);
+    await load();
+    flash(`${done} invoice${done === 1 ? "" : "s"} renumbered — the next new one is #${nextNew}`);
+  };
+
   const handlePo = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -1470,6 +1532,7 @@ export default function Pact() {
               { label: "Upload a folder of proposals", hidden: !canInvoice, disabled: busy, title: "Pick a folder of proposal letters — every one becomes a job, then all the invoices download in one zip", onSelect: () => folderRef.current?.click() },
               { label: "Proposal template", hidden: !canInvoice, disabled: busy, title: "A blank proposal letter in our layout — fill it in, and uploading it back here builds the job and the invoice", onSelect: blankProposal },
               { label: "Add a job manually", onSelect: () => setAddOpen(!addOpen) },
+              { label: "Renumber invoices…", hidden: !canInvoice, disabled: busy, title: "Close a hole in the invoice numbers (after deleted jobs) so they go up by one again", onSelect: renumberInvoices },
               { label: `Clean up old email imports… (${emailJobsToClean().length})`, hidden: !canPrice || emailJobsToClean().length === 0, disabled: busy, destructive: true, title: "Deletes the jobs the old email intake made that nobody has touched. Jobs with photos or real prices stay.", onSelect: cleanupEmailJobs },
             ]} />
           </div>

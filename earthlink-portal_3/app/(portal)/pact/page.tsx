@@ -116,12 +116,15 @@ export default function Pact() {
 
   // invoice numbers count up: 569, 570, 571… — the highest plain number wins,
   // so old "8300-1"-style numbers never skew the sequence
+  // the portal's run of invoice numbers starts above this — anything at or
+  // below it is an old hand-typed number, outside the sequence
+  const INVOICE_FLOOR = 568;
   const nextInvoiceNo = async (): Promise<string> => {
     const { data } = await sb().from("pact_jobs").select("invoice_number");
     const nums = ((data || []) as { invoice_number?: string }[])
       .map((r) => (/^\d+$/.test(String(r.invoice_number || "").trim()) ? parseInt(String(r.invoice_number).trim(), 10) : NaN))
       .filter((n) => Number.isFinite(n));
-    return String(Math.max(568, ...nums) + 1);
+    return String(Math.max(INVOICE_FLOOR, ...nums) + 1);
   };
 
   // every new job carries its auto-price baseline (RUN_ME section 15) — the
@@ -631,8 +634,13 @@ export default function Pact() {
     if (error) { flash(upgradeHint(error.message)); return; }
     const rows = ((data || []) as Row[])
       .map((r) => ({ r, n: /^\d+$/.test(String(r.invoice_number || "").trim()) ? parseInt(String(r.invoice_number).trim(), 10) : NaN }))
-      .filter((x) => Number.isFinite(x.n))
+      // only the portal's own run counts — an old hand-typed "12" is not a hole
+      .filter((x) => Number.isFinite(x.n) && x.n > INVOICE_FLOOR)
       .sort((a, b) => a.n - b.n || String(a.r.created_at || "").localeCompare(String(b.r.created_at || "")));
+    // two jobs on one number: sort that out by hand first — moving numbers
+    // around a duplicate could hand two jobs the same one for good
+    const twin = rows.find((x, i) => i > 0 && rows[i - 1].n === x.n);
+    if (twin) { flash(`Two jobs share invoice #${twin.n} — give one of them its own number first (Job details → Invoice #)`); return; }
     // the last number before the first hole
     let gapAt = -1;
     for (let i = 0; i + 1 < rows.length; i++) if (rows[i + 1].n > rows[i].n + 1) { gapAt = i; break; }
@@ -654,22 +662,26 @@ export default function Pact() {
       do { next += 1; } while (kept.has(next));
       if (next !== x.n) plan.push({ x, to: next });
     }
-    const nextNew = Math.max(next, ...kept) + 1;
+    const nextNew = Math.max(INVOICE_FLOOR, next, ...kept) + 1;
     if (plan.length === 0) { flash(`Nothing to move — the next new invoice is #${nextNew}`); return; }
     const msg = `Close the hole after #${last}? ${plan.length} invoice${plan.length === 1 ? "" : "s"} move${plan.length === 1 ? "s" : ""} down:\n\n${plan.slice(0, 14).map((p) => `#${p.x.n} → #${p.to}  ${label(p.x)}`).join("\n")}${plan.length > 14 ? `\n…and ${plan.length - 14} more` : ""}\n\nThe next new invoice will be #${nextNew}. Invoice PDFs already saved on these jobs are removed — download them again with the new number.`;
     if (!window.confirm(msg)) return;
     setBusy(true);
-    let done = 0;
+    let done = 0, stopped = "";
     // in order of the old numbers: each new number sits below every old number
     // still to come, so no two jobs ever hold the same one, even for a moment
     for (const p of plan) {
       const { error: e } = await sb().from("pact_jobs").update({ invoice_number: String(p.to) }).eq("id", p.x.r.id);
-      if (e) { flash(`Stopped at #${p.x.n}: ${e.message}`); break; }
+      if (e) { stopped = `Stopped at #${p.x.n}: ${e.message.slice(0, 80)}`; break; }
       done += 1;
-      // the saved invoice PDF carries the old number in its name — off the
-      // shelf it goes; the next download makes a fresh one
-      const atts = p.x.r.attachments || [];
-      const stale = atts.filter((a) => /^invoice # /i.test(a.name) || /\/made\/invoice /i.test(a.path));
+      // the invoice PDF the portal shelved carries the old number in its name —
+      // off the shelf it goes; the next download makes a fresh one. The list is
+      // read again right here: another phone may have added photos since the
+      // click, and those stay. Only the portal's own shelf is touched, never a
+      // file someone uploaded.
+      const { data: cur } = await sb().from("pact_jobs").select("attachments").eq("id", p.x.r.id).single();
+      const atts = ((cur as { attachments?: { name: string; path: string }[] } | null)?.attachments) || [];
+      const stale = atts.filter((a) => /\/made\/invoice /i.test(a.path));
       if (stale.length) {
         try { await sb().storage.from("docs").remove(stale.map((a) => a.path)); } catch { /* best effort */ }
         await sb().from("pact_jobs").update({ attachments: atts.filter((a) => !stale.includes(a)) }).eq("id", p.x.r.id);
@@ -677,7 +689,11 @@ export default function Pact() {
     }
     setBusy(false);
     await load();
-    flash(`${done} invoice${done === 1 ? "" : "s"} renumbered — the next new one is #${nextNew}`);
+    // one message, and the truth: a run that stopped short says so, and
+    // doesn't claim a next number it can't know
+    flash(stopped
+      ? `${stopped} — ${done} of ${plan.length} moved. Run Renumber invoices… again to finish`
+      : `${done} invoice${done === 1 ? "" : "s"} renumbered — the next new one is #${nextNew}`);
   };
 
   const handlePo = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1093,7 +1109,7 @@ export default function Pact() {
       const { data: priorRows, error: le } = await sb().from("pact_jobs").select(`partner,bill_to,invoice_number,${DUPE_COLS}`).limit(5000);
       if (le) { flash(`Couldn't check for duplicates (${le.message.slice(0, 60)}) — nothing was created, try again`); return; }
       const prior = (priorRows || []) as (Job & { partner: string; bill_to?: string; invoice_number?: string })[];
-      let seq = Math.max(568, ...prior
+      let seq = Math.max(INVOICE_FLOOR, ...prior
         .map((p) => (/^\d+$/.test(String(p.invoice_number || "").trim()) ? parseInt(String(p.invoice_number).trim(), 10) : NaN))
         .filter((n) => Number.isFinite(n)));
       const made: Job[] = [];

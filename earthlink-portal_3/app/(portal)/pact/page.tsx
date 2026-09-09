@@ -1481,7 +1481,6 @@ export default function Pact() {
               </button>
               <div className="flex shrink-0 items-center gap-2">
                 {canPrice && <span className="font-mono text-sm font-semibold">{fmt(Number(j.amount) || invTotal(j))}</span>}
-                {/⚠/.test(j.notes || "") && <span className="chip text-alert" title={j.notes}>⚠ check</span>}
                 {(j.attachments || []).length > 0 && <span className="chip text-inksoft" title="Documents & photos">📎 {(j.attachments || []).length}</span>}
                 <RowActions items={[
                   { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },

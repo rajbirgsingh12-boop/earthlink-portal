@@ -31,11 +31,12 @@ export const PoSchema = z.object({
 export type SmartPo = z.infer<typeof PoSchema>;
 
 export const SMART_PO_SYSTEM = `You read purchase orders (POs) that property-management partners send to Earth Link General Construction, a NYC contractor doing apartment repairs (plaster, paint, doors, floors, kitchens). Fill the form from the PO exactly as printed. Rules:
-- Earth Link is the vendor ("To:" / "Vendor"). The partner is whoever issued the PO — the LLC or management company at the top or in Bill To.
-- The Ship To block is the job site (service address). Keep the apartment out of the address line and put it in "apartment".
+- Earth Link is the vendor ("To:" / "Vendor") — its address, phone and email are never the partner's. The partner is whoever issued the PO: the LLC or management company printed at the top and in Bill To (e.g. "boulevard together TENANT LLC", "Fairstead").
+- Bill To and Ship To are often printed side by side as two columns. Bill To is the partner's office; Ship To is the job site (service address). Keep the apartment out of the address line and put it in "apartment".
 - A Unit code like "0884-03A" means building 884, apartment 3A. When the address block names two apartments, the Unit code decides — and say so in warnings.
-- "Access date" / "Scheduled" is the day the work is set for. "Date Required" and "Date Ordered" are not.
-- Money: read the rows and the total as printed. A PO priced at $1.00 is a placeholder — report it as 1, do not invent prices.
+- "Access date" / "Scheduled" is the day the work is set for. "Date Required" and "Date Ordered" are not. The access date is a date, never a work row.
+- The description is the "Description:" field plus its continuation lines, plus the work-row wording (which often repeats it, wrapped onto several lines) — joined into one plain sentence, without labels, dates, form headings or HPD ticket boilerplate stripped only if it is a label.
+- Money: read the rows and the total as printed. A PO priced at $1.00 (rows and total) is a placeholder — report 1 and do not invent prices. A "NOT APPROVED" stamp is normal for these partners; just report it.
 - Never guess a field that is not on the page: leave it empty.`;
 
 export type SmartRead = { fields: PactPoFields & { taxPct?: number }; readBy: "claude" | "rules"; note?: string };
@@ -43,21 +44,25 @@ export type SmartRead = { fields: PactPoFields & { taxPct?: number }; readBy: "c
 const digits = (s: string) => String(s || "").replace(/\D/g, "");
 const cents = (v: number) => Math.round((Number(v) || 0) * 100) / 100;
 
-// Does Claude's answer agree with what is printed? The PO number must be on
-// the page, the money must add up, and dates must be real days.
+// Does Claude's answer come from this page at all? Only a made-up PO number,
+// or an answer with nothing in it, sends the read back to the rules — Claude
+// reads these POs better than the rules do, so everything else it says is
+// kept, and anything odd about the money becomes a note on the job.
 export function smartAgrees(s: SmartPo, text: string): string | null {
   const t = text.replace(/\s+/g, " ");
   if (!s.po_number.trim()) return "no PO number";
   if (!digits(t).includes(digits(s.po_number)) && !t.includes(s.po_number.trim())) return `PO number ${s.po_number} isn't printed on the page`;
   if (!s.partner.trim() && !s.service_address.trim() && !s.description.trim()) return "no partner, address or description";
-  const rowSum = s.rows.reduce((a, r) => a + cents(cents(r.unit_price) * (Number(r.qty) || 0)), 0);
-  // the printed total is the rows, or the rows with the 8.875% tax on top —
-  // either is the same PO read right
-  const near = (a: number, b: number) => Math.abs(a - b) <= 0.05;
-  if (s.rows.length > 0 && s.total > 1 && !near(rowSum, s.total) && !near(cents(rowSum * 1.08875), s.total)) return `rows add to ${rowSum.toFixed(2)} but the PO says ${s.total.toFixed(2)}`;
-  if (s.access_date && !/^\d{4}-\d{2}-\d{2}$/.test(s.access_date)) return `access date "${s.access_date}" isn't a date`;
-  if (s.rows.some((r) => r.qty < 0 || r.unit_price < 0)) return "a negative quantity or price";
   return null;
+}
+// things worth a note, never a rejection
+export function smartNotes(s: SmartPo): string[] {
+  const out: string[] = [];
+  const rowSum = s.rows.reduce((a, r) => a + cents(cents(r.unit_price) * (Number(r.qty) || 0)), 0);
+  const near = (a: number, b: number) => Math.abs(a - b) <= 0.05;
+  if (s.rows.length > 0 && s.total > 1 && !near(rowSum, s.total) && !near(cents(rowSum * 1.08875), s.total)) out.push(`The rows add to $${rowSum.toFixed(2)} but the PO's total says $${s.total.toFixed(2)} — check the money`);
+  if (s.rows.some((r) => r.qty < 0 || r.unit_price < 0)) out.push("A row has a negative quantity or price — check it");
+  return out;
 }
 
 // Claude's answer laid over the rule read: Claude's field wins where it has
@@ -69,8 +74,9 @@ export function mergeSmart(rules: PactPoFields & { taxPct?: number }, s: SmartPo
     : rules.rows;
   const rowSum = rows.reduce((a, r) => a + cents(cents(r.unit_price) * (Number(r.qty) || 0)), 0);
   const amount = s.total > 0 ? cents(s.total) : rules.amount || rowSum;
-  const accessDate = isoDate(s.access_date) || (/^\d{4}-\d{2}-\d{2}$/.test(s.access_date) ? s.access_date : "") || rules.accessDate || "";
-  const warnings = [...new Set([...(rules.warnings || []), ...s.warnings.map((w) => w.trim()).filter(Boolean)])];
+  // a date in any shape Claude might write it — "2026-09-10", "9/10/2026"
+  const accessDate = (/^\d{4}-\d{2}-\d{2}$/.test(s.access_date) ? s.access_date : "") || isoDate(s.access_date) || rules.accessDate || "";
+  const warnings = [...new Set([...(rules.warnings || []), ...s.warnings.map((w) => w.trim()).filter(Boolean), ...smartNotes(s)])];
   return {
     ...rules,
     po: pick(s.po_number, rules.po),
@@ -115,9 +121,9 @@ export async function askClaude(pdf: Uint8Array, timeoutMs: number = SMART_TIMEO
   const res = await client.messages.parse({
     model: "claude-opus-5",
     max_tokens: 8000,
-    // a form fill from a one-page PO doesn't need deep thought — medium keeps
-    // it well inside the server's time limit
-    output_config: { effort: "medium", format: zodOutputFormat(PoSchema) },
+    // a one-page PO reads in a few seconds at high effort — well inside the
+    // server's time limit, and worth it: this read becomes the job
+    output_config: { effort: "high", format: zodOutputFormat(PoSchema) },
     system: SMART_PO_SYSTEM,
     messages: [{
       role: "user",

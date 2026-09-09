@@ -119,7 +119,7 @@ const MONEYISH = /\$|\b\d[\d,]*\.\d{2}\b/;
 // fields — "Contact info", "Scheduled", "PO Closed: No". The description is
 // the WORK; everything the form adds after it gets cut.
 const FORM_TAIL = /\s*(?:contact\s*info|scheduled|date\s*payment|po\s*closed|closed\s*\?|status|terms|vendor|approved\s*by|requested\s*by|bill\s*to|ship\s*to|service\s*(?:address|location)|job\s*site|qty\b|quantity\b|unit\s*price|total\s*cost|sales\s*tax|grand\s*total|amount\s*due|signature|page\s*\d)\b[\s\S]*$/i;
-const FORM_HEAD = /^(?:contact\s*info|scheduled|date\s*payment|po\s*closed|status|terms|vendor|approved\s*by|requested\s*by|signature)\b/i;
+const FORM_HEAD = /^(?:contact\s*info|scheduled|access\s*date|date\s*payment|po\s*closed|status|terms|vendor|approved\s*by|requested\s*by|signature)\b/i;
 const cleanWork = (v: string) => (v || "")
   .replace(FORM_TAIL, "")
   .replace(/\bpo\s*closed\s*:?\s*(?:no|yes|n|y)\b/gi, "")
@@ -148,7 +148,12 @@ export function readRow(line: string, opts: { allowTotalish?: boolean } = {}): P
   // In our own letters it can be real work ("Total station survey"), and the
   // totals there are recognised by their own shape instead.
   if (!l || (!opts.allowTotalish && TOTALISH.test(l)) || !/[A-Za-z]/.test(l)) return null;
-  const nums = [...l.matchAll(/-?\$?\s?(\d[\d,]*(?:\.\d{1,2})?)/g)]
+  // "Access date 9/09/2026" is a date, not a row priced at $9 — and a row
+  // read there would tell the reader the work table starts above the
+  // Bill To / Ship To blocks, which breaks the reading of the address
+  if (/^(?:access|scheduled?|start|work)\s*date\b/i.test(l)) return null;
+  // dates are blanked to same-length spaces so every position still points into l
+  const nums = [...l.replace(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g, (m) => " ".repeat(m.length)).matchAll(/-?\$?\s?(\d[\d,]*(?:\.\d{1,2})?)/g)]
     .map((m) => ({ v: cash(m[1]) * (m[0].trim().startsWith("-") ? -1 : 1), at: m.index as number, len: m[0].length }));
   if (nums.length < 2) return null;
   // a bare number in front of the work is the table's line number, but only

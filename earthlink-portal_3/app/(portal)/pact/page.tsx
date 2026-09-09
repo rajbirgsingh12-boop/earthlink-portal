@@ -15,7 +15,6 @@ import Modal from "@/components/Modal";
 import Disclosure from "@/components/Disclosure";
 import { useLive } from "@/lib/useLive";
 import { findDupe, DUPE_COLS } from "@/lib/po";
-import JobDates from "@/components/JobDates";
 import { COMPANY } from "@/lib/company";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
@@ -1499,10 +1498,6 @@ export default function Pact() {
               const photoN = (j.attachments || []).filter((a) => isImg(a.name)).length;
               return (
               <div className="mt-3 border-t border-rulesoft pt-3">
-                {/* when the crew goes — movable with one tap, every move written down */}
-                <div className="mb-3 rounded-sm border border-rulesoft p-3">
-                  <JobDates job={j} canEdit={canEdit} onSave={(p) => patch(j, p as Partial<Job>)} />
-                </div>
                 <div className="mb-2.5 flex flex-wrap items-center gap-2">
                   {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "before")} disabled={busy}>📷 Before{beforeN > 0 ? ` · ${beforeN}` : ""}</button>}
                   {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "after")} disabled={busy}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}

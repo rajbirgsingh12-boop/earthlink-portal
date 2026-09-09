@@ -40,7 +40,10 @@ export async function POST(req: Request) {
     // the browser fallback, so both paths read the same table
     const { getResolvedPDFJS } = await import("unpdf");
     const pdfjs = await getResolvedPDFJS();
-    const doc = await pdfjs.getDocument({ data: new Uint8Array(buf) }).promise;
+    // pdfjs takes the buffer it is handed and detaches it — it gets a copy,
+    // so the bytes still exist for the smart reader afterwards
+    const bytes = new Uint8Array(buf);
+    const doc = await pdfjs.getDocument({ data: bytes.slice() }).promise;
     const pages: PoItem[][] = [];
     for (let pg = 1; pg <= doc.numPages; pg++) {
       const tc = await (await doc.getPage(pg)).getTextContent();
@@ -52,7 +55,7 @@ export async function POST(req: Request) {
     const text = pages.map((it) => it.map((x) => x.str || "").join(" ")).join("\n");
     // readPoSmart only ever shows Claude a partner PO — releases, payroll,
     // statements and anything else stay with the rules
-    const smart = await readPoSmart(new Uint8Array(buf), text, rules);
+    const smart = await readPoSmart(bytes, text, rules);
     return NextResponse.json({ ok: true, fields: smart.fields, readBy: smart.readBy, ...(smart.note ? { note: smart.note } : {}) });
   } catch (e) {
     return NextResponse.json({ error: `Couldn't open the PDF: ${e instanceof Error ? e.message.slice(0, 120) : "unknown"}` }, { status: 422 });

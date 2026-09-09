@@ -622,9 +622,16 @@ export function mergePricedLines(text: string, existing: JobLine[], bk: PriceIte
 // lines have.
 export function linesFromPoRead(f: { desc: string; scope: string; rows: { description: string; qty: number; unit_price: number; uom?: string; base?: string }[] },
   unreadable: boolean, amount: number, bk: PriceItem[]): { items: JobLine[]; amount: number } {
+  // a PO whose printed total is the $1 placeholder has priced nothing — any
+  // row that arrives with a price on it there is a misread (a date, a line
+  // number), never an agreement
+  const placeholderPo = amount > 0 && amount <= PLACEHOLDER;
+  // and a "row" that is only a date or a form label is not work at all
+  const junkRow = (d: string) => /^\s*(?:access|scheduled?|start|work|due|order(?:ed)?)\s*date\b/i.test(d) || /^\s*date\b/i.test(d) || !/[A-Za-z]{3}/.test(d);
   const seed: JobLine[] = unreadable ? []
     : f.rows.length > 0
-      ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: normUnit(r.uom || unitFor(r.description)), unit_price: r.unit_price, ...(r.base ? { base: r.base } : {}) }))
+      ? f.rows.filter((r) => !junkRow(r.description))
+        .map((r) => ({ description: r.description, qty: r.qty, unit: normUnit(r.uom || unitFor(r.description)), unit_price: placeholderPo ? 0 : r.unit_price, ...(r.base ? { base: r.base } : {}) }))
         // a placeholder row that names more than one trade ("scrape plaster
         // paint") is dropped: keeping it would leave a dollar line sitting
         // beside the three real lines it stands for

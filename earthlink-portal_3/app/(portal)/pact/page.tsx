@@ -583,6 +583,33 @@ export default function Pact() {
     return out.readBy === "claude" ? "claude" : "rules";
   };
 
+  // ---------- one-time clean-up of what the old email intake made ----------
+  // Jobs that came in by email and nobody has touched go. A job someone has
+  // put photos on, or priced for real, stays — that work is worth more than
+  // a tidy list. "Real" money means at least $100 on the job, so a $13 line
+  // the reader invented doesn't count as priced.
+  const isEmailJob = (j: Job) => (j.notes || "").startsWith("📧");
+  const hasPhotos = (j: Job) => (j.attachments || []).some((a) => isImg(a.name));
+  const hasRealPrices = (j: Job) => Number(j.amount || 0) >= 100
+    || (j.items || []).some((it) => (Number(it.qty) || 0) * (Number(it.unit_price) || 0) >= 100);
+  const emailJobsToClean = () => jobs.filter((j) => isEmailJob(j) && !hasPhotos(j) && !hasRealPrices(j));
+  const cleanupEmailJobs = async () => {
+    const gone = emailJobsToClean();
+    const kept = jobs.filter((j) => isEmailJob(j) && !gone.includes(j));
+    if (gone.length === 0) { flash("Nothing to clean up"); return; }
+    const name = (j: Job) => `PO ${j.po_number || j.job_number || "?"}${j.address ? ` · ${j.address.split(",")[0]}` : ""}`;
+    const why = (j: Job) => [hasPhotos(j) && "photos", hasRealPrices(j) && `${fmt(Number(j.amount) || 0)}`].filter(Boolean).join(" + ");
+    const msg = `Delete ${gone.length} email import${gone.length === 1 ? "" : "s"} nobody has worked on?\n\n${gone.slice(0, 12).map(name).join("\n")}${gone.length > 12 ? `\n…and ${gone.length - 12} more` : ""}`
+      + (kept.length ? `\n\nKEPT (photos or real prices): ${kept.slice(0, 8).map((j) => `${name(j)} (${why(j)})`).join("; ")}${kept.length > 8 ? "…" : ""}` : "")
+      + "\n\nThe deleted jobs and their files disappear for good. Hand-made and phone-uploaded jobs are not touched.";
+    if (!window.confirm(msg)) return;
+    setBusy(true);
+    let done = 0;
+    for (const j of gone) if (await deleteJobNow(j)) done += 1;
+    setBusy(false);
+    flash(`${done} of ${gone.length} deleted — ${kept.length} kept for their photos or prices`);
+  };
+
   const handlePo = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -1422,6 +1449,7 @@ export default function Pact() {
               { label: "Upload a folder of proposals", hidden: !canInvoice, disabled: busy, title: "Pick a folder of proposal letters — every one becomes a job, then all the invoices download in one zip", onSelect: () => folderRef.current?.click() },
               { label: "Proposal template", hidden: !canInvoice, disabled: busy, title: "A blank proposal letter in our layout — fill it in, and uploading it back here builds the job and the invoice", onSelect: blankProposal },
               { label: "Add a job manually", onSelect: () => setAddOpen(!addOpen) },
+              { label: `Clean up old email imports… (${emailJobsToClean().length})`, hidden: !canPrice || emailJobsToClean().length === 0, disabled: busy, destructive: true, title: "Deletes the jobs the old email intake made that nobody has touched. Jobs with photos or real prices stay.", onSelect: cleanupEmailJobs },
             ]} />
           </div>
         </div>

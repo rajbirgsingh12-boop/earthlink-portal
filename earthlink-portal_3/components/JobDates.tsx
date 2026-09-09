@@ -18,28 +18,34 @@ export const lastNote = (notes?: string | null) => (notes || "").trim().split("\
 
 const appendNote = (notes: string | null | undefined, line: string) => `${(notes || "").trim()}${(notes || "").trim() ? "\n" : ""}${line}`;
 
-export default function JobDates({ job, canEdit, onSave, showNotes = true }: {
+export default function JobDates({ job, canEdit, onSave, showNotes = true, crew, onMoved }: {
   job: DatedJob;
   canEdit: boolean;
   onSave: (patch: Partial<DatedJob>) => void;
   showNotes?: boolean;
+  // the crew on the job, when there is one — the Move it… dialog offers to text them the new day
+  crew?: { names: string[]; told: boolean };
+  onMoved?: (from: string, to: string) => Promise<void> | void;
 }) {
   const [moving, setMoving] = useState(false);
   const [to, setTo] = useState("");
   const [why, setWhy] = useState(MOVE_REASONS[0]);
   const [note, setNote] = useState("");
   const [draft, setDraft] = useState<string | null>(null);
+  const [tellCrew, setTellCrew] = useState(true);
   const today = localISO(new Date());
   const trips = noAccessCount(job.notes);
 
   const bump = (days: number) => onSave({ start_date: addDays(job.start_date || today, days) });
-  const openMove = () => { setTo(addDays(job.start_date || today, 7)); setWhy(MOVE_REASONS[0]); setNote(""); setMoving(true); };
-  const move = () => {
+  const openMove = () => { setTo(addDays(job.start_date || today, 7)); setWhy(MOVE_REASONS[0]); setNote(""); setTellCrew(!!crew?.told); setMoving(true); };
+  const move = async () => {
     const was = job.start_date ? ` — was ${prettyDate(job.start_date)}` : "";
     const next = to ? `moved to ${prettyDate(to)}` : "needs a new date";
     const line = `⛔ ${why} · ${prettyDate(today)}${was} → ${next}${note.trim() ? ` · ${note.trim()}` : ""}`;
+    // (the crew rows follow the new day through RUN_ME's pact_job_moved trigger — never moved here)
     onSave({ start_date: to, notes: appendNote(job.notes, line) });
     setMoving(false);
+    if (tellCrew && to && crew?.names.length && onMoved) await onMoved(job.start_date || "", to);
   };
   const clear = () => onSave({ start_date: "", notes: appendNote(job.notes, `📅 Date cleared ${prettyDate(today)}${job.start_date ? ` (was ${prettyDate(job.start_date)})` : ""} — back to Need to schedule`) });
 
@@ -79,6 +85,12 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true }: {
             <button type="button" className="btn btn-ghost min-h-[36px] px-2.5 py-1 text-[12px]" onClick={() => setTo("")} title="Leave it without a date for now">No date yet</button>
           </div>
           <input className="field mb-2" placeholder="Note (optional) — who you spoke to, what they said…" value={note} onChange={(e) => setNote(e.target.value)} />
+          {crew && crew.names.length > 0 && (
+            <label className="mb-2 flex min-h-[44px] items-center gap-2 text-[13px]">
+              <input type="checkbox" className="h-5 w-5" checked={tellCrew && !!to} disabled={!to} onChange={(e) => setTellCrew(e.target.checked)} />
+              <span>{to ? `Text ${crew.names.join(", ")} the new day` : `${crew.names.join(", ")} come off the schedule — tell them to hold`}</span>
+            </label>
+          )}
           <div className="flex gap-2">
             <button type="button" className="btn btn-primary min-h-[40px]" onClick={move}>{to ? `Move to ${prettyDate(to)}` : "Log it, no date"}</button>
             <button type="button" className="btn btn-ghost min-h-[40px]" onClick={() => setMoving(false)}>Cancel</button>

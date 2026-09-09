@@ -23,6 +23,11 @@
 -- the login fix for accounts stuck waiting on Supabase
 -- emails that never arrive, and the work-line wording
 -- cleanup applied to every job already in the portal.
+--
+-- Sep additions: one PO is one job (the database refuses a
+-- twin), and PACT jobs on the same crew schedule as NYCHA
+-- releases — the calendar's "Who's going?" remembers who is
+-- on each job, and a moved job takes its crew with it.
 -- ============================================================
 
 -- ---------- from upgrade_invoices_aging_docs.sql ----------
@@ -535,10 +540,57 @@ create index if not exists pact_jobs_norm_po on pact_jobs (public.norm_po(po_num
 create index if not exists pact_jobs_norm_job on pact_jobs (public.norm_po(job_number));
 
 -- 14) PACT jobs go on the same crew schedule as NYCHA releases.
--- One crew table, one texting flow: a schedule_days row can now belong to a
--- PACT job instead of a release. Everything else about the row (worker, day,
--- description, address, the TEXTED mark) is the same, so "Assign & text" and
--- its never-double-text guard cover PACT crews with no new machinery.
+-- One crew table, one texting flow: a schedule_days row can belong to a PACT
+-- job instead of a release. Worker, day, description, address and the TEXTED
+-- mark are the same columns, so the crew texts and their never-double-text
+-- guard (/api/text skips rows already stamped) cover PACT with no new machinery.
+-- releases.crew (from the older schedule upgrade, above) is dormant —
+-- schedule_days superseded it; do not reuse it for PACT.
 alter table schedule_days add column if not exists pact_job_id uuid references pact_jobs(id) on delete cascade;
 create index if not exists schedule_days_pact_job on schedule_days (pact_job_id);
 create index if not exists schedule_days_day on schedule_days (day);
+
+-- The job's site exactly as the app writes it on a crew row — lib/pactCrew.ts
+-- siteOf(); keep the two identical: "123 Main St, Brooklyn, NY 11201, Apt 4B"
+create or replace function public.pact_site(p pact_jobs) returns text
+language sql immutable as $$
+  select concat_ws(', ',
+    coalesce(nullif(trim(p.address), ''), nullif(trim(p.development), '')),
+    case when coalesce(trim(p.property_unit), '') <> '' then 'Apt ' || trim(p.property_unit) end)
+$$;
+
+-- Crew rows made before this section ran (texts sent without the link) are
+-- matched to their job by day + site and linked.
+update schedule_days s set pact_job_id = p.id from pact_jobs p
+  where s.pact_job_id is null and s.release_id is null
+    and s.day = coalesce(p.start_date, '') and s.address = public.pact_site(p);
+
+-- The job's date and site and its crew rows are ONE fact. This trigger is the
+-- only thing that moves crew rows — app code never does (the PACT page's
+-- patch, the calendar's save, a re-uploaded PO's new date, a re-read all just
+-- write pact_jobs and rely on it). Runs as the caller: admin/office already
+-- hold update/delete on schedule_days under RLS.
+create or replace function public.pact_job_follows() returns trigger
+language plpgsql as $$
+begin
+  if new.start_date is distinct from old.start_date then
+    if coalesce(new.start_date, '') = '' then
+      -- no date = off the schedule (a crew with no day is exactly the drift we avoid)
+      delete from schedule_days where pact_job_id = new.id and day = coalesce(old.start_date, '');
+    else
+      -- rows on the old day move to the new day and lose their TEXTED mark
+      update schedule_days set day = new.start_date, texted = false
+        where pact_job_id = new.id and day = coalesce(old.start_date, '');
+    end if;
+  end if;
+  if public.pact_site(new) is distinct from public.pact_site(old) then
+    -- a corrected address reaches the rows the same way (and un-tells the crew)
+    update schedule_days set address = public.pact_site(new), texted = false
+      where pact_job_id = new.id and address is distinct from public.pact_site(new);
+  end if;
+  return new;
+end $$;
+drop trigger if exists pact_job_follows on pact_jobs;
+create trigger pact_job_follows
+  after update of start_date, address, property_unit, development on pact_jobs
+  for each row execute function public.pact_job_follows();

@@ -49,7 +49,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
     key: "nycha", label: "NYCHA",
     items: [["/releases", "Releases", "📄"], ["/items", "Price Book", "📗"], ["/proposals", "Proposals", "📋"], ["/package", "Invoice Package", "🧾"]],
   };
-  const PACT: Group = { key: "pact", label: "PACT", items: [["/pact", "Jobs", "🏢"], ["/pact/schedule", "Schedule", "📅"]] };
+  const PACT: Group = { key: "pact", label: "PACT", items: [["/pact", "Jobs", "🏢"], ["/pact/schedule", "Calendar", "📅"]] };
   // entries render in order: plain links and group menus mixed
   const entries: (["link", string, string] | ["group", Group])[] = [["link", "/home", "Home"]];
   if (role === "admin" || role === "office") {

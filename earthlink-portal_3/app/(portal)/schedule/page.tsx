@@ -11,11 +11,15 @@ import PageHeader from "@/components/PageHeader";
 import ContractPicker, { contractLabel } from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
 import type { Contract } from "@/lib/types";
-import { cleanPhone, smsHref, sendServerTexts, textMachineReady } from "@/lib/notify";
+import Link from "next/link";
+import { cleanPhone, smsHref, sendServerTexts, textMachineReady, textRows, stampRows } from "@/lib/notify";
+import { CREW_JOB_COLS, crewLine, normText, rowsOfJob, siteOf, type CrewJob } from "@/lib/pactCrew";
 
 interface Emp { id: string; name: string; trade: string; active?: boolean; phone?: string | null; }
 interface RelRow { id: string; rel_number: string; location: string; contract_id: string; address?: string | null; }
-interface Assign { id: string; day: string; release_id: string | null; employee_id: string; description: string; texted: boolean; address?: string | null; }
+interface Assign { id: string; day: string; release_id: string | null; pact_job_id?: string | null; employee_id: string; description: string; texted: boolean; address?: string | null; }
+// a PACT job on this day — read here, worked from the calendar
+interface PactDay extends CrewJob { work_done?: boolean; canceled?: boolean }
 
 const upgradeMsg = "Run supabase/upgrade_day_schedule.sql first";
 
@@ -27,6 +31,7 @@ export default function Schedule() {
   const [rels, setRels] = useState<RelRow[]>([]);
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [rows, setRows] = useState<Assign[]>([]);
+  const [pactToday, setPactToday] = useState<PactDay[]>([]);
   const [linkContract, setLinkContract] = useState("");
   const [relPickQ, setRelPickQ] = useState("");
   const [extraRels, setExtraRels] = useState<string[]>([]); // releases added to the day before anyone's assigned
@@ -72,18 +77,29 @@ export default function Schedule() {
     setContracts((c || []) as Contract[]);
   };
   useEffect(() => { myProfile().then((p) => setRole(p?.role || "")); load(); }, []);
+  // the calendar links here with ?day=YYYY-MM-DD (read after mount — the
+  // first paint is today's, the same on the server and the phone)
+  useEffect(() => {
+    const d = new URLSearchParams(window.location.search).get("day") || "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) setDay(d);
+  }, []);
 
   const loadDay = async (d: string) => {
-    const { data, error } = await sb().from("schedule_days").select("*").eq("day", d).order("created_at");
+    // the day's crew rows, and the PACT jobs set for the day (no money — CREW_JOB_COLS)
+    const [{ data, error }, { data: pj }] = await Promise.all([
+      sb().from("schedule_days").select("*").eq("day", d).order("created_at"),
+      sb().from("pact_jobs").select(CREW_JOB_COLS).eq("start_date", d).eq("canceled", false).order("created_at"),
+    ]);
     if (dayRef.current !== d) return; // switched days while this was in flight
+    setPactToday((pj || []) as PactDay[]);
     if (error) { if (/relation|column|schema cache/i.test(error.message)) flash(upgradeMsg); return; }
     setRows((data || []) as Assign[]);
   };
   const dayRef = useRef(day);
   useEffect(() => { dayRef.current = day; setExtraRels([]); setAddFor(null); setAddQ(""); setDescBuf({}); setAddrBuf({}); setMapFor(null); loadDay(day); }, [day]); // eslint-disable-line react-hooks/exhaustive-deps
   // a schedule_days event only refreshes the day; crew/release changes reload the lists
-  useLive(["schedule_days", "employees", "releases"], (changed) => {
-    if (!changed || changed.some((t) => t !== "schedule_days")) load();
+  useLive(["schedule_days", "employees", "releases", "pact_jobs"], (changed) => {
+    if (!changed || changed.some((t) => t !== "schedule_days" && t !== "pact_jobs")) load();
     loadDay(day);
   }, { skipWhileTyping: true });
 
@@ -131,53 +147,37 @@ export default function Schedule() {
     const assigned = rows.filter((x) => x.release_id === rel.id);
     const targets = assigned
       .map((row) => ({ row, emp: emps.find((e) => e.id === row.employee_id) }))
-      .filter((t): t is { row: Assign; emp: Emp } => !!t.emp)
-      .map((t) => ({ ...t, phone: cleanPhone(t.emp.phone || "") }))
-      .filter((t) => t.phone);
+      .filter((t): t is { row: Assign; emp: Emp } => !!t.emp && !!cleanPhone(t.emp.phone || ""))
+      .map((t) => ({ rowId: t.row.id, to: cleanPhone(t.emp.phone || ""), first: t.emp.name.split(" ")[0], body: msgFor(rel, rel.id, t.emp.name.split(" ")[0]) }));
     if (targets.length === 0) { flash("No saved numbers on this crew — add them in Payroll → Crew first"); return; }
     if (!descOf(rel.id).trim() && !window.confirm("No work description yet — send the assignments anyway?")) return;
-    const markAll = async () => {
-      const ids = targets.map((t) => t.row.id);
+    const stamp = async (ids: string[]) => {
       setRows((prev) => prev.map((x) => (ids.includes(x.id) ? { ...x, texted: true } : x)));
-      await sb().from("schedule_days").update({ texted: true }).in("id", ids);
+      await stampRows(ids);
     };
     setSending(rel.id);
-    // row ids ride along so the server stamps TEXTED itself and a retry after a
-    // dead spot skips workers who were already texted — nobody gets doubled
-    const res = await sendServerTexts(
-      targets.map((t) => ({ to: t.phone, body: msgFor(rel, rel.id, t.emp.name.split(" ")[0]), id: t.row.id })),
-      (await sb().auth.getSession()).data.session?.access_token || null,
-      { skipTexted: true }
-    );
+    // the one sender every crew text goes through: row ids ride along so the
+    // server stamps TEXTED itself and a retry after a dead spot skips workers
+    // who were already texted — nobody gets doubled
+    const out = await textRows(targets);
     setSending(null);
-    if (res.ok) {
+    if (out.status === "sent") {
       // TEXTED only goes on rows whose number actually went through (skipped
       // rows are already stamped in the database)
-      const bad = new Set((res.failed || []).map((f) => f.to));
-      const okIds = targets.filter((t) => !bad.has(t.phone)).map((t) => t.row.id);
-      if (okIds.length > 0) {
-        setRows((prev) => prev.map((x) => (okIds.includes(x.id) ? { ...x, texted: true } : x)));
-        await sb().from("schedule_days").update({ texted: true }).in("id", okIds);
-      }
-      const fails = res.failed || [];
-      const skippedNote = res.skipped ? ` (${res.skipped} already texted — skipped)` : "";
-      flash(fails.length === 0
-        ? res.sent === 0
-          // nothing actually went out — saying "✓" here is how a crew ends up
-          // never being told anything
-          ? "Everyone here was already texted today — nothing new went out"
-          : `Sent ${res.sent} text${res.sent === 1 ? "" : "s"} from the company number ✓${skippedNote}`
-        : `Sent ${res.sent}, but ${fails.length} didn't go through — check those numbers in Payroll → Crew`);
-    } else if (res.status === 501) {
-      // no company number yet — group text from this phone. The stamp waits for
-      // the owner to confirm: the composer can be canceled (or never open right
-      // on some phones), and a false TEXTED ✓ means a crew that was never told.
-      window.location.href = `sms:${targets.map((t) => t.phone).join(",")}?&body=${encodeURIComponent(msgFor(rel, rel.id))}`;
+      const bad = new Set(out.failed.map((f) => f.to));
+      const okIds = targets.filter((t) => !bad.has(t.to)).map((t) => t.rowId);
+      if (okIds.length > 0) await stamp(okIds);
+      flash(out.message);
+    } else if (out.status === "fallback") {
+      // no company number yet — a group text opened on this phone. The stamp
+      // waits for the owner to confirm: the composer can be canceled (or never
+      // open right on some phones), and a false TEXTED ✓ means a crew that was
+      // never told.
       setTimeout(async () => {
-        if (window.confirm("Did the group text send? OK stamps the crew TEXTED ✓")) await markAll();
+        if (window.confirm("Did the group text send? OK stamps the crew TEXTED ✓")) await stamp(out.rowIds);
       }, 600);
     } else {
-      flash(res.error || "Couldn't send — try again");
+      flash(out.message);
     }
   };
   const unassign = async (id: string) => {
@@ -199,7 +199,7 @@ export default function Schedule() {
     if (ids.length === 0) return;
     // the crew was texted the OLD wording — a real change puts them back in the
     // to-send pile, otherwise Assign & text skips everyone and says it sent ✓
-    const resend = mine.some((x) => (x.description || "").trim() !== desc) && mine.some((x) => x.texted);
+    const resend = mine.some((x) => normText(x.description || "") !== normText(desc)) && mine.some((x) => x.texted);
     setRows((prev) => prev.map((x) => (x.release_id === relId ? { ...x, description: desc, ...(resend ? { texted: false } : {}) } : x)));
     await sb().from("schedule_days").update(resend ? { description: desc, texted: false } : { description: desc }).in("id", ids);
     if (resend) flash("Description changed — hit Assign & text again so the crew gets it");
@@ -213,7 +213,7 @@ export default function Schedule() {
     if (ids.length === 0) return;
     // same as the description: a corrected address the crew never got told is
     // the whole reason to text again
-    const resend = mine.some((x) => (x.address || "").trim() !== addr) && mine.some((x) => x.texted);
+    const resend = mine.some((x) => normText(x.address || "") !== normText(addr)) && mine.some((x) => x.texted);
     setRows((prev) => prev.map((x) => (x.release_id === relId ? { ...x, address: addr, ...(resend ? { texted: false } : {}) } : x)));
     const { error } = await sb().from("schedule_days").update(resend ? { address: addr, texted: false } : { address: addr }).in("id", ids);
     if (error && /column|schema cache/i.test(error.message)) flash("Re-run supabase/upgrade_day_schedule.sql so addresses save");
@@ -373,6 +373,28 @@ export default function Schedule() {
           </div>
         );
       })}
+
+      {pactToday.length > 0 && (
+        <>
+          <div className="mb-1.5 mt-4 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Also {day === localISO() ? "today" : "this day"} — PACT</div>
+          <div className="card mb-3">
+            {pactToday.map((j) => {
+              const crew = rowsOfJob(rows, j);
+              return (
+                <Link key={j.id} href="/pact/schedule" className="flex items-center gap-3 border-t border-rulesoft p-3.5 first:border-t-0 hover:bg-paper">
+                  <span className="inline-block h-8 w-1 rounded-sm bg-work" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[14px] font-semibold">{siteOf(j) || j.partner || "PACT job"}{(j.po_number || j.job_number) ? <span className="ml-1.5 font-mono text-xs text-inksoft">PO {j.po_number || j.job_number}</span> : null}</div>
+                    <div className="truncate text-[11px] text-inksoft">{[j.partner, j.description].filter(Boolean).join(" · ")}</div>
+                    <div className={`text-[12px] ${crew.some((r) => !r.texted) ? "text-alert" : "text-inksoft"}`}>📱 {crewLine(crew, j, emps)}</div>
+                  </div>
+                  <span className="shrink-0 text-[12px] text-inksoft">calendar →</span>
+                </Link>
+              );
+            })}
+          </div>
+        </>
+      )}
 
       <div className="mt-1 text-[11px] text-inksoft">
         Phone numbers live in the crew list (Payroll → Crew) — enter each one once.

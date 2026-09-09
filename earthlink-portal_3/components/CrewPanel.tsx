@@ -10,12 +10,11 @@ import Stamp from "@/components/Stamp";
 // "Text crew" sends each one the address, the apartment, the day and the
 // work from the company number; every row shows whether that person has been
 // told. Same rows, same stamps, same guard as the NYCHA day schedule.
-export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose, flash, onSetDay }: {
+export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose, flash }: {
   job: CrewJob; rows: CrewRow[]; emps: Worker[]; canEdit: boolean;
   onChange: () => void | Promise<void>;      // rows changed — parent reloads
   onClose?: () => void;
   flash: (m: string) => void;
-  onSetDay?: (iso: string) => void | Promise<void>; // a job with no day gets one right here
 }) {
   const [q, setQ] = useState("");
   const [adding, setAdding] = useState(false);
@@ -99,12 +98,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
         <div className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">Who's going? {day ? `· ${prettyDate(day)}` : "· no day yet"}</div>
         {onClose && <button type="button" className="btn-icon border-0 text-inksoft" aria-label="Close" onClick={onClose}>✕</button>}
       </div>
-      {!day && (canEdit && onSetDay ? (
-        <label className="mb-2 flex flex-wrap items-center gap-2 text-[12px] text-alert">
-          No day on the PO — put it on the calendar:
-          <input type="date" className="field w-44 py-1.5 text-[13px]" onChange={(e) => e.target.value && onSetDay(e.target.value)} />
-        </label>
-      ) : <div className="mb-2 text-[12px] text-alert">No date yet — set one on the calendar first. The crew is texted the day.</div>)}
+      {!day && <div className="mb-2 text-[12px] text-alert">No day yet — put the job on a day first. The crew is texted the day.</div>}
       <input className="field mb-2" placeholder="Work (what should they do there?)" value={work} readOnly={!canEdit}
         onChange={(e) => setWork(e.target.value)} onBlur={() => canEdit && saveWork()} />
       <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 text-[12px] text-inksoft [overflow-wrap:anywhere]">{crewMessage(job, "Name", work.trim())}</div>

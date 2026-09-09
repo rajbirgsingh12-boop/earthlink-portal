@@ -205,8 +205,8 @@ export default function PactCalendar() {
 
   return (
     <div>
-      <PageHeader title="Calendar" sub={`${onCal} PACT job${onCal === 1 ? "" : "s"} on the calendar${undated.length ? ` · ${undated.length} with no day yet` : ""}`}>
-        <Link className="btn btn-ghost min-h-[44px]" href="/pact">Jobs</Link>
+      <PageHeader title="Schedule" sub={`PACT — ${onCal} job${onCal === 1 ? "" : "s"} on the calendar${undated.length ? ` · ${undated.length} with no day yet` : ""}`}>
+        <Link className="btn btn-ghost min-h-[44px]" href="/pact">🧾 Billing</Link>
       </PageHeader>
       <input className="field mb-3" placeholder="Search PO #, partner, address…" value={q} onChange={(e) => setQ(e.target.value)} />
 

@@ -18,8 +18,6 @@ import { findDupe, DUPE_COLS } from "@/lib/po";
 import { COMPANY } from "@/lib/company";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
-import CrewPanel from "@/components/CrewPanel";
-import { rowsOfJob, crewLine, crewState, type CrewRow, type Worker } from "@/lib/pactCrew";
 import { parsePactPoText, type PactPoFields, type PoItem } from "@/lib/parsePactPo";
 import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, attnFrom, DEFAULT_ATTN, type PriceItem, cleanLineWording, unitFor, mergePricedLines, linesFromPoRead } from "@/lib/priceBook";
 
@@ -74,21 +72,6 @@ export default function Pact() {
   const [photoTarget, setPhotoTarget] = useState<{ id: string; kind: "before" | "after" } | null>(null);
   const snapPhotos = (j: Job, kind: "before" | "after") => { setPhotoTarget({ id: j.id, kind }); photoRef.current?.click(); };
   const poRef = useRef<HTMLInputElement>(null);
-  // "Who's going?" — a job's crew lives in schedule_days, the rows the NYCHA
-  // day schedule has always used (one per worker per day, with the TEXTED
-  // mark). PACT rows carry no release, so those are the ones read here.
-  const [crewJob, setCrewJob] = useState<string | null>(null);
-  const [crewRows, setCrewRows] = useState<CrewRow[]>([]);
-  const [emps, setEmps] = useState<Worker[]>([]);
-  const loadCrew = async () => {
-    // select("*"): pact_job_id isn't there until RUN_ME section 14 is run
-    const [{ data: rows }, { data: es }] = await Promise.all([
-      sb().from("schedule_days").select("*").is("release_id", null).order("day", { ascending: false }).limit(3000),
-      sb().from("employees").select("id,name,phone,active").order("name"),
-    ]);
-    setCrewRows((rows || []) as CrewRow[]);
-    setEmps((es || []) as Worker[]);
-  };
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3500); };
   const num = useNumBuffer();
   const upgradeHint = (m: string) => (/proposal_sent/i.test(m) ? "Run supabase/upgrade_pact_proposal.sql to track proposals sent"
@@ -124,14 +107,12 @@ export default function Pact() {
   };
   useEffect(() => {
     load();
-    loadCrew();
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
     myProfile().then((p) => setRole(p?.role || ""));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // live: PACT jobs changing anywhere refresh the list without a reload
   useLive(["pact_jobs"], () => load(), { skipWhileTyping: true });
-  useLive(["schedule_days", "employees"], () => loadCrew(), { skipWhileTyping: true });
 
   // invoice numbers count up: 569, 570, 571… — the highest plain number wins,
   // so old "8300-1"-style numbers never skew the sequence
@@ -161,12 +142,11 @@ export default function Pact() {
     // file list comes fresh from the database, not this device's possibly-stale copy
     const { data: freshRow } = await sb().from("pact_jobs").select("attachments").eq("id", j.id).single();
     const paths = (((freshRow as { attachments?: { path: string }[] } | null)?.attachments) || j.attachments || []).map((a) => a.path);
-    const crewIds = rowsOfJob(crewRows, j).map((r) => r.id);
     const { error } = await sb().from("pact_jobs").delete().eq("id", j.id);
     if (error) { flash(upgradeHint(error.message)); return false; }
-    // its crew comes off the day schedule too (the database cascades this once
-    // RUN_ME section 14 is in; until then the rows are matched by day and site)
-    if (crewIds.length) await sb().from("schedule_days").delete().in("id", crewIds);
+    // its crew comes off the Schedule too (the database cascades this once
+    // RUN_ME section 14 is in; before that the column isn't there — ignored)
+    await sb().from("schedule_days").delete().eq("pact_job_id", j.id);
     let cleanupFailed = false;
     if (paths.length > 0) {
       const { error: se } = await sb().storage.from("docs").remove(paths);
@@ -825,7 +805,7 @@ export default function Pact() {
           ? isDocx
             ? "File attached, but the proposal couldn't be read — type the partner, address and description below"
             : `PDF attached, but no text could be read (scanned copy?${how ? ` · ${how}` : ""}) — type the partner, address and description below`
-          : `PO ${f.po || "imported"} — ${isDocx ? "our letter" : readBy === "claude" ? "read by Claude" : `⚠ read by the rules${readNote ? ` (${readNote})` : ""}`} · ${f.accessDate ? `on the calendar for ${prettyDate(f.accessDate)}` : "no date on the PO — pick a day below"}${poFlags.length ? ` · ⚠ ${poFlags[0]}` : ""} · check the lines, then pick who's going below`);
+          : `PO ${f.po || "imported"} — ${isDocx ? "our letter" : readBy === "claude" ? "read by Claude" : `⚠ read by the rules${readNote ? ` (${readNote})` : ""}`} · ${f.accessDate ? `on the Schedule for ${prettyDate(f.accessDate)}` : "no date on the PO — put it on a day from the Schedule tab"}${poFlags.length ? ` · ⚠ ${poFlags[0]}` : ""} · check the lines below; the crew is picked on the Schedule tab`);
     } catch (err) {
       setBusy(false);
       flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
@@ -1356,14 +1336,14 @@ export default function Pact() {
 
   return (
     <div>
-      <PageHeader title="PACT">
-        <Link className="btn btn-ghost" href="/pact/schedule">📅 Calendar</Link>
+      <PageHeader title="Billing" sub="PACT — POs, proposals, invoices">
+        <Link className="btn btn-ghost" href="/pact/schedule">📅 Schedule</Link>
       </PageHeader>
       <input ref={poRef} type="file" accept="application/pdf,.pdf,.docx" className="hidden" onChange={handlePo} />
       {/* a folder (or multi-select) of proposal letters, read in one go */}
       {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
       <input ref={folderRef} type="file" multiple {...({ webkitdirectory: "" } as any)} className="hidden" onChange={handleProposalFolder} />
-      {oneShot && canEdit && (() => {
+      {oneShot && canInvoice && (() => {
         // always the job as it stands right now — edits included. The copy
         // taken at upload only stands in while the list is still loading; a
         // deleted job closes the card outright (deleteJob clears it).
@@ -1372,17 +1352,16 @@ export default function Pact() {
         const priced = billable.some((it) => Number(it.unit_price) > 0);
         return (
           <div className="card mb-3 border-work p-3.5">
-            <div className="font-display text-base font-bold uppercase">{oneShot.note} — {!canInvoice ? "on the calendar" : billable.length > 0 ? "papers ready" : "read, but nothing priced yet"}</div>
+            <div className="font-display text-base font-bold uppercase">{oneShot.note} — {billable.length > 0 ? "papers ready" : "read, but nothing priced yet"}</div>
             <div className="mt-1 text-xs text-inksoft">
               {j.address || "This job"}{j.property_unit ? ` · Apt ${j.property_unit}` : ""}
               {" · "}{billable.length} work line{billable.length === 1 ? "" : "s"}
               {canPrice && Number(j.amount) > 0 ? ` · ${fmt(Number(j.amount))}` : ""}
               {canInvoice && j.invoice_number ? ` · invoice # ${j.invoice_number}` : ""}
-              {!canInvoice ? (j.start_date ? `. Set for ${prettyDate(j.start_date)} — pick who's going and text them.` : ". No day on the PO — pick one below, then who's going.")
-                : billable.length === 0
-                  ? ". Nothing on the price list matched this one — add the work lines below, then come back here."
-                  : priced ? ". Check the lines below before you send anything."
-                    : ". The lines have no prices yet — fill them in below first."}
+              {billable.length === 0
+                ? ". Nothing on the price list matched this one — add the work lines below, then come back here."
+                : priced ? ". Check the lines below before you send anything."
+                  : ". The lines have no prices yet — fill them in below first."}
             </div>
             <CardToolbar className="mt-3"
               primary={canInvoice && billable.length > 0 ? (
@@ -1393,17 +1372,13 @@ export default function Pact() {
               secondary={<button className="btn btn-ghost" disabled={busy} onClick={() => setOneShot(null)}>Done</button>}
               menuLabel="Papers"
               menu={[
-                { label: "View proposal", hidden: !canInvoice, disabled: busy, title: "Read the proposal letter on screen first", onSelect: () => viewProposal(j) },
-                { label: "⬇ Proposal (PDF)", hidden: !canInvoice, disabled: busy, title: "The proposal to send — opens the same everywhere", onSelect: () => saveProposalPdfFor(j) },
+                { label: "View proposal", disabled: busy, title: "Read the proposal letter on screen first", onSelect: () => viewProposal(j) },
+                { label: "⬇ Proposal (PDF)", disabled: busy, title: "The proposal to send — opens the same everywhere", onSelect: () => saveProposalPdfFor(j) },
                 // this one saves the invoice PDF alone — the full zip lives on the job's Papers menu
                 { label: "⬇ Invoice (PDF)", hidden: !canInvoice, disabled: busy || billable.length === 0,
                   title: billable.length === 0 ? "The job needs a work line first" : "Just the invoice, as a PDF",
                   onSelect: () => saveInvoiceFor(j) },
               ]} />
-            {/* the crew goes on right here, the moment the PO is read */}
-            <div className="mt-3">
-              <CrewPanel job={j} rows={rowsOfJob(crewRows, j)} emps={emps} canEdit={canEdit} onChange={loadCrew} flash={flash} onSetDay={(d) => patch(j, { start_date: d })} />
-            </div>
           </div>
         );
       })()}
@@ -1497,20 +1472,14 @@ export default function Pact() {
                 {!j.canceled && (() => {
                   const stages = pipeline(j);
                   const current = stages.findIndex(([, done]) => !done);
-                  const crew = rowsOfJob(crewRows, j);
-                  const notTold = crewState(crew, j) === "not_told";
                   return (
-                    <>
-                      <div className="mt-1 flex flex-wrap items-center gap-1">
-                        {stages.map(([l, done], i) => (
-                          <span key={l} className={`chip rounded-[2px] border px-1 py-px font-semibold ${done ? "border-ok bg-ok/10 text-ok" : i === current ? "border-work text-work" : "border-rulesoft text-rule"}`}>{l}</span>
-                        ))}
-                        {j.proposal_sent && !j.approved && <span className="chip ml-1 text-work">{days(j.proposal_sent)}d waiting</span>}
-                        {canInvoice && j.invoice_sent && !j.received && <span className="chip ml-1 text-inksoft">{days(j.invoice_sent)}d out</span>}
-                        {notTold && <span className="chip ml-1 text-alert">crew not told</span>}
-                      </div>
-                      {crew.length > 0 && <div className={`mt-0.5 text-[12px] ${notTold ? "text-alert" : "text-inksoft"}`}>📱 {crewLine(crew, j, emps)}{j.start_date ? ` · ${prettyDate(j.start_date)}` : ""}</div>}
-                    </>
+                    <div className="mt-1 flex flex-wrap items-center gap-1">
+                      {stages.map(([l, done], i) => (
+                        <span key={l} className={`chip rounded-[2px] border px-1 py-px font-semibold ${done ? "border-ok bg-ok/10 text-ok" : i === current ? "border-work text-work" : "border-rulesoft text-rule"}`}>{l}</span>
+                      ))}
+                      {j.proposal_sent && !j.approved && <span className="chip ml-1 text-work">{days(j.proposal_sent)}d waiting</span>}
+                      {canInvoice && j.invoice_sent && !j.received && <span className="chip ml-1 text-inksoft">{days(j.invoice_sent)}d out</span>}
+                    </div>
                   );
                 })()}
               </button>
@@ -1536,19 +1505,11 @@ export default function Pact() {
                   {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "before")} disabled={busy}>📷 Before{beforeN > 0 ? ` · ${beforeN}` : ""}</button>}
                   {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "after")} disabled={busy}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}
                   {photoN > 0 && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => downloadPhotos(j)} disabled={busy} title="Just the pictures — no PO, no invoice">⬇ Photos · {photoN}</button>}
-                  {canEdit && (() => { const n = rowsOfJob(crewRows, j).length; return (
-                    <button className={`btn min-h-[44px] px-3 py-1.5 text-[13px] ${crewJob === j.id ? "border-work" : ""}`} onClick={() => setCrewJob(crewJob === j.id ? null : j.id)} title="Pick who's going, and text them the address, the apartment, the day and the work">📱 Who's going?{n > 0 ? ` · ${n}` : ""}</button>
-                  ); })()}
                   <RowActions items={[
                     { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },
                     { label: "Re-read the PO", glyph: "🔁", hidden: !canPrice || !(j.attachments || []).some((a) => /\.pdf$/i.test(a.name)), disabled: busy, title: "Rebuild this job from its PDF — the reader, then the price list. Photos and documents stay.", confirm: "Re-read this PO? The partner, address, description, work lines and amount are replaced with what the PDF says. Photos and documents stay.", onSelect: async () => { setBusy(true); await rereadJob(j); setBusy(false); } },
                   ]} />
                 </div>
-                {crewJob === j.id && (
-                  <div className="mb-2.5">
-                    <CrewPanel job={j} rows={rowsOfJob(crewRows, j)} emps={emps} canEdit={canEdit} onChange={loadCrew} flash={flash} onClose={() => setCrewJob(null)} onSetDay={(d) => patch(j, { start_date: d })} />
-                  </div>
-                )}
                 {canEdit && (
                 <div className="mb-2.5 flex flex-wrap gap-2">
                   <button className="btn-stamp" onClick={() => patch(j, j.proposal_sent ? { proposal_sent: null } : { proposal_sent: today() })}><Stamp label={j.proposal_sent ? `PROPOSAL SENT ${prettyDate(j.proposal_sent)}` : "MARK PROPOSAL SENT"} tone={j.proposal_sent ? "ok" : "mute"} /></button>

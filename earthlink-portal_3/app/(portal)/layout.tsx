@@ -49,7 +49,8 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
     key: "nycha", label: "NYCHA",
     items: [["/releases", "Releases", "📄"], ["/items", "Price Book", "📗"], ["/proposals", "Proposals", "📋"], ["/package", "Invoice Package", "🧾"]],
   };
-  const PACT: Group = { key: "pact", label: "PACT", items: [["/pact", "Jobs", "🏢"], ["/pact/schedule", "Calendar", "📅"]] };
+  // two tabs, kept apart: Billing (POs, prices, invoices) and Schedule (the calendar and the crews)
+  const PACT: Group = { key: "pact", label: "PACT", items: [["/pact", "Billing", "🧾"], ["/pact/schedule", "Schedule", "📅"]] };
   // entries render in order: plain links and group menus mixed
   const entries: (["link", string, string] | ["group", Group])[] = [["link", "/home", "Home"]];
   if (role === "admin" || role === "office") {

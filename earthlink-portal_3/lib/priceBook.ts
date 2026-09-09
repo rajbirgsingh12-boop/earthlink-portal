@@ -553,3 +553,93 @@ export const soleKey = (description: string, book?: PriceItem[]): string | null 
   const ks = keysIn(description, book);
   return ks.length === 1 ? ks[0] : null;
 };
+
+// ---- laying the price list over a job's lines ----
+// Shared by the phone upload, "Price from list", the re-read, and the email
+// intake, so a PO becomes the same lines whichever way it came in.
+export interface JobLine { description: string; qty: number; unit: string; unit_price: number; key?: string; base?: string }
+export const PLACEHOLDER = 1;                       // "$1.00" on a PO means "price me", not a price
+export const realPrice = (n: unknown) => Number(n) > PLACEHOLDER;
+export function mergePricedLines(text: string, existing: JobLine[], bk: PriceItem[],
+  opts: { bundle?: boolean; refresh?: boolean; fillOnly?: boolean; prepOnly?: boolean } = {}): JobLine[] {
+  const lines = priceLinesFor(text, { book: bk, bundle: opts.bundle ?? true });
+  if (lines.length === 0) return existing;
+  // what each line already on the job stands for. A line the portal wrote
+  // remembers its own price-list line; one typed by hand or read off a PO is
+  // matched only when it reads as exactly one line and nothing else, so
+  // nothing gets silently swallowed or doubled.
+  const covered = new Map<string, number>();
+  const sameText = (a: string, b: string) => a.toLowerCase().replace(/[^a-z0-9]/g, "") === b.toLowerCase().replace(/[^a-z0-9]/g, "");
+  existing.forEach((it, i) => {
+    // a line that IS one of the price-list lines, word for word, covers that
+    // one and nothing else — before falling back to reading its wording
+    const exact = bk.find((p) => sameText(p.description, it.description))?.key;
+    // its own wording first; failing that, the wording it had before its
+    // wrapped line was added — otherwise a row reading "plaster … and paint"
+    // matches nothing and the list bills the plaster a second time
+    const k = it.key || exact || soleKey(it.description, bk) || (it.base ? soleKey(it.base, bk) : null);
+    if (k && !covered.has(k)) covered.set(k, i);
+  });
+  const out = [...existing];
+  for (const l of lines) {
+    const at = covered.get(l.key);
+    if (at === undefined) {
+      // A PO that priced its own table is the agreement — nothing new goes
+      // beside it, EXCEPT the prep a wet trade always carries: plaster is
+      // never billed without its primer and paint.
+      const isPrep = l.key === "primer" || l.key === "paint_sf";
+      if (opts.fillOnly && !(opts.prepOnly && isPrep)) continue;
+      out.push({ description: l.description, qty: l.qty, unit: l.unit, unit_price: l.unit_price, key: l.key });
+      covered.set(l.key, out.length - 1);
+      continue;
+    }
+    const it = out[at];
+    // a line that says nothing but the trade's own name follows the list's
+    // wording — that is how "Plaster" picks up its "Scrape and" on a repair
+    // job. A PO's own sentence matches neither name and keeps its words.
+    const bkName = bk.find((b) => b.key === l.key)?.description || "";
+    const takesName = !!it.key || sameText(it.description, bkName) || sameText(it.description, l.description);
+    // a line the portal put there follows the list; a price the PO stated
+    // stays the PO's, because that one is the agreement
+    if (realPrice(it.unit_price)) {
+      // a line that already carries a price of its own is the PO's or theirs
+      // — re-pricing only touches lines the portal itself wrote
+      if (opts.refresh && it.key) out[at] = { ...it, description: l.description, unit: l.unit, unit_price: l.unit_price, qty: Number(it.qty) > 1 ? it.qty : l.qty };
+      // a hand-typed "Plaster" that someone also priced by hand still takes
+      // the list's wording ("Scrape and plaster") — the typed price stays
+      else if (opts.refresh && takesName) out[at] = { ...it, description: l.description, key: it.key || l.key };
+      continue;
+    }
+    out[at] = { ...it, description: takesName ? l.description : it.description, unit: it.unit || l.unit, unit_price: l.unit_price, qty: Number(it.qty) > 1 ? it.qty : l.qty, key: it.key || l.key };
+  }
+  return out.filter((it) => it.description.trim());
+}
+
+// The lines a PO's read turns into: its rows as lines, and whatever the price
+// list already answers — plaster brings its primer and paint with it — filled
+// in, priced. A price the PO itself states is never touched: that one is the
+// agreement. A PO that totals a dollar hasn't told us the money — the priced
+// lines have.
+export function linesFromPoRead(f: { desc: string; scope: string; rows: { description: string; qty: number; unit_price: number; uom?: string; base?: string }[] },
+  unreadable: boolean, amount: number, bk: PriceItem[]): { items: JobLine[]; amount: number } {
+  const seed: JobLine[] = unreadable ? []
+    : f.rows.length > 0
+      ? f.rows.map((r) => ({ description: r.description, qty: r.qty, unit: normUnit(r.uom || unitFor(r.description)), unit_price: r.unit_price, ...(r.base ? { base: r.base } : {}) }))
+        // a placeholder row that names more than one trade ("scrape plaster
+        // paint") is dropped: keeping it would leave a dollar line sitting
+        // beside the three real lines it stands for
+        .filter((it) => realPrice(it.unit_price) || keysIn(it.description, bk).length < 2)
+      : (f.desc || f.scope) ? [{ description: (f.desc || f.scope).slice(0, 120), qty: 1, unit: unitFor(f.desc || f.scope), unit_price: 0 }] : [];
+  // when the PO priced its own lines, that IS the deal — fill the gaps but
+  // never add prep work it didn't ask for
+  const poPriced = seed.some((it) => realPrice(it.unit_price));
+  // the same words must only be priced once — a PO often repeats its
+  // description as its scope, and counting both doubles every quantity
+  const said = [...new Set([f.desc, f.scope, f.rows.map((r) => r.description).join(" ")].map((x) => (x || "").trim()).filter(Boolean))];
+  const priced = mergePricedLines(said.join(". "), seed, bk, { fillOnly: poPriced, prepOnly: poPriced })
+    // a placeholder the list had no answer for is work still to be priced —
+    // showing it as a dollar would put "$1.00" on a proposal
+    .map((it) => (Number(it.unit_price) === PLACEHOLDER ? { ...it, unit_price: 0 } : it));
+  const lineSub = priced.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
+  return { items: priced, amount: amount > PLACEHOLDER || lineSub <= 0 ? amount : Math.round(lineSub * 1.08875 * 100) / 100 };
+}

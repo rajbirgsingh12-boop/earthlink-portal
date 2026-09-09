@@ -13,7 +13,8 @@ import { NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { type PoItem, type PactPoFields } from "@/lib/parsePactPo";
 import { readPoOrProposalPages } from "@/lib/parsePactProposal";
-import { normUnit, unitFor } from "@/lib/priceBook";
+import { linesFromPoRead } from "@/lib/priceBook";
+import { loadPricesServer } from "@/lib/priceServer";
 import { findDupe, DUPE_COLS, type PoLike } from "@/lib/po";
 import { readPoSmart, SMART_TIMEOUT_MS } from "@/lib/smartPo";
 
@@ -156,17 +157,26 @@ const intakeOne = async (att: Att, mail: Body, deadline: number): Promise<Result
       reason: `PO ${po} is already job ${dupe.po_number || dupe.job_number || dupe.id} — the PDF was attached to it${moved ? `, and its new access date moves the job to ${pretty(f.accessDate!)}` : ""}, nothing new was made` };
   }
 
-  // a PO priced at $1.00 is a placeholder, not a price — the lines wait for
-  // the price list, and the job's money stays blank until then
-  const PLACEHOLDER = 1;
-  const items = f.rows.map((r) => ({
-    description: r.description, qty: r.qty, unit: normUnit(r.uom || unitFor(r.description)),
-    unit_price: Number(r.unit_price) <= PLACEHOLDER ? 0 : r.unit_price,
-    ...(r.base ? { base: r.base } : {}),
-  }));
-  const amount = f.amount > PLACEHOLDER ? f.amount : 0;
+  // one of our own letters names the person, not the partner company —
+  // borrow the partner from an earlier job billed to the same office (the
+  // phone upload does the same)
+  if (!f.partner && f.billBlock) {
+    const street = f.billBlock.match(/\d+\s+[A-Za-z .]+/)?.[0] || "";
+    if (street) {
+      const pr = await rest("pact_jobs?select=partner,bill_to&partner=neq.&limit=200");
+      const prior = pr.ok ? ((await pr.json()) as { partner: string; bill_to?: string }[]) : [];
+      const re = new RegExp(`(^|[^0-9])${street.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i");
+      const hit = prior.find((p) => re.test(p.bill_to || ""));
+      if (hit) f.partner = hit.partner;
+    }
+  }
+  // the same lines a phone upload gets: the PO's rows, and whatever the price
+  // list already answers — plaster brings its primer and paint — priced from
+  // the owner's own list. A $1.00 placeholder is "price me", never money.
+  const book = await loadPricesServer();
+  const { items: seed, amount } = linesFromPoRead(f, false, f.amount, book.items);
+  if (!book.ok) console.warn("[intake] price list unreadable — priced from the standard sheet");
   const desc = (f.desc || f.scope).slice(0, 120);
-  const seed = items.length > 0 ? items : desc ? [{ description: desc, qty: 1, unit: unitFor(desc), unit_price: 0 }] : [];
   const when = mail.date ? ` on ${String(mail.date).slice(0, 40)}` : "";
   // "Nelyv <n@x.com>" reads as Nelyv; a bare "<cdr@yardi.com>" keeps the address
   const fromName = String(mail.from || "").replace(/<[^>]*>/g, "").trim() || String(mail.from || "").replace(/[<>]/g, "").trim();

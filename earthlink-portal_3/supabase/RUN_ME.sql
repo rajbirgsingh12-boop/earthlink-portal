@@ -603,6 +603,10 @@ create trigger pact_job_follows
 -- the job is PRICED, and the calendar is done with it. An invoice sent, or
 -- a payment in, counts as priced too. The flag is a plain yes/no, so the
 -- calendar can read it for everyone without showing anyone a dollar.
+-- Jobs from before this section carry no baseline: those count as priced
+-- only by money that exists (an invoice sent, a payment in) or when the
+-- work is marked done and the lines carry a real measurement — a PO's own
+-- square feet on an untouched job never hide it.
 alter table pact_jobs add column if not exists list_subtotal numeric;
 alter table pact_jobs add column if not exists priced boolean default false;
 
@@ -615,8 +619,7 @@ language sql immutable as $$
       * (case when (it->>'unit_price') ~ '^-?[0-9]+(\.[0-9]+)?$' then (it->>'unit_price')::numeric else 0 end))
     from jsonb_array_elements(items) it), 0) else 0 end
 $$;
--- jobs from before this section carry no list_subtotal — a real measurement on
--- the lines (square feet, or any count of ten or more) says they were priced
+-- a real measurement on the lines: square feet, or any count of ten or more
 create or replace function public.pact_items_measured(items jsonb) returns boolean
 language sql immutable as $$
   select case when jsonb_typeof(items) = 'array' then coalesce((
@@ -638,14 +641,14 @@ begin
   new.priced := new.invoice_sent is not null or coalesce(new.received, false)
     or case when new.list_subtotal is not null
             then round(public.pact_items_total(new.items), 2) <> round(new.list_subtotal, 2)
-            else coalesce(new.priced, false) or public.pact_items_measured(new.items) end;
+            else coalesce(new.work_done, false) and public.pact_items_measured(new.items) end;
   return new;
 end $$;
 drop trigger if exists pact_job_priced on pact_jobs;
 create trigger pact_job_priced
-  before insert or update of amount, list_subtotal, invoice_sent, received, items, priced on pact_jobs
+  before insert or update of amount, list_subtotal, invoice_sent, received, work_done, items, priced on pact_jobs
   for each row execute function public.pact_job_priced();
--- the jobs already here: priced if an invoice went out, money came in, or the lines were measured
-update pact_jobs set priced = (invoice_sent is not null or coalesce(received, false) or public.pact_items_measured(items))
+-- the jobs already here: priced if an invoice went out, money came in, or the work is done on measured lines
+update pact_jobs set priced = (invoice_sent is not null or coalesce(received, false) or (coalesce(work_done, false) and public.pact_items_measured(items)))
   where list_subtotal is null
-    and priced is distinct from (invoice_sent is not null or coalesce(received, false) or public.pact_items_measured(items));
+    and priced is distinct from (invoice_sent is not null or coalesce(received, false) or (coalesce(work_done, false) and public.pact_items_measured(items)));

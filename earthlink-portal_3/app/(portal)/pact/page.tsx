@@ -124,6 +124,17 @@ export default function Pact() {
     return String(Math.max(568, ...nums) + 1);
   };
 
+  // every new job carries its auto-price baseline (RUN_ME section 15) — the
+  // same rule then judges an uploaded PO, a proposal letter and a hand-typed
+  // job alike. Before the section is in, the column isn't there: written without.
+  const insertJob = async (row: Record<string, unknown>) => {
+    let res = await sb().from("pact_jobs").insert(row).select().single();
+    if (res.error && "list_subtotal" in row && /list_subtotal/i.test(res.error.message)) {
+      const { list_subtotal: _skip, ...rest } = row; void _skip;
+      res = await sb().from("pact_jobs").insert(rest).select().single();
+    }
+    return res;
+  };
   const patch = async (j: Job, p: Partial<Job>) => {
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, ...p } : x)));
     setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, ...p } : prev));
@@ -783,11 +794,7 @@ export default function Pact() {
         // which reader read it, and anything a person should know about the read
         notes: [isDocx ? "✓ Read from our own letter" : readBy === "claude" ? "✓ Read by Claude" : `⚠ Read by the rules${readNote ? ` (${readNote})` : ""}`, ...poFlags.map((w) => `⚠ ${w}`)].join("\n"),
       };
-      let { data: job, error } = await sb().from("pact_jobs").insert(newRow).select().single();
-      if (error && /list_subtotal/i.test(error.message)) { // before RUN_ME section 15
-        delete newRow.list_subtotal;
-        ({ data: job, error } = await sb().from("pact_jobs").insert(newRow).select().single());
-      }
+      const { data: job, error } = await insertJob(newRow);
       if (error || !job) { setBusy(false); flash(upgradeHint(error?.message || "Save failed")); return; }
       // attach the PO itself
       const path = `pact/${(job as Job).id}/${file.name}`;
@@ -830,10 +837,12 @@ export default function Pact() {
         return;
       }
     }
-    const { error } = await sb().from("pact_jobs").insert({
+    const { error } = await insertJob({
       partner: draft.partner.trim(), development: draft.development.trim(), job_number: draft.job_number.trim(),
       description: draft.description.trim(), amount: parseNum(draft.amount),
       invoice_number: await nextInvoiceNo(),
+      // no lines yet — a baseline of 0, so a line typed later at no price leaves it unpriced
+      list_subtotal: 0,
     });
     if (error) { flash(upgradeHint(error.message)); return; }
     setDraft({ ...BLANK }); setAddOpen(false); load();
@@ -1045,12 +1054,14 @@ export default function Pact() {
           }
           seq += 1;
           const seed: Item[] = parsed.rows.map((r) => ({ description: r.description, qty: r.qty, unit: r.uom || unitFor(r.description), unit_price: r.unit_price, ...(r.base ? { base: r.base } : {}) }));
-          const { data: job, error } = await sb().from("pact_jobs").insert({
+          const { data: job, error } = await insertJob({
             partner, development: "", job_number: parsed.po, description: parsed.desc, amount: parsed.amount,
             po_number: parsed.po, po_date: parsed.poDate, address: parsed.address, property_unit: parsed.punit,
             contact: parsed.contact, bill_to: parsed.billBlock, items: seed, invoice_number: String(seq),
             ...(parsed.taxPct !== undefined ? { tax_pct: parsed.taxPct } : {}),
-          }).select().single();
+            // the letter's own lines are this job's baseline — the same as uploading it one at a time
+            list_subtotal: subtotalOf(seed),
+          });
           if (error || !job) { failed += 1; seq -= 1; continue; }
           const path = `pact/${(job as Job).id}/${f.name}`;
           const { error: ue } = await sb().storage.from("docs").upload(path, f, { upsert: true });

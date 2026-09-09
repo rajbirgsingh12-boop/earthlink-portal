@@ -36,7 +36,12 @@ interface Job {
   contact?: string; bill_to?: string; items?: Item[] | null; invoice_number?: string; tax_pct?: number | null;
   proposal_sent?: string | null;
   start_date?: string | null; finish_date?: string | null;
+  // RUN_ME section 15: the auto lines' subtotal at upload, and whether the
+  // lines have since been priced for real (the calendar drops priced jobs)
+  list_subtotal?: number | null; priced?: boolean | null;
 }
+const subtotalOf = (items: { qty: number; unit_price: number }[]) =>
+  Math.round(items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0) * 100) / 100;
 const BLANK = { partner: "", development: "", job_number: "", description: "", amount: "" };
 
 export default function Pact() {
@@ -577,8 +582,14 @@ export default function Pact() {
       ...(f.taxPct !== undefined ? { tax_pct: f.taxPct } : {}),
       // (a new day here moves the job's crew rows with it — RUN_ME section 14's trigger)
       ...(f.accessDate && !j.work_done ? { start_date: f.accessDate } : {}),
+      // the auto price starts over — this read's lines are the new "original"
+      list_subtotal: subtotalOf(items),
     };
-    const { error } = await sb().from("pact_jobs").update(patchRow).eq("id", j.id);
+    let { error } = await sb().from("pact_jobs").update(patchRow).eq("id", j.id);
+    if (error && /list_subtotal/i.test(error.message)) { // before RUN_ME section 15
+      delete patchRow.list_subtotal;
+      ({ error } = await sb().from("pact_jobs").update(patchRow).eq("id", j.id));
+    }
     if (error) { if (!quiet) flash(upgradeHint(error.message)); return "none"; }
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, ...patchRow } : x)));
     if (!quiet) flash(`PO ${f.po || ""} re-read ${out.readBy === "claude" ? "by Claude" : "by the rules"} — ${items.length} line${items.length === 1 ? "" : "s"}`);
@@ -775,16 +786,24 @@ export default function Pact() {
       // work is done — so only real reading calls are flagged
       const poFlags = [...(f.warnings || [])];
       const { items: priced, amount: amountOut } = await linesFromPo(f, unreadable, amount);
-      const { data: job, error } = await sb().from("pact_jobs").insert({
+      const newRow: Record<string, unknown> = {
         partner: f.partner, development: "", job_number: f.po, description: (f.desc || f.scope).slice(0, 120), amount: amountOut,
         po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,
         contact: f.contact, bill_to: f.billBlock, items: priced, invoice_number: await nextInvoiceNo(),
         ...(taxFromDoc !== undefined ? { tax_pct: taxFromDoc } : {}),
-        // the day the PO set goes straight onto the schedule; no day = Need to schedule
+        // the day the PO set goes straight onto the calendar; no day = pick one on the card
         ...(f.accessDate ? { start_date: f.accessDate } : {}),
+        // the auto price — when the lines later add up to something else, the
+        // job is priced and the calendar is done with it (RUN_ME section 15)
+        list_subtotal: subtotalOf(priced),
         // which reader read it, and anything a person should know about the read
         notes: [isDocx ? "✓ Read from our own letter" : readBy === "claude" ? "✓ Read by Claude" : `⚠ Read by the rules${readNote ? ` (${readNote})` : ""}`, ...poFlags.map((w) => `⚠ ${w}`)].join("\n"),
-      }).select().single();
+      };
+      let { data: job, error } = await sb().from("pact_jobs").insert(newRow).select().single();
+      if (error && /list_subtotal/i.test(error.message)) { // before RUN_ME section 15
+        delete newRow.list_subtotal;
+        ({ data: job, error } = await sb().from("pact_jobs").insert(newRow).select().single());
+      }
       if (error || !job) { setBusy(false); flash(upgradeHint(error?.message || "Save failed")); return; }
       // attach the PO itself
       const path = `pact/${(job as Job).id}/${file.name}`;
@@ -806,7 +825,7 @@ export default function Pact() {
           ? isDocx
             ? "File attached, but the proposal couldn't be read — type the partner, address and description below"
             : `PDF attached, but no text could be read (scanned copy?${how ? ` · ${how}` : ""}) — type the partner, address and description below`
-          : `PO ${f.po || "imported"} — ${isDocx ? "our letter" : readBy === "claude" ? "read by Claude" : `⚠ read by the rules${readNote ? ` (${readNote})` : ""}`} · ${f.accessDate ? `set for ${prettyDate(f.accessDate)}` : "no date, under Need to schedule"}${poFlags.length ? ` · ⚠ ${poFlags[0]}` : ""} · check the lines, then pick who's going below`);
+          : `PO ${f.po || "imported"} — ${isDocx ? "our letter" : readBy === "claude" ? "read by Claude" : `⚠ read by the rules${readNote ? ` (${readNote})` : ""}`} · ${f.accessDate ? `on the calendar for ${prettyDate(f.accessDate)}` : "no date on the PO — pick a day below"}${poFlags.length ? ` · ⚠ ${poFlags[0]}` : ""} · check the lines, then pick who's going below`);
     } catch (err) {
       setBusy(false);
       flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
@@ -1359,7 +1378,7 @@ export default function Pact() {
               {" · "}{billable.length} work line{billable.length === 1 ? "" : "s"}
               {canPrice && Number(j.amount) > 0 ? ` · ${fmt(Number(j.amount))}` : ""}
               {canInvoice && j.invoice_number ? ` · invoice # ${j.invoice_number}` : ""}
-              {!canInvoice ? (j.start_date ? `. Set for ${prettyDate(j.start_date)} — pick who's going and text them.` : ". No day on the PO yet — give it one on the calendar, then pick who's going.")
+              {!canInvoice ? (j.start_date ? `. Set for ${prettyDate(j.start_date)} — pick who's going and text them.` : ". No day on the PO — pick one below, then who's going.")
                 : billable.length === 0
                   ? ". Nothing on the price list matched this one — add the work lines below, then come back here."
                   : priced ? ". Check the lines below before you send anything."
@@ -1383,7 +1402,7 @@ export default function Pact() {
               ]} />
             {/* the crew goes on right here, the moment the PO is read */}
             <div className="mt-3">
-              <CrewPanel job={j} rows={rowsOfJob(crewRows, j)} emps={emps} canEdit={canEdit} onChange={loadCrew} flash={flash} />
+              <CrewPanel job={j} rows={rowsOfJob(crewRows, j)} emps={emps} canEdit={canEdit} onChange={loadCrew} flash={flash} onSetDay={(d) => patch(j, { start_date: d })} />
             </div>
           </div>
         );
@@ -1527,7 +1546,7 @@ export default function Pact() {
                 </div>
                 {crewJob === j.id && (
                   <div className="mb-2.5">
-                    <CrewPanel job={j} rows={rowsOfJob(crewRows, j)} emps={emps} canEdit={canEdit} onChange={loadCrew} flash={flash} onClose={() => setCrewJob(null)} />
+                    <CrewPanel job={j} rows={rowsOfJob(crewRows, j)} emps={emps} canEdit={canEdit} onChange={loadCrew} flash={flash} onClose={() => setCrewJob(null)} onSetDay={(d) => patch(j, { start_date: d })} />
                   </div>
                 )}
                 {canEdit && (

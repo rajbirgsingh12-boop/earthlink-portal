@@ -171,8 +171,8 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
       </div>
       {view === "month" ? month() : view === "week" ? week() : day()}
       <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-inksoft">
-        <span className="inline-flex items-center gap-1"><span className="inline-block h-3 w-3 rounded-[2px] border-l-[3px] border-l-work bg-work/10" /> PACT job</span>
-        <span className="inline-flex items-center gap-1"><span className="inline-block h-3 w-3 rounded-[2px] border-l-[3px] border-l-carbon bg-carbon/10" /> NYCHA release</span>
+        {(!events.length || events.some((e) => e.kind === "pact")) && <span className="inline-flex items-center gap-1"><span className="inline-block h-3 w-3 rounded-[2px] border-l-[3px] border-l-work bg-work/10" /> PACT job</span>}
+        {events.some((e) => e.kind === "nycha") && <span className="inline-flex items-center gap-1"><span className="inline-block h-3 w-3 rounded-[2px] border-l-[3px] border-l-carbon bg-carbon/10" /> NYCHA release</span>}
         <span className="inline-flex items-center gap-1"><span className="inline-block h-3 w-3 rounded-[2px] border-l-[3px] border-l-rule bg-paper" /> done</span>
         <span className="inline-flex items-center gap-1">⚠ crew not told</span>
       </div>

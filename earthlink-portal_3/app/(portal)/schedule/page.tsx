@@ -11,15 +11,13 @@ import PageHeader from "@/components/PageHeader";
 import ContractPicker, { contractLabel } from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
 import type { Contract } from "@/lib/types";
-import Link from "next/link";
 import { cleanPhone, smsHref, sendServerTexts, textMachineReady, textRows, stampRows } from "@/lib/notify";
-import { CREW_JOB_COLS, crewLine, normText, rowsOfJob, siteOf, type CrewJob } from "@/lib/pactCrew";
+import { normText } from "@/lib/pactCrew";
 
 interface Emp { id: string; name: string; trade: string; active?: boolean; phone?: string | null; }
 interface RelRow { id: string; rel_number: string; location: string; contract_id: string; address?: string | null; }
+// (a row with pact_job_id belongs to a PACT job — those live on the PACT calendar, not here)
 interface Assign { id: string; day: string; release_id: string | null; pact_job_id?: string | null; employee_id: string; description: string; texted: boolean; address?: string | null; }
-// a PACT job on this day — read here, worked from the calendar
-interface PactDay extends CrewJob { work_done?: boolean; canceled?: boolean }
 
 const upgradeMsg = "Run supabase/upgrade_day_schedule.sql first";
 
@@ -31,7 +29,6 @@ export default function Schedule() {
   const [rels, setRels] = useState<RelRow[]>([]);
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [rows, setRows] = useState<Assign[]>([]);
-  const [pactToday, setPactToday] = useState<PactDay[]>([]);
   const [linkContract, setLinkContract] = useState("");
   const [relPickQ, setRelPickQ] = useState("");
   const [extraRels, setExtraRels] = useState<string[]>([]); // releases added to the day before anyone's assigned
@@ -85,21 +82,16 @@ export default function Schedule() {
   }, []);
 
   const loadDay = async (d: string) => {
-    // the day's crew rows, and the PACT jobs set for the day (no money — CREW_JOB_COLS)
-    const [{ data, error }, { data: pj }] = await Promise.all([
-      sb().from("schedule_days").select("*").eq("day", d).order("created_at"),
-      sb().from("pact_jobs").select(CREW_JOB_COLS).eq("start_date", d).eq("canceled", false).order("created_at"),
-    ]);
+    const { data, error } = await sb().from("schedule_days").select("*").eq("day", d).order("created_at");
     if (dayRef.current !== d) return; // switched days while this was in flight
-    setPactToday((pj || []) as PactDay[]);
     if (error) { if (/relation|column|schema cache/i.test(error.message)) flash(upgradeMsg); return; }
     setRows((data || []) as Assign[]);
   };
   const dayRef = useRef(day);
   useEffect(() => { dayRef.current = day; setExtraRels([]); setAddFor(null); setAddQ(""); setDescBuf({}); setAddrBuf({}); setMapFor(null); loadDay(day); }, [day]); // eslint-disable-line react-hooks/exhaustive-deps
   // a schedule_days event only refreshes the day; crew/release changes reload the lists
-  useLive(["schedule_days", "employees", "releases", "pact_jobs"], (changed) => {
-    if (!changed || changed.some((t) => t !== "schedule_days" && t !== "pact_jobs")) load();
+  useLive(["schedule_days", "employees", "releases"], (changed) => {
+    if (!changed || changed.some((t) => t !== "schedule_days")) load();
     loadDay(day);
   }, { skipWhileTyping: true });
 
@@ -373,28 +365,6 @@ export default function Schedule() {
           </div>
         );
       })}
-
-      {pactToday.length > 0 && (
-        <>
-          <div className="mb-1.5 mt-4 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">Also {day === localISO() ? "today" : "this day"} — PACT</div>
-          <div className="card mb-3">
-            {pactToday.map((j) => {
-              const crew = rowsOfJob(rows, j);
-              return (
-                <Link key={j.id} href="/pact/schedule" className="flex items-center gap-3 border-t border-rulesoft p-3.5 first:border-t-0 hover:bg-paper">
-                  <span className="inline-block h-8 w-1 rounded-sm bg-work" />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[14px] font-semibold">{siteOf(j) || j.partner || "PACT job"}{(j.po_number || j.job_number) ? <span className="ml-1.5 font-mono text-xs text-inksoft">PO {j.po_number || j.job_number}</span> : null}</div>
-                    <div className="truncate text-[11px] text-inksoft">{[j.partner, j.description].filter(Boolean).join(" · ")}</div>
-                    <div className={`text-[12px] ${crew.some((r) => !r.texted) ? "text-alert" : "text-inksoft"}`}>📱 {crewLine(crew, j, emps)}</div>
-                  </div>
-                  <span className="shrink-0 text-[12px] text-inksoft">calendar →</span>
-                </Link>
-              );
-            })}
-          </div>
-        </>
-      )}
 
       <div className="mt-1 text-[11px] text-inksoft">
         Phone numbers live in the crew list (Payroll → Crew) — enter each one once.

@@ -16,6 +16,13 @@ export interface Worker { id: string; name: string; phone?: string | null; activ
 
 // the columns a page may read from pact_jobs for crew work — never the money
 export const CREW_JOB_COLS = "id,po_number,job_number,partner,address,development,property_unit,description,start_date,finish_date,work_done,canceled,notes,created_at";
+// the calendar reads one more yes/no: priced (RUN_ME section 15) — never a dollar
+export const CAL_JOB_COLS = `${CREW_JOB_COLS},priced`;
+// A priced job is off the calendar once its day has passed (or the work is
+// marked done). A priced job still ahead of us stays in view — hiding work
+// that hasn't happened yet is the one mistake a calendar must never make.
+export const offCalendar = (j: { priced?: boolean | null; work_done?: boolean | null; start_date?: string | null }, today: string): boolean =>
+  !!j.priced && (!!j.work_done || (!!j.start_date && j.start_date < today));
 
 export const normText = (s: string) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
 const squash = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");

@@ -52,6 +52,10 @@ export default function Proposals() {
   const [relAsk, setRelAsk] = useState<{ p: Proposal; value: string } | null>(null);
   const [listQ, setListQ] = useState("");
   const [listFilter, setListFilter] = useState<"all" | "draft" | "approved">("all");
+  // the contract whose walk sheets are on screen — one at a time, so two
+  // contracts' sheets never sit in one long list. "" until the lists are in.
+  const [listContract, setListContract] = useState("");
+  const CONTRACT_KEY = "proposals.contract";
   const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
   const [showHead, setShowHead] = useState(false); // walk-sheet header fields tucked away until needed
   const [msg, setMsg] = useState("");
@@ -81,6 +85,20 @@ export default function Proposals() {
       setContracts(cs); if (cs[0]) setPickId(cs[0].id);
     });
   }, []);
+  // which contract opens first: the one picked last time, else the one the
+  // newest walk sheet is on, else the first contract
+  useEffect(() => {
+    if (listContract || contracts.length === 0) return;
+    let saved = "";
+    try { saved = localStorage.getItem(CONTRACT_KEY) || ""; } catch { /* private mode */ }
+    const valid = (id: string) => id === "all" || id === "none" || contracts.some((c) => c.id === id);
+    const newest = list.find((p) => p.contract_id && contracts.some((c) => c.id === p.contract_id))?.contract_id || "";
+    setListContract(valid(saved) ? saved : newest || contracts[0].id);
+  }, [contracts, list]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pickListContract = (id: string) => {
+    setListContract(id);
+    try { localStorage.setItem(CONTRACT_KEY, id); } catch { /* private mode */ }
+  };
 
   // live: walk sheets, contracts and price books refresh without a reload
   useLive(["proposals", "contracts", "contract_items"], () => {
@@ -707,14 +725,36 @@ export default function Proposals() {
           </div>
         </div>
       )}
-      <div className="mb-3 flex flex-wrap gap-2">
-        {([["all", `All (${list.length})`], ["draft", `Drafts (${list.filter((p) => p.status === "draft").length})`], ["approved", `In a release (${list.filter((p) => p.status === "approved").length})`]] as ["all" | "draft" | "approved", string][]).map(([f, l]) => (
-          <button key={f} className={`btn ${listFilter === f ? "btn-primary" : "btn-ghost"} px-3 py-1.5 text-[13px]`} onClick={() => setListFilter(f)}>{l}</button>
-        ))}
-      </div>
+      {(() => {
+        // the contract on screen; sheets not tied to any contract get their own choice
+        const strays = list.filter((p) => !p.contract_id || !contracts.some((c) => c.id === p.contract_id));
+        const onContract = (p: Proposal) => listContract === "all" || !listContract ? true
+          : listContract === "none" ? strays.includes(p) : p.contract_id === listContract;
+        const mine = list.filter(onContract);
+        return (
+          <>
+            {contracts.length > 0 && (
+              <div className="mb-3">
+                <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Contract</div>
+                <ContractPicker contracts={contracts} value={listContract} onChange={pickListContract}
+                  extra={[{ id: "all", label: "All contracts" }, ...(strays.length > 0 ? [{ id: "none", label: `Not tied to a contract (${strays.length})` }] : [])]} />
+              </div>
+            )}
+            <div className="mb-3 flex flex-wrap gap-2">
+              {([["all", `All (${mine.length})`], ["draft", `Drafts (${mine.filter((p) => p.status === "draft").length})`], ["approved", `In a release (${mine.filter((p) => p.status === "approved").length})`]] as ["all" | "draft" | "approved", string][]).map(([f, l]) => (
+                <button key={f} className={`btn ${listFilter === f ? "btn-primary" : "btn-ghost"} px-3 py-1.5 text-[13px]`} onClick={() => setListFilter(f)}>{l}</button>
+              ))}
+            </div>
+          </>
+        );
+      })()}
       <input className="field mb-3" placeholder="Search name, development, address, release #…" value={listQ} onChange={(e) => setListQ(e.target.value)} />
       {(() => {
+        const strays = list.filter((p) => !p.contract_id || !contracts.some((c) => c.id === p.contract_id));
+        const onContract = (p: Proposal) => listContract === "all" || !listContract ? true
+          : listContract === "none" ? strays.includes(p) : p.contract_id === listContract;
         const shown = list
+          .filter(onContract)
           .filter((p) => listFilter === "all" || p.status === listFilter)
           .filter((p) => {
             if (!listQ) return true;
@@ -722,9 +762,11 @@ export default function Proposals() {
             return `${p.number} ${p.job} ${p.client_name} ${p.development || ""} ${p.address || ""} ${p.apt || ""} ${p.stairhall || ""} ${p.release_number || ""} ${c?.number || ""}`
               .toLowerCase().includes(listQ.toLowerCase());
           });
+        // on a phone the name and total take the whole first line; the buttons
+        // sit under them instead of squeezing the name into a column
         const row = (p: Proposal) => (
-          <div key={p.id} className="flex items-center gap-2 p-3.5">
-            <button className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left" onClick={() => openEditor(p)}>
+          <div key={p.id} className="flex flex-wrap items-center gap-2 p-3.5">
+            <button className="flex w-full min-w-0 items-center justify-between gap-2 text-left sm:w-auto sm:flex-1" onClick={() => openEditor(p)}>
               <div className="min-w-0">
                 <div className="text-[14px] font-semibold">
                   {(p.development || p.address || p.job)
@@ -742,12 +784,14 @@ export default function Proposals() {
                 <Stamp label={p.status.toUpperCase()} tone={tone(p.status) as "ok"} />
               </div>
             </button>
-            <button type="button" className="btn btn-ghost min-h-[44px] px-2.5 text-[12px]" disabled={!!pdfBusy} title="The sheet as a PDF file — no need to open it" onClick={() => downloadPdf(p)}>{pdfBusy === p.id ? "…" : "⬇ PDF"}</button>
-            {p.contract_id && <button type="button" className="btn btn-ghost min-h-[44px] px-2.5 text-[12px]" title="Make (or update) the release on this contract from this sheet" onClick={() => addToRelease(p)}>→ Release</button>}
-            <RowActions items={[
-              { label: "Add to release…", hidden: !p.contract_id, onSelect: () => addToRelease(p) },
-              { label: "Delete…", destructive: true, onSelect: () => deleteProposal(p) }, // deleteProposal keeps its own confirm
-            ]} />
+            <span className="ml-auto flex items-center gap-2">
+              <button type="button" className="btn btn-ghost min-h-[44px] px-2.5 text-[12px]" disabled={!!pdfBusy} title="The sheet as a PDF file — no need to open it" onClick={() => downloadPdf(p)}>{pdfBusy === p.id ? "…" : "⬇ PDF"}</button>
+              {p.contract_id && <button type="button" className="btn btn-ghost min-h-[44px] px-2.5 text-[12px]" title="Make (or update) the release on this contract from this sheet" onClick={() => addToRelease(p)}>→ Release</button>}
+              <RowActions items={[
+                { label: "Add to release…", hidden: !p.contract_id, onSelect: () => addToRelease(p) },
+                { label: "Delete…", destructive: true, onSelect: () => deleteProposal(p) }, // deleteProposal keeps its own confirm
+              ]} />
+            </span>
           </div>
         );
         // one card per contract, in contract order; anything not tied to a
@@ -769,7 +813,9 @@ export default function Proposals() {
             ))}
             {groups.length === 0 && (
               <div className="card p-5 text-sm text-inksoft">
-                {list.length === 0 ? "No walk sheets yet. Tap + New NYCHA walk sheet, load the contract price book once, and fill quantities as you walk the unit." : "Nothing matches that search."}
+                {list.length === 0 ? "No walk sheets yet. Tap + New NYCHA walk sheet, load the contract price book once, and fill quantities as you walk the unit."
+                  : listQ || listFilter !== "all" ? "Nothing matches that search."
+                  : "No walk sheets on this contract yet — pick another above, or All contracts."}
               </div>
             )}
           </>

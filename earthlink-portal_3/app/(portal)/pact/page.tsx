@@ -641,12 +641,19 @@ export default function Pact() {
     // around a duplicate could hand two jobs the same one for good
     const twin = rows.find((x, i) => i > 0 && rows[i - 1].n === x.n);
     if (twin) { flash(`Two jobs share invoice #${twin.n} — give one of them its own number first (Job details → Invoice #)`); return; }
-    // the last number before the first hole
+    // the last number before the first hole — offered as the starting point,
+    // and the owner confirms it: an older hole from some long-deleted job must
+    // never pull already-sent invoices down with it
     let gapAt = -1;
     for (let i = 0; i + 1 < rows.length; i++) if (rows[i + 1].n > rows[i].n + 1) { gapAt = i; break; }
     if (gapAt < 0) { flash("Invoice numbers already go up by one — nothing to fix"); return; }
-    const last = rows[gapAt].n;
-    const above = rows.slice(gapAt + 1);
+    const typed = window.prompt(`Continue the numbers from which invoice? Everything above it moves down to follow on; it and everything before it stay as they are.`, String(rows[gapAt].n));
+    if (typed === null) return;
+    const last = /^\d+$/.test(typed.trim()) ? parseInt(typed.trim(), 10) : NaN;
+    if (!Number.isFinite(last) || last <= INVOICE_FLOOR) { flash(`"${typed}" isn't an invoice number in the portal's run (above ${INVOICE_FLOOR})`); return; }
+    const above = rows.filter((x) => x.n > last);
+    if (above.length === 0) { flash(`Nothing above #${last} to move`); return; }
+    if (above[0].n === last + 1 && !above.some((x, i) => i > 0 && x.n > above[i - 1].n + 1)) { flash(`The numbers after #${last} already go up by one`); return; }
     const label = (x: { r: Row; n: number }) => `PO ${x.r.po_number || x.r.job_number || "?"}${x.r.address ? ` · ${x.r.address.split(",")[0]}` : ""}${x.r.canceled ? " (canceled)" : ""}`;
     const sent = above.filter((x) => x.r.invoice_sent || x.r.received);
     let keep = new Set<string>();

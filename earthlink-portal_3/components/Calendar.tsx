@@ -56,7 +56,7 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
   const Bar = ({ e, compact = false }: { e: CalEvent; compact?: boolean }) => (
     <button type="button" onClick={(ev) => { ev.stopPropagation(); onSelect(e.day); onOpen?.(e); }}
       title={[e.title, e.subtitle, e.flag].filter(Boolean).join(" · ")}
-      className={`block w-full rounded-[3px] border-l-[3px] text-left ${compact ? "px-1 py-[1px] text-[10.5px] leading-[1.25]" : "px-2 py-1 text-[12px] leading-snug"} ${barCls(e)}`}>
+      className={`block w-full rounded-[3px] border-l-[3px] text-left ${compact ? "px-1 py-[1px] text-[11px] leading-[1.25]" : "px-2 py-1 text-[12px] leading-snug"} ${barCls(e)}`}>
       <span className="block truncate font-semibold">{e.flag ? "⚠ " : ""}{e.title}</span>
       {!compact && e.subtitle && <span className="block truncate text-[11px] text-inksoft">{e.subtitle}</span>}
       {!compact && e.people && e.people.length > 0 && <span className="block truncate text-[11px] text-inksoft">👷 {e.people.join(", ")}</span>}
@@ -91,15 +91,15 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
                 className={`flex min-h-[52px] flex-col gap-[2px] border-r border-rulesoft p-1 md:min-h-[96px] ${lastRow ? "" : "border-b"} ${i % 7 === 6 ? "border-r-0" : ""} ${inMonth ? "bg-white" : "bg-paper/60"} ${isSel ? "outline outline-2 -outline-offset-2 outline-ink" : ""}`}>
                 <div className="flex items-center justify-between">
                   <span className={`grid h-6 w-6 place-items-center rounded-full font-mono text-[12px] ${isToday ? "bg-work font-bold text-white" : inMonth ? "text-ink" : "text-inksoft"}`}>{Number(iso.slice(-2))}</span>
-                  {evs.length > 0 && <span className="hidden font-mono text-[10px] text-inksoft md:inline">{evs.length}</span>}
+                  {evs.length > 0 && <span className="hidden font-mono text-[11px] text-inksoft md:inline">{evs.length}</span>}
                 </div>
                 <div className="flex flex-wrap gap-[3px] px-[2px] md:hidden">
                   {evs.slice(0, 4).map((e) => <span key={e.id} className={`inline-block h-[7px] w-[7px] rounded-full ${e.done ? "bg-rule" : e.kind === "pact" ? "bg-work" : "bg-carbon"}`} />)}
-                  {evs.length > 4 && <span className="text-[9px] leading-[7px] text-inksoft">+{evs.length - 4}</span>}
+                  {evs.length > 4 && <span className="text-[11px] leading-[8px] text-inksoft">+{evs.length - 4}</span>}
                 </div>
                 <div className="hidden flex-col gap-[2px] md:flex">
                   {show.map((e) => <Bar key={e.id} e={e} compact />)}
-                  {evs.length > show.length && <span className="px-1 text-[10px] text-inksoft">+{evs.length - show.length} more</span>}
+                  {evs.length > show.length && <span className="px-1 text-[11px] text-inksoft">+{evs.length - show.length} more</span>}
                 </div>
               </div>
             );

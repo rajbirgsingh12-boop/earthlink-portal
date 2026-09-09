@@ -25,7 +25,6 @@ export const offCalendar = (j: { priced?: boolean | null; work_done?: boolean | 
   !!j.priced && (!!j.work_done || (!!j.start_date && j.start_date < today));
 
 export const normText = (s: string) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
-const squash = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
 // the site, byte-identical to RUN_ME's pact_site(): "street, city, Apt 4B"
 export const siteOf = (j: CrewJob): string => {
@@ -51,16 +50,10 @@ export const crewMessage = (j: CrewJob, first: string, work: string, moved?: { f
   return `${head}${work ? ` Work: ${work}.` : ""}${(j.address || j.development) ? ` Map: ${mapLink(siteOf(j))}` : ""}`;
 };
 
-// this job's crew rows. Until RUN_ME section 14 is run the rows carry no job
-// link, so a row on this job's day at this job's site (and belonging to no
-// release) is taken as this job's.
-export const rowsOfJob = (rows: CrewRow[], j: CrewJob): CrewRow[] => {
-  const linked = rows.filter((r) => r.pact_job_id === j.id);
-  if (linked.length) return linked;
-  const site = squash(siteOf(j));
-  if (!site || !j.start_date) return [];
-  return rows.filter((r) => !r.release_id && !r.pact_job_id && r.day === j.start_date && squash(r.address || "") === site);
-};
+// this job's crew rows — the ones linked to it. A crew is only ever written
+// with the link (RUN_ME section 14), so a moved job keeps its crew: the
+// database moves the rows with the day, and they are found here by the job.
+export const rowsOfJob = (rows: CrewRow[], j: CrewJob): CrewRow[] => rows.filter((r) => r.pact_job_id === j.id);
 // a worker who hasn't been told, or was told a different day — computed here,
 // so a mismatch shows even where the database trigger isn't in yet
 export const rowNeedsText = (r: CrewRow, j: CrewJob) => !r.texted || (!!j.start_date && r.day !== j.start_date);

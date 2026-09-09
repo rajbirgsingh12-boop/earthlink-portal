@@ -623,12 +623,18 @@ language sql immutable as $$
     select bool_or(
       (case when (it->>'qty') ~ '^-?[0-9]+(\.[0-9]+)?$' then (it->>'qty')::numeric else 0 end) >= 10
       or (coalesce(it->>'unit', '') ~* 'sf'
-          and (case when (it->>'qty') ~ '^-?[0-9]+(\.[0-9]+)?$' then (it->>'qty')::numeric else 0 end) <> 1))
+          and (case when (it->>'qty') ~ '^-?[0-9]+(\.[0-9]+)?$' then (it->>'qty')::numeric else 0 end) > 1))
     from jsonb_array_elements(items) it), false) else false end
 $$;
 create or replace function public.pact_job_priced() returns trigger
 language plpgsql as $$
 begin
+  -- the app sends list_subtotal to say "these lines are the list's own"; the
+  -- number itself is taken from the lines here, so the app's floating-point
+  -- math and this exact math never disagree by a cent
+  if new.list_subtotal is not null and (tg_op = 'INSERT' or new.list_subtotal is distinct from old.list_subtotal) then
+    new.list_subtotal := round(public.pact_items_total(new.items), 2);
+  end if;
   new.priced := new.invoice_sent is not null or coalesce(new.received, false)
     or case when new.list_subtotal is not null
             then round(public.pact_items_total(new.items), 2) <> round(new.list_subtotal, 2)

@@ -55,6 +55,7 @@ export default function Proposals() {
   // the contract whose walk sheets are on screen — one at a time, so two
   // contracts' sheets never sit in one long list. "" until the lists are in.
   const [listContract, setListContract] = useState("");
+  const [listLoaded, setListLoaded] = useState(false);
   const CONTRACT_KEY = "proposals.contract";
   const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
   const [showHead, setShowHead] = useState(false); // walk-sheet header fields tucked away until needed
@@ -73,9 +74,11 @@ export default function Proposals() {
     if (error) { // older database without some columns — fall back to full rows
       const { data: d2 } = await sb().from("proposals").select("*").order("created_at", { ascending: false });
       setList((d2 || []) as Proposal[]);
+      setListLoaded(true);
       return;
     }
     setList((data || []) as Proposal[]);
+    setListLoaded(true);
   };
   useEffect(() => {
     load();
@@ -88,15 +91,20 @@ export default function Proposals() {
   // which contract opens first: the one picked last time, else the one the
   // newest walk sheet is on, else the first contract
   useEffect(() => {
-    if (listContract || contracts.length === 0) return;
+    // both lists must be in — the newest sheet can't be found before the sheets are
+    if (listContract || contracts.length === 0 || !listLoaded) return;
     let saved = "";
     try { saved = localStorage.getItem(CONTRACT_KEY) || ""; } catch { /* private mode */ }
-    const valid = (id: string) => id === "all" || id === "none" || contracts.some((c) => c.id === id);
+    const strays = list.some((p) => !p.contract_id || !contracts.some((c) => c.id === p.contract_id));
+    const valid = (id: string) => id === "all" || (id === "none" && strays) || contracts.some((c) => c.id === id);
     const newest = list.find((p) => p.contract_id && contracts.some((c) => c.id === p.contract_id))?.contract_id || "";
-    setListContract(valid(saved) ? saved : newest || contracts[0].id);
-  }, [contracts, list]); // eslint-disable-line react-hooks/exhaustive-deps
+    const first = valid(saved) ? saved : newest || contracts[0].id;
+    setListContract(first);
+    if (contracts.some((c) => c.id === first)) setPickId(first); // a new walk sheet starts on the contract on screen
+  }, [contracts, list, listLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
   const pickListContract = (id: string) => {
     setListContract(id);
+    if (contracts.some((c) => c.id === id)) setPickId(id);
     try { localStorage.setItem(CONTRACT_KEY, id); } catch { /* private mode */ }
   };
 
@@ -152,7 +160,10 @@ export default function Proposals() {
       number, client_name: "New York City Housing Authority", contract_id: pickId || contracts[0].id,
     }).select().single();
     if (error) { flash(upgradeHint(error.message)); return; }
-    await load(); openEditor(data as Proposal);
+    // the list follows the new sheet's contract, so it is on screen when the editor closes
+    const made = data as Proposal;
+    if (made.contract_id && listContract !== "all" && listContract !== made.contract_id) pickListContract(made.contract_id);
+    await load(); openEditor(made);
   };
 
   // ---------- saving ----------

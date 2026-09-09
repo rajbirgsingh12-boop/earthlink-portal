@@ -52,12 +52,19 @@ export default function PactCalendar() {
     }
     if (res.error) { flash(/relation|column|schema/i.test(res.error.message) ? "Run supabase/RUN_ME.sql first" : res.error.message); return; }
     setJobs(((res.data || []) as Job[]).filter((j) => !j.canceled));
-    // the crews — PACT rows only (no release); quietly absent until the day schedule exists
-    const [{ data: d }, { data: e }] = await Promise.all([
-      sb().from("schedule_days").select("*").is("release_id", null).order("day", { ascending: false }).limit(3000),
-      sb().from("employees").select("id,name,phone,active"),
-    ]);
-    setDayRows((d || []) as DayRow[]); setEmps((e || []) as Emp[]);
+    // the crews — PACT rows only (no release), in pages: an unranged read stops
+    // silently at 1000 rows and the oldest jobs would lose their crew
+    const fetchRows = async () => {
+      const out: DayRow[] = [];
+      for (let from = 0; ; from += 1000) {
+        const { data: d } = await sb().from("schedule_days").select("*").is("release_id", null).order("day", { ascending: false }).order("id").range(from, from + 999);
+        out.push(...((d || []) as DayRow[]));
+        if (!d || d.length < 1000) break;
+      }
+      return out;
+    };
+    const [d, { data: e }] = await Promise.all([fetchRows(), sb().from("employees").select("id,name,phone,active")]);
+    setDayRows(d); setEmps((e || []) as Emp[]);
   };
   useEffect(() => { load(); myProfile().then((p) => setRole(p?.role || "")); }, []);
   useLive(["pact_jobs", "schedule_days", "employees"], () => load(), { skipWhileTyping: true });
@@ -65,10 +72,11 @@ export default function PactCalendar() {
   // a new start_date here moves the job's crew rows to the new day and clears
   // their TEXTED mark (RUN_ME section 14's trigger) — the cards then show who
   // needs the new day. Nothing is texted from here; that is the Move it… box.
-  const save = async (j: Job, patch: Partial<Job>) => {
+  const save = async (j: Job, patch: Partial<Job>): Promise<boolean> => {
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, ...patch } : x)));
     const { error } = await sb().from("pact_jobs").update(patch).eq("id", j.id);
-    if (error) { flash(/column|schema cache/i.test(error.message) ? "Run supabase/RUN_ME.sql first" : error.message); load(); }
+    if (error) { flash(/column|schema cache/i.test(error.message) ? "Run supabase/RUN_ME.sql first" : error.message); load(); return false; }
+    return true;
   };
   // "Text the crew the new day" from the Move it… box: everyone on the job is
   // told once, as a move, from the company number
@@ -97,7 +105,7 @@ export default function PactCalendar() {
   const putOnDay = async (j: Job, iso: string) => {
     const was = (j.start_date || "").trim();
     const line = was ? `📅 Moved to ${prettyDate(iso)} from the calendar (was ${prettyDate(was)})` : `📅 Put on the calendar for ${prettyDate(iso)}`;
-    await save(j, { start_date: iso, notes: appendNote(j.notes, line) });
+    if (!(await save(j, { start_date: iso, notes: appendNote(j.notes, line) }))) return; // the page said why; the search stays
     setAddQ("");
     flash(`${j.po_number || j.job_number ? `PO ${j.po_number || j.job_number}` : "Job"} is on ${prettyDate(iso)} — now pick who's going`);
   };
@@ -153,7 +161,7 @@ export default function PactCalendar() {
           {(canEdit || crew.length > 0) && (
             <button type="button" className={`btn min-h-[44px] px-3 py-1.5 text-[13px] ${crewOpen === j.id ? "border-work" : ""}`} onClick={() => setCrewOpen(crewOpen === j.id ? null : j.id)}
               title="Pick who's going, and text them the address, the apartment, the day and the work">
-              {crewOpen === j.id ? "Close" : crew.length === 0 ? "📱 Who's going?" : state === "not_told" ? "📱 Text crew" : "📱 Crew"}
+              {crewOpen === j.id ? "Close" : `📱 Who's going?${crew.length ? ` · ${crew.length}` : ""}`}
             </button>
           )}
         </div>
@@ -167,11 +175,12 @@ export default function PactCalendar() {
   };
 
   // the Day view and the panel under Month/Week: that day's jobs as cards, and
-  // a box to put any other job on the day — the ones with no day yet come first
+  // a box to put any other job on the day — the ones with no day yet come
+  // first, and a priced job that slipped off the calendar can be put back
   const dayPanel = (iso: string) => {
     const pact = list.filter((j) => j.start_date === iso);
     const aq = addQ.trim().toLowerCase();
-    const pick = live
+    const pick = jobs
       .filter((j) => j.start_date !== iso && !j.work_done)
       .filter((j) => !aq || `${j.partner} ${j.po_number || j.job_number} ${j.address || ""} ${j.property_unit || ""} ${j.description}`.toLowerCase().includes(aq))
       .sort((a, b) => Number(!!(a.start_date || "").trim()) - Number(!!(b.start_date || "").trim()) || (b.created_at || "").localeCompare(a.created_at || ""));
@@ -185,9 +194,9 @@ export default function PactCalendar() {
             {aq && (
               <div className="mt-1 max-h-64 overflow-y-auto rounded-sm border border-rulesoft bg-white">
                 {pick.slice(0, 12).map((j) => (
-                  <button key={j.id} type="button" className="flex w-full items-center justify-between gap-2 border-b border-rulesoft px-3 py-2.5 text-left text-[13px] last:border-b-0 hover:bg-paper" onClick={() => putOnDay(j, iso)}>
+                  <button key={j.id} type="button" className="flex min-h-[44px] w-full items-center justify-between gap-2 border-b border-rulesoft px-3 py-2.5 text-left text-[13px] last:border-b-0 hover:bg-paper" onClick={() => putOnDay(j, iso)}>
                     <span className="min-w-0 truncate">{(j.address || j.development || j.partner || "").split(",")[0]}{j.property_unit ? ` · Apt ${j.property_unit}` : ""}{(j.po_number || j.job_number) ? <span className="ml-1.5 font-mono text-[11px] text-inksoft">PO {j.po_number || j.job_number}</span> : null}</span>
-                    <span className="shrink-0 text-[11px] text-inksoft">{(j.start_date || "").trim() ? `on ${prettyDate(j.start_date)} → move here` : "no day yet → put here"}</span>
+                    <span className="shrink-0 text-[11px] text-inksoft">{offCalendar(j, today) ? "priced, off the calendar → put here" : (j.start_date || "").trim() ? `on ${prettyDate(j.start_date)} → move here` : "no day yet → put here"}</span>
                   </button>
                 ))}
                 {pick.length === 0 && <div className="px-3 py-2 text-[13px] text-inksoft">No job matches “{addQ}”.</div>}

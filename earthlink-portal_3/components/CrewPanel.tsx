@@ -1,7 +1,7 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { sb } from "@/lib/supabase";
-import { cleanPhone, prettyPhone, textRows, stampRows } from "@/lib/notify";
+import { cleanPhone, prettyPhone, textRows, stampRows, textMachineReady } from "@/lib/notify";
 import { prettyDate } from "@/lib/docs";
 import { crewMessage, normText, rowNeedsText, siteOf, workOf, type CrewJob, type CrewRow, type Worker } from "@/lib/pactCrew";
 import Stamp from "@/components/Stamp";
@@ -20,6 +20,9 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   const [adding, setAdding] = useState(false);
   const [sending, setSending] = useState(false);
   const [phoneBuf, setPhoneBuf] = useState<Record<string, string>>({});
+  const [machine, setMachine] = useState(true); // company number set up? (else a group text opens on this phone)
+  useEffect(() => { textMachineReady().then(setMachine); }, []);
+  const addingNow = useRef<Set<string>>(new Set()); // guards a double-tap on the same name
   const day = (job.start_date || "").trim();
   // the work the crew is told — the rows' saved wording, else the PO's own
   const savedWork = rows.find((r) => (r.description || "").trim())?.description || "";
@@ -41,16 +44,17 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
 
   const addWorker = async (e: Worker) => {
     if (!day) { flash("Give the job a day first — the start date above"); return; }
+    if (!siteOf(job)) { flash("Give the job an address first — the crew is texted where to go"); return; }
+    if (addingNow.current.has(e.id) || onJob.has(e.id)) return;
+    addingNow.current.add(e.id);
     setAdding(true);
-    const base = { day, employee_id: e.id, description: work.trim() || workOf(job), address: siteOf(job) };
-    let { error } = await sb().from("schedule_days").insert({ ...base, pact_job_id: job.id });
-    if (error && /column|schema cache/i.test(error.message)) {
-      // before RUN_ME section 14 the row has no job link — it still texts
-      ({ error } = await sb().from("schedule_days").insert(base));
-      if (!error) flash("Run supabase/RUN_ME.sql so the calendar remembers who's on each job");
-    }
+    // always with the link to the job — that is what keeps the crew on a job
+    // when its day moves. Before RUN_ME section 14 there is no link column, so
+    // no crew is written at all rather than one that would go missing later.
+    const { error } = await sb().from("schedule_days").insert({ day, employee_id: e.id, description: work.trim() || workOf(job), address: siteOf(job), pact_job_id: job.id });
     setAdding(false);
-    if (error) { flash(/relation|schema cache/i.test(error.message) ? "Run supabase/RUN_ME.sql first (day schedule)" : error.message); return; }
+    addingNow.current.delete(e.id);
+    if (error) { flash(/relation|column|schema cache/i.test(error.message) ? "Run supabase/RUN_ME.sql first — the Schedule needs it to keep a crew on each job" : error.message); return; }
     setQ("");
     await onChange();
   };
@@ -111,12 +115,12 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
           <div key={r.id} className="flex flex-wrap items-center gap-2 border-t border-rulesoft py-1.5 first:border-t-0">
             <b className="text-[13px]">{name}</b>
             {r.texted && !needs && <Stamp label="TEXTED ✓" tone="ok" />}
-            {r.texted && needs && <Stamp label={r.pact_job_id ? "NEEDS THE NEW DAY" : "WRONG DAY — RUN RUN_ME.SQL"} tone="alert" />}
+            {r.texted && needs && <Stamp label="NEEDS THE NEW DAY" tone="alert" />}
             {!r.texted && <Stamp label="NOT TEXTED" tone="mute" />}
             {canEdit && (
               <span className="ml-auto flex items-center gap-2">
-                {needs && cleanPhone(e?.phone || "") && <button type="button" className="text-[13px] text-inksoft underline" disabled={sending} onClick={() => send(r)}>send</button>}
-                {!needs && cleanPhone(e?.phone || "") && <button type="button" className="text-[13px] text-inksoft underline" disabled={sending} onClick={() => send(r)}>resend</button>}
+                {needs && cleanPhone(e?.phone || "") && <button type="button" className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline" disabled={sending} onClick={() => send(r)}>send</button>}
+                {!needs && cleanPhone(e?.phone || "") && <button type="button" className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline" disabled={sending} onClick={() => send(r)}>resend</button>}
                 <button type="button" className="btn-icon border-0 bg-transparent text-[15px] text-alert shadow-none" title="Take off this job" onClick={() => remove(r, name)}>✕</button>
               </span>
             )}
@@ -134,7 +138,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
           {cq && (
             <div className="max-h-48 overflow-y-auto rounded-sm border border-rulesoft bg-white">
               {pick.slice(0, 12).map((e) => (
-                <button key={e.id} type="button" className="block w-full border-b border-rulesoft px-3 py-2.5 text-left text-[13px] last:border-b-0 hover:bg-paper" onClick={() => addWorker(e)}>
+                <button key={e.id} type="button" className="block min-h-[44px] w-full border-b border-rulesoft px-3 py-2.5 text-left text-[13px] last:border-b-0 hover:bg-paper" disabled={adding} onClick={() => addWorker(e)}>
                   {e.name}{cleanPhone(e.phone || "") ? "" : <span className="ml-2 text-[11px] text-inksoft">no number yet</span>}
                 </button>
               ))}
@@ -145,7 +149,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
             <button type="button" className="btn btn-primary min-h-[44px]" disabled={sending || need.length === 0 || !day} onClick={() => send()}>
               {sending ? "Sending…" : need.length ? `📱 Text crew (${need.length})` : "Crew is up to date ✓"}
             </button>
-            <span className="text-[11px] text-inksoft">from the company number · each person once</span>
+            <span className="text-[11px] text-inksoft">{machine ? "from the company number" : "opens a group text on this phone"} · each person once</span>
           </div>
         </>
       )}

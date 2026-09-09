@@ -127,7 +127,11 @@ export default function Pact() {
   const patch = async (j: Job, p: Partial<Job>) => {
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, ...p } : x)));
     setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, ...p } : prev));
-    const { error } = await sb().from("pact_jobs").update(p).eq("id", j.id);
+    let { error } = await sb().from("pact_jobs").update(p).eq("id", j.id);
+    if (error && "list_subtotal" in p && /list_subtotal/i.test(error.message)) { // before RUN_ME section 15
+      const { list_subtotal: _skip, ...rest } = p; void _skip;
+      ({ error } = await sb().from("pact_jobs").update(rest).eq("id", j.id));
+    }
     if (error) { flash(upgradeHint(error.message)); load(); }
   };
 
@@ -247,7 +251,7 @@ export default function Pact() {
         if (!auto) flash("Already matching the price list — nothing to change");
         return;
       }
-      setItems(live, next, true);
+      setItems(live, next, true, auto);
       flash(auto
         ? "Priced off the quantities on the job — check the lines before invoicing"
         : [added > 0 ? `${added} line${added === 1 ? "" : "s"} added` : "", changed > 0 ? `${changed} re-priced` : ""]
@@ -836,14 +840,17 @@ export default function Pact() {
   };
 
   // ---------- invoice items ----------
-  const setItems = (j: Job, items: Item[], persist = false) => {
+  // baseline: the lines were priced by the list on its own (opening a job
+  // fills the gaps) — that total is still the "original price", so the job is
+  // not PRICED by it (RUN_ME section 15)
+  const setItems = (j: Job, items: Item[], persist = false, baseline = false) => {
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, items } : x)));
     setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, items } : prev));
     if (persist) {
       const sub = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
       const amount = sub * (1 + taxRate(j) / 100); // billed total includes tax
       // unpriced lines must not wipe a hand-typed job amount
-      patch({ ...j, items }, sub > 0 ? { items, amount } : { items });
+      patch({ ...j, items }, { ...(sub > 0 ? { items, amount } : { items }), ...(baseline ? { list_subtotal: subtotalOf(items) } : {}) });
     }
   };
 

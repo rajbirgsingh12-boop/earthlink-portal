@@ -4,7 +4,7 @@ import { addDays, localISO, prettyDate } from "@/lib/docs";
 
 // The dates on a job, built for a business where the tenant doesn't open the
 // door: move it a day or a week with one tap, log a no-access visit with the
-// reason and the new date, clear it back to "Need to schedule", and keep
+// reason and the new date, clear it off the calendar, and keep
 // free-form notes on the job. Every move is written into the notes so the
 // history is there when the partner asks how many trips were made.
 export type DatedJob = {
@@ -21,7 +21,8 @@ const appendNote = (notes: string | null | undefined, line: string) => `${(notes
 export default function JobDates({ job, canEdit, onSave, showNotes = true, crew, onMoved }: {
   job: DatedJob;
   canEdit: boolean;
-  onSave: (patch: Partial<DatedJob>) => void;
+  // may answer false when the save was refused — then nothing else happens
+  onSave: (patch: Partial<DatedJob>) => void | boolean | Promise<void | boolean>;
   showNotes?: boolean;
   // the crew on the job, when there is one — the Move it… dialog offers to text them the new day
   crew?: { names: string[]; told: boolean };
@@ -42,12 +43,14 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true, crew,
     const was = job.start_date ? ` — was ${prettyDate(job.start_date)}` : "";
     const next = to ? `moved to ${prettyDate(to)}` : "needs a new date";
     const line = `⛔ ${why} · ${prettyDate(today)}${was} → ${next}${note.trim() ? ` · ${note.trim()}` : ""}`;
-    // (the crew rows follow the new day through RUN_ME's pact_job_moved trigger — never moved here)
-    onSave({ start_date: to, notes: appendNote(job.notes, line) });
+    // the save lands first — the crew rows follow the new day through RUN_ME's
+    // pact_job_follows trigger (never moved here), and only then is anyone texted
+    const ok = await onSave({ start_date: to, notes: appendNote(job.notes, line) });
+    if (ok === false) return; // refused — the box stays open, the page said why
     setMoving(false);
     if (tellCrew && to && crew?.names.length && onMoved) await onMoved(job.start_date || "", to);
   };
-  const clear = () => onSave({ start_date: "", notes: appendNote(job.notes, `📅 Date cleared ${prettyDate(today)}${job.start_date ? ` (was ${prettyDate(job.start_date)})` : ""} — back to Need to schedule`) });
+  const clear = () => onSave({ start_date: "", notes: appendNote(job.notes, `📅 Date cleared ${prettyDate(today)}${job.start_date ? ` (was ${prettyDate(job.start_date)})` : ""} — off the calendar until it gets a day`) });
 
   const dateBox = "rounded-sm border border-rulesoft bg-white p-1.5 font-mono text-xs min-h-[36px]";
   return (
@@ -62,14 +65,14 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true, crew,
             onChange={(e) => canEdit && onSave({ finish_date: e.target.value })} />
         </label>
         {trips > 0 && <span className="chip text-alert" title="Visits that ended at a closed door">⛔ No access ×{trips}</span>}
-        {!job.start_date && !job.work_done && <span className="chip text-inksoft">Need to schedule</span>}
+        {!job.start_date && !job.work_done && <span className="chip text-inksoft">No day yet</span>}
       </div>
       {canEdit && !job.work_done && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           <button type="button" className="btn btn-ghost min-h-[36px] px-2.5 py-1 text-[12px]" onClick={openMove} title="Log a no-access visit or any other reason, and pick the new day">📅 Move it…</button>
           <button type="button" className="btn btn-ghost min-h-[36px] px-2.5 py-1 text-[12px]" onClick={() => bump(1)}>+1 day</button>
           <button type="button" className="btn btn-ghost min-h-[36px] px-2.5 py-1 text-[12px]" onClick={() => bump(7)}>+1 week</button>
-          {job.start_date && <button type="button" className="btn btn-ghost min-h-[36px] px-2.5 py-1 text-[12px]" onClick={clear} title="No date — the job goes back under Need to schedule">Clear date</button>}
+          {job.start_date && <button type="button" className="btn btn-ghost min-h-[36px] px-2.5 py-1 text-[12px]" onClick={clear} title="No date — the job comes off the calendar until it gets a day">Clear date</button>}
         </div>
       )}
       {moving && (

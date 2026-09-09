@@ -18,7 +18,7 @@ import { findDupe, DUPE_COLS } from "@/lib/po";
 import { COMPANY } from "@/lib/company";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
-import { cleanPhone, smsHref, prettyPhone } from "@/lib/notify";
+import TextWorker from "@/components/TextWorker";
 import { parsePactPoText, type PactPoFields, type PoItem } from "@/lib/parsePactPo";
 import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, attnFrom, DEFAULT_ATTN, type PriceItem, cleanLineWording, unitFor, mergePricedLines, linesFromPoRead } from "@/lib/priceBook";
 
@@ -70,24 +70,7 @@ export default function Pact() {
   const poRef = useRef<HTMLInputElement>(null);
   // tap-to-text: pick a worker, their saved number + this job's address/description prefill the SMS
   const [notifyJob, setNotifyJob] = useState<string | null>(null);
-  const [notifyDesc, setNotifyDesc] = useState("");
-  const [crew, setCrew] = useState<{ id: string; name: string; phone?: string | null }[]>([]);
-  const [crewQ, setCrewQ] = useState("");
-  const [phoneBuf, setPhoneBuf] = useState<Record<string, string>>({});
-  const openNotify = async (j: Job) => {
-    if (notifyJob === j.id) { setNotifyJob(null); return; }
-    setNotifyJob(j.id); setNotifyDesc(j.description || ""); setCrewQ("");
-    if (crew.length === 0) {
-      const { data } = await sb().from("employees").select("*").order("name");
-      setCrew(((data || []) as { id: string; name: string; phone?: string | null; active?: boolean }[]).filter((e) => e.active !== false));
-    }
-  };
-  const savePhone = async (empId: string, raw: string) => {
-    const phone = cleanPhone(raw) || raw.trim();
-    const { error } = await sb().from("employees").update({ phone }).eq("id", empId);
-    if (error) { flash(/column|schema cache/i.test(error.message) ? "Run supabase/upgrade_worker_phone.sql first" : error.message); return; }
-    setCrew((prev) => prev.map((e) => (e.id === empId ? { ...e, phone } : e)));
-  };
+  const openNotify = (j: Job) => setNotifyJob(notifyJob === j.id ? null : j.id);
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3500); };
   const num = useNumBuffer();
   const upgradeHint = (m: string) => (/proposal_sent/i.test(m) ? "Run supabase/upgrade_pact_proposal.sql to track proposals sent"
@@ -801,7 +784,7 @@ export default function Pact() {
           ? isDocx
             ? "File attached, but the proposal couldn't be read — type the partner, address and description below"
             : `PDF attached, but no text could be read (scanned copy?${how ? ` · ${how}` : ""}) — type the partner, address and description below`
-          : `PO ${f.po || "imported"} — ${isDocx ? "our letter" : readBy === "claude" ? "read by Claude" : `⚠ read by the rules${readNote ? ` (${readNote})` : ""}`} · ${f.accessDate ? `set for ${prettyDate(f.accessDate)}` : "no date, under Need to schedule"}${poFlags.length ? ` · ⚠ ${poFlags[0]}` : ""} · check the lines below`);
+          : `PO ${f.po || "imported"} — ${isDocx ? "our letter" : readBy === "claude" ? "read by Claude" : `⚠ read by the rules${readNote ? ` (${readNote})` : ""}`} · ${f.accessDate ? `on the calendar for ${prettyDate(f.accessDate)}` : "no date on the PO — under Need to schedule on the calendar"}${poFlags.length ? ` · ⚠ ${poFlags[0]}` : ""} · check the lines, then text a worker from ⋯`);
     } catch (err) {
       setBusy(false);
       flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
@@ -1333,7 +1316,7 @@ export default function Pact() {
   return (
     <div>
       <PageHeader title="PACT">
-        <Link className="btn btn-ghost" href="/pact/schedule">📅 Schedule</Link>
+        <Link className="btn btn-ghost" href="/pact/schedule">📅 Calendar</Link>
       </PageHeader>
       <input ref={poRef} type="file" accept="application/pdf,.pdf,.docx" className="hidden" onChange={handlePo} />
       {/* a folder (or multi-select) of proposal letters, read in one go */}
@@ -1505,52 +1488,15 @@ export default function Pact() {
                   <RowActions items={[
                     { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },
                     { label: "Re-read the PO", glyph: "🔁", hidden: !canPrice || !(j.attachments || []).some((a) => /\.pdf$/i.test(a.name)), disabled: busy, title: "Rebuild this job from its PDF — the reader, then the price list. Photos and documents stay.", confirm: "Re-read this PO? The partner, address, description, work lines and amount are replaced with what the PDF says. Photos and documents stay.", onSelect: async () => { setBusy(true); await rereadJob(j); setBusy(false); } },
-                    { label: "Text worker", hidden: !canEdit, onSelect: () => openNotify(j) },
+                    { label: "Text a worker", glyph: "📱", hidden: !canEdit, onSelect: () => openNotify(j) },
                   ]} />
                 </div>
-                {notifyJob === j.id && (() => {
-                  const desc = notifyDesc.trim();
-                  const site = [j.address || j.development || "", j.property_unit && `Unit ${j.property_unit}`].filter(Boolean).join(", ");
-                  const msgFor = (who?: string) =>
-                    `Earth Link:${who ? ` ${who},` : ""} you're assigned to a job at ${site || "(no address on file)"}.${desc ? ` Work: ${desc}` : ""}`;
-                  const cq = crewQ.trim().toLowerCase();
-                  const match = crew.filter((e) => !cq || e.name.toLowerCase().includes(cq));
-                  return (
-                    <div className="mb-2.5 rounded-sm border border-rulesoft bg-paper p-2.5">
-                      <div className="mb-1.5 text-[11px] uppercase tracking-widest text-inksoft">
-                        Text a worker — the address fills in automatically
-                      </div>
-                      <input className="field mb-1" placeholder="Work description (what should they do there?)"
-                        value={notifyDesc} onChange={(e) => setNotifyDesc(e.target.value)} />
-                      <input className="field mb-1" placeholder="Find a worker by name…" value={crewQ} onChange={(e) => setCrewQ(e.target.value)} />
-                      <div className="max-h-64 overflow-y-auto">
-                        {match.map((e) => {
-                          const buf = phoneBuf[e.id] ?? prettyPhone(e.phone || "");
-                          const ok = !!cleanPhone(buf);
-                          return (
-                            <div key={e.id} className="flex flex-wrap items-center gap-2 border-t border-rulesoft py-1.5 first:border-t-0">
-                              <b className="text-[13px]">{e.name}</b>
-                              <input className="field w-44 px-2 py-1.5 text-[13px]" placeholder="Phone number" inputMode="tel"
-                                value={buf} onChange={(ev) => setPhoneBuf((p) => ({ ...p, [e.id]: ev.target.value }))}
-                                onBlur={() => { if (cleanPhone(buf) !== cleanPhone(e.phone || "")) savePhone(e.id, buf); }} />
-                              {ok
-                                ? <a className="btn min-h-[44px] px-3 py-1.5 text-[13px]" href={smsHref(buf, msgFor(e.name.split(" ")[0]))}>Text</a>
-                                : <span className="text-[11px] text-inksoft">add a number to text them</span>}
-                            </div>
-                          );
-                        })}
-                        {match.length === 0 && <div className="py-2 text-[13px] text-inksoft">No one matches “{crewQ}”.</div>}
-                      </div>
-                      <div className="mt-1.5 flex flex-wrap items-center gap-2 border-t border-rulesoft pt-2">
-                        <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]"
-                          onClick={() => { navigator.clipboard?.writeText(msgFor()); flash("Message copied — paste it into any group chat"); }}>
-                          Copy message
-                        </button>
-                        <span className="text-[11px] text-inksoft">numbers save to the crew list for next time</span>
-                      </div>
-                    </div>
-                  );
-                })()}
+                {notifyJob === j.id && (
+                  <div className="mb-2.5">
+                    <TextWorker job={j} onClose={() => setNotifyJob(null)}
+                      onNote={(line) => patch(j, { notes: `${(j.notes || "").trim()}${(j.notes || "").trim() ? "\n" : ""}${line}` })} />
+                  </div>
+                )}
                 {canEdit && (
                 <div className="mb-2.5 flex flex-wrap gap-2">
                   <button className="btn-stamp" onClick={() => patch(j, j.proposal_sent ? { proposal_sent: null } : { proposal_sent: today() })}><Stamp label={j.proposal_sent ? `PROPOSAL SENT ${prettyDate(j.proposal_sent)}` : "MARK PROPOSAL SENT"} tone={j.proposal_sent ? "ok" : "mute"} /></button>

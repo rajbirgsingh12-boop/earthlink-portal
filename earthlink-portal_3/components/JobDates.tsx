@@ -60,7 +60,7 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true }: {
       </div>
       {canEdit && !job.work_done && (
         <div className="mt-2 flex flex-wrap gap-1.5">
-          <button type="button" className="btn btn-ghost min-h-[36px] px-2.5 py-1 text-[12px]" onClick={openMove} title="Log a no-access visit or any other reason, and pick the new day">⛔ Move it…</button>
+          <button type="button" className="btn btn-ghost min-h-[36px] px-2.5 py-1 text-[12px]" onClick={openMove} title="Log a no-access visit or any other reason, and pick the new day">📅 Move it…</button>
           <button type="button" className="btn btn-ghost min-h-[36px] px-2.5 py-1 text-[12px]" onClick={() => bump(1)}>+1 day</button>
           <button type="button" className="btn btn-ghost min-h-[36px] px-2.5 py-1 text-[12px]" onClick={() => bump(7)}>+1 week</button>
           {job.start_date && <button type="button" className="btn btn-ghost min-h-[36px] px-2.5 py-1 text-[12px]" onClick={clear} title="No date — the job goes back under Need to schedule">Clear date</button>}

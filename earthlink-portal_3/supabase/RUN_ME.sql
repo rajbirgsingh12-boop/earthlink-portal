@@ -533,3 +533,12 @@ create trigger pact_jobs_no_dupes
   for each row execute function public.pact_jobs_no_dupes();
 create index if not exists pact_jobs_norm_po on pact_jobs (public.norm_po(po_number));
 create index if not exists pact_jobs_norm_job on pact_jobs (public.norm_po(job_number));
+
+-- 14) PACT jobs go on the same crew schedule as NYCHA releases.
+-- One crew table, one texting flow: a schedule_days row can now belong to a
+-- PACT job instead of a release. Everything else about the row (worker, day,
+-- description, address, the TEXTED mark) is the same, so "Assign & text" and
+-- its never-double-text guard cover PACT crews with no new machinery.
+alter table schedule_days add column if not exists pact_job_id uuid references pact_jobs(id) on delete cascade;
+create index if not exists schedule_days_pact_job on schedule_days (pact_job_id);
+create index if not exists schedule_days_day on schedule_days (day);

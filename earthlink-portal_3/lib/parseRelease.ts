@@ -79,7 +79,8 @@ export function parseReleasePdfText(rawText: string): ParsedRelease | null {
 
   // Case 1: normal lines — "1 062001351 15 EACH 2177.3 32,659.50 <description> 1-7 Ship To:"
   const re1 = new RegExp(
-    `(?<![\\d-])(\\d{1,3}) (0\\d{8}) (${NUM}) ${UOM} (${NUM}) ([\\d,]+\\.\\d{2}) (.*?)(?= \\d{1,3}-\\d{1,2} Ship To:)`,
+    // (?:^|[^\\d-]) instead of a lookbehind — Safari before 16.4 has none
+    `(?:^|[^\\d-])(\\d{1,3}) (0\\d{8}) (${NUM}) ${UOM} (${NUM}) ([\\d,]+\\.\\d{2}) (.*?)(?= \\d{1,3}-\\d{1,2} Ship To:)`,
     "g"
   );
   for (const m of t.matchAll(re1)) {
@@ -98,15 +99,15 @@ export function parseReleasePdfText(rawText: string): ParsedRelease | null {
   // Case 2: split lines — parent has qty+UOM but no price (e.g. Demolition split
   // across multiple ship-to sub-blocks). Sum the sub-block amounts.
   const re2 = new RegExp(
-    `(?<![\\d-])(\\d{1,3}) (0\\d{8}) (${NUM}) ${UOM} (?!${NUM} [\\d,]+\\.\\d{2})(.*?)(?= \\1-\\d{1,2} Ship To:)`,
+    `(?:^|[^\\d-])(\\d{1,3}) (0\\d{8}) (${NUM}) ${UOM} (?!${NUM} [\\d,]+\\.\\d{2})(.*?)(?= \\1-\\d{1,2} Ship To:)`,
     "g"
   );
   for (const m of t.matchAll(re2)) {
     const [, ln, code, qty, uom, desc] = m;
     if (items[ln]) continue;
     const subRe = new RegExp(
-      // (?<![\d-]) so split line "2" never swallows sub-blocks of line "12"
-      `(?<![\\d-])${ln}-\\d{1,2} Ship To: Use the ship-to address at the top of page ?1 (${NUM}) ${UOM} (${NUM}) ([\\d,]+\\.\\d{2})`,
+      // the prefix keeps split line "2" from swallowing sub-blocks of line "12"
+      `(?:^|[^\\d-])${ln}-\\d{1,2} Ship To: Use the ship-to address at the top of page ?1 (${NUM}) ${UOM} (${NUM}) ([\\d,]+\\.\\d{2})`,
       "g"
     );
     let amount = 0;

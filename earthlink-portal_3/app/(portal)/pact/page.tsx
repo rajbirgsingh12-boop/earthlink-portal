@@ -107,7 +107,8 @@ export default function Pact() {
   // and its short description: the first thing it says, not the whole scope
   const shortWork = (j: Job): string => {
     const d = (j.description || "").replace(/\s+/g, " ").trim();
-    const first = d.split(/(?<=[.;])\s+/)[0] || d;
+    // (no regex lookbehind — Safari before 16.4 fails to load the whole page on it)
+    const first = (d.match(/^[^.;]*[.;]?/)?.[0] || d).trim() || d;
     return first.length > 54 ? `${first.slice(0, 54).trim()}…` : first;
   };
   // private work is taxable — NYC sales tax by default, editable per job
@@ -582,64 +583,6 @@ export default function Pact() {
     return out.readBy === "claude" ? "claude" : "rules";
   };
 
-  // ---------- the jobs that came in by email ----------
-  const isEmailJob = (j: Job) => (j.notes || "").startsWith("📧");
-  // the day the EMAIL arrived, from the note the intake wrote
-  // the intake writes the email's full timestamp (UTC); the day it belongs to
-  // is the day HERE — a PO that lands at 9 PM in New York is today's, not
-  // tomorrow's
-  const emailDay = (j: Job) => {
-    const stamp = (j.notes || "").match(/\bon (\d{4}-\d{2}-\d{2}(?:T[\d:.]+Z?)?)/)?.[1] || j.created_at || "";
-    const d = new Date(stamp);
-    return Number.isNaN(d.getTime()) ? stamp.slice(0, 10) : localISO(d);
-  };
-  // delete every job that came in by email — a clean slate for the intake
-  const purgeEmailJobs = async () => {
-    const all = jobs.filter(isEmailJob);
-    if (all.length === 0) { flash("No email imports to delete"); return; }
-    const list = all.slice(0, 8).map((j) => `PO ${j.po_number || j.job_number || "?"} (${emailDay(j)})`).join(", ");
-    if (!window.confirm(`Delete all ${all.length} email import${all.length === 1 ? "" : "s"}? ${list}${all.length > 8 ? "…" : ""}\n\nThe jobs and their files disappear for good. Jobs you made by hand or from your phone are not touched.\n\nTo bring one back later: in Gmail, remove the "EarthLink-Imported" label from that email, then tap Read email now.`)) return;
-    setBusy(true);
-    let done = 0;
-    for (const j of all) if (await deleteJobNow(j)) done += 1;
-    setBusy(false);
-    flash(`${done} of ${all.length} email import${all.length === 1 ? "" : "s"} deleted — to bring one back, remove its "EarthLink-Imported" label in Gmail and tap Read email now`);
-  };
-  // re-read today's email imports from their PDFs with the smart reader
-  const rereadTodayEmailJobs = async () => {
-    if (!(await smartOn())) { flash("The smart reader is off — add ANTHROPIC_API_KEY in Vercel and redeploy first (Settings → Health check shows it)"); return; }
-    const mine = jobs.filter((j) => isEmailJob(j) && emailDay(j) === today() && !j.canceled);
-    if (mine.length === 0) { flash("No email imports from today to re-read"); return; }
-    setBusy(true);
-    let claude = 0, rules = 0, none = 0;
-    for (const j of mine) {
-      flash(`Re-reading ${claude + rules + none + 1} of ${mine.length}…`);
-      const r = await rereadJob(j, true);
-      if (r === "claude") claude += 1; else if (r === "rules") rules += 1; else none += 1;
-    }
-    setBusy(false);
-    await load();
-    flash(`${claude} re-read by Claude${rules ? `, ${rules} by the rules` : ""}${none ? `, ${none} couldn't be` : ""} — open each and check the lines`);
-  };
-
-  // ---------- "Read email now": check the inbox this second ----------
-  const readEmailNow = async () => {
-    setBusy(true);
-    try {
-      const { data: { session } } = await sb().auth.getSession();
-      const r = await fetch("/api/inbound-po/run", { method: "POST", headers: session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {} });
-      const out = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string; threads?: number; alreadyImported?: number; since?: string; created?: number; duplicate?: number; skipped?: number; errors?: number; results?: { name: string; status: string; po?: string; reason?: string }[] };
-      if (!r.ok || !out.ok) { flash(out.error || `Couldn't read the inbox (${r.status})`); return; }
-      await load();
-      const made = out.results?.filter((x) => x.status === "created").map((x) => `PO ${x.po || x.name}`) || [];
-      flash(out.threads === 0
-        ? `Inbox checked — nothing new since the last look${out.alreadyImported ? ` (${out.alreadyImported} email${out.alreadyImported === 1 ? "" : "s"} with PDFs since ${out.since || "setup"} already imported — remove the EarthLink-Imported label in Gmail to bring one back)` : out.since ? ` (looking at emails from ${out.since} on)` : ""}`
-        : `Inbox checked — ${out.created} new${made.length ? ` (${made.slice(0, 5).join(", ")}${made.length > 5 ? "…" : ""})` : ""}${out.duplicate ? `, ${out.duplicate} already here` : ""}${out.skipped ? `, ${out.skipped} not POs` : ""}${out.errors ? `, ${out.errors} failed — will retry` : ""}`);
-    } catch (err) {
-      flash(`Couldn't read the inbox (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
-    } finally { setBusy(false); }
-  };
-
   const handlePo = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -650,6 +593,9 @@ export default function Pact() {
       let fields: PactPoFields | null = null;
       let how = "";
       let taxFromDoc: number | undefined;
+      // which reader did the reading, and why it wasn't Claude when it wasn't
+      let readBy: "claude" | "rules" = "rules";
+      let readNote = "";
       // our own proposal letters (.docx) read right here on the device
       const isDocx = /\.docx$/i.test(file.name);
       // a NYCHA blanket release dropped here by mistake would be minced into a
@@ -686,7 +632,10 @@ export default function Pact() {
             headers: { "Content-Type": "application/pdf", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) },
             body: file,
           });
-          if (res.ok) fields = ((await res.json()) as { fields: PactPoFields }).fields;
+          if (res.ok) {
+            const out = (await res.json()) as { fields: PactPoFields; readBy?: "claude" | "rules"; note?: string };
+            fields = out.fields; readBy = out.readBy === "claude" ? "claude" : "rules"; readNote = out.note || "";
+          }
           else how = `server said ${res.status}: ${(await res.text().catch(() => "")).slice(0, 90)}`;
         } catch { how = "server unreachable"; }
       } else how = "file too big for the server — read on this device";
@@ -703,6 +652,7 @@ export default function Pact() {
       if (!fields && isDocx) fields = { po: "", poDate: "", desc: "", scope: "", partner: "", address: "", billBlock: "", contact: "", punit: "", amount: 0, rows: [], rowsAddUp: true, readable: false };
       if (!fields) {
         try {
+          readBy = "rules"; readNote = readNote || how || "read on this device";
           const pdfjs = await import("pdfjs-dist");
           pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
           const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
@@ -775,7 +725,7 @@ export default function Pact() {
           const moved = !!f.accessDate && !dupe.work_done && (dupe.start_date || "") !== f.accessDate;
           if (moved) {
             const was = dupe.start_date ? ` (was ${prettyDate(dupe.start_date)})` : "";
-            const line = `📅 Moved to ${prettyDate(f.accessDate!)} by a re-sent PO${was}`;
+            const line = `📅 Moved to ${prettyDate(f.accessDate!)} by a re-uploaded PO${was}`;
             await sb().from("pact_jobs").update({ start_date: f.accessDate, notes: `${(dupe.notes || "").trim()}${(dupe.notes || "").trim() ? "\n" : ""}${line}` }).eq("id", dupe.id);
           }
           setBusy(false);
@@ -801,8 +751,8 @@ export default function Pact() {
         ...(taxFromDoc !== undefined ? { tax_pct: taxFromDoc } : {}),
         // the day the PO set goes straight onto the schedule; no day = Need to schedule
         ...(f.accessDate ? { start_date: f.accessDate } : {}),
-        // anything a person should know about how it was read stays on the job
-        ...(poFlags.length ? { notes: `⚠ ${poFlags.join(". ")}.` } : {}),
+        // which reader read it, and anything a person should know about the read
+        notes: [isDocx ? "✓ Read from our own letter" : readBy === "claude" ? "✓ Read by Claude" : `⚠ Read by the rules${readNote ? ` (${readNote})` : ""}`, ...poFlags.map((w) => `⚠ ${w}`)].join("\n"),
       }).select().single();
       if (error || !job) { setBusy(false); flash(upgradeHint(error?.message || "Save failed")); return; }
       // attach the PO itself
@@ -825,7 +775,7 @@ export default function Pact() {
           ? isDocx
             ? "File attached, but the proposal couldn't be read — type the partner, address and description below"
             : `PDF attached, but no text could be read (scanned copy?${how ? ` · ${how}` : ""}) — type the partner, address and description below`
-          : `PO ${f.po || "imported"} — ${f.accessDate ? `set for ${prettyDate(f.accessDate)} per the PO` : "no date on the PO, it's under Need to schedule"}${poFlags.length ? ` · ⚠ ${poFlags[0]}` : ""} · check the work lines below`);
+          : `PO ${f.po || "imported"} — ${isDocx ? "our letter" : readBy === "claude" ? "read by Claude" : `⚠ read by the rules${readNote ? ` (${readNote})` : ""}`} · ${f.accessDate ? `set for ${prettyDate(f.accessDate)}` : "no date, under Need to schedule"}${poFlags.length ? ` · ⚠ ${poFlags[0]}` : ""} · check the lines below`);
     } catch (err) {
       setBusy(false);
       flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
@@ -1468,13 +1418,10 @@ export default function Pact() {
           </div>
           <div className="flex shrink-0 flex-wrap gap-2">
             <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy} title="A partner PO (PDF) or one of our proposal letters (Word)">📄 Upload PO / proposal</button>
-            <button className="btn btn-ghost min-h-[44px]" onClick={readEmailNow} disabled={busy} title="Check the Gmail inbox for new POs right now instead of waiting for the 10-minute timer">📧 Read email now</button>
             <ActionMenu label="More ways to add" items={[
               { label: "Upload a folder of proposals", hidden: !canInvoice, disabled: busy, title: "Pick a folder of proposal letters — every one becomes a job, then all the invoices download in one zip", onSelect: () => folderRef.current?.click() },
               { label: "Proposal template", hidden: !canInvoice, disabled: busy, title: "A blank proposal letter in our layout — fill it in, and uploading it back here builds the job and the invoice", onSelect: blankProposal },
               { label: "Add a job manually", onSelect: () => setAddOpen(!addOpen) },
-              { label: `Re-read today's email POs with Claude (${jobs.filter((j) => isEmailJob(j) && emailDay(j) === today() && !j.canceled).length})`, hidden: !canPrice || !jobs.some(isEmailJob), disabled: busy, title: "Every job that came in by email today is rebuilt from its PDF through the smart reader, then the price list", onSelect: rereadTodayEmailJobs },
-              { label: `Delete all email imports… (${jobs.filter(isEmailJob).length})`, hidden: !canPrice || !jobs.some(isEmailJob), disabled: busy, destructive: true, title: "Every job that came in by email — hand-made and phone-uploaded jobs are not touched", onSelect: purgeEmailJobs },
             ]} />
           </div>
         </div>
@@ -1507,7 +1454,6 @@ export default function Pact() {
               </button>
               <div className="flex shrink-0 items-center gap-2">
                 {canPrice && <span className="font-mono text-sm font-semibold">{fmt(Number(j.amount) || invTotal(j))}</span>}
-                {(j.notes || "").startsWith("📧") && <span className="chip text-inksoft" title={j.notes}>📧 email</span>}
                 {/⚠/.test(j.notes || "") && <span className="chip text-alert" title={j.notes}>⚠ check</span>}
                 {(j.attachments || []).length > 0 && <span className="chip text-inksoft" title="Documents & photos">📎 {(j.attachments || []).length}</span>}
                 <RowActions items={[

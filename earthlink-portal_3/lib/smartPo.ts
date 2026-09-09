@@ -51,7 +51,10 @@ export function smartAgrees(s: SmartPo, text: string): string | null {
   if (!digits(t).includes(digits(s.po_number)) && !t.includes(s.po_number.trim())) return `PO number ${s.po_number} isn't printed on the page`;
   if (!s.partner.trim() && !s.service_address.trim() && !s.description.trim()) return "no partner, address or description";
   const rowSum = s.rows.reduce((a, r) => a + cents(cents(r.unit_price) * (Number(r.qty) || 0)), 0);
-  if (s.rows.length > 0 && s.total > 1 && Math.abs(rowSum - s.total) > 0.02) return `rows add to ${rowSum.toFixed(2)} but the PO says ${s.total.toFixed(2)}`;
+  // the printed total is the rows, or the rows with the 8.875% tax on top —
+  // either is the same PO read right
+  const near = (a: number, b: number) => Math.abs(a - b) <= 0.05;
+  if (s.rows.length > 0 && s.total > 1 && !near(rowSum, s.total) && !near(cents(rowSum * 1.08875), s.total)) return `rows add to ${rowSum.toFixed(2)} but the PO says ${s.total.toFixed(2)}`;
   if (s.access_date && !/^\d{4}-\d{2}-\d{2}$/.test(s.access_date)) return `access date "${s.access_date}" isn't a date`;
   if (s.rows.some((r) => r.qty < 0 || r.unit_price < 0)) return "a negative quantity or price";
   return null;

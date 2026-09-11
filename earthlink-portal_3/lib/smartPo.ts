@@ -97,6 +97,27 @@ export function mergeSmart(rules: PactPoFields & { taxPct?: number }, s: SmartPo
 }
 
 export const smartConfigured = () => !!process.env.ANTHROPIC_API_KEY;
+// A key made for one workspace needs nothing more. A key that spans
+// workspaces has to say which one each request acts in — ANTHROPIC_WORKSPACE_ID.
+export const smartWorkspace = () => (process.env.ANTHROPIC_WORKSPACE_ID || "").trim();
+export async function smartClient(timeoutMs: number) {
+  const { default: Anthropic } = await import("@anthropic-ai/sdk");
+  const ws = smartWorkspace();
+  return new Anthropic({ timeout: timeoutMs, maxRetries: 0, ...(ws ? { defaultHeaders: { "anthropic-workspace-id": ws } } : {}) });
+}
+// what went wrong, in plain words — with what to do about it when it is the
+// key, and the API's own words otherwise
+export function smartErrorNote(e: unknown): string {
+  const err = e as { status?: number; error?: { error?: { message?: string } }; message?: string } | null;
+  const apiMsg = String(err?.error?.error?.message || "");
+  const msg = apiMsg || (e instanceof Error ? e.message : "") || "unknown error";
+  if (/workspace/i.test(msg)) return "Claude's key isn't tied to a workspace — in the Claude Console make the key for one workspace, or add ANTHROPIC_WORKSPACE_ID in Vercel";
+  if (err?.status === 401) return "Claude's key was refused — make a new key in the Claude Console and put it in Vercel as ANTHROPIC_API_KEY";
+  if (err?.status === 403) return "Claude's key isn't allowed to do this — check the key's workspace and role in the Claude Console";
+  if (err?.status === 429) return "Claude is busy right now (rate limit) — try again in a minute";
+  if (/took too long/.test(msg)) return "the smart reader took too long";
+  return `Claude couldn't read it (${msg.replace(/\s+/g, " ").slice(0, 140)})`;
+}
 
 // Only a partner purchase order is ever shown to Claude — never a NYCHA
 // release, a payroll sheet, an invoice, a balance sheet, a photo. This is
@@ -115,9 +136,8 @@ export const looksLikePactPo = (text: string): boolean => {
 // read rather than taking the PO down with it.
 export const SMART_TIMEOUT_MS = 40_000;
 export async function askClaude(pdf: Uint8Array, timeoutMs: number = SMART_TIMEOUT_MS): Promise<SmartPo | null> {
-  const { default: Anthropic } = await import("@anthropic-ai/sdk");
   const { zodOutputFormat } = await import("@anthropic-ai/sdk/helpers/zod");
-  const client = new Anthropic({ timeout: timeoutMs, maxRetries: 0 });
+  const client = await smartClient(timeoutMs);
   const res = await client.messages.parse({
     model: "claude-opus-5",
     max_tokens: 8000,
@@ -158,6 +178,6 @@ export async function readPoSmart(
     if (why) return { fields: rules, readBy: "rules", note: `the smart read didn't match the page (${why}) — used the rules read` };
     return { fields: mergeSmart(rules, s), readBy: "claude" };
   } catch (e) {
-    return { fields: rules, readBy: "rules", note: `smart reader unavailable (${e instanceof Error ? e.message.slice(0, 80) : "unknown"}) — used the rules read` };
+    return { fields: rules, readBy: "rules", note: `${smartErrorNote(e)} — used the rules read` };
   }
 }

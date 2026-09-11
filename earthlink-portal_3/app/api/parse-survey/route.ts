@@ -1,11 +1,11 @@
-// Server-side survey reader: the phone sends the survey PDF and the contract's
-// price book, and gets back the survey as the book's own lines. Same gate,
-// same PDF engine and the same smart-reader-then-rules shape as the PO reader.
+// Server-side survey reader: the phone sends the survey PDF and gets back the
+// survey as items off the move-out list (what each line is, and its count —
+// the page bills them). Same gate, same PDF engine and the same
+// smart-reader-then-rules shape as the PO reader.
 import { NextResponse } from "next/server";
 import { readSurveySmart } from "@/lib/smartSurvey";
 import { readSurveyForm } from "@/lib/surveyForm";
 import { smartConfigured } from "@/lib/smartPo";
-import type { CatalogLine } from "@/lib/surveyTemplate";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -30,27 +30,21 @@ export async function POST(req: Request) {
   const role = (pRes.ok ? ((await pRes.json()) as { role?: string }[]) : [])[0]?.role || "";
   if (role !== "admin" && role !== "office") return NextResponse.json({ error: "Not allowed" }, { status: 403 });
 
-  // the PDF and the price book travel together as a form
+  // the PDF travels as a form
   let file: File | null = null;
-  let catalog: CatalogLine[] = [];
   try {
     const form = await req.formData();
     file = form.get("file") as File | null;
-    const raw = form.get("catalog");
-    catalog = typeof raw === "string" ? (JSON.parse(raw) as CatalogLine[]) : [];
   } catch {
-    return NextResponse.json({ error: "Send the survey PDF and the price book as a form" }, { status: 400 });
+    return NextResponse.json({ error: "Send the survey PDF as a form" }, { status: 400 });
   }
   if (!file || file.size === 0 || file.size > 8 * 1024 * 1024) return NextResponse.json({ error: "Send the survey PDF itself (max 8 MB)" }, { status: 400 });
-  if (!Array.isArray(catalog) || catalog.length === 0) return NextResponse.json({ error: "No price book for this contract — upload it on the Price Book tab first" }, { status: 400 });
-  // only what the reader needs — never a stray column
-  catalog = catalog.map((c) => ({ code: String(c.code || ""), line: Number(c.line) || 0, category: String(c.category || ""), description: String(c.description || ""), uom: String(c.uom || ""), unit_price: Number(c.unit_price) || 0 })).filter((c) => c.code);
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
     // our own survey form, filled in: read straight off its boxes — no guessing at the wording
     const formText = await readSurveyForm(bytes.slice()).catch(() => null);
     if (formText !== null) {
-      const out = await readSurveySmart(bytes, formText, catalog, undefined, undefined, formText);
+      const out = await readSurveySmart(bytes, formText, undefined, undefined, formText);
       return NextResponse.json({ ok: true, survey: out.survey, readBy: out.readBy, form: true, ...(out.note ? { note: out.note } : {}), text: formText });
     }
     const { getResolvedPDFJS } = await import("unpdf");
@@ -72,7 +66,7 @@ export async function POST(req: Request) {
     }
     await (doc as unknown as { destroy?: () => Promise<void> }).destroy?.().catch(() => null);
     const text = lines.filter(Boolean).join("\n");
-    const out = await readSurveySmart(bytes, text, catalog);
+    const out = await readSurveySmart(bytes, text);
     return NextResponse.json({ ok: true, survey: out.survey, readBy: out.readBy, ...(out.note ? { note: out.note } : {}), text });
   } catch (e) {
     return NextResponse.json({ error: `Couldn't open the PDF: ${e instanceof Error ? e.message.slice(0, 120) : "unknown"}` }, { status: 422 });

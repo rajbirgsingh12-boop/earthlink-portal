@@ -138,6 +138,10 @@ export default function Items() {
           })).filter((it) => it.description && !/^total$/i.test(it.description));
         if (rows.length === 0) { flash("No item rows found"); return; }
         if (isContract) {
+          // a code repeated on the sheet is one line in the book (the book holds each code once; lines with no code are all kept)
+          const seenCodes = new Set<string>();
+          const kept = rows.filter((r) => { if (!r.code) return true; if (seenCodes.has(r.code)) return false; seenCodes.add(r.code); return true; });
+          rows.length = 0; rows.push(...kept);
           // replace this contract's book so re-uploads never duplicate
           const { error: de } = await sb().from("contract_items").delete().eq("contract_id", sel);
           if (de) { flash(/relation/i.test(de.message) ? "Run supabase/upgrade_proposal_creator.sql first" : de.message); return; }

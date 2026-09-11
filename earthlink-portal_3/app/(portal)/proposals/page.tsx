@@ -13,6 +13,7 @@ import ContractPicker, { contractLabel } from "@/components/ContractPicker";
 import Modal from "@/components/Modal";
 import { DEFAULT_CAP, billSurvey, hoursNote, sheetTotal, LABOR_KEY, type SheetLine, type HourPart } from "@/lib/surveyTemplate";
 import { MOVEOUT_CONTRACT, MOVEOUT_RELEASE, RELEASE_LINES } from "@/lib/moveoutRelease";
+import { contractKey } from "@/lib/matchRelease";
 import type { SmartSurvey } from "@/lib/smartSurvey";
 import { useLive } from "@/lib/useLive";
 import PrintShell from "@/components/PrintShell";
@@ -184,7 +185,7 @@ export default function Proposals() {
   // A survey is a move-out job: it bills the move-out contract, whatever the
   // list is showing — and only that one, since the release's lines and prices
   // belong to it. Without it in the portal the upload says so.
-  const isMoveout = (c: Contract) => String(c.number || "").replace(/\D/g, "") === MOVEOUT_CONTRACT;
+  const isMoveout = (c: Contract) => contractKey(c.number) === MOVEOUT_CONTRACT; // "2442583", "2442583-332", "02442583" — the same contract, the way the rest of the app reads a number
   const surveyContract = () => contracts.find(isMoveout)?.id || "";
   // the blank form — the same PDF every time, so the reader knows every box
   const downloadSurveyForm = async () => {
@@ -272,13 +273,16 @@ export default function Proposals() {
       let bookNote = "";
       if (missing.length) {
         const rows = missing.map((r) => ({ contract_id: cid, line: r.line, code: r.code, category: r.category, description: r.description, uom: r.uom, unit_price: r.unit_price }));
-        // one row per code, even when two phones upload in the same second — the
-        // unique index (RUN_ME section 16) makes it so; before it is run, a plain insert
-        let { data: added, error: ae } = await sb().from("contract_items").upsert(rows, { onConflict: "contract_id,code", ignoreDuplicates: true }).select();
-        if (ae && /unique|exclusion|conflict|constraint/i.test(ae.message)) ({ data: added, error: ae } = await sb().from("contract_items").insert(rows).select());
-        if (ae) { flash(`Couldn't add release ${MOVEOUT_RELEASE}'s lines to this contract's price book (${upgradeHint(ae.message)})`); return; }
-        catalog = [...catalog, ...((added && added.length ? added : rows) as ContractItem[])];
-        bookNote = `${missing.length} line${missing.length === 1 ? "" : "s"} from release ${MOVEOUT_RELEASE} added to this contract's price book`;
+        const { data: added, error: ae } = await sb().from("contract_items").insert(rows).select();
+        if (ae && /duplicate|unique/i.test(ae.message)) {
+          // another phone got there first (the book holds each code once — RUN_ME section 16): take the book as it is now
+          const { data: again } = await sb().from("contract_items").select("*").eq("contract_id", cid).order("line");
+          catalog = (again || []) as ContractItem[];
+        } else if (ae) { flash(`Couldn't add release ${MOVEOUT_RELEASE}'s lines to this contract's price book (${upgradeHint(ae.message)})`); return; }
+        else {
+          catalog = [...catalog, ...((added && added.length ? added : rows) as ContractItem[])];
+          bookNote = `${missing.length} line${missing.length === 1 ? "" : "s"} from release ${MOVEOUT_RELEASE} added to this contract's price book`;
+        }
       }
       const form = new FormData();
       form.append("file", file);
@@ -447,17 +451,21 @@ export default function Proposals() {
             };
           })
           .filter((r) => r.code && r.description && !/^total$/i.test(r.description));
-        if (rows.length === 0) { flash("No item rows found in that sheet"); return; }
+        // a code repeated on the sheet is one line in the book (the book holds each code once)
+        const codesSeen = new Set<string>();
+        const repeats = rows.filter((r) => { if (codesSeen.has(r.code)) return true; codesSeen.add(r.code); return false; }).length;
+        const uniq = rows.filter((r, i) => rows.findIndex((x) => x.code === r.code) === i);
+        if (uniq.length === 0) { flash("No item rows found in that sheet"); return; }
         const { error: de } = await sb().from("contract_items").delete().eq("contract_id", doc.contract_id!);
         if (de) { flash(upgradeHint(de.message)); return; }
-        for (let i = 0; i < rows.length; i += 500) {
-          const { error } = await sb().from("contract_items").insert(rows.slice(i, i + 500).map((r) => ({ ...r, contract_id: doc.contract_id })));
+        for (let i = 0; i < uniq.length; i += 500) {
+          const { error } = await sb().from("contract_items").insert(uniq.slice(i, i + 500).map((r) => ({ ...r, contract_id: doc.contract_id })));
           // the old book is already cleared — say so, or a half-loaded book looks complete
           if (error) { flash(`Upload stopped partway (${upgradeHint(error.message)}) — upload the sheet again to finish the book`); return; }
         }
         const { data } = await sb().from("contract_items").select("*").eq("contract_id", doc.contract_id!).order("line");
         setCatalog((data || []) as ContractItem[]);
-        flash(`Loaded ${rows.length} price book lines for this contract`);
+        flash(`Loaded ${uniq.length} price book lines for this contract${repeats ? ` (${repeats} repeated code${repeats === 1 ? "" : "s"} skipped)` : ""}`);
       } catch { flash("Couldn't read that sheet — save as .xlsx or .csv"); }
     };
     reader.readAsArrayBuffer(file);
@@ -876,12 +884,13 @@ export default function Proposals() {
         const over = now - DEFAULT_CAP;
         const nothing = a.keep.length === 0;
         const toggle = (key: string, on: boolean) => { const next = new Set(off); if (on) next.add(key); else next.delete(key); setTrim({ plan, off: next }); };
-        const row = (key: string, title: string, sub: string, right: string) => (
+        const row = (key: string, title: string, sub: string, right: string, pair?: string) => (
           <label key={key} className={`flex min-h-[44px] cursor-pointer items-center gap-3 px-3 py-2 ${off.has(key) ? "bg-alert/5 line-through opacity-70" : ""}`}>
             <input type="checkbox" className="h-5 w-5 shrink-0" checked={off.has(key)} onChange={(e) => toggle(key, e.target.checked)} />
             <span className="min-w-0 flex-1">
               <span className="block text-[14px] font-semibold">{title}</span>
               <span className="block truncate text-[12px] text-inksoft">{sub}</span>
+              {pair && <span className="block text-[11px] font-semibold text-alert">{pair}</span>}
             </span>
             <span className="shrink-0 font-mono text-[14px] font-semibold">{right}</span>
           </label>
@@ -904,8 +913,8 @@ export default function Proposals() {
               {plan.hours.some((h) => h.also) ? " A job the price book also prices is on the list twice — as its hours and as the book's line — so tick off the one that doesn't apply." : ""}
             </div>
             <div className="divide-y divide-rulesoft rounded-sm border border-rulesoft">
-              {plan.lines.filter((l) => l.itemKey !== LABOR_KEY).map((l) => row(l.code, l.label, `#${l.line} ${l.description} · ${l.qty} × ${fmt(l.unit_price)}${l.alsoHours ? " · ALSO IN THE HOURS BELOW — keep one" : ""}`, fmt(l.qty * l.unit_price)))}
-              {plan.hours.map((h, i) => row(HOUR_KEY(i), h.written, `${h.label} · General Laborer hours${h.also ? ` · ALSO LINE #${plan.lines.find((l) => l.code === h.also)?.line ?? h.also} ABOVE — keep one` : ""}`, `${h.hours}h`))}
+              {plan.lines.filter((l) => l.itemKey !== LABOR_KEY).map((l) => row(l.code, l.label, `#${l.line} ${l.description} · ${l.qty} × ${fmt(l.unit_price)}`, fmt(l.qty * l.unit_price), l.alsoHours ? "ALSO IN THE HOURS BELOW — keep one" : undefined))}
+              {plan.hours.map((h, i) => row(HOUR_KEY(i), h.written, `${h.label} · General Laborer hours`, `${h.hours}h`, h.also ? `ALSO LINE #${plan.lines.find((l) => l.code === h.also)?.line ?? h.also} ABOVE — keep one` : undefined))}
               {plan.labor && a.hourTotal > 0 && (
                 <div className="flex min-h-[44px] items-center gap-3 bg-paper px-3 py-2">
                   <span className="h-5 w-5 shrink-0" />

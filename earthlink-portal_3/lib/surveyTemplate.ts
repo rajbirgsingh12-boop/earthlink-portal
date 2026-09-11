@@ -65,7 +65,7 @@ export const SEED_ITEMS: SurveyItem[] = [
   // windows
   S("win_balance", "Windows", "Window balance", ["window balance", "balance", "balances", "window balances", "sash balance"], L(CODE.balance), [{ req: ["balance"], opt: ["window", "sash", "replace"] }]),
   S("win_guard", "Windows", "Window guard", ["window guard", "guard", "guards", "window guards", "child guard"], H(0.5), [{ req: ["guard"], opt: ["window", "child", "install"] }]),
-  S("win_lock", "Windows", "Window lock", ["window lock", "sash lock", "window latch"], H(0.25), [{ req: ["lock|latch"], opt: ["window", "sash"] }]),
+  S("win_lock", "Windows", "Window lock", ["window lock", "sash lock", "window latch"], H(0.25), [{ req: ["lock|latch", "window|sash"], opt: ["window", "sash"] }]),
   S("win_shade", "Windows", "Window shade", ["shade", "shades", "window shade", "window shades", "blind"], H(0.25), [{ req: ["shade|blind"], opt: ["window", "roller"] }]),
   S("win_screen", "Windows", "Window screen", ["screen", "screens", "window screen"], H(0.25), [{ req: ["screen"], opt: ["window", "insect"] }]),
   // doors and hardware
@@ -81,9 +81,9 @@ export const SEED_ITEMS: SurveyItem[] = [
   S("saddle", "Doors", "Saddle / threshold", ["saddle", "saddles", "threshold", "door saddle"], H(0.5), [{ req: ["saddle|threshold"], opt: ["door", "marble", "metal"] }]),
   S("peephole", "Doors", "Peephole / door viewer", ["peephole", "peep hole", "viewer", "door viewer", "interviewer", "door interviewer", "interview"], H(0.5), [{ req: ["peephole|viewer|peep"], opt: ["door"] }]),
   S("door_knocker", "Doors", "Door knocker", ["door knocker", "knocker"], H(0.5), [{ req: ["knocker"], opt: ["door"] }]),
-  S("door_repair", "Doors", "Door repair (Bondo)", ["bondo door", "bondo", "door bondo", "door repair", "repair door", "patch door", "door patch", "fill door"], H(1), [{ req: ["door"], opt: ["repair", "patch", "bondo", "fill", "dent"], not: ["replace", "install", "lock", "stop", "hinge", "closet", "entrance", "paint", "knocker", "viewer", "chain", "saddle", "furnish"] }]),
-  S("door_chain", "Doors", "Door chain / guard", ["door chain", "chain", "chain guard", "door guard"], H(0.25), [{ req: ["chain"], opt: ["door", "guard"] }]),
-  S("closet_shelf", "Doors", "Closet shelf and pole", ["closet shelf", "shelf and pole", "shelf", "closet pole", "pole"], H(1), [{ req: ["shelf|pole"], opt: ["closet", "clothes", "rod"] }]),
+  S("door_repair", "Doors", "Door repair (Bondo)", ["bondo door", "bondo", "door bondo", "door repair", "repair door", "patch door", "door patch", "fill door"], H(1), [{ req: ["door", "repair|patch|bondo|fill|dent"], opt: ["repair", "patch", "bondo", "fill", "dent"], not: ["replace", "install", "lock", "stop", "hinge", "closet", "entrance", "paint", "knocker", "viewer", "chain", "saddle", "furnish"] }]),
+  S("door_chain", "Doors", "Door chain / guard", ["door chain", "chain", "chain guard", "door guard"], H(0.25), [{ req: ["chain"], opt: ["door", "guard"], not: ["pull", "light", "lamp", "fixture", "lampholder"] }]),
+  S("closet_shelf", "Doors", "Closet shelf and pole", ["closet shelf", "shelf and pole", "shelf", "closet pole", "pole"], H(1), [{ req: ["shelf|pole"], opt: ["closet", "clothes", "rod"], not: ["switch", "toggle", "light", "flag"] }]),
   // electrical
   S("gfi", "Electrical", "GFI outlet", ["gfi", "gfci", "gfi outlet", "gfci outlet", "gfi receptacle", "ground fault"], L(CODE.gfi), [{ req: ["gfci|gfi|ground fault"], opt: ["receptacle", "outlet"] }]),
   S("outlet_single", "Electrical", "Outlet — single", ["single outlet", "outlet single", "single", "single receptacle", "simplex"], L(CODE.switches), [{ req: ["receptacle|outlet"], opt: ["single", "simplex"], not: ["gfci", "gfi", "duplex", "plate", "cover", "220", "range", "dryer"] }]),
@@ -113,12 +113,12 @@ export const SEED_ITEMS: SurveyItem[] = [
   S("cabinet_wall", "Kitchen", "Wall cabinet", ["wall cabinet", "wall cabinets", "upper cabinet", "upper cabinets"], B(2), [{ req: ["cabinet"], opt: ["wall", "upper"] }]),
   S("countertop", "Kitchen", "Countertop", ["countertop", "counter top", "counter", "laminate top"], B(3), [{ req: ["countertop|counter"], opt: ["top", "laminate", "kitchen"] }]),
   S("stove", "Kitchen", "Stove / range", ["stove", "range", "gas stove", "gas range"], B(1), [{ req: ["stove|range"], opt: ["gas", "kitchen", "install", "connect"], not: ["hood", "connect"] }]),
-  S("connect_appliances", "Kitchen", "Connect kitchen appliances", ["connect kitchen appliances", "connect appliances", "kitchen appliances", "appliance hookup", "hook up appliances", "connect stove", "hook up stove", "connect range", "connect refrigerator"], H(1), [{ req: ["connect|hook|hookup"], opt: ["appliance", "stove", "range", "refrigerator", "gas", "kitchen"], not: ["detector", "alarm", "water", "heater"] }]),
+  S("connect_appliances", "Kitchen", "Connect kitchen appliances", ["connect kitchen appliances", "connect appliances", "kitchen appliances", "appliance hookup", "hook up appliances", "connect stove", "hook up stove", "connect range", "connect refrigerator"], H(1), [{ req: ["connect|hook|hookup"], opt: ["appliance", "stove", "range", "refrigerator", "gas", "kitchen"], not: ["detector", "alarm", "water", "heater", "disconnect", "remove", "removal"] }]),
   S("range_hood", "Kitchen", "Range hood", ["range hood", "hood", "stove hood"], B(1), [{ req: ["hood"], opt: ["range", "stove", "kitchen"] }]),
   S("refrigerator", "Kitchen", "Refrigerator", ["refrigerator", "fridge"], B(0.5), [{ req: ["refrigerator"], opt: ["install", "deliver"] }]),
   // bathroom
   S("medicine_cabinet", "Bathroom", "Medicine cabinet", ["medicine cabinet", "medicine", "med cabinet", "mirror cabinet"], L(CODE.med), [{ req: ["medicine"], opt: ["cabinet", "mirror"], not: ["door", "shelf", "glass"] }]),
-  S("toilet", "Bathroom", "Toilet", ["toilet", "water closet", "wc", "toilet bowl", "toilet and tank"], H(2), [{ req: ["toilet|water closet|closet"], opt: ["bowl", "tank", "complete", "replace", "install"], not: ["paper", "seat", "holder", "tissue", "flange", "supply"] }]),
+  S("toilet", "Bathroom", "Toilet", ["toilet", "water closet", "wc", "toilet bowl", "toilet and tank"], H(2), [{ req: ["toilet|water closet"], opt: ["bowl", "tank", "complete", "replace", "install"], not: ["paper", "seat", "holder", "tissue", "flange", "supply"] }]),
   S("toilet_seat", "Bathroom", "Toilet seat", ["toilet seat", "seat"], H(0.25), [{ req: ["seat"], opt: ["toilet", "closet"], not: ["paper", "holder"] }]),
   S("shower_head", "Bathroom", "Shower head", ["shower head", "showerhead", "shower"], L(CODE.rod), [{ req: ["shower"], opt: ["head", "replace"], not: ["rod", "valve", "body", "curtain", "door", "diverter", "arm"] }]),
   S("shower_rod", "Bathroom", "Shower rod", ["shower rod", "curtain rod", "rod"], L(CODE.rod), [{ req: ["rod"], opt: ["shower", "curtain"], not: ["closet", "clothes"] }]),
@@ -405,23 +405,28 @@ function mergeTwice(items: ReadItem[]): { items: ReadItem[]; twice: string[] } {
 // the read items, billed the way the release bills them: the contract's line
 // (the price book's row when it has the code, the release's when not) or
 // hours on the General Laborer line
-// "Shower head" and "Shower rod" both bill the rod-and-mounting-kit line; written
-// once each with no count, that is one line, not two
+// Two items that are one thing written two ways — "Shower head" and "Shower
+// rod" are the one rod-and-mounting-kit line — written once each with no
+// count, are that line once. Only the pairs named here: three detectors or
+// two fixtures that happen to share a release line are three and two.
+const SAME_THING: string[][] = [["shower_head", "shower_rod"]];
+const sameThingOf = (key: string) => SAME_THING.find((g) => g.includes(key))?.join("+") || "";
 function mergeSameLine(items: ReadItem[], twice: string[]): ReadItem[] {
   const out: ReadItem[] = [];
   const seen = new Map<string, ReadItem>();
+  const noted = new Set<string>();
   for (const it of items) {
-    const b = it.key ? itemByKey(it.key)?.bill : undefined;
-    const sig = b && "codes" in b && it.implied ? [...b.codes].sort().join("+") : "";
+    const sig = it.key && it.implied ? sameThingOf(it.key) : "";
     const first = sig ? seen.get(sig) : undefined;
     if (first && first.implied) {
       first.written = `${first.written} + ${it.written}`;
-      twice.push(`${first.written} (one line)`);
+      noted.add(sig);
       continue;
     }
     if (sig) seen.set(sig, it);
     out.push(it);
   }
+  for (const sig of noted) twice.push(`${seen.get(sig)!.written} (one line)`);
   return out;
 }
 export function billSurvey(read: ReadItem[], catalog: CatalogLine[]): Billed {
@@ -434,6 +439,8 @@ export function billSurvey(read: ReadItem[], catalog: CatalogLine[]): Billed {
   const other = new Map<string, { qty: number; labels: string[]; pair: boolean }>();  // the book's other lines; `pair`: also in the hours
   const hours: HourPart[] = [];
   const unmatched: ReadItem[] = [];
+  // small jobs the book prices: placed after every material item has its line
+  const paired: { part: HourPart; it: ReadItem; line: CatalogLine; per: number }[] = [];
   for (const it of items) {
     const seed = it.key ? itemByKey(it.key) : undefined;
     if (!seed) { unmatched.push(it); continue; }
@@ -450,18 +457,35 @@ export function billSurvey(read: ReadItem[], catalog: CatalogLine[]): Billed {
     // the book's own line for it, when the book has one — the release's main
     // lines come first on the sheet, these after. The release's own lines are
     // never found by keyword: "Re-glazing work for sink" is not a new sink.
-    // A material item is that line (hours only when there is none); a small
-    // job is hours, and the book's line as well when it prices the job —
-    // marked as a pair, for the owner to tick one off.
-    const own = bookLines(seed, rest);
-    for (const { line, per } of own) {
-      const c = other.get(line.code) || { qty: 0, labels: [], pair: false };
-      c.qty += it.qty * per; if (!c.labels.includes(it.written)) c.labels.push(it.written);
-      if (!b.book) c.pair = true;
-      other.set(line.code, c);
+    // A material item is that line (hours only when there is none). A small
+    // job is hours — and, when the book prices exactly that job (one line to
+    // find), the book's line as well, marked as a pair for the owner to tick
+    // one off; a job that is three lines in the book (the accessories) stays hours.
+    if (b.book) {
+      const own = bookLines(seed, rest);
+      for (const { line, per } of own) {
+        const c = other.get(line.code) || { qty: 0, labels: [], pair: false };
+        c.qty += it.qty * per; if (!c.labels.includes(it.written)) c.labels.push(it.written);
+        other.set(line.code, c);
+      }
+      if (own.length) continue;
     }
-    if (b.book && own.length) continue;
-    hours.push({ key: seed.key, label: seed.label, written: it.written, qty: it.qty, hours: Math.round(it.qty * b.hours * 100) / 100, ...(own.length ? { also: own[0].line.code } : {}) });
+    const part: HourPart = { key: seed.key, label: seed.label, written: it.written, qty: it.qty, hours: Math.round(it.qty * b.hours * 100) / 100 };
+    hours.push(part);
+    if (!b.book && seed.find.length === 1) {
+      const own = bookLines(seed, rest);
+      if (own.length) paired.push({ part, it, line: own[0].line, per: own[0].per });
+    }
+  }
+  // a small job's book line — unless a material item already bills on that
+  // line (its only billing; the small job stays hours and says nothing)
+  for (const p of paired) {
+    const at = other.get(p.line.code);
+    if (at && !at.pair) continue;
+    const c = at || { qty: 0, labels: [], pair: true };
+    c.qty += p.it.qty * p.per; if (!c.labels.includes(p.it.written)) c.labels.push(p.it.written);
+    other.set(p.line.code, c);
+    p.part.also = p.line.code;
   }
   const lineFor = (code: string, qty: number, label: string, itemKey: string): SheetLine | null => {
     const c = byCode.get(code), r = releaseLine(code);

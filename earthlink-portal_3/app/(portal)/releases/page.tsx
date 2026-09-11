@@ -936,7 +936,13 @@ export default function Releases() {
       if (t.id === keeperContract.id) continue;
       setFolderProgress(`Merging contract ${t.number} into ${keeperContract.number}…`);
       await sb().from("releases").update({ contract_id: keeperContract.id }).eq("contract_id", t.id);
-      await sb().from("contract_items").update({ contract_id: keeperContract.id }).eq("contract_id", t.id).then(() => null, () => null);
+      // the keeper's price book holds each code once (RUN_ME section 16): the twin's
+      // copies of codes the keeper already has go, the rest move over
+      const { data: keeperCodes } = await sb().from("contract_items").select("code").eq("contract_id", keeperContract.id);
+      const have = ((keeperCodes || []) as { code: string }[]).map((r) => r.code).filter(Boolean);
+      for (let i = 0; i < have.length; i += 200) await sb().from("contract_items").delete().eq("contract_id", t.id).in("code", have.slice(i, i + 200));
+      const { error: moveErr } = await sb().from("contract_items").update({ contract_id: keeperContract.id }).eq("contract_id", t.id);
+      if (moveErr) { setFolderProgress(`Couldn't move contract ${t.number}'s price book (${moveErr.message}) — the contract was left in place`); continue; }
       await sb().from("proposals").update({ contract_id: keeperContract.id }).eq("contract_id", t.id).then(() => null, () => null);
       const { error } = await sb().from("contracts").delete().eq("id", t.id);
       if (!error) contractsMerged += 1;

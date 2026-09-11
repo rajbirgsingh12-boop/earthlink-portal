@@ -88,7 +88,11 @@ export function cleanSmart(s: SmartSurvey): { survey: SmartSurvey; dropped: numb
     const key = String(it.key || "");
     const known = !key || !!itemByKey(key);
     if (!known) dropped += 1;
-    return { written: String(it.written || ""), qty: Number(it.qty) || 0, key: known ? key : "", note: known ? (it.note ?? null) : `the reader named "${key}", which isn't on the list${it.note ? ` — ${it.note}` : ""}` };
+    const written = String(it.written || "");
+    const qty = Number(it.qty) || 0;
+    // no count in the wording and one of it: written bare — a second mention restates it
+    const implied = qty === 1 && !/\d/.test(written);
+    return { written, qty, key: known ? key : "", note: known ? (it.note ?? null) : `the reader named "${key}", which isn't on the list${it.note ? ` — ${it.note}` : ""}`, ...(implied ? { implied } : {}) };
   }).filter((it) => it.qty > 0);
   return { survey: { address: s.address || "", apt: s.apt || "", kind: s.kind || "", bedrooms: s.bedrooms ?? null, items }, dropped };
 }

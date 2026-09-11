@@ -660,7 +660,10 @@ update pact_jobs set priced = (invoice_sent is not null or coalesce(received, fa
 --     phones doing that in the same second must not leave a code in twice
 --     (a doubled line doubles the sheet, its PDF and the release).
 --     Duplicates already there are folded first, keeping the oldest row.
+--     Lines with no code (a sheet whose Item column is the description) are
+--     left alone — they are not duplicates of one another.
 delete from contract_items a
   using contract_items b
-  where a.contract_id = b.contract_id and a.code = b.code and a.ctid > b.ctid;
-create unique index if not exists contract_items_contract_code_uq on contract_items (contract_id, code);
+  where a.contract_id = b.contract_id and a.code = b.code and a.code <> ''
+    and (a.created_at, a.id) > (b.created_at, b.id);
+create unique index if not exists contract_items_contract_code_uq on contract_items (contract_id, code) where code <> '';

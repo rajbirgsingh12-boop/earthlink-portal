@@ -214,7 +214,7 @@ export default function Proposals() {
     const laborOn = keep.some((l) => l.itemKey === LABOR_KEY);
     const noteLines = [
       `✓ ${plan.who} from the survey PDF (${plan.file})`,
-      ...(plan.hours.length ? [`${laborOn ? "⏱" : "✂"} ${plan.hourTotal} hour${plan.hourTotal === 1 ? "" : "s"} General Laborer${laborOn ? "" : " (left off)"}: ${hoursNote(plan.hours)}`] : []),
+      ...(plan.hours.length ? [`${laborOn ? "→" : "✂"} ${plan.hourTotal} hour${plan.hourTotal === 1 ? "" : "s"} General Laborer${laborOn ? "" : " (left off)"}: ${hoursNote(plan.hours)}`] : []),
       ...(plan.twice.length ? [`↺ Written twice: ${plan.twice.join("; ")}`] : []),
       ...(plan.unmatched.length ? [`⚠ Not on the move-out list: ${plan.unmatched.join("; ")}`] : []),
       ...(off.filter((l) => l.itemKey !== LABOR_KEY).length ? [`✂ Left off to stay under ${fmt(DEFAULT_CAP)}: ${off.filter((l) => l.itemKey !== LABOR_KEY).map((l) => `${l.label} (${fmt(l.qty * l.unit_price)})`).join("; ")}`] : []),
@@ -279,7 +279,7 @@ export default function Proposals() {
       // over what a super will sign: the owner picks the lines that come off
       if (total > DEFAULT_CAP) { setTrim({ plan, off: new Set() }); return; }
       const msg = `${who}: ${sv.items.length} lines on the survey → ${lines.length} contract lines, ${fmt(total)}.`
-        + (billed.hours.length ? `\n\n⏱ ${billed.hourTotal} hour${billed.hourTotal === 1 ? "" : "s"} General Laborer: ${hoursNote(billed.hours)}` : "")
+        + (billed.hours.length ? `\n\n→ ${billed.hourTotal} hour${billed.hourTotal === 1 ? "" : "s"} General Laborer: ${hoursNote(billed.hours)}` : "")
         + (billed.twice.length ? `\n\n↺ Written twice: ${billed.twice.join("; ")}` : "")
         + (unmatched.length ? `\n\nNOT ON THE MOVE-OUT LIST (${unmatched.length}): ${unmatched.slice(0, 8).join("; ")}${unmatched.length > 8 ? "…" : ""} — add those by hand on the sheet.` : "")
         + (out.note ? `\n\n⚠ ${out.note}` : "")
@@ -892,7 +892,7 @@ export default function Proposals() {
                 </label>
               ))}
             </div>
-            {plan.hours.length > 0 && <div className="mt-2 text-[12px] text-inksoft">⏱ {plan.hourTotal} hour{plan.hourTotal === 1 ? "" : "s"} General Laborer: {hoursNote(plan.hours)}</div>}
+            {plan.hours.length > 0 && <div className="mt-2 text-[12px] text-inksoft">→ {plan.hourTotal} hour{plan.hourTotal === 1 ? "" : "s"} General Laborer: {hoursNote(plan.hours)}</div>}
             {plan.twice.length > 0 && <div className="mt-1 text-[12px] text-inksoft">↺ Written twice: {plan.twice.join("; ")}</div>}
             {plan.unmatched.length > 0 && <div className="mt-2 text-[12px] text-alert">⚠ Not on the move-out list: {plan.unmatched.join("; ")} — add those by hand on the sheet.</div>}
             {plan.note && <div className="mt-1 text-[12px] text-alert">⚠ {plan.note}</div>}

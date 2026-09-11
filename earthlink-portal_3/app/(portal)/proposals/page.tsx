@@ -7,9 +7,11 @@ const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style"));
 import { sb } from "@/lib/supabase";
 import { fmt, parseNum, askFileName } from "@/lib/format";
 import Stamp from "@/components/Stamp";
-import { LineItem, Org, nextNumber, grandTotal } from "@/lib/docs";
+import { LineItem, Org, nextNumber, grandTotal, localISO } from "@/lib/docs";
 import type { Contract } from "@/lib/types";
-import ContractPicker from "@/components/ContractPicker";
+import ContractPicker, { contractLabel } from "@/components/ContractPicker";
+import { DEFAULT_CAP, sheetTotal, splitToCap, type SheetLine } from "@/lib/surveyTemplate";
+import type { SmartSurvey } from "@/lib/smartSurvey";
 import { useLive } from "@/lib/useLive";
 import PrintShell from "@/components/PrintShell";
 import Letterhead from "@/components/Letterhead";
@@ -56,6 +58,9 @@ export default function Proposals() {
   // contracts' sheets never sit in one long list. "" until the lists are in.
   const [listContract, setListContract] = useState("");
   const [listLoaded, setListLoaded] = useState(false);
+  // the survey PDF: one tap, the sheet builds itself from the contract's lines
+  const surveyRef = useRef<HTMLInputElement>(null);
+  const [surveyBusy, setSurveyBusy] = useState(false);
   const CONTRACT_KEY = "proposals.contract";
   const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
   const [showHead, setShowHead] = useState(false); // walk-sheet header fields tucked away until needed
@@ -164,6 +169,104 @@ export default function Proposals() {
     const made = data as Proposal;
     if (made.contract_id && listContract !== "all" && listContract !== made.contract_id) pickListContract(made.contract_id);
     await load(); openEditor(made);
+  };
+
+  // ---------- the survey PDF ----------
+  // The foreman's survey, as a PDF (a Notes export, a photo made into a PDF,
+  // a scan). The server reads it beside the contract's price book — Claude
+  // when it's switched on, the rules otherwise — and every written item comes
+  // back as the book's own lines. Over the cap a super will sign, the rest
+  // goes on a second sheet. The sheet then opens like any other, for a check.
+  const surveyContract = () => (contracts.some((c) => c.id === listContract) ? listContract : contracts.length === 1 ? contracts[0].id : "");
+  const uploadSurvey = () => {
+    if (contracts.length === 0) { flash("No contracts yet — upload a release sheet or release PDF first"); return; }
+    if (!surveyContract()) { flash("Pick a contract in the dropdown first — the survey bills that contract's lines"); return; }
+    surveyRef.current?.click();
+  };
+  type SurveySheet = { job: string; lines: SheetLine[]; total: number };
+  const handleSurveyPdf = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    const cid = surveyContract();
+    if (!file || !cid) return;
+    setSurveyBusy(true);
+    try {
+      const { data: cat, error } = await sb().from("contract_items").select("*").eq("contract_id", cid).order("line");
+      if (error) { flash(upgradeHint(error.message)); return; }
+      const catalog = (cat || []) as ContractItem[];
+      if (catalog.length === 0) { flash("No price book for this contract yet — Price Book tab, upload the contract's sheet once"); return; }
+      const form = new FormData();
+      form.append("file", file);
+      form.append("catalog", JSON.stringify(catalog.map((c) => ({ code: c.code, line: c.line, category: c.category, description: c.description, uom: c.uom, unit_price: c.unit_price }))));
+      const token = (await sb().auth.getSession()).data.session?.access_token || "";
+      const res = await fetch("/api/parse-survey", { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: form });
+      const out = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; survey?: SmartSurvey; readBy?: "claude" | "rules"; note?: string };
+      if (!res.ok || !out.ok || !out.survey) { flash(out.error || `The survey couldn't be read (server said ${res.status})`); return; }
+      const sv = out.survey;
+      // the written items, onto the book's lines — one line per code, counts added up
+      const byCode = new Map(catalog.map((c) => [c.code, c]));
+      const lines: SheetLine[] = [];
+      const unmatched: string[] = [];
+      sv.items.forEach((it, i) => {
+        if (!(it.qty > 0)) return;
+        const real = it.lines.filter((l) => byCode.has(l.code) && l.qty > 0);
+        if (real.length === 0) { unmatched.push(`${it.written}${it.note ? ` (${it.note})` : ""}`); return; }
+        for (const l of real) {
+          const c = byCode.get(l.code)!;
+          const at = lines.find((x) => x.code === c.code);
+          if (at) at.qty += l.qty;
+          else lines.push({ code: c.code, qty: l.qty, unit_price: Number(c.unit_price) || 0, description: c.description, itemKey: String(i), label: it.written, uom: c.uom, line: c.line });
+        }
+      });
+      if (lines.length === 0) { flash(`Nothing on that survey matched the price book${out.note ? ` — ${out.note}` : ""}`); return; }
+      const total = sheetTotal(lines);
+      const kind = sv.kind || "Move-out";
+      const where = [sv.address, sv.apt && `Apt ${sv.apt}`].filter(Boolean).join(" ");
+      // over what a super will sign? the last things written wait on a second sheet
+      let cap = 0;
+      if (total > DEFAULT_CAP) {
+        const typed = window.prompt(`${where || "This survey"} comes to ${fmt(total)} — over ${fmt(DEFAULT_CAP)}.\n\nKeep the first sheet under $ (the rest goes on a second sheet). Leave it blank for one sheet.`, String(DEFAULT_CAP));
+        if (typed === null) return;
+        cap = Number(typed.replace(/[^0-9.]/g, "")) || 0;
+      }
+      const order = sv.items.map((_, i) => String(i));
+      const split = splitToCap(lines, cap, order);
+      const sheets: SurveySheet[] = split.rest.length > 0
+        ? [{ job: `${kind} (1 of 2)`, lines: split.first, total: sheetTotal(split.first) }, { job: `${kind} (2 of 2)`, lines: split.rest, total: sheetTotal(split.rest) }]
+        : [{ job: kind, lines, total }];
+      const who = out.readBy === "claude" ? "Read by Claude" : "Read by the rules";
+      const msg = `${who}: ${sv.items.length} lines on the survey → ${lines.length} contract lines, ${fmt(total)}.`
+        + (sheets.length === 2 ? `\n\nTwo walk sheets: ${fmt(sheets[0].total)} now, ${fmt(sheets[1].total)} waits.` : "")
+        + (unmatched.length ? `\n\nNO LINE IN THE PRICE BOOK for ${unmatched.length}: ${unmatched.slice(0, 8).join("; ")}${unmatched.length > 8 ? "…" : ""} — add those by hand on the sheet.` : "")
+        + (out.note ? `\n\n⚠ ${out.note}` : "")
+        + `\n\nMake the walk sheet${sheets.length === 2 ? "s" : ""} for ${where || "this survey"}?`;
+      if (!window.confirm(msg)) return;
+      const noteLines = [`✓ ${who} from the survey PDF (${file.name})`, ...(unmatched.length ? [`⚠ No price-book line for: ${unmatched.join("; ")}`] : [])];
+      const made: Proposal[] = [];
+      for (const sh of sheets) {
+        const number = await nextNumber("proposals", "PROP");
+        const qty_map: Record<string, number> = {};
+        sh.lines.forEach((l) => { qty_map[l.code] = (qty_map[l.code] || 0) + l.qty; });
+        const { data, error: pe } = await sb().from("proposals").insert({
+          number, client_name: "New York City Housing Authority", contract_id: cid,
+          job: sh.job, address: sv.address, apt: sv.apt, walk_date: localISO(), qty_map, total: sh.total, notes: noteLines.join("\n"),
+        }).select().single();
+        if (pe || !data) { flash(upgradeHint(pe?.message || "Couldn't make the walk sheet")); break; }
+        const pid = (data as Proposal).id;
+        const full = sh.lines.map((l, i) => ({ proposal_id: pid, code: l.code, description: l.description, unit: l.uom, qty: l.qty, unit_price: l.unit_price, sort: i, category: byCode.get(l.code)?.category || "", line: l.line }));
+        let { error: ie } = await sb().from("proposal_items").insert(full);
+        if (ie && /column/i.test(ie.message)) ({ error: ie } = await sb().from("proposal_items").insert(full.map(({ category: _c, line: _l, ...rest }) => rest)));
+        if (ie) flash(ie.message);
+        made.push(data as Proposal);
+      }
+      await load();
+      if (made.length === 0) return;
+      pickListContract(cid);
+      flash(made.length === 1 ? `Walk sheet ${made[0].number} made — ${fmt(made[0].total || 0)} — check the counts` : `${made.length} walk sheets made: ${made.map((m) => `${m.number} (${fmt(m.total || 0)})`).join(" and ")}`);
+      openEditor(made[0]); // straight onto the sheet, counts in view
+    } catch (err) {
+      flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
+    } finally { setSurveyBusy(false); }
   };
 
   // ---------- saving ----------
@@ -724,8 +827,12 @@ export default function Proposals() {
     <div>
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div className="font-display text-2xl font-bold uppercase">Proposals</div>
-        <button className="btn btn-primary" onClick={newWalkSheet}>+ New NYCHA walk sheet</button>
+        <div className="flex flex-wrap gap-2">
+          <button className="btn" onClick={uploadSurvey} disabled={surveyBusy} title="The survey written on site, as a PDF — the walk sheet builds itself from the contract's lines, kept under what a super will sign">{surveyBusy ? "Reading the survey…" : "📄 Upload a survey (PDF)"}</button>
+          <button className="btn btn-primary" onClick={newWalkSheet}>+ New NYCHA walk sheet</button>
+        </div>
       </div>
+      <input ref={surveyRef} type="file" accept="application/pdf,.pdf" className="hidden" onChange={handleSurveyPdf} />
       {pickOpen && (
         <div className="card mb-3 border-work p-4">
           <div className="mb-2 text-[11px] uppercase tracking-widest text-inksoft">Which contract is this walk for?</div>

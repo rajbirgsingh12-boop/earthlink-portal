@@ -3,6 +3,7 @@
 // same PDF engine and the same smart-reader-then-rules shape as the PO reader.
 import { NextResponse } from "next/server";
 import { readSurveySmart } from "@/lib/smartSurvey";
+import { readSurveyForm } from "@/lib/surveyForm";
 import { smartConfigured } from "@/lib/smartPo";
 import type { CatalogLine } from "@/lib/surveyTemplate";
 
@@ -45,9 +46,15 @@ export async function POST(req: Request) {
   // only what the reader needs — never a stray column
   catalog = catalog.map((c) => ({ code: String(c.code || ""), line: Number(c.line) || 0, category: String(c.category || ""), description: String(c.description || ""), uom: String(c.uom || ""), unit_price: Number(c.unit_price) || 0 })).filter((c) => c.code);
   try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    // our own survey form, filled in: read straight off its boxes — no guessing at the wording
+    const formText = await readSurveyForm(bytes.slice()).catch(() => null);
+    if (formText !== null) {
+      const out = await readSurveySmart(bytes, formText, catalog, undefined, undefined, formText);
+      return NextResponse.json({ ok: true, survey: out.survey, readBy: out.readBy, form: true, ...(out.note ? { note: out.note } : {}), text: formText });
+    }
     const { getResolvedPDFJS } = await import("unpdf");
     const pdfjs = await getResolvedPDFJS();
-    const bytes = new Uint8Array(await file.arrayBuffer());
     // pdfjs detaches the buffer it is handed — it gets a copy
     const doc = await pdfjs.getDocument({ data: bytes.slice() }).promise;
     const lines: string[] = [];

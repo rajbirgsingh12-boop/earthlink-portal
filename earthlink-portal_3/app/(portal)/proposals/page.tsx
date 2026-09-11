@@ -178,6 +178,19 @@ export default function Proposals() {
   // back as the book's own lines. Over the cap a super will sign, the rest
   // goes on a second sheet. The sheet then opens like any other, for a check.
   const surveyContract = () => (contracts.some((c) => c.id === listContract) ? listContract : contracts.length === 1 ? contracts[0].id : "");
+  // the blank form — the same PDF every time, so the reader knows every box
+  const downloadSurveyForm = async () => {
+    try {
+      const { buildSurveyFormPdf, SURVEY_FORM_NAME } = await import("@/lib/surveyForm");
+      const logo = await fetch("/logo.png").then((r) => (r.ok ? r.arrayBuffer() : null)).then((b) => (b ? new Uint8Array(b) : undefined)).catch(() => undefined);
+      const bytes = await buildSurveyFormPdf(logo);
+      const ab = new ArrayBuffer(bytes.byteLength); new Uint8Array(ab).set(bytes);
+      const url = URL.createObjectURL(new Blob([ab], { type: "application/pdf" }));
+      const a = document.createElement("a"); a.href = url; a.download = SURVEY_FORM_NAME; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      flash("Blank survey saved — fill the boxes on site, then upload it here");
+    } catch (err) { flash(`Couldn't build the form (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`); }
+  };
   const uploadSurvey = () => {
     if (contracts.length === 0) { flash("No contracts yet — upload a release sheet or release PDF first"); return; }
     if (!surveyContract()) { flash("Pick a contract in the dropdown first — the survey bills that contract's lines"); return; }
@@ -830,6 +843,9 @@ export default function Proposals() {
         <div className="flex flex-wrap gap-2">
           <button className="btn" onClick={uploadSurvey} disabled={surveyBusy} title="The survey written on site, as a PDF — the walk sheet builds itself from the contract's lines, kept under what a super will sign">{surveyBusy ? "Reading the survey…" : "📄 Upload a survey (PDF)"}</button>
           <button className="btn btn-primary" onClick={newWalkSheet}>+ New NYCHA walk sheet</button>
+          <ActionMenu label="⋯" items={[
+            { label: "⬇ Blank survey (PDF)", title: "The survey form, organized by what gets checked — fill the boxes on the phone or print it", onSelect: downloadSurveyForm },
+          ]} />
         </div>
       </div>
       <input ref={surveyRef} type="file" accept="application/pdf,.pdf" className="hidden" onChange={handleSurveyPdf} />

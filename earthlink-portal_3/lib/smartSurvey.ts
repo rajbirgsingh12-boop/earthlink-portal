@@ -43,7 +43,11 @@ Rules:
 const bookText = (catalog: CatalogLine[]) =>
   catalog.map((c) => `${c.code} | ${c.description} | ${c.uom} | ${Number(c.unit_price).toFixed(2)}`).join("\n");
 
-export async function askClaudeSurvey(pdf: Uint8Array, catalog: CatalogLine[], timeoutMs: number = SMART_TIMEOUT_MS): Promise<SmartSurvey | null> {
+// what Claude is shown: the page itself (typed or scanned), or — for our own
+// form, read off its boxes — the survey as text, so nothing rides on how a
+// PDF app drew the boxes
+export type SurveySource = { pdf: Uint8Array } | { text: string };
+export async function askClaudeSurvey(source: SurveySource, catalog: CatalogLine[], timeoutMs: number = SMART_TIMEOUT_MS): Promise<SmartSurvey | null> {
   const { default: Anthropic } = await import("@anthropic-ai/sdk");
   const { zodOutputFormat } = await import("@anthropic-ai/sdk/helpers/zod");
   const client = new Anthropic({ timeout: timeoutMs, maxRetries: 0 });
@@ -55,8 +59,8 @@ export async function askClaudeSurvey(pdf: Uint8Array, catalog: CatalogLine[], t
     messages: [{
       role: "user",
       content: [
-        { type: "document", source: { type: "base64", media_type: "application/pdf", data: Buffer.from(pdf).toString("base64") } },
-        { type: "text", text: `Read this survey into the price book's lines.\n\nPRICE BOOK (code | description | unit | price):\n${bookText(catalog)}` },
+        ...("pdf" in source ? [{ type: "document" as const, source: { type: "base64" as const, media_type: "application/pdf" as const, data: Buffer.from(source.pdf).toString("base64") } }] : []),
+        { type: "text", text: `Read this survey into the price book's lines.${"text" in source ? `\n\nSURVEY:\n${source.text}` : ""}\n\nPRICE BOOK (code | description | unit | price):\n${bookText(catalog)}` },
       ],
     }],
   });
@@ -94,16 +98,20 @@ export function cleanSmart(s: SmartSurvey, catalog: CatalogLine[]): { survey: Sm
   return { survey: { address: s.address || "", apt: s.apt || "", kind: s.kind || "", bedrooms: s.bedrooms ?? null, items }, dropped };
 }
 
+// `formText` is set when the PDF is our own form, read off its boxes: that
+// text is the survey, for the rules and for Claude alike
 export async function readSurveySmart(
   pdf: Uint8Array, text: string, catalog: CatalogLine[],
-  ask: (pdf: Uint8Array, catalog: CatalogLine[], timeoutMs: number) => Promise<SmartSurvey | null> = askClaudeSurvey,
+  ask: (source: SurveySource, catalog: CatalogLine[], timeoutMs: number) => Promise<SmartSurvey | null> = askClaudeSurvey,
   timeoutMs: number = SMART_TIMEOUT_MS,
+  formText?: string,
 ): Promise<SurveyRead> {
-  const rules = () => rulesSurvey(text, catalog);
-  if (!smartConfigured()) return { survey: rules(), readBy: "rules", note: text.trim().length < 20 ? "no text on the page and the smart reader isn't switched on (ANTHROPIC_API_KEY)" : undefined };
+  const rules = () => rulesSurvey(formText ?? text, catalog);
+  if (formText !== undefined && formText.trim() === "") return { survey: rules(), readBy: "rules", note: "the form's boxes are all empty" };
+  if (!smartConfigured()) return { survey: rules(), readBy: "rules", note: formText === undefined && text.trim().length < 20 ? "no text on the page and the smart reader isn't switched on (ANTHROPIC_API_KEY)" : undefined };
   try {
     const answer = await Promise.race([
-      ask(pdf, catalog, timeoutMs),
+      ask(formText !== undefined ? { text: formText } : { pdf }, catalog, timeoutMs),
       new Promise<null>((_, rej) => setTimeout(() => rej(new Error("the smart reader took too long")), timeoutMs + 2_000)),
     ]);
     if (!answer) return { survey: rules(), readBy: "rules", note: "the smart reader declined this page" };

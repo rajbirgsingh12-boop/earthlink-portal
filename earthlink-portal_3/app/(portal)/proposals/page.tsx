@@ -204,20 +204,34 @@ export default function Proposals() {
     surveyRef.current?.click();
   };
   // what a survey read into, waiting to become the sheet
-  type SurveyPlan = { cid: string; file: string; who: string; sv: SmartSurvey; lines: SheetLine[]; hours: HourPart[]; hourTotal: number; unmatched: string[]; twice: string[]; note?: string; bookNote?: string; catalog: ContractItem[] };
-  const [trim, setTrim] = useState<{ plan: SurveyPlan; off: Set<string> } | null>(null); // over the cap: which lines come off
+  type SurveyPlan = { cid: string; file: string; who: string; sv: SmartSurvey; lines: SheetLine[]; labor: SheetLine | null; hours: HourPart[]; unmatched: string[]; twice: string[]; note?: string; bookNote?: string; catalog: ContractItem[] };
+  // the check box: every line the survey read, each with a tick to take it off
+  // — the release's lines, the book's, and each small job in the hours
+  const [trim, setTrim] = useState<{ plan: SurveyPlan; off: Set<string> } | null>(null);
+  const HOUR_KEY = (i: number) => `h:${i}`;
   const planWhere = (sv: SmartSurvey) => [sv.address, sv.apt && `Apt ${sv.apt}`].filter(Boolean).join(" ");
-  // one walk sheet from the plan — the lines left off go in its notes, so nothing is forgotten
-  const makeSheet = async (plan: SurveyPlan, keep: SheetLine[], off: SheetLine[]) => {
+  // what stays and what comes off; the laborer line is the hours kept, rounded up
+  const applyOff = (plan: SurveyPlan, off: Set<string>) => {
+    const keepLines = plan.lines.filter((l) => l.itemKey !== LABOR_KEY && !off.has(l.code));
+    const offLines = plan.lines.filter((l) => l.itemKey !== LABOR_KEY && off.has(l.code));
+    const hoursKept = plan.hours.filter((_, i) => !off.has(HOUR_KEY(i)));
+    const hoursOff = plan.hours.filter((_, i) => off.has(HOUR_KEY(i)));
+    const hourTotal = Math.ceil(hoursKept.reduce((sum, h) => sum + h.hours, 0) - 1e-9);
+    const labor = plan.labor && hourTotal > 0 ? { ...plan.labor, qty: hourTotal, label: `General Laborer — ${hourTotal} hour${hourTotal === 1 ? "" : "s"}` } : null;
+    return { keep: labor ? [...keepLines, labor] : keepLines, offLines, hoursKept, hoursOff, hourTotal };
+  };
+  // one walk sheet from the plan — what came off goes in its notes, so nothing is forgotten
+  const makeSheet = async (plan: SurveyPlan, off: Set<string>) => {
+    const { keep, offLines, hoursKept, hoursOff, hourTotal } = applyOff(plan, off);
     const total = sheetTotal(keep);
     const byCode = new Map(plan.catalog.map((c) => [c.code, c]));
-    const laborOn = keep.some((l) => l.itemKey === LABOR_KEY);
     const noteLines = [
       `✓ ${plan.who} from the survey PDF (${plan.file})`,
-      ...(plan.hours.length ? [`${laborOn ? "→" : "✂"} ${plan.hourTotal} hour${plan.hourTotal === 1 ? "" : "s"} General Laborer${laborOn ? "" : " (left off)"}: ${hoursNote(plan.hours)}`] : []),
+      ...(hoursKept.length ? [`→ ${hourTotal} hour${hourTotal === 1 ? "" : "s"} General Laborer: ${hoursNote(hoursKept)}`] : []),
       ...(plan.twice.length ? [`↺ Written twice: ${plan.twice.join("; ")}`] : []),
       ...(plan.unmatched.length ? [`⚠ Not on the move-out list: ${plan.unmatched.join("; ")}`] : []),
-      ...(off.filter((l) => l.itemKey !== LABOR_KEY).length ? [`✂ Left off to stay under ${fmt(DEFAULT_CAP)}: ${off.filter((l) => l.itemKey !== LABOR_KEY).map((l) => `${l.label} (${fmt(l.qty * l.unit_price)})`).join("; ")}`] : []),
+      ...(offLines.length ? [`✂ Left off: ${offLines.map((l) => `${l.label} (${fmt(l.qty * l.unit_price)})`).join("; ")}`] : []),
+      ...(hoursOff.length ? [`✂ Hours left off: ${hoursNote(hoursOff)}`] : []),
     ];
     const number = await nextNumber("proposals", "PROP");
     const qty_map: Record<string, number> = {};
@@ -235,7 +249,8 @@ export default function Proposals() {
     await load();
     pickListContract(plan.cid);
     setTrim(null);
-    flash(`Walk sheet ${number} made — ${fmt(total)}${off.length ? ` · ${off.length} line${off.length === 1 ? "" : "s"} left off (in the notes)` : ""} — check the counts`);
+    const offCount = offLines.length + hoursOff.length;
+    flash(`Walk sheet ${number} made — ${fmt(total)}${offCount ? ` · ${offCount} left off (in the notes)` : ""} — check the counts`);
     openEditor(data as Proposal); // straight onto the sheet, counts in view
   };
   const handleSurveyPdf = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -274,19 +289,10 @@ export default function Proposals() {
       const lines = billed.lines;
       const unmatched = billed.unmatched.map((it) => `${it.written}${it.note ? ` (${it.note})` : ""}`);
       if (lines.length === 0) { flash(`${who} — nothing on that survey is on the move-out list${out.note ? ` (${out.note})` : sv.items.length === 0 ? " (no lines read off the page)" : ""}`); return; }
-      const total = sheetTotal(lines);
-      const plan: SurveyPlan = { cid, file: file.name, who, sv, lines, hours: billed.hours, hourTotal: billed.hourTotal, unmatched, twice: billed.twice, note: out.note, bookNote, catalog };
-      // over what a super will sign: the owner picks the lines that come off
-      if (total > DEFAULT_CAP) { setTrim({ plan, off: new Set() }); return; }
-      const msg = `${who}: ${sv.items.length} lines on the survey → ${lines.length} contract lines, ${fmt(total)}.`
-        + (billed.hours.length ? `\n\n→ ${billed.hourTotal} hour${billed.hourTotal === 1 ? "" : "s"} General Laborer: ${hoursNote(billed.hours)}` : "")
-        + (billed.twice.length ? `\n\n↺ Written twice: ${billed.twice.join("; ")}` : "")
-        + (unmatched.length ? `\n\nNOT ON THE MOVE-OUT LIST (${unmatched.length}): ${unmatched.slice(0, 8).join("; ")}${unmatched.length > 8 ? "…" : ""} — add those by hand on the sheet.` : "")
-        + (out.note ? `\n\n⚠ ${out.note}` : "")
-        + (bookNote ? `\n\n${bookNote}.` : "")
-        + `\n\nMake the walk sheet for ${planWhere(sv) || "this survey"}?`;
-      if (!window.confirm(msg)) return;
-      await makeSheet(plan, lines, []);
+      const plan: SurveyPlan = { cid, file: file.name, who, sv, lines, labor: lines.find((l) => l.itemKey === LABOR_KEY) || null, hours: billed.hours, unmatched, twice: billed.twice, note: out.note, bookNote, catalog };
+      // the check box: every line read, each with a tick to take it off — and
+      // over what a super will sign, the sheet waits until enough comes off
+      setTrim({ plan, off: new Set() });
     } catch (err) {
       flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
     } finally { setSurveyBusy(false); }
@@ -861,39 +867,52 @@ export default function Proposals() {
       <input ref={surveyRef} type="file" accept="application/pdf,.pdf" className="hidden" onChange={handleSurveyPdf} />
       {trim && (() => {
         const { plan, off } = trim;
-        const keep = plan.lines.filter((l) => !off.has(l.code));
-        const now = sheetTotal(keep);
+        const a = applyOff(plan, off);
+        const now = sheetTotal(a.keep);
         const over = now - DEFAULT_CAP;
+        const nothing = a.keep.length === 0;
+        const toggle = (key: string, on: boolean) => { const next = new Set(off); if (on) next.add(key); else next.delete(key); setTrim({ plan, off: next }); };
+        const row = (key: string, title: string, sub: string, right: string) => (
+          <label key={key} className={`flex min-h-[44px] cursor-pointer items-center gap-3 px-3 py-2 ${off.has(key) ? "bg-alert/5 line-through opacity-70" : ""}`}>
+            <input type="checkbox" className="h-5 w-5 shrink-0" checked={off.has(key)} onChange={(e) => toggle(key, e.target.checked)} />
+            <span className="min-w-0 flex-1">
+              <span className="block text-[14px] font-semibold">{title}</span>
+              <span className="block truncate text-[12px] text-inksoft">{sub}</span>
+            </span>
+            <span className="shrink-0 font-mono text-[14px] font-semibold">{right}</span>
+          </label>
+        );
         return (
-          <Modal wide title={`Over ${fmt(DEFAULT_CAP)}`} onClose={() => setTrim(null)}
+          <Modal wide title={over > 0 ? `Over ${fmt(DEFAULT_CAP)}` : "Check the walk sheet"} onClose={() => setTrim(null)}
             footer={<div className="flex flex-wrap items-center justify-between gap-2">
               <span className={`font-mono text-base font-semibold ${over > 0 ? "text-alert" : "text-ok"}`}>{fmt(now)} {over > 0 ? `· still ${fmt(over)} over` : "· under ✓"}</span>
               <div className="flex gap-2">
                 <button className="btn btn-ghost" onClick={() => setTrim(null)}>Cancel</button>
-                <button className="btn btn-primary" disabled={over > 0 || keep.length === 0 || surveyBusy} title={over > 0 ? "Take more off first" : ""}
-                  onClick={async () => { setSurveyBusy(true); try { await makeSheet(plan, keep, plan.lines.filter((l) => off.has(l.code))); } finally { setSurveyBusy(false); } }}>
+                <button className="btn btn-primary" disabled={over > 0 || nothing || surveyBusy} title={over > 0 ? "Take more off first" : nothing ? "Nothing left on the sheet" : ""}
+                  onClick={async () => { setSurveyBusy(true); try { await makeSheet(plan, off); } finally { setSurveyBusy(false); } }}>
                   {surveyBusy ? "Making…" : "Make the walk sheet"}
                 </button>
               </div>
             </div>}>
             <div className="mb-2 text-[13px] text-inksoft">
-              <b className="text-ink">{planWhere(plan.sv) || "This survey"}</b> comes to <b className="text-ink">{fmt(sheetTotal(plan.lines))}</b> — {fmt(sheetTotal(plan.lines) - DEFAULT_CAP)} over what a super will sign.
-              Tick what comes off; it's written in the sheet's notes so it isn't forgotten.
+              <b className="text-ink">{planWhere(plan.sv) || "This survey"}</b> — {plan.who}, {plan.sv.items.length} line{plan.sv.items.length === 1 ? "" : "s"} read, <b className="text-ink">{fmt(sheetTotal(plan.lines))}</b>{over > 0 ? <> — <b className="text-alert">{fmt(sheetTotal(plan.lines) - DEFAULT_CAP)} over</b> what a super will sign</> : null}.
+              Tick anything that comes off; it's written in the sheet's notes so it isn't forgotten.
             </div>
             <div className="divide-y divide-rulesoft rounded-sm border border-rulesoft">
-              {plan.lines.map((l) => (
-                <label key={l.code} className={`flex min-h-[44px] cursor-pointer items-center gap-3 px-3 py-2 ${off.has(l.code) ? "bg-alert/5 line-through opacity-70" : ""}`}>
-                  <input type="checkbox" className="h-5 w-5 shrink-0" checked={off.has(l.code)} onChange={(e) => { const next = new Set(off); if (e.target.checked) next.add(l.code); else next.delete(l.code); setTrim({ plan, off: next }); }} />
+              {plan.lines.filter((l) => l.itemKey !== LABOR_KEY).map((l) => row(l.code, l.label, `#${l.line} ${l.description} · ${l.qty} × ${fmt(l.unit_price)}`, fmt(l.qty * l.unit_price)))}
+              {plan.hours.map((h, i) => row(HOUR_KEY(i), h.written, `${h.label} · General Laborer hours`, `${h.hours}h`))}
+              {plan.labor && a.hourTotal > 0 && (
+                <div className="flex min-h-[44px] items-center gap-3 bg-paper px-3 py-2">
+                  <span className="h-5 w-5 shrink-0" />
                   <span className="min-w-0 flex-1">
-                    <span className="block text-[14px] font-semibold">{l.label}</span>
-                    <span className="block truncate text-[12px] text-inksoft">#{l.line} {l.description} · {l.qty} × {fmt(l.unit_price)}</span>
+                    <span className="block text-[14px] font-semibold">General Laborer — {a.hourTotal} hour{a.hourTotal === 1 ? "" : "s"}</span>
+                    <span className="block truncate text-[12px] text-inksoft">#{plan.labor.line} {plan.labor.description} · {a.hourTotal} × {fmt(plan.labor.unit_price)} — the hours above, rounded up</span>
                   </span>
-                  <span className="shrink-0 font-mono text-[14px] font-semibold">{fmt(l.qty * l.unit_price)}</span>
-                </label>
-              ))}
+                  <span className="shrink-0 font-mono text-[14px] font-semibold">{fmt(a.hourTotal * plan.labor.unit_price)}</span>
+                </div>
+              )}
             </div>
-            {plan.hours.length > 0 && <div className="mt-2 text-[12px] text-inksoft">→ {plan.hourTotal} hour{plan.hourTotal === 1 ? "" : "s"} General Laborer: {hoursNote(plan.hours)}</div>}
-            {plan.twice.length > 0 && <div className="mt-1 text-[12px] text-inksoft">↺ Written twice: {plan.twice.join("; ")}</div>}
+            {plan.twice.length > 0 && <div className="mt-2 text-[12px] text-inksoft">↺ Written twice: {plan.twice.join("; ")}</div>}
             {plan.unmatched.length > 0 && <div className="mt-2 text-[12px] text-alert">⚠ Not on the move-out list: {plan.unmatched.join("; ")} — add those by hand on the sheet.</div>}
             {plan.note && <div className="mt-1 text-[12px] text-alert">⚠ {plan.note}</div>}
             {plan.bookNote && <div className="mt-1 text-[12px] text-inksoft">{plan.bookNote}.</div>}

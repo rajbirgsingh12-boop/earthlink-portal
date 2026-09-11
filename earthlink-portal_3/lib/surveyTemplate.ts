@@ -69,23 +69,28 @@ export const SEED_ITEMS: Seed[] = [
   S("door_stop", "Doors", "Door stop", ["door stop", "doorstop", "stops", "door stops"], [{ req: ["stop"], opt: ["door", "wall", "floor"] }]),
   S("door_hinge", "Doors", "Door hinge", ["hinge", "hinges", "door hinge"], [{ req: ["hinge"], opt: ["door", "butt"] }]),
   S("saddle", "Doors", "Saddle / threshold", ["saddle", "saddles", "threshold", "door saddle"], [{ req: ["saddle|threshold"], opt: ["door", "marble", "metal"] }]),
-  S("peephole", "Doors", "Peephole", ["peephole", "peep hole", "viewer", "door viewer"], [{ req: ["peephole|viewer|peep"], opt: ["door"] }]),
+  S("peephole", "Doors", "Peephole / door viewer", ["peephole", "peep hole", "viewer", "door viewer", "interviewer", "door interviewer", "interview"], [{ req: ["peephole|viewer|peep"], opt: ["door"] }]),
+  S("door_knocker", "Doors", "Door knocker", ["door knocker", "knocker"], [{ req: ["knocker"], opt: ["door"] }]),
+  S("door_repair", "Doors", "Door repair (Bondo)", ["bondo door", "bondo", "door bondo", "door repair", "repair door", "patch door", "door patch", "fill door"], [{ req: ["door"], opt: ["repair", "patch", "bondo", "fill", "dent"], not: ["replace", "install", "lock", "stop", "hinge", "closet", "entrance", "paint", "knocker", "viewer", "chain", "saddle", "furnish"] }]),
   S("door_chain", "Doors", "Door chain / guard", ["door chain", "chain", "chain guard", "door guard"], [{ req: ["chain"], opt: ["door", "guard"] }]),
   S("closet_shelf", "Doors", "Closet shelf and pole", ["closet shelf", "shelf and pole", "shelf", "closet pole", "pole"], [{ req: ["shelf|pole"], opt: ["closet", "clothes", "rod"] }]),
   // electrical
   S("gfi", "Electrical", "GFI outlet", ["gfi", "gfci", "gfi outlet", "gfci outlet", "gfi receptacle", "ground fault"], [{ req: ["gfci|gfi|ground fault"], opt: ["receptacle", "outlet"] }]),
   S("outlet_single", "Electrical", "Outlet — single", ["single outlet", "outlet single", "single", "single receptacle", "simplex"], [{ req: ["receptacle|outlet"], opt: ["single", "simplex"], not: ["gfci", "gfi", "duplex", "plate", "cover", "220", "range", "dryer"] }]),
-  S("outlet_double", "Electrical", "Outlet — double (duplex)", ["double outlet", "outlet double", "double", "duplex", "duplex receptacle", "duplex outlet"], [{ req: ["receptacle|outlet"], opt: ["duplex", "double"], not: ["gfci", "gfi", "single", "plate", "cover", "220", "range", "dryer"] }]),
-  S("cover_1", "Electrical", "Outlet / switch cover — 1 gang", ["outlet cover", "cover", "cover plate", "plate", "one outlet cover", "single cover", "1 gang cover", "switch cover"], [{ req: ["plate|cover"], opt: ["1", "one", "single", "gang", "receptacle", "outlet", "switch", "wall"], not: ["2", "two", "double", "radiator", "window", "manhole", "floor"] }]),
-  S("cover_2", "Electrical", "Outlet / switch cover — 2 gang", ["two outlet cover", "outlet two outlet cover", "double cover", "2 gang cover", "two gang cover", "double outlet cover", "2 gang plate"], [{ req: ["plate|cover"], opt: ["2", "two", "double", "gang", "duplex"], not: ["1", "one", "single", "radiator", "window", "manhole", "floor"] }]),
-  S("switch", "Electrical", "Switch", ["switch", "switches", "light switch", "toggle switch", "wall switch"], [{ req: ["switch"], opt: ["toggle", "single", "pole", "wall", "light"], not: ["plate", "cover", "dimmer", "3 way", "three way"] }]),
+  S("outlet_double", "Electrical", "Outlet — double (duplex)", ["double outlet", "outlet double", "double", "duplex", "duplex receptacle", "duplex outlet", "outlet", "outlets", "receptacle"], [{ req: ["receptacle|outlet"], opt: ["duplex", "double"], not: ["gfci", "gfi", "single", "plate", "cover", "220", "range", "dryer"] }]),
+  S("cover_1", "Electrical", "Outlet / switch cover — 1 gang", ["outlet cover", "cover", "cover plate", "plate", "one outlet cover", "single cover", "1 gang cover", "switch cover"], [{ req: ["plate|cover"], opt: ["1", "one", "single", "gang", "receptacle", "outlet", "switch", "wall"], not: ["2", "two", "double", "radiator", "window", "manhole", "floor", "shower", "valve", "tub"] }]),
+  S("cover_2", "Electrical", "Outlet / switch cover — 2 gang", ["two outlet cover", "outlet two outlet cover", "double cover", "2 gang cover", "two gang cover", "double outlet cover", "2 gang plate"], [{ req: ["plate|cover"], opt: ["2", "two", "double", "gang", "duplex"], not: ["1", "one", "single", "radiator", "window", "manhole", "floor", "shower", "valve", "tub"] }]),
+  S("switch", "Electrical", "Switch", ["switch", "switches", "light switch", "toggle switch", "wall switch", "single switch", "switch single", "switch all single", "switches all single"], [{ req: ["switch"], opt: ["toggle", "single", "pole", "wall", "light"], not: ["plate", "cover", "dimmer", "3 way", "three way", "double", "2 gang", "two gang"] }]),
+  S("switch_double", "Electrical", "Switch — double (2 gang)", ["double switch", "switch double", "2 gang switch", "two gang switch", "double toggle", "2 switch"], [{ req: ["switch"], opt: ["2", "two", "double", "gang", "duplex"], not: ["plate", "cover", "dimmer", "3 way", "three way", "single"] }]),
+  S("light_pull", "Electrical", "Pull-chain light", ["pull chain", "pull", "pull chain light", "pull chain fixture", "keyless pull chain", "pullchain"], [{ req: ["pull|keyless"], opt: ["chain", "fixture", "light", "porcelain", "lampholder"], not: ["cord", "toilet", "flush"] }]),
   S("light_pancake", "Electrical", "Ceiling light (pancake)", ["pancake", "pancake light", "pancake fixture", "ceiling light", "ceiling fixture", "flush mount"], [{ req: ["fixture|light"], opt: ["ceiling", "pancake", "surface", "flush", "mount", "round"], not: [...NOT_FIXTURE, "kitchen", "bathroom", "wall", "exit", "emergency"] }]),
   S("light_wall", "Electrical", "Wall light", ["wall light", "wall lights", "wall fixture", "sconce", "wall sconce"], [{ req: ["fixture|light|sconce"], opt: ["wall", "sconce", "bracket"], not: [...NOT_FIXTURE, "kitchen", "bathroom", "ceiling"] }]),
-  S("light_kitchen", "Electrical", "Kitchen light", ["kitchen light", "kitchen fixture", "kitchen ceiling light"], [{ req: ["fixture|light"], opt: ["kitchen"], not: NOT_FIXTURE }]),
+  S("light_kitchen", "Electrical", "Kitchen light", ["kitchen light", "kitchen fixture", "kitchen ceiling light", "kitchen"], [{ req: ["fixture|light"], opt: ["kitchen"], not: NOT_FIXTURE }]),
   S("light_bath", "Electrical", "Bathroom light", ["bathroom light", "bath light", "bathroom fixture", "vanity light", "bathroom ceiling light"], [{ req: ["fixture|light"], opt: ["bathroom", "bath", "vanity"], not: [...NOT_FIXTURE, "kitchen"] }]),
-  S("smoke_wired", "Electrical", "Smoke detector — hardwired", ["wire smoke", "wired smoke", "hardwired smoke", "hard wired smoke", "hardwire smoke", "smoke wired", "smoke detector wired", "wire"], [{ req: ["smoke"], opt: ["hardwired", "hard", "wired", "wire", "120", "ac", "interconnect"], not: ["battery operated", "carbon", "monoxide"] }]),
+  S("smoke_wired", "Electrical", "Smoke detector — hardwired", ["wire smoke", "wired smoke", "hardwired smoke", "hard wired smoke", "hardwire smoke", "smoke wired", "smoke detector wired", "wire", "electric smoke", "electric", "electric smoke detector", "wired"], [{ req: ["smoke"], opt: ["hardwired", "hard", "wired", "wire", "120", "ac", "interconnect"], not: ["battery operated", "carbon", "monoxide"] }]),
   S("smoke_battery", "Electrical", "Smoke detector — battery", ["battery", "battery smoke", "smoke battery", "battery detector", "battery smoke detector", "smoke detector battery"], [{ req: ["smoke|detector"], opt: ["battery", "9v", "operated"], not: ["hardwired", "hard wired", "120", "carbon", "monoxide"] }]),
   S("co", "Electrical", "CO detector", ["co", "co detector", "carbon monoxide", "carbon monoxide detector"], [{ req: ["carbon|monoxide"], opt: ["detector", "alarm"], not: ["smoke", "combination"] }]),
+  S("gas_detector", "Electrical", "Natural gas detector", ["natural gas detector", "gas detector", "natural gas alarm", "gas alarm", "gas", "natural gas"], [{ req: ["gas"], opt: ["detector", "alarm", "natural", "methane"], not: ["range", "stove", "valve", "line", "meter", "cock", "pipe", "shut"] }]),
   S("smoke_co", "Electrical", "Smoke / CO combo detector", ["combo", "combo detector", "smoke co", "smoke and co", "smoke/co"], [{ req: ["smoke"], opt: ["carbon", "monoxide", "co", "combination", "combo"] }]),
   S("intercom", "Electrical", "Intercom", ["intercom", "buzzer", "intercom station"], [{ req: ["intercom"], opt: ["station", "apartment", "buzzer"] }]),
   S("doorbell", "Electrical", "Doorbell", ["doorbell", "door bell", "bell", "chime"], [{ req: ["bell|chime"], opt: ["door", "button"] }]),
@@ -97,7 +102,8 @@ export const SEED_ITEMS: Seed[] = [
   S("cabinet_base", "Kitchen", "Base cabinet", ["base cabinet", "base cabinets", "lower cabinet", "sink cabinet"], [{ req: ["cabinet"], opt: ["base", "lower", "sink"] }]),
   S("cabinet_wall", "Kitchen", "Wall cabinet", ["wall cabinet", "wall cabinets", "upper cabinet", "upper cabinets"], [{ req: ["cabinet"], opt: ["wall", "upper"] }]),
   S("countertop", "Kitchen", "Countertop", ["countertop", "counter top", "counter", "laminate top"], [{ req: ["countertop|counter"], opt: ["top", "laminate", "kitchen"] }]),
-  S("stove", "Kitchen", "Stove / range", ["stove", "range", "gas stove", "gas range"], [{ req: ["stove|range"], opt: ["gas", "kitchen", "install", "connect"] }]),
+  S("stove", "Kitchen", "Stove / range", ["stove", "range", "gas stove", "gas range"], [{ req: ["stove|range"], opt: ["gas", "kitchen", "install", "connect"], not: ["hood", "connect"] }]),
+  S("connect_appliances", "Kitchen", "Connect kitchen appliances", ["connect kitchen appliances", "connect appliances", "kitchen appliances", "appliance hookup", "hook up appliances", "connect stove", "hook up stove", "connect range", "connect refrigerator"], [{ req: ["connect|hook|hookup"], opt: ["appliance", "stove", "range", "refrigerator", "gas", "kitchen"], not: ["detector", "alarm", "water", "heater"] }]),
   S("range_hood", "Kitchen", "Range hood", ["range hood", "hood", "stove hood"], [{ req: ["hood"], opt: ["range", "stove", "kitchen"] }]),
   S("refrigerator", "Kitchen", "Refrigerator", ["refrigerator", "fridge"], [{ req: ["refrigerator"], opt: ["install", "deliver"] }]),
   // bathroom
@@ -106,6 +112,7 @@ export const SEED_ITEMS: Seed[] = [
   S("toilet_seat", "Bathroom", "Toilet seat", ["toilet seat", "seat"], [{ req: ["seat"], opt: ["toilet", "closet"], not: ["paper", "holder"] }]),
   S("shower_head", "Bathroom", "Shower head", ["shower head", "showerhead", "shower"], [{ req: ["shower"], opt: ["head", "replace"], not: ["rod", "valve", "body", "curtain", "door", "diverter", "arm"] }]),
   S("shower_rod", "Bathroom", "Shower rod", ["shower rod", "curtain rod", "rod"], [{ req: ["rod"], opt: ["shower", "curtain"], not: ["closet", "clothes"] }]),
+  S("shower_valve_cover", "Bathroom", "Shower valve cover", ["shower valve cover", "valve cover", "tub valve cover", "shower valve plate", "valve plate", "escutcheon"], [{ req: ["cover|plate|escutcheon"], opt: ["valve", "shower", "tub", "diverter", "trim"], not: ["window", "radiator", "gang", "switch", "receptacle", "outlet", "manhole", "floor", "wall plate"] }]),
   S("bath_accessories", "Bathroom", "Bathroom accessories (towel bar, paper holder, soap dish)", ["bathroom accessories", "accessories", "bath accessories", "bathroom accessory", "towel bar paper holder soap dish"],
     [{ req: ["towel"], opt: ["bar", "holder"], not: ["ring"] }, { req: ["paper|tissue"], opt: ["holder", "toilet"] }, { req: ["soap"], opt: ["dish", "holder"] }]),
   S("towel_bar", "Bathroom", "Towel bar", ["towel bar", "towel rack"], [{ req: ["towel"], opt: ["bar", "holder"] }]),
@@ -114,17 +121,20 @@ export const SEED_ITEMS: Seed[] = [
   S("grab_bar", "Bathroom", "Grab bar", ["grab bar", "grab bars", "safety bar"], [{ req: ["grab"], opt: ["bar", "safety"] }]),
   S("bath_faucet", "Bathroom", "Bathroom sink faucet", ["bathroom faucet", "bathroom plumbing", "lav faucet", "lavatory faucet", "sink faucet", "basin faucet"], [{ req: ["faucet"], opt: ["lavatory", "lav", "bathroom", "bath", "basin"], not: ["kitchen", "tub", "shower"] }]),
   S("tub_faucet", "Bathroom", "Tub / shower valve", ["tub faucet", "shower valve", "tub valve", "tub spout", "shower body", "diverter"], [{ req: ["tub|shower|bath"], opt: ["valve", "spout", "faucet", "diverter", "body", "mixing"] }]),
-  S("reglaze_both", "Bathroom", "Reglaze tub and sink", ["reglaze tub and sink", "reglaze", "reglazing", "tub and sink reglaze", "reglaze tub sink", "glaze tub and sink"],
+  S("reglaze_both", "Bathroom", "Reglaze tub and sink", ["reglaze tub and sink", "reglaze sink and tub", "reglaze", "reglazing", "tub and sink reglaze", "reglaze tub sink", "glaze tub and sink", "glaze sink and tub", "tub and sink"],
     [{ req: ["reglaz|glaz|refinish"], opt: ["tub", "bathtub", "bath"], not: ["sink", "lavatory", "basin", "tile", "wall"] }, { req: ["reglaz|glaz|refinish"], opt: ["sink", "lavatory", "basin", "lav"], not: ["tub", "bathtub", "tile", "wall"] }]),
-  S("reglaze_tub", "Bathroom", "Reglaze tub", ["reglaze tub", "tub reglaze", "glaze tub", "reglaze bathtub", "tub"], [{ req: ["reglaz|glaz|refinish"], opt: ["tub", "bathtub", "bath"], not: ["sink", "lavatory", "basin", "tile", "wall"] }]),
+  S("reglaze_tub", "Bathroom", "Reglaze tub", ["reglaze tub", "tub reglaze", "glaze tub", "tub glaze", "reglaze bathtub", "tub"], [{ req: ["reglaz|glaz|refinish"], opt: ["tub", "bathtub", "bath"], not: ["sink", "lavatory", "basin", "tile", "wall"] }]),
   S("reglaze_sink", "Bathroom", "Reglaze sink", ["reglaze sink", "sink reglaze", "glaze sink", "reglaze lavatory"], [{ req: ["reglaz|glaz|refinish"], opt: ["sink", "lavatory", "basin", "lav"], not: ["tub", "bathtub", "tile", "wall"] }]),
-  S("lav_sink", "Bathroom", "Bathroom sink (lavatory)", ["bathroom sink", "lavatory", "lav", "lav sink", "basin"], [{ req: ["lavatory|sink|basin"], opt: ["bathroom", "bath", "wall", "hung", "replace"] }]),
+  S("lav_sink", "Bathroom", "Bathroom sink (lavatory)", ["bathroom sink", "lavatory", "lav", "lav sink", "basin", "new sink", "sink"], [{ req: ["lavatory|sink|basin"], opt: ["bathroom", "bath", "wall", "hung", "replace"] }]),
   S("bath_tile_wall", "Bathroom", "Bathroom wall tile", ["wall tile", "bathroom tile", "bath tile", "ceramic tile"], [{ req: ["tile"], opt: ["wall", "ceramic", "bathroom", "bath"] }]),
   S("bath_tile_floor", "Bathroom", "Bathroom floor tile", ["bathroom floor tile", "bath floor", "floor tile bathroom"], [{ req: ["tile"], opt: ["floor", "ceramic", "bathroom", "bath"] }]),
   // walls, ceilings, floors
   S("plaster", "Walls & floors", "Plaster patch", ["plaster", "plaster patch", "patch", "skim", "skim coat", "plastering"], [{ req: ["plaster"], opt: ["patch", "repair", "skim", "wall", "ceiling"] }]),
   S("sheetrock", "Walls & floors", "Sheetrock patch", ["sheetrock", "drywall", "sheetrock patch", "gypsum"], [{ req: ["sheetrock|drywall|gypsum"], opt: ["patch", "repair", "replace"] }]),
   S("paint_room", "Walls & floors", "Paint room", ["paint room", "paint", "painting", "room paint"], [{ req: ["paint"], opt: ["room", "walls", "ceiling", "per"], not: ["apartment", "apt", "bedroom", "studio", "door", "radiator", "cabinet"] }]),
+  S("door_paint", "Walls & floors", "Paint door", ["door paint", "paint door", "paint doors", "door painting", "doors paint"], [{ req: ["paint"], opt: ["door", "interior", "both", "sides"], not: ["entire", "apartment", "bedroom", "studio", "room", "entrance", "metal", "radiator", "cabinet", "window"] }]),
+  S("entrance_door_paint", "Walls & floors", "Paint apartment door", ["apartment door paint", "paint apartment door", "entrance door paint", "paint entrance door", "metal door paint", "front door paint"], [{ req: ["paint"], opt: ["entrance", "apartment", "metal", "door", "entry", "steel"], not: ["entire", "bedroom", "studio", "room", "interior", "radiator", "cabinet", "window"] }]),
+  S("floor_wax", "Walls & floors", "Strip and wax floor", ["wax", "wax floor", "strip and wax", "strip and wax floor", "floor wax", "strip wax", "strip", "waxing"], [{ req: ["wax"], opt: ["strip", "floor", "seal", "buff"], not: ["ring", "toilet", "seal ring"] }]),
   S("floor_tile", "Walls & floors", "Floor tile (VCT)", ["floor tile", "vct", "tile floor", "vinyl tile", "floor tiles"], [{ req: ["tile|vct"], opt: ["floor", "vct", "vinyl", "composition"] }]),
   S("cove_base", "Walls & floors", "Cove base / baseboard", ["cove base", "base", "baseboard", "base molding", "vinyl base"], [{ req: ["base|baseboard"], opt: ["cove", "vinyl", "molding", "rubber"] }]),
   S("window_sill", "Walls & floors", "Window sill", ["sill", "window sill", "sills"], [{ req: ["sill"], opt: ["window", "marble", "replace"] }]),
@@ -142,12 +152,25 @@ const singular = (w: string) => {
   if (/s$/.test(w) && !/ss$/.test(w)) return w.replace(/s$/, "");
   return w;
 };
-// "Window balances" → ["window", "balance"]; digits stay (a "2 gang" cover)
-export const words = (s: string): string[] =>
-  (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter((w) => w && !STOP.has(w)).map(singular);
+// every word, singular — the price book's "Furnish and install" included
+const tokens = (s: string): string[] =>
+  (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean).map(singular);
+// "Window balances" → ["window", "balance"]; digits stay (a "2 gang" cover); filler words go
+export const words = (s: string): string[] => tokens(s).filter((w) => !STOP.has(w));
 export const normLabel = (s: string) => words(s).join(" ");
-// two words are the same thing when one is the other, or one sits inside the other ("wire" in "hardwired")
-const sameWord = (a: string, b: string) => a === b || (a.length >= 4 && b.length >= 4 && (a.includes(b) || b.includes(a)));
+// one letter off, on a word long enough to be sure: "showet" is "shower", "atural" is "natural"
+const oneOff = (a: string, b: string): boolean => {
+  if (Math.min(a.length, b.length) < 5 || Math.abs(a.length - b.length) > 1) return false;
+  let i = 0, j = 0, slips = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++slips > 1) return false;
+    if (a.length > b.length) i++; else if (b.length > a.length) j++; else { i++; j++; }
+  }
+  return slips + (a.length - i) + (b.length - j) <= 1;
+};
+// two words are the same thing when one is the other, one sits inside the other ("wire" in "hardwired"), or one is a slip of the other
+const sameWord = (a: string, b: string) => a === b || (a.length >= 4 && b.length >= 4 && (a.includes(b) || b.includes(a))) || oneOff(a, b);
 const overlap = (a: string[], b: string[]) => a.filter((w) => b.some((v) => sameWord(w, v))).length;
 
 // the survey line's words against every alias: 1 for a word-for-word match,
@@ -171,12 +194,14 @@ export function matchItem(label: string, items: TemplateItem[]): { item?: Templa
 }
 
 // ---- proposing lines from a price book (the one-time set-up) ----
-// a keyword is one word, or a phrase whose words all appear; "a|b" is either
-const hasWord = (desc: string[], kw: string) => kw.split("|").some((k) => words(k).every((kk) => desc.some((w) => sameWord(w, kk))));
+// a keyword is one word, or a phrase whose words all appear; "a|b" is either.
+// Keywords and descriptions keep their filler words here ("replace", "install")
+// — a `not: ["replace"]` has to be able to see one
+const hasWord = (desc: string[], kw: string) => kw.split("|").some((k) => { const ks = tokens(k); return ks.length > 0 && ks.every((kk) => desc.some((w) => sameWord(w, kk))); });
 export function proposeLine(spec: FindSpec, catalog: CatalogLine[]): { line: CatalogLine; score: number }[] {
   const out: { line: CatalogLine; score: number }[] = [];
   for (const c of catalog) {
-    const desc = words(`${c.description} ${c.category}`);
+    const desc = tokens(`${c.description} ${c.category}`);
     if (!spec.req.every((k) => hasWord(desc, k))) continue;
     if ((spec.not || []).some((k) => hasWord(desc, k))) continue;
     const opt = (spec.opt || []).filter((k) => hasWord(desc, k)).length;
@@ -231,15 +256,63 @@ function pairsOf(text: string): { qty: number; label: string }[] | null {
   return out.length >= 2 ? out : null;
 }
 
+const OK = 0.6; // the least a line has to look like an item
+// "Door knocker and interviewer bondo door" — three things on one line. The
+// whole line is tried first (so "Reglaze tub and sink" stays one item); then
+// its "and"-parts; then a part is split at the one place both halves read.
+// A line is one thing when it reads as one outright (0.9 and up — an alias
+// word for word). Read only so-so, it may be several: its "and"-parts, and a
+// part is cut at the one place where both halves read better than the whole.
+const SURE = 0.9;
+function splitMulti(label: string, items: TemplateItem[]): string[] {
+  if (matchItem(label, items).score >= SURE) return [label];
+  const parts = label.split(/\s+(?:and|&|\+)\s+|\s*[,/]\s*/i).map((p) => p.trim()).filter(Boolean);
+  const out: string[] = [];
+  for (const part of parts) {
+    const whole = matchItem(part, items).score;
+    if (whole >= SURE) { out.push(part); continue; }
+    const toks = part.split(/\s+/);
+    let best: { at: number; score: number } | null = null;
+    for (let k = 1; k < toks.length; k++) {
+      const l = matchItem(toks.slice(0, k).join(" "), items).score, r = matchItem(toks.slice(k).join(" "), items).score;
+      const m = Math.min(l, r);
+      if (l >= OK && r >= OK && m > whole && (!best || m > best.score)) best = { at: k, score: m };
+    }
+    if (best) out.push(toks.slice(0, best.at).join(" "), toks.slice(best.at).join(" "));
+    else out.push(part);
+  }
+  return out.length ? out : [label];
+}
 export function parseSurvey(text: string, items: TemplateItem[]): ParsedSurvey {
   const out: ParsedSurvey = { address: "", apt: "", kind: "", lines: [] };
-  const raw = (text || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const raw = (text || "").split(/\r?\n/).map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean);
   const push = (rawLine: string, label: string, qty: number, prefix = "") => {
-    // with a prefix ("Outlet:") try the prefixed wording first, then the bare one
+    // with a prefix ("Outlet:" — or the noun before it on the same line, "3 switch 1 double")
+    // the prefixed wording is tried too, and wins a tie
     const tries = prefix ? [`${prefix} ${label}`, label] : [label];
     let best: { item?: TemplateItem; score: number } = { score: 0 };
     for (const t of tries) { const m = matchItem(t, items); if (m.score > best.score) best = m; }
-    out.lines.push({ raw: rawLine, label: prefix ? `${prefix} ${label}` : label, qty, itemKey: best.score >= 0.6 ? best.item?.key : undefined, score: best.score });
+    if (best.score >= SURE || tries.length > 1) {
+      out.lines.push({ raw: rawLine, label: prefix ? `${prefix} ${label}` : label, qty, itemKey: best.score >= OK ? best.item?.key : undefined, score: best.score });
+      return;
+    }
+    // nothing read the line whole — maybe it is more than one thing
+    const pieces = splitMulti(label, items);
+    for (const piece of pieces) {
+      const m = matchItem(piece, items);
+      out.lines.push({ raw: rawLine, label: piece, qty, itemKey: m.score >= OK ? m.item?.key : undefined, score: m.score });
+    }
+  };
+  // a run of "n words n words" — the noun of the pair before is context for a
+  // bare "double" or "single" ("3 switch 1 double" is a double switch, not an outlet)
+  const pushPairs = (rawLine: string, pairs: { qty: number; label: string }[], prefix = "") => {
+    let prev = prefix;
+    for (const p of pairs) {
+      const bare = matchItem(p.label, items).score;
+      const withPrev = prev ? matchItem(`${prev} ${p.label}`, items).score : 0;
+      push(rawLine, p.label, p.qty, withPrev >= OK && withPrev >= bare ? prev : prefix);
+      if (bare >= OK && !prefix) prev = p.label.split(/\s+/)[0]; // "switch" carries on to "1 double"
+    }
   };
   raw.forEach((line, i) => {
     if (/^#/.test(line) || /<[^>]*>/.test(line)) return; // a group heading or an unfilled placeholder from the blank survey
@@ -254,13 +327,16 @@ export function parseSurvey(text: string, items: TemplateItem[]): ParsedSurvey {
       if (!rest) return; // a blank line on the filled-in survey — not on this job
       if (new RegExp(`^${NUM}$`).test(rest)) { push(line, prefix, parseFloat(rest)); return; }
       const pairs = pairsOf(rest);
-      if (pairs) { pairs.forEach((p) => push(line, p.label, p.qty, prefix)); return; }
+      if (pairs) { pushPairs(line, pairs, prefix); return; }
       push(line, `${prefix} ${rest}`, 1); return;
     }
     const pairs = pairsOf(line);
-    if (pairs) { pairs.forEach((p) => push(line, p.label, p.qty)); return; }
+    if (pairs) { pushPairs(line, pairs); return; }
     let m = new RegExp(`^${NUM}\\s+(.+)$`).exec(line);
     if (m) { push(line, m[2], parseFloat(m[1])); return; }
+    // "Switch 3 single" — the count in the middle: 3 single switches
+    m = new RegExp(`^([A-Za-z][^\\d]*?)\\s+${NUM}\\s+([A-Za-z].*)$`).exec(line);
+    if (m) { push(line, `${m[1]} ${m[3]}`, parseFloat(m[2])); return; }
     m = new RegExp(`^(.+?)\\s+${NUM}$`).exec(line);
     if (m) { push(line, m[1], parseFloat(m[2])); return; }
     push(line, line, 1);

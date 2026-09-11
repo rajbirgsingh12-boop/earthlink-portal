@@ -207,13 +207,15 @@ export function matchItem(label: string, items: SurveyItem[] = SEED_ITEMS): { it
 // "lockset" for "lock") or a slip of it — never when it is a piece of it: the
 // "cove" in "vinyl cove base" is not "cover"
 const isWord = (w: string, kw: string) => w === kw || (w.length >= 4 && kw.length >= 4 && w.includes(kw)) || oneOff(w, kw);
-const hasWord = (desc: string[], kw: string) => kw.split("|").some((k) => { const ks = tokens(k); return ks.length > 0 && ks.every((kk) => desc.some((w) => isWord(w, kk))); });
+// a `not` guard is the one place a piece counts too: "bath" in the book is the
+// "bathroom" the guard names, "mail box" its "mailbox" — a guard errs on the side of ruling out
+const hasWord = (desc: string[], kw: string, guard = false) => kw.split("|").some((k) => { const ks = tokens(k); return ks.length > 0 && ks.every((kk) => desc.some((w) => (guard ? sameWord(w, kk) : isWord(w, kk)))); });
 export function proposeLine(spec: FindSpec, catalog: CatalogLine[]): { line: CatalogLine; score: number }[] {
   const out: { line: CatalogLine; score: number }[] = [];
   for (const c of catalog) {
     const desc = tokens(`${c.description} ${c.category}`);
     if (!spec.req.every((k) => hasWord(desc, k))) continue;
-    if ((spec.not || []).some((k) => hasWord(desc, k))) continue;
+    if ((spec.not || []).some((k) => hasWord(desc, k, true))) continue;
     const opt = (spec.opt || []).filter((k) => hasWord(desc, k)).length;
     // shorter descriptions that carry the words are the plainer match
     out.push({ line: c, score: 2 * spec.req.length + opt - Math.min(desc.length, 20) / 40 });
@@ -227,7 +229,7 @@ export const bookLines = (item: SurveyItem, catalog: CatalogLine[]): { line: Cat
 // ---- the survey text ----
 // `implied`: the line carried no count — "Bathroom light" is one, and the same
 // thing written again with a count is a restatement, not a second one
-export interface ParsedLine { raw: string; label: string; qty: number; itemKey?: string; score: number; note?: string; implied?: boolean }
+export interface ParsedLine { raw: string; label: string; qty: number; itemKey?: string; score: number; note?: string; implied?: boolean; at?: number }
 export interface ParsedSurvey { address: string; apt: string; kind: string; bedrooms?: number; lines: ParsedLine[] }
 
 const NUM = "(\\d+(?:\\.\\d+)?)";
@@ -292,6 +294,7 @@ function splitMulti(label: string, items: SurveyItem[]): string[] {
 export function parseSurvey(text: string, items: SurveyItem[] = SEED_ITEMS): ParsedSurvey {
   const out: ParsedSurvey = { address: "", apt: "", kind: "", lines: [] };
   const raw = (text || "").split(/\r?\n/).map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean);
+  let at = 0; // which line of the page a piece came from
   const push = (rawLine: string, label: string, qty: number, prefix = "", implied = false) => {
     // with a prefix ("Outlet:" — or the noun before it on the same line, "3 switch 1 double")
     // the prefixed wording is tried too, and wins a tie
@@ -299,14 +302,14 @@ export function parseSurvey(text: string, items: SurveyItem[] = SEED_ITEMS): Par
     let best: { item?: SurveyItem; score: number } = { score: 0 };
     for (const t of tries) { const m = matchItem(t, items); if (m.score > best.score) best = m; }
     if (best.score >= SURE || tries.length > 1) {
-      out.lines.push({ raw: rawLine, label: prefix ? `${prefix} ${label}` : label, qty, itemKey: best.score >= OK ? best.item?.key : undefined, score: best.score, ...(implied ? { implied } : {}) });
+      out.lines.push({ raw: rawLine, label: prefix ? `${prefix} ${label}` : label, qty, itemKey: best.score >= OK ? best.item?.key : undefined, score: best.score, at, ...(implied ? { implied } : {}) });
       return;
     }
     // nothing read the line whole — maybe it is more than one thing
     const pieces = splitMulti(label, items);
     for (const piece of pieces) {
       const m = matchItem(piece, items);
-      out.lines.push({ raw: rawLine, label: piece, qty, itemKey: m.score >= OK ? m.item?.key : undefined, score: m.score, ...(implied ? { implied } : {}) });
+      out.lines.push({ raw: rawLine, label: piece, qty, itemKey: m.score >= OK ? m.item?.key : undefined, score: m.score, at, ...(implied ? { implied } : {}) });
     }
   };
   // a run of "n words n words" — the noun of the pair before is context for a
@@ -321,6 +324,7 @@ export function parseSurvey(text: string, items: SurveyItem[] = SEED_ITEMS): Par
     }
   };
   raw.forEach((line, i) => {
+    at = i;
     if (/^#/.test(line) || /<[^>]*>/.test(line)) return; // a group heading or an unfilled placeholder from the blank survey
     if (i === 0) { const h = parseHeader(line); if (h) { Object.assign(out, h); return; } }
     // "2 bedroom" — the size, and an item when the book prices whole apartments
@@ -383,8 +387,13 @@ function mergeTwice(items: ReadItem[]): { items: ReadItem[]; twice: string[] } {
     if (done.has(it.key)) continue; // merged into its first mention
     done.add(it.key);
     const label = itemByKey(it.key)?.label || it.written;
-    const restated = group.some((g) => g.implied);
-    const qty = restated ? Math.max(...group.map((g) => g.qty)) : group.reduce((s, g) => s + g.qty, 0);
+    // the counted mentions add up; a bare mention restates — it counts only
+    // when nothing else counted more ("Bathroom light" + "1 bathroom light" is 1;
+    // "2 pancake" + "1 pancake" + "pancake" is 3)
+    const counted = group.filter((g) => !g.implied).reduce((sum, g) => sum + g.qty, 0);
+    const bare = Math.max(0, ...group.filter((g) => g.implied).map((g) => g.qty));
+    const qty = Math.max(counted, bare);
+    const restated = group.some((g) => g.implied) && bare >= counted;
     twice.push(`${label} (${restated ? "counted once" : "counts added up"})`);
     out.push({ written: [...new Set(group.map((g) => g.written))].join(" + "), qty, key: it.key, note: group.find((g) => g.note)?.note ?? null });
   }
@@ -394,8 +403,29 @@ function mergeTwice(items: ReadItem[]): { items: ReadItem[]; twice: string[] } {
 // the read items, billed the way the release bills them: the contract's line
 // (the price book's row when it has the code, the release's when not) or
 // hours on the General Laborer line
+// "Shower head" and "Shower rod" both bill the rod-and-mounting-kit line; written
+// once each with no count, that is one line, not two
+function mergeSameLine(items: ReadItem[], twice: string[]): ReadItem[] {
+  const out: ReadItem[] = [];
+  const seen = new Map<string, ReadItem>();
+  for (const it of items) {
+    const b = it.key ? itemByKey(it.key)?.bill : undefined;
+    const sig = b && "codes" in b && it.implied ? [...b.codes].sort().join("+") : "";
+    const first = sig ? seen.get(sig) : undefined;
+    if (first && first.implied) {
+      first.written = `${first.written} + ${it.written}`;
+      twice.push(`${first.written} (one line)`);
+      continue;
+    }
+    if (sig) seen.set(sig, it);
+    out.push(it);
+  }
+  return out;
+}
 export function billSurvey(read: ReadItem[], catalog: CatalogLine[]): Billed {
-  const { items, twice } = mergeTwice(read.filter((it) => Number(it.qty) > 0));
+  const merged = mergeTwice(read.filter((it) => Number(it.qty) > 0));
+  const twice = merged.twice;
+  const items = mergeSameLine(merged.items.map((it) => ({ ...it })), twice);
   const byCode = new Map(catalog.map((c) => [c.code, c]));
   const rest = catalog.filter((c) => !releaseLine(c.code));
   const count = new Map<string, { qty: number; labels: string[] }>();  // the release's lines

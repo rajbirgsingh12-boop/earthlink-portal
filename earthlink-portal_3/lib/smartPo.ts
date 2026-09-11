@@ -111,10 +111,13 @@ export function smartErrorNote(e: unknown): string {
   const err = e as { status?: number; error?: { error?: { message?: string } }; message?: string } | null;
   const apiMsg = String(err?.error?.error?.message || "");
   const msg = apiMsg || (e instanceof Error ? e.message : "") || "unknown error";
-  if (/workspace/i.test(msg)) return "Claude's key isn't tied to a workspace — in the Claude Console make the key for one workspace, or add ANTHROPIC_WORKSPACE_ID in Vercel";
+  const aboutWorkspace = /workspace/i.test(msg);
+  // the workspace id in Vercel is set and the API still won't have it: the id is the problem
+  if (aboutWorkspace && smartWorkspace()) return "the workspace id in Vercel (ANTHROPIC_WORKSPACE_ID) was refused — check it against Settings → Workspaces in the Claude Console";
   if (err?.status === 401) return "Claude's key was refused — make a new key in the Claude Console and put it in Vercel as ANTHROPIC_API_KEY";
   if (err?.status === 403) return "Claude's key isn't allowed to do this — check the key's workspace and role in the Claude Console";
   if (err?.status === 429) return "Claude is busy right now (rate limit) — try again in a minute";
+  if (aboutWorkspace) return "Claude's key isn't tied to a workspace — in the Claude Console make the key for one workspace, or add ANTHROPIC_WORKSPACE_ID in Vercel";
   if (/took too long/.test(msg)) return "the smart reader took too long";
   return `Claude couldn't read it (${msg.replace(/\s+/g, " ").slice(0, 140)})`;
 }

@@ -27,7 +27,9 @@
 -- Sep additions: one PO is one job (the database refuses a
 -- twin), and PACT jobs on the same crew schedule as NYCHA
 -- releases — the calendar's "Who's going?" remembers who is
--- on each job, and a moved job takes its crew with it.
+-- on each job, and a moved job takes its crew with it. A
+-- priced job comes off the calendar (15), and a contract's
+-- price book holds each code once (16).
 -- ============================================================
 
 -- ---------- from upgrade_invoices_aging_docs.sql ----------
@@ -652,3 +654,13 @@ create trigger pact_job_priced
 update pact_jobs set priced = (invoice_sent is not null or coalesce(received, false) or (coalesce(work_done, false) and public.pact_items_measured(items)))
   where list_subtotal is null
     and priced is distinct from (invoice_sent is not null or coalesce(received, false) or (coalesce(work_done, false) and public.pact_items_measured(items)));
+
+-- 16) One row per code in a contract's price book. The survey upload adds
+--     the move-out release's lines to the book when they are missing; two
+--     phones doing that in the same second must not leave a code in twice
+--     (a doubled line doubles the sheet, its PDF and the release).
+--     Duplicates already there are folded first, keeping the oldest row.
+delete from contract_items a
+  using contract_items b
+  where a.contract_id = b.contract_id and a.code = b.code and a.ctid > b.ctid;
+create unique index if not exists contract_items_contract_code_uq on contract_items (contract_id, code);

@@ -181,10 +181,11 @@ export default function Proposals() {
   // the release's main lines first, the book's own line for anything else it
   // has one for, General Laborer hours for the rest. Over what a super will
   // sign, the owner ticks what comes off. The sheet then opens for a check.
-  // A survey is a move-out job, so it bills the move-out contract when the
-  // portal has it — whatever the list is showing.
-  const isMoveout = (c: Contract) => String(c.number || "").replace(/\D/g, "").includes(MOVEOUT_CONTRACT);
-  const surveyContract = () => contracts.find(isMoveout)?.id || (contracts.some((c) => c.id === listContract) ? listContract : contracts.length === 1 ? contracts[0].id : "");
+  // A survey is a move-out job: it bills the move-out contract, whatever the
+  // list is showing — and only that one, since the release's lines and prices
+  // belong to it. Without it in the portal the upload says so.
+  const isMoveout = (c: Contract) => String(c.number || "").replace(/\D/g, "") === MOVEOUT_CONTRACT;
+  const surveyContract = () => contracts.find(isMoveout)?.id || "";
   // the blank form — the same PDF every time, so the reader knows every box
   const downloadSurveyForm = async () => {
     try {
@@ -200,7 +201,7 @@ export default function Proposals() {
   };
   const uploadSurvey = () => {
     if (contracts.length === 0) { flash("No contracts yet — upload a release sheet or release PDF first"); return; }
-    if (!surveyContract()) { flash(`Pick a contract in the dropdown first — the portal has no contract ${MOVEOUT_CONTRACT} (the move-out contract) yet`); return; }
+    if (!surveyContract()) { flash(`The portal has no contract ${MOVEOUT_CONTRACT} (the move-out contract) yet — upload one of its releases on the NYCHA tab first`); return; }
     surveyRef.current?.click();
   };
   // what a survey read into, waiting to become the sheet
@@ -271,7 +272,10 @@ export default function Proposals() {
       let bookNote = "";
       if (missing.length) {
         const rows = missing.map((r) => ({ contract_id: cid, line: r.line, code: r.code, category: r.category, description: r.description, uom: r.uom, unit_price: r.unit_price }));
-        const { data: added, error: ae } = await sb().from("contract_items").insert(rows).select();
+        // one row per code, even when two phones upload in the same second — the
+        // unique index (RUN_ME section 16) makes it so; before it is run, a plain insert
+        let { data: added, error: ae } = await sb().from("contract_items").upsert(rows, { onConflict: "contract_id,code", ignoreDuplicates: true }).select();
+        if (ae && /unique|exclusion|conflict|constraint/i.test(ae.message)) ({ data: added, error: ae } = await sb().from("contract_items").insert(rows).select());
         if (ae) { flash(`Couldn't add release ${MOVEOUT_RELEASE}'s lines to this contract's price book (${upgradeHint(ae.message)})`); return; }
         catalog = [...catalog, ...((added && added.length ? added : rows) as ContractItem[])];
         bookNote = `${missing.length} line${missing.length === 1 ? "" : "s"} from release ${MOVEOUT_RELEASE} added to this contract's price book`;

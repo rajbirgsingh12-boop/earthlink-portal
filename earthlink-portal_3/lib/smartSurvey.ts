@@ -72,12 +72,12 @@ export async function askClaudeSurvey(source: SurveySource, timeoutMs: number = 
 // the rules read: the page's text as shorthand lines, matched by keywords to the list
 export function rulesSurvey(text: string): SmartSurvey {
   const p = parseSurvey(text);
-  const pieces = new Map<string, number>();
-  for (const l of p.lines) pieces.set(l.raw, (pieces.get(l.raw) || 0) + 1);
+  const pieces = new Map<number, number>();
+  for (const l of p.lines) pieces.set(l.at ?? -1, (pieces.get(l.at ?? -1) || 0) + 1);
   return {
     address: p.address, apt: p.apt, kind: p.kind, bedrooms: p.bedrooms ?? null,
     // a line that read as several things ("Outlet: 1 single 7 double") is several items, each in its own words
-    items: p.lines.map((l) => ({ written: (pieces.get(l.raw) || 0) > 1 ? l.label : l.raw, qty: l.qty, key: l.itemKey || "", note: l.itemKey ? null : "nothing on the list reads like this", ...(l.implied ? { implied: true } : {}) })),
+    items: p.lines.map((l) => ({ written: (pieces.get(l.at ?? -1) || 0) > 1 ? l.label : l.raw, qty: l.qty, key: l.itemKey || "", note: l.itemKey ? null : "nothing on the list reads like this", ...(l.implied ? { implied: true } : {}) })),
   };
 }
 

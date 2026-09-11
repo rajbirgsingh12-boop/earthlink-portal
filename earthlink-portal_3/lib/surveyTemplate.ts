@@ -9,11 +9,15 @@
 //
 // Every line is one thing a person writes down ("Window balance"), read by
 // its aliases (the ways it gets written), and billed the way our move-out
-// releases bill it (lib/moveoutRelease.ts): the contract's own line where it
-// has one for that thing, General Laborer hours for everything else. The
-// hours are the going rate for each job — a lock is half an hour, a floor
-// wax four — added up and rounded up to the hour; the owner adjusts the
-// count on the sheet like any other line.
+// releases bill it (lib/moveoutRelease.ts): the release's own line for the
+// ten things it has one for, General Laborer hours for the small jobs
+// (locks, guards, the toilet, a wax — the release put those in hours even
+// though the contract prices them), and for the material items the release
+// never covered (floor tile, cove base, cabinets, doors, a new sink) the
+// contract's own line when the price book has one, hours when it doesn't.
+// The hours are the going rate for each job — a lock is half an hour, a
+// floor wax four — added up and rounded up to the hour; the owner adjusts
+// the count on the sheet like any other line.
 //
 // Nothing here touches the database: pure functions over text and the
 // contract's price book.
@@ -21,8 +25,9 @@ import { CODE, RELEASE_LINES, releaseLine } from "./moveoutRelease";
 
 export interface CatalogLine { code: string; line: number; category: string; description: string; uom: string; unit_price: number }
 // how an item is billed: the release's line or lines it goes on (one count
-// each), the laborer hours it takes per unit, or nothing — the apartment size
-export type Bill = { codes: string[] } | { hours: number } | { size: true };
+// each); the laborer hours it takes per unit (`book` set: the price book's
+// own line first, when it has one — a material item); or nothing — the size
+export type Bill = { codes: string[] } | { hours: number; book?: boolean } | { size: true };
 // how an item that has no release line finds its own line in a price book,
 // when the book has one: every `req` word must be in the description ("a|b"
 // = either), `opt` words add to the score, a `not` word rules the line out
@@ -33,8 +38,8 @@ export interface SurveyItem {
   label: string;          // what the survey says
   aliases: string[];      // other ways it gets written (normalized on use)
   group: string;          // Windows, Electrical, … (the form is grouped)
-  bill: Bill;             // the release's line, or hours
-  find: FindSpec[];       // the book's own line for it, when the book has one — before hours
+  bill: Bill;             // the release's line, hours, or the book's line then hours
+  find: FindSpec[];       // how a material item finds its own line in the price book
 }
 export const DEFAULT_CAP = 10_000;
 
@@ -44,7 +49,8 @@ export const DEFAULT_CAP = 10_000;
 const S = (key: string, group: string, label: string, aliases: string[], bill: Bill, find: FindSpec[] = []): SurveyItem => ({ key, group, label, aliases, bill, find });
 const NOT_FIXTURE = ["switch", "plate", "cover", "receptacle", "outlet", "bulb", "lamp"];
 const L = (...codes: string[]): Bill => ({ codes });
-const H = (hours: number): Bill => ({ hours });
+const H = (hours: number): Bill => ({ hours });                 // a small job: laborer hours, as the release bills it
+const B = (hours: number): Bill => ({ hours, book: true });     // a material item: the book's own line when it has one, else hours
 const SIZE: Bill = { size: true };
 export const SEED_ITEMS: SurveyItem[] = [
   // apartment size — the whole-apartment lines (paint, clean) that go by bedrooms
@@ -66,9 +72,9 @@ export const SEED_ITEMS: SurveyItem[] = [
   S("lock_privacy", "Doors", "Privacy lock", ["privacy lock", "privacy", "privacy lockset", "bathroom lock", "bedroom lock"], H(0.5), [{ req: ["privacy"], opt: ["lock", "lockset", "set"], not: ["passage"] }]),
   S("lock_entrance", "Doors", "Entrance lock / deadbolt", ["entrance lock", "entry lock", "deadbolt", "dead bolt", "front door lock", "apartment lock"], H(1), [{ req: ["deadbolt|lock|lockset"], opt: ["entrance", "entry", "dead", "bolt", "apartment", "door"], not: ["passage", "privacy", "window", "mailbox", "cylinder", "sash"] }]),
   S("cylinder", "Doors", "Lock cylinder / re-key", ["cylinder", "rekey", "re key", "change cylinder", "keys"], H(0.5), [{ req: ["cylinder|rekey|key"], opt: ["change", "replace", "lock"] }]),
-  S("door_interior", "Doors", "Interior door", ["interior door", "room door", "bedroom door", "door", "doors"], H(2), [{ req: ["door"], opt: ["interior", "hollow", "core", "replace", "install", "room"] }]),
-  S("door_closet", "Doors", "Closet door", ["closet door", "closet doors", "bifold"], H(1.5), [{ req: ["door"], opt: ["closet", "bifold", "bi-fold"] }]),
-  S("door_entrance", "Doors", "Entrance door", ["entrance door", "entry door", "front door", "apartment door", "metal door"], H(3), [{ req: ["door"], opt: ["entrance", "entry", "apartment", "metal", "steel", "fire"] }]),
+  S("door_interior", "Doors", "Interior door", ["interior door", "room door", "bedroom door", "door", "doors"], B(2), [{ req: ["door"], opt: ["interior", "hollow", "core", "replace", "install", "room"] }]),
+  S("door_closet", "Doors", "Closet door", ["closet door", "closet doors", "bifold"], B(1.5), [{ req: ["door"], opt: ["closet", "bifold", "bi-fold"] }]),
+  S("door_entrance", "Doors", "Entrance door", ["entrance door", "entry door", "front door", "apartment door", "metal door"], B(3), [{ req: ["door"], opt: ["entrance", "entry", "apartment", "metal", "steel", "fire"] }]),
   S("door_stop", "Doors", "Door stop", ["door stop", "doorstop", "stops", "door stops"], H(0.25), [{ req: ["stop"], opt: ["door", "wall", "floor"] }]),
   S("door_hinge", "Doors", "Door hinge", ["hinge", "hinges", "door hinge"], H(0.5), [{ req: ["hinge"], opt: ["door", "butt"] }]),
   S("saddle", "Doors", "Saddle / threshold", ["saddle", "saddles", "threshold", "door saddle"], H(0.5), [{ req: ["saddle|threshold"], opt: ["door", "marble", "metal"] }]),
@@ -95,20 +101,20 @@ export const SEED_ITEMS: SurveyItem[] = [
   S("co", "Electrical", "CO detector", ["co", "co detector", "carbon monoxide", "carbon monoxide detector"], L(CODE.combo), [{ req: ["carbon|monoxide"], opt: ["detector", "alarm"], not: ["smoke", "combination"] }]),
   S("gas_detector", "Electrical", "Natural gas detector", ["natural gas detector", "gas detector", "natural gas alarm", "gas alarm", "gas", "natural gas"], L(CODE.combo), [{ req: ["gas"], opt: ["detector", "alarm", "natural", "methane"], not: ["range", "stove", "valve", "line", "meter", "cock", "pipe", "shut"] }]),
   S("smoke_co", "Electrical", "Smoke / CO combo detector", ["combo", "combo detector", "smoke co", "smoke and co", "smoke/co"], L(CODE.combo), [{ req: ["smoke"], opt: ["carbon", "monoxide", "co", "combination", "combo"] }]),
-  S("intercom", "Electrical", "Intercom", ["intercom", "buzzer", "intercom station"], H(1), [{ req: ["intercom"], opt: ["station", "apartment", "buzzer"] }]),
-  S("doorbell", "Electrical", "Doorbell", ["doorbell", "door bell", "bell", "chime"], H(0.5), [{ req: ["bell|chime"], opt: ["door", "button"] }]),
-  S("exhaust_fan", "Electrical", "Exhaust fan", ["exhaust fan", "fan", "bathroom fan", "vent fan"], H(1), [{ req: ["fan"], opt: ["exhaust", "bathroom", "vent"] }]),
+  S("intercom", "Electrical", "Intercom", ["intercom", "buzzer", "intercom station"], B(1), [{ req: ["intercom"], opt: ["station", "apartment", "buzzer"] }]),
+  S("doorbell", "Electrical", "Doorbell", ["doorbell", "door bell", "bell", "chime"], B(0.5), [{ req: ["bell|chime"], opt: ["door", "button"] }]),
+  S("exhaust_fan", "Electrical", "Exhaust fan", ["exhaust fan", "fan", "bathroom fan", "vent fan"], B(1), [{ req: ["fan"], opt: ["exhaust", "bathroom", "vent"] }]),
   // kitchen
   S("kitchen_plumbing", "Kitchen", "Kitchen plumbing (faucet)", ["kitchen plumbing", "kitchen faucet", "kitchen sink plumbing", "kitchen sink faucet", "faucet kitchen"], H(1.5), [{ req: ["faucet"], opt: ["kitchen", "sink", "replace"], not: ["lavatory", "lav", "bathroom", "bath", "tub", "shower"] }]),
-  S("kitchen_sink", "Kitchen", "Kitchen sink", ["kitchen sink", "sink kitchen"], H(2), [{ req: ["sink"], opt: ["kitchen", "stainless", "replace"] }]),
+  S("kitchen_sink", "Kitchen", "Kitchen sink", ["kitchen sink", "sink kitchen"], B(2), [{ req: ["sink"], opt: ["kitchen", "stainless", "replace"] }]),
   S("kitchen_trap", "Kitchen", "Kitchen trap / supplies", ["trap", "p trap", "supply lines", "supplies", "kitchen trap"], H(1), [{ req: ["trap|supply"], opt: ["kitchen", "sink", "p-trap", "line"] }]),
-  S("cabinet_base", "Kitchen", "Base cabinet", ["base cabinet", "base cabinets", "lower cabinet", "sink cabinet"], H(2), [{ req: ["cabinet"], opt: ["base", "lower", "sink"] }]),
-  S("cabinet_wall", "Kitchen", "Wall cabinet", ["wall cabinet", "wall cabinets", "upper cabinet", "upper cabinets"], H(2), [{ req: ["cabinet"], opt: ["wall", "upper"] }]),
-  S("countertop", "Kitchen", "Countertop", ["countertop", "counter top", "counter", "laminate top"], H(3), [{ req: ["countertop|counter"], opt: ["top", "laminate", "kitchen"] }]),
-  S("stove", "Kitchen", "Stove / range", ["stove", "range", "gas stove", "gas range"], H(1), [{ req: ["stove|range"], opt: ["gas", "kitchen", "install", "connect"], not: ["hood", "connect"] }]),
+  S("cabinet_base", "Kitchen", "Base cabinet", ["base cabinet", "base cabinets", "lower cabinet", "sink cabinet"], B(2), [{ req: ["cabinet"], opt: ["base", "lower", "sink"] }]),
+  S("cabinet_wall", "Kitchen", "Wall cabinet", ["wall cabinet", "wall cabinets", "upper cabinet", "upper cabinets"], B(2), [{ req: ["cabinet"], opt: ["wall", "upper"] }]),
+  S("countertop", "Kitchen", "Countertop", ["countertop", "counter top", "counter", "laminate top"], B(3), [{ req: ["countertop|counter"], opt: ["top", "laminate", "kitchen"] }]),
+  S("stove", "Kitchen", "Stove / range", ["stove", "range", "gas stove", "gas range"], B(1), [{ req: ["stove|range"], opt: ["gas", "kitchen", "install", "connect"], not: ["hood", "connect"] }]),
   S("connect_appliances", "Kitchen", "Connect kitchen appliances", ["connect kitchen appliances", "connect appliances", "kitchen appliances", "appliance hookup", "hook up appliances", "connect stove", "hook up stove", "connect range", "connect refrigerator"], H(1), [{ req: ["connect|hook|hookup"], opt: ["appliance", "stove", "range", "refrigerator", "gas", "kitchen"], not: ["detector", "alarm", "water", "heater"] }]),
-  S("range_hood", "Kitchen", "Range hood", ["range hood", "hood", "stove hood"], H(1), [{ req: ["hood"], opt: ["range", "stove", "kitchen"] }]),
-  S("refrigerator", "Kitchen", "Refrigerator", ["refrigerator", "fridge"], H(0.5), [{ req: ["refrigerator"], opt: ["install", "deliver"] }]),
+  S("range_hood", "Kitchen", "Range hood", ["range hood", "hood", "stove hood"], B(1), [{ req: ["hood"], opt: ["range", "stove", "kitchen"] }]),
+  S("refrigerator", "Kitchen", "Refrigerator", ["refrigerator", "fridge"], B(0.5), [{ req: ["refrigerator"], opt: ["install", "deliver"] }]),
   // bathroom
   S("medicine_cabinet", "Bathroom", "Medicine cabinet", ["medicine cabinet", "medicine", "med cabinet", "mirror cabinet"], L(CODE.med), [{ req: ["medicine"], opt: ["cabinet", "mirror"], not: ["door", "shelf", "glass"] }]),
   S("toilet", "Bathroom", "Toilet", ["toilet", "water closet", "wc", "toilet bowl", "toilet and tank"], H(2), [{ req: ["toilet|water closet|closet"], opt: ["bowl", "tank", "complete", "replace", "install"], not: ["paper", "seat", "holder", "tissue", "flange", "supply"] }]),
@@ -121,14 +127,14 @@ export const SEED_ITEMS: SurveyItem[] = [
   S("paper_holder", "Bathroom", "Toilet paper holder", ["paper holder", "toilet paper holder", "tissue holder"], H(0.25), [{ req: ["paper|tissue"], opt: ["holder", "toilet"] }]),
   S("soap_dish", "Bathroom", "Soap dish", ["soap dish", "soap holder"], H(0.25), [{ req: ["soap"], opt: ["dish", "holder"] }]),
   S("grab_bar", "Bathroom", "Grab bar", ["grab bar", "grab bars", "safety bar"], H(0.5), [{ req: ["grab"], opt: ["bar", "safety"] }]),
-  S("bath_faucet", "Bathroom", "Bathroom sink faucet", ["bathroom faucet", "bathroom plumbing", "lav faucet", "lavatory faucet", "sink faucet", "basin faucet"], H(1), [{ req: ["faucet"], opt: ["lavatory", "lav", "bathroom", "bath", "basin"], not: ["kitchen", "tub", "shower"] }]),
-  S("tub_faucet", "Bathroom", "Tub / shower valve", ["tub faucet", "shower valve", "tub valve", "tub spout", "shower body", "diverter"], H(2), [{ req: ["tub|shower|bath"], opt: ["valve", "spout", "faucet", "diverter", "body", "mixing"] }]),
+  S("bath_faucet", "Bathroom", "Bathroom sink faucet", ["bathroom faucet", "bathroom plumbing", "lav faucet", "lavatory faucet", "sink faucet", "basin faucet"], B(1), [{ req: ["faucet"], opt: ["lavatory", "lav", "bathroom", "bath", "basin"], not: ["kitchen", "tub", "shower"] }]),
+  S("tub_faucet", "Bathroom", "Tub / shower valve", ["tub faucet", "shower valve", "tub valve", "tub spout", "shower body", "diverter"], B(2), [{ req: ["tub|shower|bath"], opt: ["valve", "spout", "faucet", "diverter", "body", "mixing"] }]),
   S("reglaze_both", "Bathroom", "Reglaze tub and sink", ["reglaze tub and sink", "reglaze sink and tub", "reglaze", "reglazing", "tub and sink reglaze", "reglaze tub sink", "glaze tub and sink", "glaze sink and tub", "tub and sink"], L(CODE.tub, CODE.sink), [{ req: ["reglaz|glaz|refinish"], opt: ["tub", "bathtub", "bath"], not: ["sink", "lavatory", "basin", "tile", "wall"] }, { req: ["reglaz|glaz|refinish"], opt: ["sink", "lavatory", "basin", "lav"], not: ["tub", "bathtub", "tile", "wall"] }]),
   S("reglaze_tub", "Bathroom", "Reglaze tub", ["reglaze tub", "tub reglaze", "glaze tub", "tub glaze", "reglaze bathtub", "tub"], L(CODE.tub), [{ req: ["reglaz|glaz|refinish"], opt: ["tub", "bathtub", "bath"], not: ["sink", "lavatory", "basin", "tile", "wall"] }]),
   S("reglaze_sink", "Bathroom", "Reglaze sink", ["reglaze sink", "sink reglaze", "glaze sink", "reglaze lavatory"], L(CODE.sink), [{ req: ["reglaz|glaz|refinish"], opt: ["sink", "lavatory", "basin", "lav"], not: ["tub", "bathtub", "tile", "wall"] }]),
-  S("lav_sink", "Bathroom", "Bathroom sink (lavatory)", ["bathroom sink", "lavatory", "lav", "lav sink", "basin", "new sink", "sink"], H(2), [{ req: ["lavatory|sink|basin"], opt: ["bathroom", "bath", "wall", "hung", "replace"] }]),
-  S("bath_tile_wall", "Bathroom", "Bathroom wall tile", ["wall tile", "bathroom tile", "bath tile", "ceramic tile"], H(0.5), [{ req: ["tile"], opt: ["wall", "ceramic", "bathroom", "bath"] }]),
-  S("bath_tile_floor", "Bathroom", "Bathroom floor tile", ["bathroom floor tile", "bath floor", "floor tile bathroom"], H(0.5), [{ req: ["tile"], opt: ["floor", "ceramic", "bathroom", "bath"] }]),
+  S("lav_sink", "Bathroom", "Bathroom sink (lavatory)", ["bathroom sink", "lavatory", "lav", "lav sink", "basin", "new sink", "sink"], B(2), [{ req: ["lavatory|sink|basin"], opt: ["bathroom", "bath", "wall", "hung", "replace"] }]),
+  S("bath_tile_wall", "Bathroom", "Bathroom wall tile", ["wall tile", "bathroom tile", "bath tile", "ceramic tile"], B(0.5), [{ req: ["tile"], opt: ["wall", "ceramic", "bathroom", "bath"] }]),
+  S("bath_tile_floor", "Bathroom", "Bathroom floor tile", ["bathroom floor tile", "bath floor", "floor tile bathroom"], B(0.5), [{ req: ["tile"], opt: ["floor", "ceramic", "bathroom", "bath"] }]),
   // walls, ceilings, floors
   S("plaster", "Walls & floors", "Plaster patch", ["plaster", "plaster patch", "patch", "skim", "skim coat", "plastering"], H(1), [{ req: ["plaster"], opt: ["patch", "repair", "skim", "wall", "ceiling"] }]),
   S("sheetrock", "Walls & floors", "Sheetrock patch", ["sheetrock", "drywall", "sheetrock patch", "gypsum"], H(1), [{ req: ["sheetrock|drywall|gypsum"], opt: ["patch", "repair", "replace"] }]),
@@ -136,12 +142,12 @@ export const SEED_ITEMS: SurveyItem[] = [
   S("door_paint", "Walls & floors", "Paint door", ["door paint", "paint door", "paint doors", "door painting", "doors paint"], H(1), [{ req: ["paint"], opt: ["door", "interior", "both", "sides"], not: ["entire", "apartment", "bedroom", "studio", "room", "entrance", "metal", "radiator", "cabinet", "window"] }]),
   S("entrance_door_paint", "Walls & floors", "Paint apartment door", ["apartment door paint", "paint apartment door", "entrance door paint", "paint entrance door", "metal door paint", "front door paint"], H(1.5), [{ req: ["paint"], opt: ["entrance", "apartment", "metal", "door", "entry", "steel"], not: ["entire", "bedroom", "studio", "room", "interior", "radiator", "cabinet", "window"] }]),
   S("floor_wax", "Walls & floors", "Strip and wax floor", ["wax", "wax floor", "strip and wax", "strip and wax floor", "floor wax", "strip wax", "strip", "waxing"], H(4), [{ req: ["wax"], opt: ["strip", "floor", "seal", "buff"], not: ["ring", "toilet", "seal ring"] }]),
-  S("floor_tile", "Walls & floors", "Floor tile (VCT)", ["floor tile", "vct", "tile floor", "vinyl tile", "floor tiles"], H(0.05), [{ req: ["tile|vct"], opt: ["floor", "vct", "vinyl", "composition"] }]),
-  S("cove_base", "Walls & floors", "Cove base / baseboard", ["cove base", "base", "baseboard", "base molding", "vinyl base"], H(0.05), [{ req: ["base|baseboard"], opt: ["cove", "vinyl", "molding", "rubber"] }]),
-  S("window_sill", "Walls & floors", "Window sill", ["sill", "window sill", "sills"], H(1), [{ req: ["sill"], opt: ["window", "marble", "replace"] }]),
-  S("radiator_cover", "Walls & floors", "Radiator cover", ["radiator cover", "radiator covers", "rad cover"], H(1), [{ req: ["radiator"], opt: ["cover", "enclosure"] }]),
-  S("radiator_valve", "Walls & floors", "Radiator valve", ["radiator valve", "steam valve", "valve"], H(1), [{ req: ["valve"], opt: ["radiator", "steam", "air"] }]),
-  S("mailbox", "Doors", "Mailbox lock", ["mailbox", "mailbox lock", "mail box"], H(0.5), [{ req: ["mailbox|mail"], opt: ["lock", "box"] }]),
+  S("floor_tile", "Walls & floors", "Floor tile (VCT)", ["floor tile", "vct", "tile floor", "vinyl tile", "floor tiles"], B(0.05), [{ req: ["tile|vct"], opt: ["floor", "vct", "vinyl", "composition"] }]),
+  S("cove_base", "Walls & floors", "Cove base / baseboard", ["cove base", "base", "baseboard", "base molding", "vinyl base"], B(0.05), [{ req: ["base|baseboard"], opt: ["cove", "vinyl", "molding", "rubber"] }]),
+  S("window_sill", "Walls & floors", "Window sill", ["sill", "window sill", "sills"], B(1), [{ req: ["sill"], opt: ["window", "marble", "replace"] }]),
+  S("radiator_cover", "Walls & floors", "Radiator cover", ["radiator cover", "radiator covers", "rad cover"], B(1), [{ req: ["radiator"], opt: ["cover", "enclosure"] }]),
+  S("radiator_valve", "Walls & floors", "Radiator valve", ["radiator valve", "steam valve", "valve"], B(1), [{ req: ["valve"], opt: ["radiator", "steam", "air"] }]),
+  S("mailbox", "Doors", "Mailbox lock", ["mailbox", "mailbox lock", "mail box"], B(0.5), [{ req: ["mailbox|mail"], opt: ["lock", "box"] }]),
 ];
 
 // ---- words ----
@@ -409,11 +415,11 @@ export function billSurvey(read: ReadItem[], catalog: CatalogLine[]): Billed {
       continue;
     }
     if ("size" in b) continue; // the apartment size bills nothing
-    // the book's own line for it, when the book has one — the release's main
-    // lines come first on the sheet, these after; hours when there is none.
-    // The release's own lines are never found by keyword: "Re-glazing work
-    // for sink" is not a new sink
-    const own = bookLines(seed, rest);
+    // a material item: the book's own line for it, when the book has one —
+    // the release's main lines come first on the sheet, these after. The
+    // release's own lines are never found by keyword: "Re-glazing work for
+    // sink" is not a new sink. A small job is hours, whatever the book prices.
+    const own = b.book ? bookLines(seed, rest) : [];
     if (own.length) {
       for (const { line, per } of own) {
         const c = other.get(line.code) || { qty: 0, labels: [] };

@@ -10,7 +10,8 @@ import Stamp from "@/components/Stamp";
 import { LineItem, Org, nextNumber, grandTotal, localISO } from "@/lib/docs";
 import type { Contract } from "@/lib/types";
 import ContractPicker, { contractLabel } from "@/components/ContractPicker";
-import { DEFAULT_CAP, sheetTotal, splitToCap, type SheetLine } from "@/lib/surveyTemplate";
+import Modal from "@/components/Modal";
+import { DEFAULT_CAP, sheetTotal, type SheetLine } from "@/lib/surveyTemplate";
 import type { SmartSurvey } from "@/lib/smartSurvey";
 import { useLive } from "@/lib/useLive";
 import PrintShell from "@/components/PrintShell";
@@ -196,7 +197,38 @@ export default function Proposals() {
     if (!surveyContract()) { flash("Pick a contract in the dropdown first — the survey bills that contract's lines"); return; }
     surveyRef.current?.click();
   };
-  type SurveySheet = { job: string; lines: SheetLine[]; total: number };
+  // what a survey read into, waiting to become the sheet
+  type SurveyPlan = { cid: string; file: string; who: string; sv: SmartSurvey; lines: SheetLine[]; unmatched: string[]; note?: string; catalog: ContractItem[] };
+  const [trim, setTrim] = useState<{ plan: SurveyPlan; off: Set<string> } | null>(null); // over the cap: which lines come off
+  const planWhere = (sv: SmartSurvey) => [sv.address, sv.apt && `Apt ${sv.apt}`].filter(Boolean).join(" ");
+  // one walk sheet from the plan — the lines left off go in its notes, so nothing is forgotten
+  const makeSheet = async (plan: SurveyPlan, keep: SheetLine[], off: SheetLine[]) => {
+    const total = sheetTotal(keep);
+    const byCode = new Map(plan.catalog.map((c) => [c.code, c]));
+    const noteLines = [
+      `✓ ${plan.who} from the survey PDF (${plan.file})`,
+      ...(plan.unmatched.length ? [`⚠ No price-book line for: ${plan.unmatched.join("; ")}`] : []),
+      ...(off.length ? [`✂ Left off to stay under ${fmt(DEFAULT_CAP)}: ${off.map((l) => `${l.label} (${fmt(l.qty * l.unit_price)})`).join("; ")}`] : []),
+    ];
+    const number = await nextNumber("proposals", "PROP");
+    const qty_map: Record<string, number> = {};
+    keep.forEach((l) => { qty_map[l.code] = (qty_map[l.code] || 0) + l.qty; });
+    const { data, error: pe } = await sb().from("proposals").insert({
+      number, client_name: "New York City Housing Authority", contract_id: plan.cid,
+      job: plan.sv.kind || "Move-out", address: plan.sv.address, apt: plan.sv.apt, walk_date: localISO(), qty_map, total, notes: noteLines.join("\n"),
+    }).select().single();
+    if (pe || !data) { flash(upgradeHint(pe?.message || "Couldn't make the walk sheet")); return; }
+    const pid = (data as Proposal).id;
+    const full = keep.map((l, i) => ({ proposal_id: pid, code: l.code, description: l.description, unit: l.uom, qty: l.qty, unit_price: l.unit_price, sort: i, category: byCode.get(l.code)?.category || "", line: l.line }));
+    let { error: ie } = await sb().from("proposal_items").insert(full);
+    if (ie && /column/i.test(ie.message)) ({ error: ie } = await sb().from("proposal_items").insert(full.map(({ category: _c, line: _l, ...rest }) => rest)));
+    if (ie) flash(ie.message);
+    await load();
+    pickListContract(plan.cid);
+    setTrim(null);
+    flash(`Walk sheet ${number} made — ${fmt(total)}${off.length ? ` · ${off.length} line${off.length === 1 ? "" : "s"} left off (in the notes)` : ""} — check the counts`);
+    openEditor(data as Proposal); // straight onto the sheet, counts in view
+  };
   const handleSurveyPdf = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -227,56 +259,22 @@ export default function Proposals() {
         for (const l of real) {
           const c = byCode.get(l.code)!;
           const at = lines.find((x) => x.code === c.code);
-          if (at) at.qty += l.qty;
+          if (at) { at.qty += l.qty; if (!at.label.includes(it.written)) at.label = `${at.label} + ${it.written}`; }
           else lines.push({ code: c.code, qty: l.qty, unit_price: Number(c.unit_price) || 0, description: c.description, itemKey: String(i), label: it.written, uom: c.uom, line: c.line });
         }
       });
       if (lines.length === 0) { flash(`Nothing on that survey matched the price book${out.note ? ` — ${out.note}` : ""}`); return; }
       const total = sheetTotal(lines);
-      const kind = sv.kind || "Move-out";
-      const where = [sv.address, sv.apt && `Apt ${sv.apt}`].filter(Boolean).join(" ");
-      // over what a super will sign? the last things written wait on a second sheet
-      let cap = 0;
-      if (total > DEFAULT_CAP) {
-        const typed = window.prompt(`${where || "This survey"} comes to ${fmt(total)} — over ${fmt(DEFAULT_CAP)}.\n\nKeep the first sheet under $ (the rest goes on a second sheet). Leave it blank for one sheet.`, String(DEFAULT_CAP));
-        if (typed === null) return;
-        cap = Number(typed.replace(/[^0-9.]/g, "")) || 0;
-      }
-      const order = sv.items.map((_, i) => String(i));
-      const split = splitToCap(lines, cap, order);
-      const sheets: SurveySheet[] = split.rest.length > 0
-        ? [{ job: `${kind} (1 of 2)`, lines: split.first, total: sheetTotal(split.first) }, { job: `${kind} (2 of 2)`, lines: split.rest, total: sheetTotal(split.rest) }]
-        : [{ job: kind, lines, total }];
       const who = out.readBy === "claude" ? "Read by Claude" : "Read by the rules";
+      const plan: SurveyPlan = { cid, file: file.name, who, sv, lines, unmatched, note: out.note, catalog };
+      // over what a super will sign: the owner picks the lines that come off
+      if (total > DEFAULT_CAP) { setTrim({ plan, off: new Set() }); return; }
       const msg = `${who}: ${sv.items.length} lines on the survey → ${lines.length} contract lines, ${fmt(total)}.`
-        + (sheets.length === 2 ? `\n\nTwo walk sheets: ${fmt(sheets[0].total)} now, ${fmt(sheets[1].total)} waits.` : "")
         + (unmatched.length ? `\n\nNO LINE IN THE PRICE BOOK for ${unmatched.length}: ${unmatched.slice(0, 8).join("; ")}${unmatched.length > 8 ? "…" : ""} — add those by hand on the sheet.` : "")
         + (out.note ? `\n\n⚠ ${out.note}` : "")
-        + `\n\nMake the walk sheet${sheets.length === 2 ? "s" : ""} for ${where || "this survey"}?`;
+        + `\n\nMake the walk sheet for ${planWhere(sv) || "this survey"}?`;
       if (!window.confirm(msg)) return;
-      const noteLines = [`✓ ${who} from the survey PDF (${file.name})`, ...(unmatched.length ? [`⚠ No price-book line for: ${unmatched.join("; ")}`] : [])];
-      const made: Proposal[] = [];
-      for (const sh of sheets) {
-        const number = await nextNumber("proposals", "PROP");
-        const qty_map: Record<string, number> = {};
-        sh.lines.forEach((l) => { qty_map[l.code] = (qty_map[l.code] || 0) + l.qty; });
-        const { data, error: pe } = await sb().from("proposals").insert({
-          number, client_name: "New York City Housing Authority", contract_id: cid,
-          job: sh.job, address: sv.address, apt: sv.apt, walk_date: localISO(), qty_map, total: sh.total, notes: noteLines.join("\n"),
-        }).select().single();
-        if (pe || !data) { flash(upgradeHint(pe?.message || "Couldn't make the walk sheet")); break; }
-        const pid = (data as Proposal).id;
-        const full = sh.lines.map((l, i) => ({ proposal_id: pid, code: l.code, description: l.description, unit: l.uom, qty: l.qty, unit_price: l.unit_price, sort: i, category: byCode.get(l.code)?.category || "", line: l.line }));
-        let { error: ie } = await sb().from("proposal_items").insert(full);
-        if (ie && /column/i.test(ie.message)) ({ error: ie } = await sb().from("proposal_items").insert(full.map(({ category: _c, line: _l, ...rest }) => rest)));
-        if (ie) flash(ie.message);
-        made.push(data as Proposal);
-      }
-      await load();
-      if (made.length === 0) return;
-      pickListContract(cid);
-      flash(made.length === 1 ? `Walk sheet ${made[0].number} made — ${fmt(made[0].total || 0)} — check the counts` : `${made.length} walk sheets made: ${made.map((m) => `${m.number} (${fmt(m.total || 0)})`).join(" and ")}`);
-      openEditor(made[0]); // straight onto the sheet, counts in view
+      await makeSheet(plan, lines, []);
     } catch (err) {
       flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
     } finally { setSurveyBusy(false); }
@@ -849,6 +847,44 @@ export default function Proposals() {
         </div>
       </div>
       <input ref={surveyRef} type="file" accept="application/pdf,.pdf" className="hidden" onChange={handleSurveyPdf} />
+      {trim && (() => {
+        const { plan, off } = trim;
+        const keep = plan.lines.filter((l) => !off.has(l.code));
+        const now = sheetTotal(keep);
+        const over = now - DEFAULT_CAP;
+        return (
+          <Modal wide title={`Over ${fmt(DEFAULT_CAP)}`} onClose={() => setTrim(null)}
+            footer={<div className="flex flex-wrap items-center justify-between gap-2">
+              <span className={`font-mono text-base font-semibold ${over > 0 ? "text-alert" : "text-ok"}`}>{fmt(now)} {over > 0 ? `· still ${fmt(over)} over` : "· under ✓"}</span>
+              <div className="flex gap-2">
+                <button className="btn btn-ghost" onClick={() => setTrim(null)}>Cancel</button>
+                <button className="btn btn-primary" disabled={over > 0 || keep.length === 0 || surveyBusy} title={over > 0 ? "Take more off first" : ""}
+                  onClick={async () => { setSurveyBusy(true); try { await makeSheet(plan, keep, plan.lines.filter((l) => off.has(l.code))); } finally { setSurveyBusy(false); } }}>
+                  {surveyBusy ? "Making…" : "Make the walk sheet"}
+                </button>
+              </div>
+            </div>}>
+            <div className="mb-2 text-[13px] text-inksoft">
+              <b className="text-ink">{planWhere(plan.sv) || "This survey"}</b> comes to <b className="text-ink">{fmt(sheetTotal(plan.lines))}</b> — {fmt(sheetTotal(plan.lines) - DEFAULT_CAP)} over what a super will sign.
+              Tick what comes off; it's written in the sheet's notes so it isn't forgotten.
+            </div>
+            <div className="divide-y divide-rulesoft rounded-sm border border-rulesoft">
+              {plan.lines.map((l) => (
+                <label key={l.code} className={`flex min-h-[44px] cursor-pointer items-center gap-3 px-3 py-2 ${off.has(l.code) ? "bg-alert/5 line-through opacity-70" : ""}`}>
+                  <input type="checkbox" className="h-5 w-5 shrink-0" checked={off.has(l.code)} onChange={(e) => { const next = new Set(off); if (e.target.checked) next.add(l.code); else next.delete(l.code); setTrim({ plan, off: next }); }} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[14px] font-semibold">{l.label}</span>
+                    <span className="block truncate text-[12px] text-inksoft">#{l.line} {l.description} · {l.qty} × {fmt(l.unit_price)}</span>
+                  </span>
+                  <span className="shrink-0 font-mono text-[14px] font-semibold">{fmt(l.qty * l.unit_price)}</span>
+                </label>
+              ))}
+            </div>
+            {plan.unmatched.length > 0 && <div className="mt-2 text-[12px] text-alert">⚠ No price-book line for: {plan.unmatched.join("; ")} — add those by hand on the sheet.</div>}
+            {plan.note && <div className="mt-1 text-[12px] text-alert">⚠ {plan.note}</div>}
+          </Modal>
+        );
+      })()}
       {pickOpen && (
         <div className="card mb-3 border-work p-4">
           <div className="mb-2 text-[11px] uppercase tracking-widest text-inksoft">Which contract is this walk for?</div>

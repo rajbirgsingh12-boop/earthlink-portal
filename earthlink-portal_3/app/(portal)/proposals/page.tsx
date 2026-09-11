@@ -901,10 +901,11 @@ export default function Proposals() {
             <div className="mb-2 text-[13px] text-inksoft">
               <b className="text-ink">{planWhere(plan.sv) || "This survey"}</b> — {plan.who}, {plan.sv.items.length} line{plan.sv.items.length === 1 ? "" : "s"} read, <b className="text-ink">{fmt(sheetTotal(plan.lines))}</b>{over > 0 ? <> — <b className="text-alert">{fmt(sheetTotal(plan.lines) - DEFAULT_CAP)} over</b> what a super will sign</> : null}.
               Tick anything that comes off; it's written in the sheet's notes so it isn't forgotten.
+              {plan.hours.some((h) => h.also) ? " A job the price book also prices is on the list twice — as its hours and as the book's line — so tick off the one that doesn't apply." : ""}
             </div>
             <div className="divide-y divide-rulesoft rounded-sm border border-rulesoft">
-              {plan.lines.filter((l) => l.itemKey !== LABOR_KEY).map((l) => row(l.code, l.label, `#${l.line} ${l.description} · ${l.qty} × ${fmt(l.unit_price)}`, fmt(l.qty * l.unit_price)))}
-              {plan.hours.map((h, i) => row(HOUR_KEY(i), h.written, `${h.label} · General Laborer hours`, `${h.hours}h`))}
+              {plan.lines.filter((l) => l.itemKey !== LABOR_KEY).map((l) => row(l.code, l.label, `#${l.line} ${l.description} · ${l.qty} × ${fmt(l.unit_price)}${l.alsoHours ? " · ALSO IN THE HOURS BELOW — keep one" : ""}`, fmt(l.qty * l.unit_price)))}
+              {plan.hours.map((h, i) => row(HOUR_KEY(i), h.written, `${h.label} · General Laborer hours${h.also ? ` · ALSO LINE #${plan.lines.find((l) => l.code === h.also)?.line ?? h.also} ABOVE — keep one` : ""}`, `${h.hours}h`))}
               {plan.labor && a.hourTotal > 0 && (
                 <div className="flex min-h-[44px] items-center gap-3 bg-paper px-3 py-2">
                   <span className="h-5 w-5 shrink-0" />

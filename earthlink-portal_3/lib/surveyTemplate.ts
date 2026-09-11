@@ -11,13 +11,14 @@
 // its aliases (the ways it gets written), and billed the way our move-out
 // releases bill it (lib/moveoutRelease.ts): the release's own line for the
 // ten things it has one for, General Laborer hours for the small jobs
-// (locks, guards, the toilet, a wax — the release put those in hours even
-// though the contract prices them), and for the material items the release
-// never covered (floor tile, cove base, cabinets, doors, a new sink) the
-// contract's own line when the price book has one, hours when it doesn't.
-// The hours are the going rate for each job — a lock is half an hour, a
-// floor wax four — added up and rounded up to the hour; the owner adjusts
-// the count on the sheet like any other line.
+// (locks, guards, the toilet, a wax — the release put those in hours), and
+// for the material items the release never covered (floor tile, cove base,
+// cabinets, doors, a new sink) the contract's own line when the price book
+// has one, hours when it doesn't. A small job the book also prices is
+// offered both ways — its hours and the book's line, marked as a pair —
+// and the owner ticks off the one that doesn't apply. The hours are the
+// going rate for each job — a lock is half an hour, a floor wax four —
+// added up and rounded up to the hour.
 //
 // Nothing here touches the database: pure functions over text and the
 // contract's price book.
@@ -355,11 +356,12 @@ export function parseSurvey(text: string, items: SurveyItem[] = SEED_ITEMS): Par
 }
 
 // ---- from counts to the release's lines ----
-export interface SheetLine { code: string; qty: number; unit_price: number; description: string; itemKey: string; label: string; uom: string; line: number; category?: string }
+export interface SheetLine { code: string; qty: number; unit_price: number; description: string; itemKey: string; label: string; uom: string; line: number; category?: string; alsoHours?: boolean }
 // one written item, read: what it is (its key on the list — "" when nothing on
 // the list is it), the count, and the reader's note
 export interface ReadItem { written: string; qty: number; key: string; note?: string | null; implied?: boolean }
-export interface HourPart { key: string; label: string; written: string; qty: number; hours: number }
+// `also`: the book prices this job too — that line is on the sheet as well, one of the two comes off
+export interface HourPart { key: string; label: string; written: string; qty: number; hours: number; also?: string }
 export interface Billed {
   lines: SheetLine[];     // the release's lines first, in its order; the book's other lines; the laborer hours last
   hours: HourPart[];      // what the hours are for, one part per item
@@ -429,7 +431,7 @@ export function billSurvey(read: ReadItem[], catalog: CatalogLine[]): Billed {
   const byCode = new Map(catalog.map((c) => [c.code, c]));
   const rest = catalog.filter((c) => !releaseLine(c.code));
   const count = new Map<string, { qty: number; labels: string[] }>();  // the release's lines
-  const other = new Map<string, { qty: number; labels: string[] }>();  // the book's other lines
+  const other = new Map<string, { qty: number; labels: string[]; pair: boolean }>();  // the book's other lines; `pair`: also in the hours
   const hours: HourPart[] = [];
   const unmatched: ReadItem[] = [];
   for (const it of items) {
@@ -445,20 +447,21 @@ export function billSurvey(read: ReadItem[], catalog: CatalogLine[]): Billed {
       continue;
     }
     if ("size" in b) continue; // the apartment size bills nothing
-    // a material item: the book's own line for it, when the book has one —
-    // the release's main lines come first on the sheet, these after. The
-    // release's own lines are never found by keyword: "Re-glazing work for
-    // sink" is not a new sink. A small job is hours, whatever the book prices.
-    const own = b.book ? bookLines(seed, rest) : [];
-    if (own.length) {
-      for (const { line, per } of own) {
-        const c = other.get(line.code) || { qty: 0, labels: [] };
-        c.qty += it.qty * per; if (!c.labels.includes(it.written)) c.labels.push(it.written);
-        other.set(line.code, c);
-      }
-      continue;
+    // the book's own line for it, when the book has one — the release's main
+    // lines come first on the sheet, these after. The release's own lines are
+    // never found by keyword: "Re-glazing work for sink" is not a new sink.
+    // A material item is that line (hours only when there is none); a small
+    // job is hours, and the book's line as well when it prices the job —
+    // marked as a pair, for the owner to tick one off.
+    const own = bookLines(seed, rest);
+    for (const { line, per } of own) {
+      const c = other.get(line.code) || { qty: 0, labels: [], pair: false };
+      c.qty += it.qty * per; if (!c.labels.includes(it.written)) c.labels.push(it.written);
+      if (!b.book) c.pair = true;
+      other.set(line.code, c);
     }
-    hours.push({ key: seed.key, label: seed.label, written: it.written, qty: it.qty, hours: Math.round(it.qty * b.hours * 100) / 100 });
+    if (b.book && own.length) continue;
+    hours.push({ key: seed.key, label: seed.label, written: it.written, qty: it.qty, hours: Math.round(it.qty * b.hours * 100) / 100, ...(own.length ? { also: own[0].line.code } : {}) });
   }
   const lineFor = (code: string, qty: number, label: string, itemKey: string): SheetLine | null => {
     const c = byCode.get(code), r = releaseLine(code);
@@ -480,7 +483,7 @@ export function billSurvey(read: ReadItem[], catalog: CatalogLine[]): Billed {
     const at = lines.find((l) => l.code === code);
     if (at) { at.qty += c.qty; at.label = `${at.label} + ${c.labels.join(" + ")}`; continue; } // a release line the book matched on its own
     const l = lineFor(code, c.qty, c.labels.join(" + "), code);
-    if (l) lines.push(l);
+    if (l) lines.push(c.pair ? { ...l, alsoHours: true } : l);
   }
   const hourTotal = Math.ceil(hours.reduce((s, h) => s + h.hours, 0) - 1e-9);
   if (hourTotal > 0) {

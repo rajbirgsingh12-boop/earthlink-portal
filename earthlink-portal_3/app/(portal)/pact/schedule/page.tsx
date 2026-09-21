@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { sb } from "@/lib/supabase";
 import { myProfile } from "@/lib/profile";
@@ -7,11 +7,14 @@ import { useLive } from "@/lib/useLive";
 import { localISO, prettyDate } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
 import PageHeader from "@/components/PageHeader";
+import ActionMenu from "@/components/ActionMenu";
 import JobDates, { lastNote } from "@/components/JobDates";
 import Calendar, { type CalEvent, type CalView } from "@/components/Calendar";
 import CrewPanel from "@/components/CrewPanel";
-import { CAL_JOB_COLS, CREW_JOB_COLS, crewLine, crewMessage, crewState, offCalendar, rowsOfJob, type CrewRow, type Worker } from "@/lib/pactCrew";
+import { CAL_JOB_COLS, CREW_JOB_COLS, crewLine, crewMessage, crewState, offCalendar, rowsOfJob, siteOf, type CrewRow, type Worker } from "@/lib/pactCrew";
 import { textRows, stampRows } from "@/lib/notify";
+import { intakePoFile, addJobByHand } from "@/lib/pactIntake";
+import { loadPrices } from "@/lib/priceBook";
 
 // the job as the calendar reads it — CAL_JOB_COLS, never the money
 interface Job {
@@ -22,11 +25,20 @@ interface Job {
 type DayRow = CrewRow;
 type Emp = Worker;
 const appendNote = (notes: string | null | undefined, line: string) => `${(notes || "").trim()}${(notes || "").trim() ? "\n" : ""}${line}`;
+// the job's name on this tab: its PO number, the way the office and the partners say it
+const poOf = (j: Job) => (j.po_number || j.job_number || "").trim();
+const poLabel = (j: Job) => (poOf(j) ? `PO ${poOf(j)}` : "Job");
+// "PO 116843" before "PO 116850", never "PO 9" after "PO 10"
+const byPo = (a: Job, b: Job) => poOf(a).localeCompare(poOf(b), undefined, { numeric: true });
+const BLANK = { partner: "", po: "", address: "", apt: "", description: "", day: "" };
 
 // The PACT calendar: every PACT job on the day its PO names, or the day you
-// give it here. Nothing else on it — NYCHA crews have their own Schedule tab.
-// A priced job (the lines add up to more than the price list filled in on
-// its own) drops off once its day has passed.
+// give it here — named by its PO number, and moved by dragging it to another
+// day. POs come in here too (upload the PDF, or type one in), the same way
+// they do on the Billing tab, so the schedule is one place. Nothing else is
+// on it — NYCHA crews have their own Schedule tab. A priced job (the lines
+// add up to more than the price list filled in on its own) drops off once
+// its day has passed.
 export default function PactCalendar() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [dayRows, setDayRows] = useState<DayRow[]>([]);
@@ -35,7 +47,7 @@ export default function PactCalendar() {
   const [role, setRole] = useState("");
   const canEdit = role === "admin" || role === "office";
   const [msg, setMsg] = useState("");
-  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
+  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3500); };
   const [view, setView] = useState<CalView>("month");
   const [anchor, setAnchor] = useState(localISO(new Date()));
   const [selected, setSelected] = useState(localISO(new Date()));
@@ -43,6 +55,11 @@ export default function PactCalendar() {
   const [crewOpen, setCrewOpen] = useState<string | null>(null);
   // "+ Put a job on this day" — what's being typed
   const [addQ, setAddQ] = useState("");
+  // a PO coming in: the PDF picker, the by-hand form, and the wait
+  const poRef = useRef<HTMLInputElement>(null);
+  const [handOpen, setHandOpen] = useState(false);
+  const [draft, setDraft] = useState({ ...BLANK });
+  const [busy, setBusy] = useState(false);
   const today = localISO(new Date());
 
   const load = async () => {
@@ -101,28 +118,107 @@ export default function PactCalendar() {
     flash(out.message);
     await load();
   };
+  // the calendar jumps to a day and opens it
+  const goTo = (iso: string) => { setAnchor(iso); setSelected(iso); setAddQ(""); };
   // a job with no day (or the wrong one) put on the selected day by hand
   const putOnDay = async (j: Job, iso: string) => {
     const was = (j.start_date || "").trim();
     const line = was ? `📅 Moved to ${prettyDate(iso)} from the calendar (was ${prettyDate(was)})` : `📅 Put on the calendar for ${prettyDate(iso)}`;
     if (!(await save(j, { start_date: iso, notes: appendNote(j.notes, line) }))) return; // the page said why; the search stays
     setAddQ("");
-    flash(`${j.po_number || j.job_number ? `PO ${j.po_number || j.job_number}` : "Job"} is on ${prettyDate(iso)} — now pick who's going`);
+    flash(`${poLabel(j)} is on ${prettyDate(iso)} — now pick who's going`);
+  };
+  // a PO dragged to another day on the calendar itself. The crew rows follow
+  // (RUN_ME section 14's trigger) and show as needing the new day; a crew
+  // that was already told is offered a text right here.
+  const dragMove = async (e: CalEvent, iso: string) => {
+    const j = jobs.find((x) => `pact:${x.id}` === e.id);
+    if (!j || !canEdit) return;
+    const was = (j.start_date || "").trim();
+    if (was === iso) return;
+    const line = `📅 Moved to ${prettyDate(iso)} on the calendar${was ? ` (was ${prettyDate(was)})` : ""}`;
+    if (!(await save(j, { start_date: iso, notes: appendNote(j.notes, line) }))) return;
+    setSelected(iso);
+    const crew = rowsOfJob(dayRows, j);
+    const told = crew.filter((r) => r.texted).map((r) => emps.find((x) => x.id === r.employee_id)?.name.split(" ")[0] || "").filter(Boolean);
+    if (told.length) {
+      // the confirm waits a beat so the bar is seen landing first
+      setTimeout(() => { if (window.confirm(`${poLabel(j)} moved to ${prettyDate(iso)}. Text ${told.join(", ")} the new day?`)) void textMove(j, was, iso); }, 60);
+    } else flash(`${poLabel(j)} moved to ${prettyDate(iso)}${crew.length ? " — the crew still needs the new day" : ""}`);
+  };
+
+  // ---- POs coming in ----
+  const priceBook = async () => (await loadPrices()).items;
+  const handlePo = async (ev: React.ChangeEvent<HTMLInputElement>) => {
+    const file = ev.target.files?.[0];
+    ev.target.value = "";
+    if (!file || !canEdit) return;
+    setBusy(true);
+    try {
+      const out = await intakePoFile(file, priceBook);
+      if (out.kind === "release") { flash("That's a NYCHA blanket release — upload it on the Releases tab (Import release PDFs). PACT only takes partner POs and proposal letters."); return; }
+      if (out.kind === "error") { flash(/relation|column|schema/i.test(out.message) ? "Database needs the upgrade — run supabase/RUN_ME.sql" : out.message); return; }
+      await load();
+      const label = out.po ? `PO ${out.po}` : "That PO";
+      if (out.kind === "dupe") {
+        const j = jobs.find((x) => x.id === out.id);
+        const day = out.moved ? out.movedTo : j?.start_date;
+        if (day) goTo(day);
+        flash(out.moved ? `${label} is already here — the new PO moves it to ${prettyDate(out.movedTo!)}` : `${label} is already here${out.canceled ? " (canceled)" : ""}${day ? ` — on ${prettyDate(day)}` : " — it has no day yet"}; nothing new was created`);
+        return;
+      }
+      const who = out.isDocx ? "our letter" : out.readBy === "claude" ? "read by Claude" : `⚠ read by the rules${out.readNote ? ` (${out.readNote})` : ""}`;
+      if (out.accessDate) { goTo(out.accessDate); flash(`${label} — ${who} · on the calendar for ${prettyDate(out.accessDate)} — now pick who's going${out.attachError ? ` (the PDF didn't attach: ${out.attachError})` : ""}`); }
+      else {
+        // no day on the PO: it is first in the "+ Put a job on…" box, one tap from a day
+        setAddQ(out.po || "");
+        flash(out.unreadable
+          ? `PDF attached, but no text could be read (scanned copy?) — the job is here with no name; fill it in on the Billing tab, or put it on a day below`
+          : `${label} — ${who} · no date on the PO — it's in the "+ Put a job on…" box below, tap it to put it on ${prettyDate(selected)}`);
+      }
+    } catch (err) {
+      flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
+    } finally { setBusy(false); }
+  };
+  const addByHand = async () => {
+    if (!draft.partner.trim() || !draft.po.trim()) { flash("The partner and the PO number are the minimum"); return; }
+    setBusy(true);
+    try {
+      const out = await addJobByHand({
+        partner: draft.partner, job_number: draft.po, description: draft.description || `PO ${draft.po.trim()}`, address: draft.address, property_unit: draft.apt,
+        start_date: draft.day || undefined, notes: draft.day ? `📅 Put on the calendar for ${prettyDate(draft.day)} when it was typed in` : "",
+      });
+      if (out.kind === "error") { flash(/relation|column|schema/i.test(out.message) ? "Database needs the upgrade — run supabase/RUN_ME.sql" : out.message); return; }
+      await load();
+      if (out.kind === "dupe") {
+        if (out.start_date) goTo(out.start_date);
+        flash(`PO ${draft.po.trim()} is already here${out.canceled ? " (canceled)" : ""}${out.start_date ? ` — on ${prettyDate(out.start_date)}` : " — it has no day yet"}; nothing new was created`);
+        return;
+      }
+      const day = draft.day;
+      setDraft({ ...BLANK }); setHandOpen(false);
+      if (day) { goTo(day); flash(`PO ${draft.po.trim()} added on ${prettyDate(day)} — now pick who's going`); }
+      else { setAddQ(draft.po.trim()); flash(`PO ${draft.po.trim()} added with no day — tap it in the "+ Put a job on…" box below`); }
+    } finally { setBusy(false); }
   };
 
   // what the calendar holds: not canceled, not priced-and-past
   const live = jobs.filter((j) => !offCalendar(j, today));
-  const hit = (j: Job) => !q.trim() || `${j.partner} ${j.po_number || j.job_number} ${j.address || ""} ${j.description}`.toLowerCase().includes(q.trim().toLowerCase());
+  const hit = (j: Job) => !q.trim() || `${j.partner} ${poOf(j)} ${j.address || ""} ${j.property_unit || ""} ${j.description}`.toLowerCase().includes(q.trim().toLowerCase());
   const list = live.filter(hit);
   const undated = live.filter((j) => !(j.start_date || "").trim() && !j.work_done);
+  // the search's own answer: every PO that matches, on the calendar or not
+  const found = q.trim() ? jobs.filter(hit).sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")) : [];
 
   // ---- everything on the calendar ----
   const events = useMemo<CalEvent[]>(() => list.filter((j) => (j.start_date || "").trim()).map((j) => {
     const crew = rowsOfJob(dayRows, j);
+    const where = [(j.address || j.development || "").split(",")[0], j.property_unit && `Apt ${j.property_unit}`].filter(Boolean).join(" · ");
     return {
       id: `pact:${j.id}`, day: j.start_date!, kind: "pact" as const, done: j.work_done,
-      title: (j.address || j.development || j.partner || "").split(",")[0] + (j.property_unit ? ` · Apt ${j.property_unit}` : ""),
-      subtitle: [j.partner, (j.po_number || j.job_number) && `PO ${j.po_number || j.job_number}`].filter(Boolean).join(" · "),
+      title: poOf(j) ? `PO ${poOf(j)}` : where || j.partner || "Job",
+      short: poOf(j) || (j.address || j.partner || "").split(",")[0],
+      subtitle: [where, j.partner].filter(Boolean).join(" · "),
       people: crew.map((r) => emps.find((e) => e.id === r.employee_id)?.name.split(" ")[0] || "").filter(Boolean),
       flag: crewState(crew, j) === "not_told" ? "crew not told" : undefined,
     };
@@ -132,12 +228,13 @@ export default function PactCalendar() {
     const crew = rowsOfJob(dayRows, j);
     const state = crewState(crew, j);
     const names = crew.map((r) => emps.find((e) => e.id === r.employee_id)?.name.split(" ")[0] || "").filter(Boolean);
+    const site = siteOf(j);
     return (
-      <div key={j.id} className="border-t border-rulesoft p-3.5 first:border-t-0">
+      <div key={j.id} className="border-t border-rulesoft p-3.5 first:border-t-0" data-po-card={poOf(j)}>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
-            <span className="text-[14px] font-semibold">{j.address || j.partner}{j.property_unit ? ` · Apt ${j.property_unit}` : ""}</span>
-            {(j.po_number || j.job_number) && <span className="ml-1.5 font-mono text-xs text-inksoft">PO {j.po_number || j.job_number}</span>}
+            <span className="font-mono text-[15px] font-semibold">{poLabel(j)}</span>
+            {site && <span className="ml-1.5 text-[14px]">{site}</span>}
             <div className="max-w-[520px] truncate text-[11px] text-inksoft">{j.partner}{j.description ? ` · ${j.description}` : ""}</div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -174,20 +271,29 @@ export default function PactCalendar() {
     );
   };
 
+  // a PO's one line in a list: its number, where, whose
+  const poLine = (j: Job) => (
+    <span className="min-w-0 truncate">
+      <span className="font-mono font-semibold">{poLabel(j)}</span>
+      {siteOf(j) && <span className="ml-1.5">{siteOf(j)}</span>}
+      {j.partner && <span className="ml-1.5 text-[11px] text-inksoft">{j.partner}</span>}
+    </span>
+  );
+
   // the Day view and the panel under Month/Week: that day's jobs as cards, and
   // a box to put any other job on the day — the ones with no day yet come
   // first, and a priced job that slipped off the calendar can be put back
   const dayPanel = (iso: string) => {
-    const pact = list.filter((j) => j.start_date === iso);
+    const pact = list.filter((j) => j.start_date === iso).sort((a, b) => Number(!!a.work_done) - Number(!!b.work_done) || byPo(a, b));
     const aq = addQ.trim().toLowerCase();
     const pick = jobs
       .filter((j) => j.start_date !== iso && !j.work_done)
-      .filter((j) => !aq || `${j.partner} ${j.po_number || j.job_number} ${j.address || ""} ${j.property_unit || ""} ${j.description}`.toLowerCase().includes(aq))
+      .filter((j) => !aq || `${j.partner} ${poOf(j)} ${j.address || ""} ${j.property_unit || ""} ${j.description}`.toLowerCase().includes(aq))
       .sort((a, b) => Number(!!(a.start_date || "").trim()) - Number(!!(b.start_date || "").trim()) || (b.created_at || "").localeCompare(a.created_at || ""));
     return (
       <div>
         {pact.length > 0 && <div className="divide-y divide-rulesoft">{pact.map(card)}</div>}
-        {pact.length === 0 && <div className="p-5 text-[13px] text-inksoft">Nothing on {prettyDate(iso)}.{canEdit ? " Put a job on it below, or tap another day." : ""}</div>}
+        {pact.length === 0 && <div className="p-5 text-[13px] text-inksoft">Nothing on {prettyDate(iso)}.{canEdit ? " Put a PO on it below, drag one here from another day, or tap another day." : ""}</div>}
         {canEdit && (
           <div className="border-t border-rulesoft p-3.5">
             <input className="field" placeholder={`+ Put a job on ${prettyDate(iso)} — type a PO #, address or partner…`} value={addQ} onChange={(e) => setAddQ(e.target.value)} />
@@ -195,7 +301,7 @@ export default function PactCalendar() {
               <div className="mt-1 max-h-64 overflow-y-auto rounded-sm border border-rulesoft bg-white">
                 {pick.slice(0, 12).map((j) => (
                   <button key={j.id} type="button" className="flex min-h-[44px] w-full items-center justify-between gap-2 border-b border-rulesoft px-3 py-2.5 text-left text-[13px] last:border-b-0 hover:bg-paper" onClick={() => putOnDay(j, iso)}>
-                    <span className="min-w-0 truncate">{(j.address || j.development || j.partner || "").split(",")[0]}{j.property_unit ? ` · Apt ${j.property_unit}` : ""}{(j.po_number || j.job_number) ? <span className="ml-1.5 font-mono text-[11px] text-inksoft">PO {j.po_number || j.job_number}</span> : null}</span>
+                    {poLine(j)}
                     <span className="shrink-0 text-[11px] text-inksoft">{offCalendar(j, today) ? "priced, off the calendar → put here" : (j.start_date || "").trim() ? `on ${prettyDate(j.start_date)} → move here` : "no day yet → put here"}</span>
                   </button>
                 ))}
@@ -211,16 +317,62 @@ export default function PactCalendar() {
 
   if (!role) return <div className="card p-4 text-sm text-inksoft">Checking your account…</div>;
   const onCal = events.filter((e) => !e.done).length;
+  const field = "field min-h-[44px]";
 
   return (
     <div>
-      <PageHeader title="Schedule" sub={`PACT — ${onCal} job${onCal === 1 ? "" : "s"} on the calendar${undated.length ? ` · ${undated.length} with no day yet` : ""}`}>
+      <PageHeader title="Schedule" sub={`PACT — ${onCal} PO${onCal === 1 ? "" : "s"} on the calendar${undated.length ? ` · ${undated.length} with no day yet` : ""}`}>
+        {canEdit && (
+          <ActionMenu label={busy ? "Reading the PO…" : "+ Add PO"} variant="primary" items={[
+            { label: "📄 Upload a PO (PDF or letter)", title: "A partner PO or one of our proposal letters — read, filed and put on its day", onSelect: () => poRef.current?.click(), disabled: busy },
+            { label: "+ Type one in", title: "The partner, the PO number, the address and the day", onSelect: () => { setHandOpen(!handOpen); setDraft({ ...BLANK, day: selected }); } },
+          ]} />
+        )}
         <Link className="btn btn-ghost min-h-[44px]" href="/pact">🧾 Billing</Link>
       </PageHeader>
-      <input className="field mb-3" placeholder="Search PO #, partner, address…" value={q} onChange={(e) => setQ(e.target.value)} />
+      <input ref={poRef} type="file" accept="application/pdf,.pdf,.docx" className="hidden" onChange={handlePo} />
+      {handOpen && canEdit && (
+        <div className="card mb-3 border-work p-4">
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">A PO, typed in</div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <input className={field} placeholder="Partner (who sent the PO)" value={draft.partner} onChange={(e) => setDraft({ ...draft, partner: e.target.value })} />
+            <input className={`${field} font-mono`} placeholder="PO #" value={draft.po} onChange={(e) => setDraft({ ...draft, po: e.target.value })} />
+            <input className={field} placeholder="Address" value={draft.address} onChange={(e) => setDraft({ ...draft, address: e.target.value })} />
+            <input className={field} placeholder="Apt" value={draft.apt} onChange={(e) => setDraft({ ...draft, apt: e.target.value })} />
+            <input className={`${field} sm:col-span-2`} placeholder="What's the work? (optional)" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
+            <label className="flex items-center gap-2 text-[11px] uppercase tracking-widest text-inksoft">Day
+              <input type="date" className={`${field} font-mono`} value={draft.day} onChange={(e) => setDraft({ ...draft, day: e.target.value })} />
+              {draft.day && <button type="button" className="btn btn-ghost min-h-[36px] px-2 py-1 text-[12px] normal-case tracking-normal" onClick={() => setDraft({ ...draft, day: "" })}>No day yet</button>}
+            </label>
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button className="btn btn-primary" onClick={addByHand} disabled={busy}>Add PO</button>
+            <button className="btn btn-ghost" onClick={() => setHandOpen(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <input className="field mb-1.5" placeholder="Search POs — number, partner, address…" value={q} onChange={(e) => setQ(e.target.value)} />
+      {q.trim() && (
+        <div className="mb-3 max-h-72 overflow-y-auto rounded-sm border border-rulesoft bg-white" data-po-results>
+          {found.slice(0, 20).map((j) => {
+            const day = (j.start_date || "").trim();
+            const tail = j.work_done ? `done ✓${day ? ` · ${prettyDate(day)}` : ""}` : offCalendar(j, today) ? `priced, off the calendar · ${prettyDate(day)}` : day ? `on ${prettyDate(day)} → go there` : canEdit ? `no day yet → put on ${prettyDate(selected)}` : "no day yet";
+            return (
+              <button key={j.id} type="button" className="flex min-h-[44px] w-full items-center justify-between gap-2 border-b border-rulesoft px-3 py-2.5 text-left text-[13px] last:border-b-0 hover:bg-paper"
+                onClick={() => { if (day) { goTo(day); setQ(""); } else if (canEdit) putOnDay(j, selected); }}>
+                {poLine(j)}
+                <span className="shrink-0 text-[11px] text-inksoft">{tail}</span>
+              </button>
+            );
+          })}
+          {found.length === 0 && <div className="px-3 py-2.5 text-[13px] text-inksoft">No PO matches “{q.trim()}”.{canEdit ? " Add it with + Add PO." : ""}</div>}
+          {found.length > 20 && <div className="px-3 py-2 text-[11px] text-inksoft">{found.length - 20} more — type more of the number</div>}
+        </div>
+      )}
 
       <Calendar events={events} view={view} onView={setView} anchor={anchor} onAnchor={(d) => { setAnchor(d); }} selected={selected}
         onSelect={(d) => { setSelected(d); setAddQ(""); if (view !== "day") setAnchor(view === "month" ? anchor : d); }}
+        onMove={canEdit ? dragMove : undefined}
         renderDay={dayPanel} />
 
       {view !== "day" && (

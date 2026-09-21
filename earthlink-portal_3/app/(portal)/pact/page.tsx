@@ -15,6 +15,7 @@ import Modal from "@/components/Modal";
 import Disclosure from "@/components/Disclosure";
 import { useLive } from "@/lib/useLive";
 import { findDupe, DUPE_COLS } from "@/lib/po";
+import { INVOICE_FLOOR, nextInvoiceNo, insertJob, subtotalOf, intakePoFile } from "@/lib/pactIntake";
 import { COMPANY } from "@/lib/company";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
@@ -38,8 +39,6 @@ interface Job {
   // lines have since been priced for real (the calendar drops priced jobs)
   list_subtotal?: number | null; priced?: boolean | null;
 }
-const subtotalOf = (items: { qty: number; unit_price: number }[]) =>
-  Math.round(items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0) * 100) / 100;
 const BLANK = { partner: "", development: "", job_number: "", description: "", amount: "" };
 
 export default function Pact() {
@@ -114,30 +113,8 @@ export default function Pact() {
   // live: PACT jobs changing anywhere refresh the list without a reload
   useLive(["pact_jobs"], () => load(), { skipWhileTyping: true });
 
-  // invoice numbers count up: 569, 570, 571… — the highest plain number wins,
-  // so old "8300-1"-style numbers never skew the sequence
-  // the portal's run of invoice numbers starts above this — anything at or
-  // below it is an old hand-typed number, outside the sequence
-  const INVOICE_FLOOR = 568;
-  const nextInvoiceNo = async (): Promise<string> => {
-    const { data } = await sb().from("pact_jobs").select("invoice_number");
-    const nums = ((data || []) as { invoice_number?: string }[])
-      .map((r) => (/^\d+$/.test(String(r.invoice_number || "").trim()) ? parseInt(String(r.invoice_number).trim(), 10) : NaN))
-      .filter((n) => Number.isFinite(n));
-    return String(Math.max(INVOICE_FLOOR, ...nums) + 1);
-  };
-
-  // every new job carries its auto-price baseline (RUN_ME section 15) — the
-  // same rule then judges an uploaded PO, a proposal letter and a hand-typed
-  // job alike. Before the section is in, the column isn't there: written without.
-  const insertJob = async (row: Record<string, unknown>) => {
-    let res = await sb().from("pact_jobs").insert(row).select().single();
-    if (res.error && "list_subtotal" in row && /list_subtotal/i.test(res.error.message)) {
-      const { list_subtotal: _skip, ...rest } = row; void _skip;
-      res = await sb().from("pact_jobs").insert(rest).select().single();
-    }
-    return res;
-  };
+  // invoice numbers, the job insert and the PO reader live in lib/pactIntake —
+  // the Schedule tab takes POs in through the same door
   const patch = async (j: Job, p: Partial<Job>) => {
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, ...p } : x)));
     setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, ...p } : prev));
@@ -710,198 +687,33 @@ export default function Pact() {
     setOneShot(null); // whatever was offered for the last PO no longer applies
     setBusy(true);
     try {
-      let fields: PactPoFields | null = null;
-      let how = "";
-      let taxFromDoc: number | undefined;
-      // which reader did the reading, and why it wasn't Claude when it wasn't
-      let readBy: "claude" | "rules" = "rules";
-      let readNote = "";
-      // our own proposal letters (.docx) read right here on the device
-      const isDocx = /\.docx$/i.test(file.name);
-      // a NYCHA blanket release dropped here by mistake would be minced into a
-      // garbage job — its cover page names it, so it gets sent to the right tab
-      if (!isDocx) {
-        try {
-          const pdfjs = await import("pdfjs-dist");
-          pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
-          const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
-          const tc = await (await doc.getPage(1)).getTextContent();
-          const cover = (tc.items as { str?: string }[]).map((it) => it.str || "").join(" ");
-          await doc.destroy();
-          if (/Blanket\s+Release/i.test(cover) && /NYCHA|Supply\s+Management/i.test(cover)) {
-            setBusy(false);
-            flash("That's a NYCHA blanket release — upload it on the Releases tab (Import release PDFs). PACT only takes partner POs and proposal letters.");
-            return;
-          }
-        } catch { /* no text layer or reader hiccup — the real readers below handle it */ }
-      }
-      if (isDocx) {
-        try {
-          const { parsePactProposalDocx } = await import("@/lib/parsePactProposal");
-          const parsed = parsePactProposalDocx(await file.arrayBuffer());
-          taxFromDoc = parsed.taxPct;
-          fields = parsed;
-        } catch { fields = null; }
-      }
-      // 1) server read (Vercel caps request bodies ~4.5 MB — bigger scans go straight to the phone)
-      if (!isDocx && file.size <= 4 * 1024 * 1024) {
-        try {
-          const { data: { session } } = await sb().auth.getSession();
-          const res = await fetch("/api/parse-po", {
-            method: "POST",
-            headers: { "Content-Type": "application/pdf", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) },
-            body: file,
-          });
-          if (res.ok) {
-            const out = (await res.json()) as { fields: PactPoFields; readBy?: "claude" | "rules"; note?: string };
-            fields = out.fields; readBy = out.readBy === "claude" ? "claude" : "rules"; readNote = out.note || "";
-          }
-          else how = `server said ${res.status}: ${(await res.text().catch(() => "")).slice(0, 90)}`;
-        } catch { how = "server unreachable"; }
-      } else how = "file too big for the server — read on this device";
-      // the server answering with nothing usable counts as a miss too
-      if (!isDocx && fields && !fields.po && !fields.partner && !fields.desc) fields = null;
-      // …and so does an answer whose work lines don't add up to the total the PO
-      // printed: the server's PDF engine can run two figures together on a tight
-      // table, and the line it then drops is a line nobody would get paid for.
-      // The phone reads it with a different engine, so it's worth asking.
-      const serverShort = !isDocx && !!fields && !fields.rowsAddUp;
-      const serverFields = fields;
-      if (serverShort) fields = null;
-      // 2) browser fallback
-      if (!fields && isDocx) fields = { po: "", poDate: "", desc: "", scope: "", partner: "", address: "", billBlock: "", contact: "", punit: "", amount: 0, rows: [], rowsAddUp: true, readable: false };
-      if (!fields) {
-        try {
-          readBy = "rules"; readNote = readNote || how || "read on this device";
-          const pdfjs = await import("pdfjs-dist");
-          pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
-          const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
-          const { readPoOrProposalPages } = await import("@/lib/parsePactProposal");
-          const pages: PoItem[][] = [];
-          for (let pg = 1; pg <= doc.numPages; pg++) {
-            const tc = await (await doc.getPage(pg)).getTextContent();
-            pages.push(tc.items as PoItem[]);
-          }
-          fields = readPoOrProposalPages(pages);
-          taxFromDoc = (fields as { taxPct?: number }).taxPct ?? taxFromDoc;
-          // whichever read explains the PO's own total is the one to believe —
-          // but a read that found NO work rows explains nothing, so it never
-          // replaces one that found priced lines
-          if (serverShort && serverFields
-            && (serverFields.rows.length > fields.rows.length
-              || (!fields.rowsAddUp && serverFields.rows.length >= fields.rows.length))) fields = serverFields;
-        } catch {
-          fields = serverFields || parsePactPoText(""); // truly unreadable here — job still gets created
-        }
-      }
-      // one of our own letters names the person, not the partner company —
-      // borrow the partner from an earlier job billed to the same office
-      if (fields && !fields.partner && fields.billBlock) {
-        const street = fields.billBlock.match(/\d+\s+[A-Za-z .]+/)?.[0] || "";
-        if (street) {
-          const { data: prior } = await sb().from("pact_jobs").select("partner,bill_to").not("partner", "eq", "").limit(200);
-          // whole-number match — "10 Bank Street" must not hit "110 Bank Street"
-          const re = new RegExp(`(^|[^0-9])${street.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i");
-          const hit = ((prior || []) as { partner: string; bill_to?: string }[]).find((p) => re.test(p.bill_to || ""));
-          if (hit) fields.partner = hit.partner;
-        }
-      }
-      // whichever read won, a proposal letter's own tax rate travels with it —
-      // the server path returns taxPct too, and dropping it here billed 8.875%
-      // against letters that printed a different rate
-      taxFromDoc = (fields as { taxPct?: number }).taxPct ?? taxFromDoc;
-      const f = fields;
-      const unreadable = !f.po && !f.partner && !f.desc;
-      // an unreadable PDF must not smuggle in a dollar amount from a stray "Total $" hit
-      const amount = unreadable ? 0 : f.amount;
-      // this PO may already be a job — uploading it again must not make a second
-      // one (a hand-typed job carries the PO in job_number, so check both)
-      // one PO is one job: the number is matched in its stripped form ("PO
-      // 8388" = "8388"), and a letter with no number — or a misread one — is
-      // still the same job when it's the same address for the same money.
-      // If the list can't be read, nothing is made rather than risk a twin.
-      {
-        const { data: all, error: le } = await sb().from("pact_jobs").select(DUPE_COLS).order("created_at", { ascending: false }).limit(5000);
-        if (le) { setBusy(false); flash(`Couldn't check for duplicates (${le.message.slice(0, 60)}) — nothing was created, try again`); return; }
-        const dupe = findDupe((all || []) as Job[], { po: f.po, address: f.address, property_unit: f.punit, amount });
-        if (dupe) {
-          const atts = dupe.attachments || [];
-          if (!atts.some((a) => a.name === file.name)) {
-            const dpath = `pact/${dupe.id}/${file.name}`;
-            const { error: de } = await sb().storage.from("docs").upload(dpath, file, { upsert: true });
-            if (!de) await sb().from("pact_jobs").update({ attachments: [...atts, { name: file.name, path: dpath }] }).eq("id", dupe.id);
-          }
-          // A job made before the reader learned this PO's shape may hold only
-          // half the description. When the fresh read carries MORE of the same
-          // words, the job takes the fuller wording — a description someone
-          // rewrote by hand matches nothing and is left alone.
-          const oldD = (dupe.description || "").replace(/\s+/g, " ").trim();
-          const newD = (f.desc || "").replace(/\s+/g, " ").trim();
-          const grew = !!newD && newD.toLowerCase() !== oldD.toLowerCase()
-            && (oldD === "" || newD.toLowerCase().includes(oldD.toLowerCase()));
-          if (grew) await sb().from("pact_jobs").update({ description: newD }).eq("id", dupe.id);
-          // the partner re-issued the PO with a different access date: that IS
-          // the new schedule — unless the work is already done
-          const moved = !!f.accessDate && !dupe.work_done && (dupe.start_date || "") !== f.accessDate;
-          if (moved) {
-            const was = dupe.start_date ? ` (was ${prettyDate(dupe.start_date)})` : "";
-            const line = `📅 Moved to ${prettyDate(f.accessDate!)} by a re-uploaded PO${was}`;
-            // the crew rows follow to the new day (RUN_ME section 14's trigger) and
-            // lose their TEXTED mark — the calendar shows who needs the new day
-            await sb().from("pact_jobs").update({ start_date: f.accessDate, notes: `${(dupe.notes || "").trim()}${(dupe.notes || "").trim() ? "\n" : ""}${line}` }).eq("id", dupe.id);
-          }
-          setBusy(false);
-          await load();
-          setOpenId(dupe.id); showDetailsFor(dupe.id);
-          const label = f.po ? `PO ${f.po}` : "That proposal";
-          flash(moved
-            ? `${label} is already here — the new PO moves it to ${prettyDate(f.accessDate!)}`
-            : grew
-              ? `${label} is already here — picked up the PO's full wording (tap Price from list to refresh the lines)`
-              : `${label} is already here${dupe.canceled ? " (canceled)" : ""} — opened it, nothing new was created`);
-          return;
-        }
-      }
-      // a "NOT APPROVED" stamp is normal — the partner approves after the
-      // work is done — so only real reading calls are flagged
-      const poFlags = [...(f.warnings || [])];
-      const { items: priced, amount: amountOut } = await linesFromPo(f, unreadable, amount);
-      const newRow: Record<string, unknown> = {
-        partner: f.partner, development: "", job_number: f.po, description: (f.desc || f.scope).slice(0, 120), amount: amountOut,
-        po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,
-        contact: f.contact, bill_to: f.billBlock, items: priced, invoice_number: await nextInvoiceNo(),
-        ...(taxFromDoc !== undefined ? { tax_pct: taxFromDoc } : {}),
-        // the day the PO set goes straight onto the calendar; no day = pick one on the card
-        ...(f.accessDate ? { start_date: f.accessDate } : {}),
-        // the auto price — when the lines later add up to something else, the
-        // job is priced and the calendar is done with it (RUN_ME section 15)
-        list_subtotal: subtotalOf(priced),
-        // which reader read it, and anything a person should know about the read
-        notes: [isDocx ? "✓ Read from our own letter" : readBy === "claude" ? "✓ Read by Claude" : `⚠ Read by the rules${readNote ? ` (${readNote})` : ""}`, ...poFlags.map((w) => `⚠ ${w}`)].join("\n"),
-      };
-      const { data: job, error } = await insertJob(newRow);
-      if (error || !job) { setBusy(false); flash(upgradeHint(error?.message || "Save failed")); return; }
-      // attach the PO itself
-      const path = `pact/${(job as Job).id}/${file.name}`;
-      const { error: ue } = await sb().storage.from("docs").upload(path, file, { upsert: true });
-      if (!ue) await sb().from("pact_jobs").update({ attachments: [{ name: file.name, path }] }).eq("id", (job as Job).id);
+      const out = await intakePoFile(file, priceBook);
       setBusy(false);
+      if (out.kind === "release") { flash("That's a NYCHA blanket release — upload it on the Releases tab (Import release PDFs). PACT only takes partner POs and proposal letters."); return; }
+      if (out.kind === "error") { flash(upgradeHint(out.message)); return; }
       await load();
-      // open the fresh job with its details showing so what was read is on screen
-      setOpenId((job as Job).id);
-      showDetailsFor((job as Job).id);
+      setOpenId(out.id); showDetailsFor(out.id);
+      if (out.kind === "dupe") {
+        const label = out.po ? `PO ${out.po}` : "That proposal";
+        flash(out.moved
+          ? `${label} is already here — the new PO moves it to ${prettyDate(out.movedTo!)}`
+          : out.grew
+            ? `${label} is already here — picked up the PO's full wording (tap Price from list to refresh the lines)`
+            : `${label} is already here${out.canceled ? " (canceled)" : ""} — opened it, nothing new was created`);
+        return;
+      }
       // the finished job, with the lines the price list filled in — and if
       // that read comes back empty, the job we just made is still the truth
-      const { data: fresh } = await sb().from("pact_jobs").select("*").eq("id", (job as Job).id).single();
-      const ready = (fresh as Job | null)?.id ? (fresh as Job) : (job as Job);
-      if (!unreadable) setOneShot({ id: ready.id, job: ready, note: f.po ? `PO ${f.po}` : "PO read" });
-      flash(ue
-        ? `Job created, but the PDF didn't attach (${/bucket/i.test(ue.message) ? "storage not set up — run supabase/upgrade_invoices_aging_docs.sql" : ue.message.slice(0, 80)}) — open the job → ⋯ → Documents`
-        : unreadable
-          ? isDocx
+      const { data: fresh } = await sb().from("pact_jobs").select("*").eq("id", out.id).single();
+      const ready = (fresh as Job | null)?.id ? (fresh as Job) : (out.job as unknown as Job);
+      if (!out.unreadable) setOneShot({ id: ready.id, job: ready, note: out.po ? `PO ${out.po}` : "PO read" });
+      flash(out.attachError
+        ? `Job created, but the PDF didn't attach (${out.attachError}) — open the job → ⋯ → Documents`
+        : out.unreadable
+          ? out.isDocx
             ? "File attached, but the proposal couldn't be read — type the partner, address and description below"
-            : `PDF attached, but no text could be read (scanned copy?${how ? ` · ${how}` : ""}) — type the partner, address and description below`
-          : `PO ${f.po || "imported"} — ${isDocx ? "our letter" : readBy === "claude" ? "read by Claude" : `⚠ read by the rules${readNote ? ` (${readNote})` : ""}`} · ${f.accessDate ? `on the Schedule for ${prettyDate(f.accessDate)}` : "no date on the PO — put it on a day from the Schedule tab"}${poFlags.length ? ` · ⚠ ${poFlags[0]}` : ""} · check the lines below; the crew is picked on the Schedule tab`);
+            : `PDF attached, but no text could be read (scanned copy?${out.how ? ` · ${out.how}` : ""}) — type the partner, address and description below`
+          : `PO ${out.po || "imported"} — ${out.isDocx ? "our letter" : out.readBy === "claude" ? "read by Claude" : `⚠ read by the rules${out.readNote ? ` (${out.readNote})` : ""}`} · ${out.accessDate ? `on the Schedule for ${prettyDate(out.accessDate)}` : "no date on the PO — put it on a day from the Schedule tab"}${out.flags.length ? ` · ⚠ ${out.flags[0]}` : ""} · check the lines below; the crew is picked on the Schedule tab`);
     } catch (err) {
       setBusy(false);
       flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);

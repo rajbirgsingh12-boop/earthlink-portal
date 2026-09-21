@@ -36,10 +36,15 @@ export const siteOf = (j: CrewJob): string => {
   const unit = (j.property_unit || "").trim();
   return [where, unit && `Apt ${unit}`].filter(Boolean).join(", ");
 };
-// what the crew is going there to do — the PO's own words, one text long
+// what the crew is going there to do — the PO's own words, whole: the rooms
+// and the where are usually at the end, so nothing is cut short of a very long
+// one (and then at a word, not mid-word)
+export const WORK_MAX = 400;
 export const workOf = (j: CrewJob): string => {
   const w = (j.description || "").replace(/\s+/g, " ").trim();
-  return w.length > 120 ? `${w.slice(0, 117).trimEnd()}…` : w;
+  if (w.length <= WORK_MAX) return w;
+  const cut = w.slice(0, WORK_MAX - 1);
+  return `${(cut.lastIndexOf(" ") > WORK_MAX - 60 ? cut.slice(0, cut.lastIndexOf(" ")) : cut).trimEnd()}…`;
 };
 export const mapLink = mapLinkOf;
 

@@ -10,10 +10,13 @@ import { findDupe, DUPE_COLS } from "./po";
 import { parsePactPoText, type PactPoFields, type PoItem } from "./parsePactPo";
 import { linesFromPoRead, type JobLine, type PriceItem } from "./priceBook";
 
-// invoice numbers count up: 569, 570, 571… — the highest plain number wins,
+// Invoice numbers count up: 569, 570, 571… — the highest plain number wins,
 // so old "8300-1"-style numbers never skew the sequence. The portal's run
 // starts above the floor — anything at or below it is an old hand-typed
-// number, outside the sequence.
+// number, outside the sequence. A PO coming in gets NO number: the number
+// is given out when the job is priced (RUN_ME section 17's trigger), or —
+// before that section is in — when an invoice is built for it, so the run
+// of numbers follows the invoices, not the POs.
 export const INVOICE_FLOOR = 568;
 export async function nextInvoiceNo(): Promise<string> {
   const { data } = await sb().from("pact_jobs").select("invoice_number");
@@ -21,6 +24,21 @@ export async function nextInvoiceNo(): Promise<string> {
     .map((r) => (/^\d+$/.test(String(r.invoice_number || "").trim()) ? parseInt(String(r.invoice_number).trim(), 10) : NaN))
     .filter((n) => Number.isFinite(n));
   return String(Math.max(INVOICE_FLOOR, ...nums) + 1);
+}
+// the job's invoice number, given out now if it has none: the database's
+// counter (one for everyone), else — before RUN_ME section 17 — the page's
+// own count, written only where no number is there yet
+export async function claimInvoiceNo(jobId: string, current?: string | null): Promise<string> {
+  if ((current || "").trim()) return (current || "").trim();
+  const rpc = await sb().rpc("pact_claim_invoice_no", { job: jobId });
+  if (!rpc.error && typeof rpc.data === "string" && rpc.data) return rpc.data;
+  // the function isn't there yet (RUN_ME section 17 not run): count up here. Any other error is an error.
+  if (rpc.error && !/could not find|schema cache|does not exist|not found|404/i.test(rpc.error.message)) throw new Error(rpc.error.message);
+  const n = await nextInvoiceNo();
+  const { error } = await sb().from("pact_jobs").update({ invoice_number: n }).eq("id", jobId).or("invoice_number.is.null,invoice_number.eq.");
+  if (error) throw new Error(error.message);
+  const { data } = await sb().from("pact_jobs").select("invoice_number").eq("id", jobId).single();
+  return String((data as { invoice_number?: string } | null)?.invoice_number || n);
 }
 export const subtotalOf = (items: { qty: number; unit_price: number }[]) =>
   Math.round(items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0) * 100) / 100;
@@ -194,7 +212,7 @@ export async function intakePoFile(file: File, priceBook: () => Promise<PriceIte
   const newRow: Record<string, unknown> = {
     partner: f.partner, development: "", job_number: f.po, description: (f.desc || f.scope).slice(0, 120), amount: amountOut,
     po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,
-    contact: f.contact, bill_to: f.billBlock, items: priced, invoice_number: await nextInvoiceNo(),
+    contact: f.contact, bill_to: f.billBlock, items: priced,
     ...(taxFromDoc !== undefined ? { tax_pct: taxFromDoc } : {}),
     // the day the PO set goes straight onto the calendar; no day = pick one on the card
     ...(f.accessDate ? { start_date: f.accessDate } : {}),
@@ -235,7 +253,6 @@ export async function addJobByHand(d: HandJob): Promise<HandOutcome> {
     ...(d.property_unit !== undefined ? { property_unit: d.property_unit.trim() } : {}),
     ...(d.start_date ? { start_date: d.start_date } : {}),
     ...(d.notes ? { notes: d.notes } : {}),
-    invoice_number: await nextInvoiceNo(),
     // no lines yet — a baseline of 0, so a line typed later at no price leaves it unpriced
     list_subtotal: 0,
   });

@@ -15,7 +15,7 @@ import Modal from "@/components/Modal";
 import Disclosure from "@/components/Disclosure";
 import { useLive } from "@/lib/useLive";
 import { findDupe, DUPE_COLS } from "@/lib/po";
-import { INVOICE_FLOOR, nextInvoiceNo, insertJob, subtotalOf, intakePoFile } from "@/lib/pactIntake";
+import { INVOICE_FLOOR, insertJob, subtotalOf, intakePoFile, claimInvoiceNo } from "@/lib/pactIntake";
 import { COMPANY } from "@/lib/company";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
@@ -737,7 +737,7 @@ export default function Pact() {
     const { error } = await insertJob({
       partner: draft.partner.trim(), development: draft.development.trim(), job_number: draft.job_number.trim(),
       description: draft.description.trim(), amount: parseNum(draft.amount),
-      invoice_number: await nextInvoiceNo(),
+      // no invoice number yet — it is given out when the job is priced
       // no lines yet — a baseline of 0, so a line typed later at no price leaves it unpriced
       list_subtotal: 0,
     });
@@ -924,13 +924,11 @@ export default function Pact() {
     setBusy(true);
     try {
       const { parsePactProposalDocx } = await import("@/lib/parsePactProposal");
-      // one read up front: dupes, partner lookup, and the invoice number sequence
-      const { data: priorRows, error: le } = await sb().from("pact_jobs").select(`partner,bill_to,invoice_number,${DUPE_COLS}`).limit(5000);
+      // one read up front: dupes and the partner lookup. No invoice numbers
+      // here — those are given out as the invoices are made (below)
+      const { data: priorRows, error: le } = await sb().from("pact_jobs").select(`partner,bill_to,${DUPE_COLS}`).limit(5000);
       if (le) { flash(`Couldn't check for duplicates (${le.message.slice(0, 60)}) — nothing was created, try again`); return; }
-      const prior = (priorRows || []) as (Job & { partner: string; bill_to?: string; invoice_number?: string })[];
-      let seq = Math.max(INVOICE_FLOOR, ...prior
-        .map((p) => (/^\d+$/.test(String(p.invoice_number || "").trim()) ? parseInt(String(p.invoice_number).trim(), 10) : NaN))
-        .filter((n) => Number.isFinite(n)));
+      const prior = (priorRows || []) as (Job & { partner: string; bill_to?: string })[];
       const made: Job[] = [];
       let skipped = 0, failed = 0, done = 0;
       for (const f of files) {
@@ -949,17 +947,16 @@ export default function Pact() {
             const hit = prior.find((p) => re.test(p.bill_to || ""));
             if (hit) partner = hit.partner;
           }
-          seq += 1;
           const seed: Item[] = parsed.rows.map((r) => ({ description: r.description, qty: r.qty, unit: r.uom || unitFor(r.description), unit_price: r.unit_price, ...(r.base ? { base: r.base } : {}) }));
           const { data: job, error } = await insertJob({
             partner, development: "", job_number: parsed.po, description: parsed.desc, amount: parsed.amount,
             po_number: parsed.po, po_date: parsed.poDate, address: parsed.address, property_unit: parsed.punit,
-            contact: parsed.contact, bill_to: parsed.billBlock, items: seed, invoice_number: String(seq),
+            contact: parsed.contact, bill_to: parsed.billBlock, items: seed,
             ...(parsed.taxPct !== undefined ? { tax_pct: parsed.taxPct } : {}),
             // the letter's own lines are this job's baseline — the same as uploading it one at a time
             list_subtotal: subtotalOf(seed),
           });
-          if (error || !job) { failed += 1; seq -= 1; continue; }
+          if (error || !job) { failed += 1; continue; }
           const path = `pact/${(job as Job).id}/${f.name}`;
           const { error: ue } = await sb().storage.from("docs").upload(path, f, { upsert: true });
           if (!ue) await sb().from("pact_jobs").update({ attachments: [{ name: f.name, path }] }).eq("id", (job as Job).id);
@@ -988,8 +985,10 @@ export default function Pact() {
       let done = 0;
       for (const j0 of folderResult.made) {
         flash(`Making invoices… ${++done} of ${folderResult.made.length}`);
-        // whatever was corrected since the import is what gets billed
-        const j = jobs.find((x) => x.id === j0.id) || j0;
+        // whatever was corrected since the import is what gets billed — and
+        // the invoice number is given out right here, in this order
+        const j1 = jobs.find((x) => x.id === j0.id) || j0;
+        const j = { ...j1, invoice_number: await claimInvoiceNo(j1.id, j1.invoice_number) };
         const bytes = await buildPackageBytes(j, theOrg);
         if (!bytes) continue;
         let base = `invoice # ${j.invoice_number || ""} PO ${j.po_number || j.job_number || ""} ${[j.address, j.property_unit && `Apt ${j.property_unit}`].filter(Boolean).join(" ")}`
@@ -1210,11 +1209,15 @@ export default function Pact() {
     `invoice # ${j.invoice_number || ""} PO ${j.po_number || j.job_number || ""} ${[j.address, j.property_unit && `Apt ${j.property_unit}`].filter(Boolean).join(" ")}`
       .trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\s{2,}/g, " ").slice(0, 120) + ".pdf";
 
-  const buildPackage = async (j: Job) => {
+  const buildPackage = async (j0: Job) => {
+    let j = j0;
     const theOrg = await companyOrg();
     if (!theOrg) { flash("Company details haven't loaded — check your signal and try again"); return; }
     setBusy(true);
     try {
+      // the invoice number is given out the moment an invoice is built, if the job has none yet
+      const no = await claimInvoiceNo(j.id, j.invoice_number);
+      if (no !== (j.invoice_number || "")) { j = { ...j, invoice_number: no }; setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, invoice_number: no } : x))); }
       const out = await buildPackageBytes(j, theOrg);
       if (!out) { flash("Fill in the invoice lines first (open the job → Papers → Edit invoice)"); setBusy(false); return; }
       const blob = new Blob([out.buffer as ArrayBuffer], { type: "application/pdf" });
@@ -1304,7 +1307,7 @@ export default function Pact() {
           <div className="mt-1 text-xs text-inksoft">
             {folderResult.skipped > 0 && `${folderResult.skipped} skipped (already here). `}
             {folderResult.failed > 0 && `${folderResult.failed} couldn't be read — upload those one at a time. `}
-            {canInvoice && `Invoice numbers ${folderResult.made[0]?.invoice_number}–${folderResult.made[folderResult.made.length - 1]?.invoice_number} assigned.`}
+            {canInvoice && "Invoice numbers are given out as the invoices are made."}
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
             {canInvoice && (
@@ -1550,7 +1553,7 @@ export default function Pact() {
               <div className="mb-3 text-[13px] text-inksoft">{j.partner} · {j.address}{j.property_unit ? ` · Unit ${j.property_unit}` : ""}</div>
               <div className="mb-3 grid grid-cols-2 gap-2.5 md:grid-cols-4">
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Invoice #</div>
-                  <input className="field" value={j.invoice_number || ""}
+                  <input className="field" value={j.invoice_number || ""} placeholder="given out when priced" title="The number comes on its own once the job is priced — or the moment its invoice is built"
                     onChange={(e) => { setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, invoice_number: e.target.value } : x))); setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, invoice_number: e.target.value } : prev)); }}
                     onBlur={(e) => patch(j, { invoice_number: e.target.value })} /></div>
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Subtotal</div>

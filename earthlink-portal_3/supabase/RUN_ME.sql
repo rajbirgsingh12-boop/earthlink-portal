@@ -28,8 +28,9 @@
 -- twin), and PACT jobs on the same crew schedule as NYCHA
 -- releases — the calendar's "Who's going?" remembers who is
 -- on each job, and a moved job takes its crew with it. A
--- priced job comes off the calendar (15), and a contract's
--- price book holds each code once (16).
+-- priced job comes off the calendar (15), a contract's
+-- price book holds each code once (16), and invoice numbers
+-- are held until a job is priced (17).
 -- ============================================================
 
 -- ---------- from upgrade_invoices_aging_docs.sql ----------
@@ -667,3 +668,50 @@ delete from contract_items a
   where a.contract_id = b.contract_id and a.code = b.code and a.code <> ''
     and (a.created_at, a.id) > (b.created_at, b.id);
 create unique index if not exists contract_items_contract_code_uq on contract_items (contract_id, code) where code <> '';
+
+-- 17) Invoice numbers are held until a job is priced.
+--     A PO coming in gets no invoice number. The number is given out the
+--     moment the job is PRICED (section 15: the lines add up to more than
+--     the price list filled in on its own, an invoice went out, or money
+--     came in) — so the run of numbers follows the invoices, not the POs,
+--     and a PO that never turns into work never eats a number. One counter
+--     for everyone: two phones pricing two jobs in the same second get two
+--     numbers. The app asks for a number by hand when it builds an invoice
+--     for a job the trigger hasn't numbered yet (pact_claim_invoice_no).
+--     Jobs numbered before this section keep their numbers.
+create or replace function public.pact_next_invoice_no() returns text
+language plpgsql security definer set search_path = public as $$
+declare n integer;
+begin
+  -- one at a time, whoever asks — the counter never hands out a twin
+  perform pg_advisory_xact_lock(hashtext('pact_invoice_no'));
+  select greatest(568, coalesce(max(invoice_number::integer), 0)) + 1 into n
+    from pact_jobs where invoice_number ~ '^[0-9]+$';
+  return n::text;
+end $$;
+create or replace function public.pact_job_invoice_no() returns trigger
+language plpgsql as $$
+begin
+  if coalesce(new.priced, false) and coalesce(new.invoice_number, '') = '' then
+    new.invoice_number := public.pact_next_invoice_no();
+  end if;
+  return new;
+end $$;
+-- named to run right after pact_job_priced (triggers fire in name order), so it sees the fresh flag
+drop trigger if exists pact_job_priced_invoice on pact_jobs;
+create trigger pact_job_priced_invoice
+  before insert or update of amount, list_subtotal, invoice_sent, received, work_done, items, priced, invoice_number on pact_jobs
+  for each row execute function public.pact_job_invoice_no();
+create or replace function public.pact_claim_invoice_no(job uuid) returns text
+language plpgsql as $$
+declare cur text;
+begin
+  perform pg_advisory_xact_lock(hashtext('pact_invoice_no'));
+  select coalesce(invoice_number, '') into cur from pact_jobs where id = job for update;
+  if not found then return null; end if;
+  if cur = '' then
+    cur := public.pact_next_invoice_no();
+    update pact_jobs set invoice_number = cur where id = job;
+  end if;
+  return cur;
+end $$;

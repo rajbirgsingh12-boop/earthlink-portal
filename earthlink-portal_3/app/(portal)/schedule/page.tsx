@@ -13,6 +13,7 @@ import { useLive } from "@/lib/useLive";
 import type { Contract } from "@/lib/types";
 import { cleanPhone, smsHref, sendServerTexts, textMachineReady, textRows, stampRows } from "@/lib/notify";
 import { normText } from "@/lib/pactCrew";
+import { crewText } from "@/lib/crewText";
 
 interface Emp { id: string; name: string; trade: string; active?: boolean; phone?: string | null; }
 interface RelRow { id: string; rel_number: string; location: string; contract_id: string; address?: string | null; }
@@ -106,12 +107,9 @@ export default function Schedule() {
     addrBuf[relId] ?? rows.find((x) => x.release_id === relId && (x.address || "").trim())?.address
     ?? (rels.find((r) => r.id === relId)?.address || "");
   const mapLink = (addr: string) => `https://maps.google.com/?q=${encodeURIComponent(addr)}`;
-  const msgFor = (rel: RelRow, relId: string, who?: string) => {
-    const desc = descOf(relId).trim();
-    const addr = addrOf(relId).trim();
-    return `Earth Link:${who ? ` ${who},` : ""} you're scheduled for ${prettyDate(day)} at ${addr || rel.location} (Release #${rel.rel_number}).`
-      + `${desc ? ` Work: ${desc}` : ""}${addr ? ` Map: ${mapLink(addr)}` : ""}`;
-  };
+  // the street when one is known (typed, saved on the day, or read off the release PDF), the building always
+  const msgFor = (rel: RelRow, relId: string, who?: string) =>
+    crewText({ first: who, day, street: addrOf(relId), building: rel.location, work: descOf(relId), ref: `NYCHA release #${rel.rel_number}` });
 
   // + Add worker just adds them to the day — no message goes out until Assign & text
   const addingNow = useRef<Set<string>>(new Set()); // guards a double-tap on the same name

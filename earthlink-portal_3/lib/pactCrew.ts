@@ -1,7 +1,7 @@
 // A PACT job's crew lives in schedule_days, the same table the NYCHA day
 // schedule has always used: one row per worker per day, with the TEXTED mark.
 // These helpers read that crew for a job and write the text a worker gets.
-import { prettyDate } from "./docs";
+import { crewText, mapLink as mapLinkOf } from "./crewText";
 
 export interface CrewRow {
   id: string; day: string; release_id: string | null; pact_job_id?: string | null;
@@ -37,17 +37,16 @@ export const workOf = (j: CrewJob): string => {
   const w = (j.description || "").replace(/\s+/g, " ").trim();
   return w.length > 120 ? `${w.slice(0, 117).trimEnd()}…` : w;
 };
-export const mapLink = (addr: string) => `https://maps.google.com/?q=${encodeURIComponent(addr)}`;
+export const mapLink = mapLinkOf;
 
-// the text itself. "moved" makes it read as a change, not a repeat.
+// the text itself — lib/crewText lays it out; "moved" makes it read as a change, not a repeat
 export const crewMessage = (j: CrewJob, first: string, work: string, moved?: { from: string; to: string }): string => {
-  const site = siteOf(j) || "(no address on file)";
   const po = j.po_number || j.job_number || "";
-  const tag = [po && `PO ${po}`, (j.partner || "").trim()].filter(Boolean).join(" · ");
-  const head = moved
-    ? `Earth Link:${first ? ` ${first},` : ""} the job at ${site} moved to ${prettyDate(moved.to)}${moved.from ? ` (was ${prettyDate(moved.from)})` : ""}.`
-    : `Earth Link:${first ? ` ${first},` : ""} you're scheduled for ${j.start_date ? prettyDate(j.start_date) : "a day to be set"} at ${site}${tag ? ` (${tag})` : ""}.`;
-  return `${head}${work ? ` Work: ${work}.` : ""}${(j.address || j.development) ? ` Map: ${mapLink(siteOf(j))}` : ""}`;
+  return crewText({
+    first, day: j.start_date, street: j.address, building: j.development, apt: j.property_unit, work,
+    ref: [po && `PO ${po}`, (j.partner || "").trim()].filter(Boolean).join(" · "),
+    moved: moved ? { from: moved.from || null, to: moved.to } : null,
+  });
 };
 
 // this job's crew rows — the ones linked to it. A crew is only ever written

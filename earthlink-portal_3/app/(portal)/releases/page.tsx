@@ -1348,12 +1348,12 @@ export default function Releases() {
         const breakdown = parsed.items.filter((it) => it.uom === "HOUR")
           .map((it) => ({ cls: it.description.replace(/,?\s*Regular Hours/i, "").trim(), hours: it.qty }));
         const payload: Record<string, unknown> = {
-          contract_id: contract.id, rel_number: parsed.rel, location: parsed.development,
+          contract_id: contract.id, rel_number: parsed.rel, location: parsed.development, address: parsed.street,
           buildings: "", ticket: parsed.workOrders[0] || "", amount: parsed.total,
           labor_hours: parsed.laborHours, labor_breakdown: breakdown,
           date_completed: "", pre_check: "", payroll_done: false, received: false, canceled: false, assigned_to: null,
         };
-        const strip = (o: Record<string, unknown>) => { const { labor_breakdown: _b, labor_hours: _h, ...rest } = o; return rest; };
+        const strip = (o: Record<string, unknown>) => { const { labor_breakdown: _b, labor_hours: _h, address: _a, ...rest } = o; return rest; };
         let { data: rel, error } = await sb().from("releases").insert(payload).select().single();
         if (error && /column|schema cache/i.test(error.message)) {
           ({ data: rel, error } = await sb().from("releases").insert(strip(payload)).select().single());
@@ -1589,7 +1589,7 @@ export default function Releases() {
             await sb().from("release_items").delete().eq("release_id", relId);
           } else {
             const payload: Record<string, unknown> = {
-              contract_id: contract.id, rel_number: parsed.rel, location: parsed.development,
+              contract_id: contract.id, rel_number: parsed.rel, location: parsed.development, address: parsed.street,
               buildings: "", ticket: parsed.workOrders[0] || "", amount: parsed.total,
               labor_hours: parsed.laborHours, labor_breakdown: breakdown,
               date_completed: "", pre_check: "", payroll_done: false, received: false, canceled: false, assigned_to: null,
@@ -1650,7 +1650,7 @@ export default function Releases() {
           .map((it) => ({ cls: it.description.replace(/,?\s*Regular Hours/i, "").trim(), hours: it.qty }));
         setPdfPending({
           contract: parsed.contract, rel: parsed.rel, date: parsed.orderDate,
-          location: parsed.development, address: "", ticket: parsed.workOrders[0] || "",
+          location: parsed.development, address: parsed.street, ticket: parsed.workOrders[0] || "",
           amount: parsed.total, hours: parsed.laborHours, items: parsed.items,
           breakdown, propNote: "", pdfFile: file,
         });

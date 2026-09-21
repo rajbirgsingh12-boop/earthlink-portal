@@ -105,7 +105,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
       {!day && <div className="mb-2 text-[12px] text-alert">No day yet — put the job on a day first. The crew is texted the day.</div>}
       <input className="field mb-2" placeholder="Work (what should they do there?)" value={work} readOnly={!canEdit}
         onChange={(e) => setWork(e.target.value)} onBlur={() => canEdit && saveWork()} />
-      <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 text-[12px] text-inksoft [overflow-wrap:anywhere]">{crewMessage(job, "Name", work.trim())}</div>
+      <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 whitespace-pre-line text-[12px] text-inksoft [overflow-wrap:anywhere]">{crewMessage(job, "Name", work.trim())}</div>
       {rows.map((r) => {
         const e = emps.find((x) => x.id === r.employee_id);
         const name = e?.name || "?";

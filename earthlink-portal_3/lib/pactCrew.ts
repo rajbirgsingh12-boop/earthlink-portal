@@ -1,7 +1,8 @@
 // A PACT job's crew lives in schedule_days, the same table the NYCHA day
 // schedule has always used: one row per worker per day, with the TEXTED mark.
 // These helpers read that crew for a job and write the text a worker gets.
-import { crewText, mapLink as mapLinkOf } from "./crewText";
+import { crewText } from "./crewText";
+import { mapLink as mapLinkOf } from "./mapLink";
 
 export interface CrewRow {
   id: string; day: string; release_id: string | null; pact_job_id?: string | null;
@@ -41,10 +42,12 @@ export const mapLink = mapLinkOf;
 
 // the text itself — lib/crewText lays it out; "moved" makes it read as a change, not a repeat
 export const crewMessage = (j: CrewJob, first: string, work: string, moved?: { from: string; to: string }): string => {
-  const po = j.po_number || j.job_number || "";
+  const po = (j.po_number || j.job_number || "").trim();
+  const partner = (j.partner || "").trim();
+  // "PO 116843 for Beacon Mgmt" — "a job for Beacon Mgmt" when the PO has no number yet
+  const ref = po ? `PO ${po}${partner ? ` for ${partner}` : ""}` : partner ? `a job for ${partner}` : "";
   return crewText({
-    first, day: j.start_date, street: j.address, building: j.development, apt: j.property_unit, work,
-    ref: [po && `PO ${po}`, (j.partner || "").trim()].filter(Boolean).join(" · "),
+    first, day: j.start_date, street: j.address, building: j.development, apt: j.property_unit, work, ref,
     moved: moved ? { from: moved.from || null, to: moved.to } : null,
   });
 };

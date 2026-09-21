@@ -78,7 +78,9 @@ export async function textRows(targets: TextTarget[], opts: { skipTexted?: boole
   }
   if (res.status === 501) {
     // group text from this phone; the caller confirms before anything is stamped
-    window.location.href = `sms:${good.map((t) => cleanPhone(t.to)).join(",")}?&body=${encodeURIComponent(good[0].body.replace(`${good[0].first}, `, ""))}`;
+    // one text to everyone: the greeting drops the one name ("Hi Jose, this is…" → "Hi, this is…")
+    const forAll = good[0].first ? good[0].body.replace(`Hi ${good[0].first}, `, "Hi, ").replace(`${good[0].first}, `, "") : good[0].body;
+    window.location.href = `sms:${good.map((t) => cleanPhone(t.to)).join(",")}?&body=${encodeURIComponent(forAll)}`;
     return { status: "fallback", message: "Company number isn't set up — a group text opened on this phone", rowIds: good.map((t) => t.rowId) };
   }
   return { status: "error", message: res.error || "Couldn't send — try again" };

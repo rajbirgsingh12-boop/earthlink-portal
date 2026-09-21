@@ -144,7 +144,8 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
         title={[e.title, e.subtitle, e.flag, movable ? "drag to another day to move it" : ""].filter(Boolean).join(" · ")}
         data-po-bar={e.id}
         className={`block w-full rounded-[3px] border-l-[3px] text-left ${size === "chip" ? "px-[2px] py-0 font-mono text-[11px] leading-[1.35] tracking-tight" : size === "compact" ? "px-1 py-[1px] text-[11px] leading-[1.25]" : "px-2 py-1 text-[12px] leading-snug"} ${barCls(e)} ${lifted ? "opacity-40" : ""} ${movable ? "cursor-grab active:cursor-grabbing" : ""}`}>
-        <span className="block truncate font-semibold">{e.flag ? "⚠ " : ""}{size === "chip" ? e.short || e.title : e.title}</span>
+        {/* a phone's chip has no room for the ⚠ — the flag turns the number red instead */}
+        <span className={`block truncate font-semibold ${size === "chip" && e.flag ? "text-alert" : ""}`}>{e.flag && size !== "chip" ? "⚠ " : ""}{size === "chip" ? e.short || e.title : e.title}</span>
         {size === "bar" && e.subtitle && <span className="block truncate text-[11px] text-inksoft">{e.subtitle}</span>}
         {size === "bar" && e.people && e.people.length > 0 && <span className="block truncate text-[11px] text-inksoft">👷 {e.people.join(", ")}</span>}
       </button>

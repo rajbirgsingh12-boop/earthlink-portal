@@ -4,6 +4,7 @@ import { sb } from "@/lib/supabase";
 import { cleanPhone, prettyPhone, textRows, stampRows, textMachineReady } from "@/lib/notify";
 import { prettyDate } from "@/lib/docs";
 import { crewMessage, normText, rowNeedsText, siteOf, workOf, type CrewJob, type CrewRow, type Worker } from "@/lib/pactCrew";
+import { langOf } from "@/lib/crewText";
 import Stamp from "@/components/Stamp";
 
 // "Who's going?" — the crew on a PACT job. Add names from the crew list, and
@@ -76,7 +77,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
       const e = emps.find((x) => x.id === r.employee_id);
       const first = (e?.name || "").split(" ")[0];
       const moved = r.texted && r.day !== day ? { from: r.day, to: day } : undefined;
-      return { rowId: r.id, to: e?.phone || "", body: crewMessage(job, first, work.trim(), moved), first };
+      return { rowId: r.id, to: e?.phone || "", body: crewMessage(job, first, work.trim(), moved, e?.lang), first };
     });
     if (targets.some((t) => !cleanPhone(t.to))) { flash("Someone here has no number — add it in the box beside their name"); return; }
     setSending(true);
@@ -105,7 +106,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
       {!day && <div className="mb-2 text-[12px] text-alert">No day yet — put the job on a day first. The crew is texted the day.</div>}
       <input className="field mb-2" placeholder="Work (what should they do there?)" value={work} readOnly={!canEdit}
         onChange={(e) => setWork(e.target.value)} onBlur={() => canEdit && saveWork()} />
-      <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 whitespace-pre-line text-[12px] text-inksoft [overflow-wrap:anywhere]">{crewMessage(job, "Name", work.trim())}</div>
+      <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 whitespace-pre-line text-[12px] text-inksoft [overflow-wrap:anywhere]">{crewMessage(job, "Name", work.trim())}{emps.some((e) => rows.some((r) => r.employee_id === e.id) && langOf(e.lang) === "es") ? <span className="mt-1 block text-[11px]">Workers marked ES get it in Spanish.</span> : null}</div>
       {rows.map((r) => {
         const e = emps.find((x) => x.id === r.employee_id);
         const name = e?.name || "?";
@@ -139,7 +140,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
             <div className="max-h-48 overflow-y-auto rounded-sm border border-rulesoft bg-white">
               {pick.slice(0, 12).map((e) => (
                 <button key={e.id} type="button" className="block min-h-[44px] w-full border-b border-rulesoft px-3 py-2.5 text-left text-[13px] last:border-b-0 hover:bg-paper" disabled={adding} onClick={() => addWorker(e)}>
-                  {e.name}{cleanPhone(e.phone || "") ? "" : <span className="ml-2 text-[11px] text-inksoft">no number yet</span>}
+                  {e.name}{langOf(e.lang) === "es" ? <span className="chip ml-1.5 text-inksoft" title="Texted in Spanish — set in Settings → Crew">ES</span> : null}{cleanPhone(e.phone || "") ? "" : <span className="ml-2 text-[11px] text-inksoft">no number yet</span>}
                 </button>
               ))}
               {pick.length === 0 && <div className="px-3 py-2 text-[13px] text-inksoft">No one matches “{q}”.</div>}

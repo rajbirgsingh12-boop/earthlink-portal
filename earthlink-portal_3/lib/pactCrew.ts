@@ -13,7 +13,10 @@ export interface CrewJob {
   address?: string | null; development?: string | null; property_unit?: string | null;
   description?: string | null; start_date?: string | null;
 }
-export interface Worker { id: string; name: string; phone?: string | null; active?: boolean }
+export interface Worker { id: string; name: string; phone?: string | null; active?: boolean; lang?: string | null }
+// the columns a page reads for a crew — `lang` is RUN_ME section 18's; before it, read without
+export const WORKER_COLS = "id,name,phone,active,lang";
+export const WORKER_COLS_OLD = "id,name,phone,active";
 
 // the columns a page may read from pact_jobs for crew work — never the money
 export const CREW_JOB_COLS = "id,po_number,job_number,partner,address,development,property_unit,description,start_date,finish_date,work_done,canceled,notes,created_at";
@@ -41,9 +44,9 @@ export const workOf = (j: CrewJob): string => {
 export const mapLink = mapLinkOf;
 
 // the text itself — lib/crewText writes it (no PO number: the crew doesn't need one); "moved" makes it read as a change, not a repeat
-export const crewMessage = (j: CrewJob, first: string, work: string, moved?: { from: string; to: string }): string => {
+export const crewMessage = (j: CrewJob, first: string, work: string, moved?: { from: string; to: string }, lang?: string | null): string => {
   return crewText({
-    first, day: j.start_date, street: j.address, building: j.development, apt: j.property_unit, work,
+    first, day: j.start_date, street: j.address, building: j.development, apt: j.property_unit, work, lang,
     moved: moved ? { from: moved.from || null, to: moved.to } : null,
   });
 };

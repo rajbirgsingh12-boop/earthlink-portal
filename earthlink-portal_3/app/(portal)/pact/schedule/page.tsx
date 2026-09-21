@@ -11,7 +11,7 @@ import ActionMenu from "@/components/ActionMenu";
 import JobDates, { lastNote } from "@/components/JobDates";
 import Calendar, { type CalEvent, type CalView } from "@/components/Calendar";
 import CrewPanel from "@/components/CrewPanel";
-import { CAL_JOB_COLS, CREW_JOB_COLS, crewLine, crewMessage, crewState, offCalendar, rowsOfJob, siteOf, type CrewRow, type Worker } from "@/lib/pactCrew";
+import { CAL_JOB_COLS, CREW_JOB_COLS, WORKER_COLS, WORKER_COLS_OLD, crewLine, crewMessage, crewState, offCalendar, rowsOfJob, siteOf, type CrewRow, type Worker } from "@/lib/pactCrew";
 import { textRows, stampRows } from "@/lib/notify";
 import { intakePoFile, addJobByHand } from "@/lib/pactIntake";
 import { loadPrices } from "@/lib/priceBook";
@@ -80,7 +80,13 @@ export default function PactCalendar() {
       }
       return out;
     };
-    const [d, { data: e }] = await Promise.all([fetchRows(), sb().from("employees").select("id,name,phone,active")]);
+    // the crew, with each worker's language (RUN_ME section 18) — before it, without
+    const fetchEmps = async () => {
+      const r = await sb().from("employees").select(WORKER_COLS);
+      if (r.error && /lang|column|schema cache/i.test(r.error.message)) return (await sb().from("employees").select(WORKER_COLS_OLD)).data;
+      return r.data;
+    };
+    const [d, e] = await Promise.all([fetchRows(), fetchEmps()]);
     setDayRows(d); setEmps((e || []) as Emp[]);
   };
   useEffect(() => { load(); myProfile().then((p) => setRole(p?.role || "")); }, []);
@@ -104,7 +110,7 @@ export default function PactCalendar() {
       const e = emps.find((x) => x.id === r.employee_id);
       const first = (e?.name || "").split(" ")[0];
       // told the old day → reads as a move; never told → the plain first text
-      return { rowId: r.id, to: e?.phone || "", body: crewMessage(moved, first, r.description || "", r.texted ? { from, to } : undefined), first };
+      return { rowId: r.id, to: e?.phone || "", body: crewMessage(moved, first, r.description || "", r.texted ? { from, to } : undefined, e?.lang), first };
     });
     // the trigger clears the old stamps; clear them here too so the server
     // doesn't skip anyone where the trigger isn't in yet

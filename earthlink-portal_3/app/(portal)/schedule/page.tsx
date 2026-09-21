@@ -13,9 +13,9 @@ import { useLive } from "@/lib/useLive";
 import type { Contract } from "@/lib/types";
 import { cleanPhone, smsHref, sendServerTexts, textMachineReady, textRows, stampRows } from "@/lib/notify";
 import { normText } from "@/lib/pactCrew";
-import { crewText } from "@/lib/crewText";
+import { crewText, langOf } from "@/lib/crewText";
 
-interface Emp { id: string; name: string; trade: string; active?: boolean; phone?: string | null; }
+interface Emp { id: string; name: string; trade: string; active?: boolean; phone?: string | null; lang?: string | null; }
 interface RelRow { id: string; rel_number: string; location: string; contract_id: string; address?: string | null; }
 // (a row with pact_job_id belongs to a PACT job — those live on the PACT calendar, not here)
 interface Assign { id: string; day: string; release_id: string | null; pact_job_id?: string | null; employee_id: string; description: string; texted: boolean; address?: string | null; }
@@ -108,8 +108,8 @@ export default function Schedule() {
     ?? (rels.find((r) => r.id === relId)?.address || "");
   const mapLink = (addr: string) => `https://maps.google.com/?q=${encodeURIComponent(addr)}`;
   // the street when one is known (typed, saved on the day, or read off the release PDF), the building always
-  const msgFor = (rel: RelRow, relId: string, who?: string) =>
-    crewText({ first: who, day, street: addrOf(relId), building: rel.location, work: descOf(relId) });
+  const msgFor = (rel: RelRow, relId: string, who?: string, lang?: string | null) =>
+    crewText({ first: who, day, street: addrOf(relId), building: rel.location, work: descOf(relId), lang });
 
   // + Add worker just adds them to the day — no message goes out until Assign & text
   const addingNow = useRef<Set<string>>(new Set()); // guards a double-tap on the same name
@@ -138,7 +138,7 @@ export default function Schedule() {
     const targets = assigned
       .map((row) => ({ row, emp: emps.find((e) => e.id === row.employee_id) }))
       .filter((t): t is { row: Assign; emp: Emp } => !!t.emp && !!cleanPhone(t.emp.phone || ""))
-      .map((t) => ({ rowId: t.row.id, to: cleanPhone(t.emp.phone || ""), first: t.emp.name.split(" ")[0], body: msgFor(rel, rel.id, t.emp.name.split(" ")[0]) }));
+      .map((t) => ({ rowId: t.row.id, to: cleanPhone(t.emp.phone || ""), first: t.emp.name.split(" ")[0], body: msgFor(rel, rel.id, t.emp.name.split(" ")[0], t.emp.lang) }));
     if (targets.length === 0) { flash("No saved numbers on this crew — add them in Payroll → Crew first"); return; }
     if (!descOf(rel.id).trim() && !window.confirm("No work description yet — send the assignments anyway?")) return;
     const stamp = async (ids: string[]) => {
@@ -299,7 +299,7 @@ export default function Schedule() {
               const ok = !!cleanPhone(emp.phone || "");
               return (
                 <div key={row.id} className="flex flex-wrap items-center gap-2 border-t border-rulesoft py-2 first:border-t-0">
-                  <b className="text-[14px]">{emp.name}</b>
+                  <b className="text-[14px]">{emp.name}</b>{langOf(emp.lang) === "es" ? <span className="chip ml-1.5 text-inksoft" title="Texted in Spanish — set in Settings → Crew">ES</span> : null}
                   {row.texted && (canEdit
                     // a stamp that landed without a text really going out (e.g. the
                     // group message was never hit send on) can be tapped off
@@ -313,14 +313,14 @@ export default function Schedule() {
                   <span className="ml-auto flex items-center gap-2.5">
                     {ok && !machine && (
                       <a className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline" title="Opens their text on this phone"
-                        href={smsHref(emp.phone || "", msgFor(rel, rel.id, emp.name.split(" ")[0]))}
+                        href={smsHref(emp.phone || "", msgFor(rel, rel.id, emp.name.split(" ")[0], emp.lang))}
                         onClick={() => setTimeout(() => { if (window.confirm(`Did the text to ${emp.name.split(" ")[0]} send? OK stamps TEXTED ✓`)) markTexted(row.id); }, 600)}>resend</a>
                     )}
                     {ok && machine && canEdit && (
                       <button className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline" title="Resend from the company number"
                         onClick={async () => {
                           const res = await sendServerTexts(
-                            [{ to: cleanPhone(emp.phone || ""), body: msgFor(rel, rel.id, emp.name.split(" ")[0]), id: row.id }],
+                            [{ to: cleanPhone(emp.phone || ""), body: msgFor(rel, rel.id, emp.name.split(" ")[0], emp.lang), id: row.id }],
                             (await sb().auth.getSession()).data.session?.access_token || null);
                           if (res.ok && (res.failed || []).length === 0) { markTexted(row.id); flash(`Texted ${emp.name.split(" ")[0]} ✓`); }
                           else flash(res.failed?.[0]?.error || res.error || "Couldn't send");

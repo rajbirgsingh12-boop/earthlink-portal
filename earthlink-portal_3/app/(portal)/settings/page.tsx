@@ -16,6 +16,7 @@ import { PKG_DEFAULTS, type PkgInfo, loadPkgInfo, savePkgInfo } from "@/lib/pack
 import { PRICE_BOOK, PRICE_GROUPS, CUSTOM_GROUP, EMPTY_STORE, DEFAULT_ATTN, blankCustom, bookFrom, keywordsRe, loadPrices, savePrices,
   type PriceOverride, type PriceStore, type CustomItem } from "@/lib/priceBook";
 import { cleanPhone, prettyPhone } from "@/lib/notify";
+import { langOf, LANG_LABEL, type Lang } from "@/lib/crewText";
 
 // the two roles: Admin 1 sees everything; Admin 2 works PACT without ever
 // seeing a price, an amount, an invoice or a proposal
@@ -79,12 +80,31 @@ export default function Settings() {
   }, { skipWhileTyping: true });
 
   // ---- crew phone numbers (used by the Schedule tab's tap-to-text) ----
-  type Emp = { id: string; name: string; trade: string; active: boolean; phone?: string | null };
+  type Emp = { id: string; name: string; trade: string; active: boolean; phone?: string | null; lang?: string | null };
   const [emps, setEmps] = useState<Emp[]>([]);
   const [phoneBuf, setPhoneBuf] = useState<Record<string, string>>({});
-  const [crewDraft, setCrewDraft] = useState({ name: "", trade: "", phone: "" });
-  const loadEmps = () => sb().from("employees").select("id,name,trade,active,phone").order("name")
-    .then(({ data }) => setEmps((data || []) as Emp[]));
+  const [crewDraft, setCrewDraft] = useState({ name: "", trade: "", phone: "", lang: "en" as Lang });
+  // each worker's language for the crew text (RUN_ME section 18) — before it, read without
+  const loadEmps = async () => {
+    let r = await sb().from("employees").select("id,name,trade,active,phone,lang").order("name") as { data: unknown; error: { message: string } | null };
+    if (r.error && /lang|column|schema cache/i.test(r.error.message)) r = await sb().from("employees").select("id,name,trade,active,phone").order("name");
+    setEmps((r.data || []) as Emp[]);
+  };
+  const saveLang = async (empId: string, lang: Lang) => {
+    setEmps((prev) => prev.map((e) => (e.id === empId ? { ...e, lang } : e)));
+    const { error } = await sb().from("employees").update({ lang }).eq("id", empId);
+    if (error) { flash(/column|schema cache/i.test(error.message) ? "Run supabase/RUN_ME.sql so each worker's language saves" : error.message); loadEmps(); return; }
+    flash(`Texts to ${emps.find((e) => e.id === empId)?.name.split(" ")[0] || "them"} go out in ${LANG_LABEL[lang]}`);
+  };
+  // English | Español, one tap
+  const langPick = (value: Lang, onPick: (l: Lang) => void, disabled = false) => (
+    <span className="inline-flex rounded-sm border-[1.5px] border-ink" role="radiogroup" aria-label="Language for texts">
+      {(["en", "es"] as Lang[]).map((l, i) => (
+        <button key={l} type="button" role="radio" aria-checked={value === l} disabled={disabled} onClick={() => onPick(l)}
+          className={`min-h-[44px] px-3 font-display text-[12px] font-semibold uppercase tracking-wider ${i > 0 ? "border-l-[1.5px] border-ink" : ""} ${value === l ? "bg-ink text-white" : "bg-white text-ink"}`}>{LANG_LABEL[l]}</button>
+      ))}
+    </span>
+  );
   useEffect(() => { loadEmps(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useLive(["employees"], loadEmps, { skipWhileTyping: true });
   const savePhone = async (empId: string, raw: string) => {
@@ -98,14 +118,15 @@ export default function Settings() {
     if (!crewDraft.name) return;
     const row: Record<string, unknown> = { name: crewDraft.name, trade: crewDraft.trade, base_rate: 0 };
     if (crewDraft.phone.trim()) row.phone = cleanPhone(crewDraft.phone) || crewDraft.phone.trim();
+    if (crewDraft.lang !== "en") row.lang = crewDraft.lang;
     let { error } = await sb().from("employees").insert(row);
-    if (error && "phone" in row && /column|schema cache/i.test(error.message)) {
-      delete row.phone;
+    if (error && ("phone" in row || "lang" in row) && /column|schema cache/i.test(error.message)) {
+      delete row.phone; delete row.lang;
       ({ error } = await sb().from("employees").insert(row));
-      if (!error) flash("Run supabase/RUN_ME.sql so phone numbers save");
+      if (!error) flash("Run supabase/RUN_ME.sql so phone numbers and languages save");
     }
     if (error) { flash(error.message); return; }
-    setCrewDraft({ name: "", trade: "", phone: "" }); loadEmps();
+    setCrewDraft({ name: "", trade: "", phone: "", lang: "en" }); loadEmps();
   };
 
   // ---- invoice-package wording per contract (stored with the package files) ----
@@ -506,14 +527,15 @@ export default function Settings() {
         </Disclosure>
       )}
 
-      <Disclosure label="Crew" sublabel="phone numbers for tap-to-text" className="mt-4">
+      <Disclosure label="Crew" sublabel="phone numbers and the language for texts" className="mt-4">
       <div className="card p-3.5">
-        <div className="mb-2 text-xs text-inksoft">The numbers the Schedule tab texts. Numbers save when you tap out of the field.</div>
+        <div className="mb-2 text-xs text-inksoft">The numbers the Schedule tabs text, and the language each worker gets their texts in. Numbers save when you tap out of the field.</div>
         {me?.role !== "accountant" && (
-          <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
             <input className="field" placeholder="Name" value={crewDraft.name} onChange={(e) => setCrewDraft({ ...crewDraft, name: e.target.value })} />
             <input className="field" placeholder="Usual classification (laborer…)" value={crewDraft.trade} onChange={(e) => setCrewDraft({ ...crewDraft, trade: e.target.value })} />
             <input className="field" placeholder="Phone (for texts)" inputMode="tel" value={crewDraft.phone} onChange={(e) => setCrewDraft({ ...crewDraft, phone: e.target.value })} />
+            {langPick(crewDraft.lang, (l) => setCrewDraft({ ...crewDraft, lang: l }))}
             <button className="btn btn-primary" onClick={addWorker}>Add</button>
           </div>
         )}
@@ -523,10 +545,11 @@ export default function Settings() {
             return (
               <div key={e.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
                 <span className="min-w-0"><b>{e.name}</b>{e.trade ? <span className="ml-2 text-xs text-inksoft">{e.trade}</span> : null}</span>
-                <span className="flex items-center gap-2">
+                <span className="flex flex-wrap items-center gap-2">
                   <input className="field w-44 px-2 py-1.5 text-[13px]" placeholder="Phone number" inputMode="tel" readOnly={me?.role === "accountant"}
                     value={buf} onChange={(ev) => setPhoneBuf((p) => ({ ...p, [e.id]: ev.target.value }))}
                     onBlur={() => { if (cleanPhone(buf) !== cleanPhone(e.phone || "")) savePhone(e.id, buf); }} />
+                  {langPick(langOf(e.lang), (l) => saveLang(e.id, l), me?.role === "accountant")}
                   {me?.role !== "accountant" && <button className="btn-icon text-alert" title="Remove from the crew list" onClick={async () => { if (!window.confirm(`Remove ${e.name} from the crew?`)) return; await sb().from("employees").update({ active: false }).eq("id", e.id); loadEmps(); }}>✕</button>}
                 </span>
               </div>

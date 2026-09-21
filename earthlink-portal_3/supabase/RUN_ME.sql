@@ -29,8 +29,9 @@
 -- releases — the calendar's "Who's going?" remembers who is
 -- on each job, and a moved job takes its crew with it. A
 -- priced job comes off the calendar (15), a contract's
--- price book holds each code once (16), and invoice numbers
--- are held until a job is priced (17).
+-- price book holds each code once (16), invoice numbers are
+-- held until a job is priced (17), and each worker has a
+-- language for the crew text (18).
 -- ============================================================
 
 -- ---------- from upgrade_invoices_aging_docs.sql ----------
@@ -715,3 +716,8 @@ begin
   end if;
   return cur;
 end $$;
+
+-- 18) Each worker's language. The crew text goes out in English or
+--     Spanish, worker by worker — set on Settings → Crew. Nothing set
+--     reads as English.
+alter table employees add column if not exists lang text default 'en';

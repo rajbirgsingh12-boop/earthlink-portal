@@ -56,6 +56,13 @@ export const crewMessage = (j: CrewJob, first: string, work: string, moved?: { f
   });
 };
 
+// a worker's language, saved to the crew list — "" when it saved, else what to tell the person
+export async function saveWorkerLang(sbc: { from: (t: string) => { update: (v: Record<string, unknown>) => { eq: (k: string, v: string) => PromiseLike<{ error: { message: string } | null }> } } }, empId: string, lang: string): Promise<string> {
+  const { error } = await sbc.from("employees").update({ lang }).eq("id", empId);
+  if (!error) return "";
+  return /column|schema cache/i.test(error.message) ? "Run supabase/RUN_ME.sql so each worker's language saves" : error.message;
+}
+
 // this job's crew rows — the ones linked to it. A crew is only ever written
 // with the link (RUN_ME section 14), so a moved job keeps its crew: the
 // database moves the rows with the day, and they are found here by the job.

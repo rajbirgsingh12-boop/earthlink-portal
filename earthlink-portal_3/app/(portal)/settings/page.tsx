@@ -17,6 +17,7 @@ import { PRICE_BOOK, PRICE_GROUPS, CUSTOM_GROUP, EMPTY_STORE, DEFAULT_ATTN, blan
   type PriceOverride, type PriceStore, type CustomItem } from "@/lib/priceBook";
 import { cleanPhone, prettyPhone } from "@/lib/notify";
 import { langOf, LANG_LABEL, type Lang } from "@/lib/crewText";
+import LangToggle from "@/components/LangToggle";
 
 // the two roles: Admin 1 sees everything; Admin 2 works PACT without ever
 // seeing a price, an amount, an invoice or a proposal
@@ -97,14 +98,7 @@ export default function Settings() {
     flash(`Texts to ${emps.find((e) => e.id === empId)?.name.split(" ")[0] || "them"} go out in ${LANG_LABEL[lang]}`);
   };
   // English | Español, one tap
-  const langPick = (value: Lang, onPick: (l: Lang) => void, disabled = false) => (
-    <span className="inline-flex rounded-sm border-[1.5px] border-ink" role="radiogroup" aria-label="Language for texts">
-      {(["en", "es"] as Lang[]).map((l, i) => (
-        <button key={l} type="button" role="radio" aria-checked={value === l} disabled={disabled} onClick={() => onPick(l)}
-          className={`min-h-[44px] px-3 font-display text-[12px] font-semibold uppercase tracking-wider ${i > 0 ? "border-l-[1.5px] border-ink" : ""} ${value === l ? "bg-ink text-white" : "bg-white text-ink"}`}>{LANG_LABEL[l]}</button>
-      ))}
-    </span>
-  );
+  const langPick = (value: Lang, onPick: (l: Lang) => void, disabled = false) => <LangToggle value={value} onChange={onPick} disabled={disabled} full />;
   useEffect(() => { loadEmps(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useLive(["employees"], loadEmps, { skipWhileTyping: true });
   const savePhone = async (empId: string, raw: string) => {

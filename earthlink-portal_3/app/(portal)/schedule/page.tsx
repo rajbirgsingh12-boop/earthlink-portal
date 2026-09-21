@@ -12,8 +12,9 @@ import ContractPicker, { contractLabel } from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
 import type { Contract } from "@/lib/types";
 import { cleanPhone, smsHref, sendServerTexts, textMachineReady, textRows, stampRows } from "@/lib/notify";
-import { normText } from "@/lib/pactCrew";
-import { crewText, langOf } from "@/lib/crewText";
+import { normText, saveWorkerLang } from "@/lib/pactCrew";
+import { crewText, langOf, LANG_LABEL, type Lang } from "@/lib/crewText";
+import LangToggle from "@/components/LangToggle";
 
 interface Emp { id: string; name: string; trade: string; active?: boolean; phone?: string | null; lang?: string | null; }
 interface RelRow { id: string; rel_number: string; location: string; contract_id: string; address?: string | null; }
@@ -299,7 +300,13 @@ export default function Schedule() {
               const ok = !!cleanPhone(emp.phone || "");
               return (
                 <div key={row.id} className="flex flex-wrap items-center gap-2 border-t border-rulesoft py-2 first:border-t-0">
-                  <b className="text-[14px]">{emp.name}</b>{langOf(emp.lang) === "es" ? <span className="chip ml-1.5 text-inksoft" title="Texted in Spanish — set in Settings → Crew">ES</span> : null}
+                  <b className="text-[14px]">{emp.name}</b>
+                  <LangToggle value={langOf(emp.lang)} disabled={!canEdit} name={`Language for ${emp.name}`} onChange={async (l: Lang) => {
+                    const bad = await saveWorkerLang(sb(), emp.id, l);
+                    if (bad) { flash(bad); return; }
+                    setEmps((prev) => prev.map((x) => (x.id === emp.id ? { ...x, lang: l } : x)));
+                    flash(`${emp.name.split(" ")[0]} gets texts in ${LANG_LABEL[l]}`);
+                  }} />
                   {row.texted && (canEdit
                     // a stamp that landed without a text really going out (e.g. the
                     // group message was never hit send on) can be tapped off

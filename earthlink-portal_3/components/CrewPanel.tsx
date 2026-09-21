@@ -3,8 +3,9 @@ import { useEffect, useRef, useState } from "react";
 import { sb } from "@/lib/supabase";
 import { cleanPhone, prettyPhone, textRows, stampRows, textMachineReady } from "@/lib/notify";
 import { prettyDate } from "@/lib/docs";
-import { crewMessage, normText, rowNeedsText, siteOf, workOf, type CrewJob, type CrewRow, type Worker } from "@/lib/pactCrew";
-import { langOf } from "@/lib/crewText";
+import { crewMessage, normText, rowNeedsText, saveWorkerLang, siteOf, workOf, type CrewJob, type CrewRow, type Worker } from "@/lib/pactCrew";
+import { langOf, LANG_LABEL, type Lang } from "@/lib/crewText";
+import LangToggle from "@/components/LangToggle";
 import Stamp from "@/components/Stamp";
 
 // "Who's going?" — the crew on a PACT job. Add names from the crew list, and
@@ -28,6 +29,16 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   // the work the crew is told — the rows' saved wording, else the PO's own
   const savedWork = rows.find((r) => (r.description || "").trim())?.description || "";
   const [work, setWork] = useState(savedWork || workOf(job));
+  // the preview's language: what the first worker on the job gets, until it's switched
+  const [previewLang, setPreviewLang] = useState<Lang | null>(null);
+  const shownLang: Lang = previewLang ?? langOf(emps.find((e) => rows[0] && e.id === rows[0].employee_id)?.lang);
+  // one tap on a row: that worker's texts, from now on, in that language
+  const setLang = async (e: Worker, lang: Lang) => {
+    const bad = await saveWorkerLang(sb(), e.id, lang);
+    if (bad) { flash(bad); return; }
+    flash(`${e.name.split(" ")[0]} gets texts in ${LANG_LABEL[lang]}`);
+    await onChange();
+  };
   const saveWork = async () => {
     const w = work.trim();
     if (rows.length === 0 || normText(w) === normText(savedWork || workOf(job))) return;
@@ -106,7 +117,11 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
       {!day && <div className="mb-2 text-[12px] text-alert">No day yet — put the job on a day first. The crew is texted the day.</div>}
       <input className="field mb-2" placeholder="Work (what should they do there?)" value={work} readOnly={!canEdit}
         onChange={(e) => setWork(e.target.value)} onBlur={() => canEdit && saveWork()} />
-      <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 whitespace-pre-line text-[12px] text-inksoft [overflow-wrap:anywhere]">{crewMessage(job, "Name", work.trim())}{emps.some((e) => rows.some((r) => r.employee_id === e.id) && langOf(e.lang) === "es") ? <span className="mt-1 block text-[11px]">Workers marked ES get it in Spanish.</span> : null}</div>
+      <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+        <span className="text-[11px] uppercase tracking-widest text-inksoft">What they get</span>
+        <LangToggle value={shownLang} onChange={setPreviewLang} full name="Preview language" />
+      </div>
+      <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 whitespace-pre-line text-[12px] text-inksoft [overflow-wrap:anywhere]" data-preview-lang={shownLang}>{crewMessage(job, "Name", work.trim(), undefined, shownLang)}<span className="mt-1 block text-[11px]">Each worker gets it in the language beside their name.</span></div>
       {rows.map((r) => {
         const e = emps.find((x) => x.id === r.employee_id);
         const name = e?.name || "?";
@@ -115,6 +130,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
         return (
           <div key={r.id} className="flex flex-wrap items-center gap-2 border-t border-rulesoft py-1.5 first:border-t-0">
             <b className="text-[13px]">{name}</b>
+            {e && <LangToggle value={langOf(e.lang)} onChange={(l) => setLang(e, l)} disabled={!canEdit} name={`Language for ${name}`} />}
             {r.texted && !needs && <Stamp label="TEXTED ✓" tone="ok" />}
             {r.texted && needs && <Stamp label="NEEDS THE NEW DAY" tone="alert" />}
             {!r.texted && <Stamp label="NOT TEXTED" tone="mute" />}
@@ -140,7 +156,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
             <div className="max-h-48 overflow-y-auto rounded-sm border border-rulesoft bg-white">
               {pick.slice(0, 12).map((e) => (
                 <button key={e.id} type="button" className="block min-h-[44px] w-full border-b border-rulesoft px-3 py-2.5 text-left text-[13px] last:border-b-0 hover:bg-paper" disabled={adding} onClick={() => addWorker(e)}>
-                  {e.name}{langOf(e.lang) === "es" ? <span className="chip ml-1.5 text-inksoft" title="Texted in Spanish — set in Settings → Crew">ES</span> : null}{cleanPhone(e.phone || "") ? "" : <span className="ml-2 text-[11px] text-inksoft">no number yet</span>}
+                  {e.name}{langOf(e.lang) === "es" ? <span className="chip ml-1.5 text-inksoft" title="Texted in Spanish">ES</span> : null}{cleanPhone(e.phone || "") ? "" : <span className="ml-2 text-[11px] text-inksoft">no number yet</span>}
                 </button>
               ))}
               {pick.length === 0 && <div className="px-3 py-2 text-[13px] text-inksoft">No one matches “{q}”.</div>}

@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { sb } from "@/lib/supabase";
 import { cleanPhone, prettyPhone, textRows, stampRows, textMachineReady } from "@/lib/notify";
 import { prettyDate } from "@/lib/docs";
-import { crewMessage, normText, rowNeedsText, saveWorkerLang, siteOf, workOf, type CrewJob, type CrewRow, type Worker } from "@/lib/pactCrew";
+import { crewMessageFor, crewPreview, normText, rowNeedsText, saveWorkerLang, siteOf, workOf, type CrewJob, type CrewRow, type Worker } from "@/lib/pactCrew";
+import { spanishKnown, spanishWork } from "@/lib/spanish";
 import { langOf, LANG_LABEL, type Lang } from "@/lib/crewText";
 import LangToggle from "@/components/LangToggle";
 import Stamp from "@/components/Stamp";
@@ -32,6 +33,17 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   // the preview's language: what the first worker on the job gets, until it's switched
   const [previewLang, setPreviewLang] = useState<Lang | null>(null);
   const shownLang: Lang = previewLang ?? langOf(emps.find((e) => rows[0] && e.id === rows[0].employee_id)?.lang);
+  // the work line in Spanish, asked of Claude as soon as anyone here reads
+  // Spanish (or the preview is switched to it), so the text — and the
+  // preview — carry the real translation, not just the glossary's
+  const [, bump] = useState(0);
+  const wantsEs = shownLang === "es" || rows.some((r) => langOf(emps.find((e) => e.id === r.employee_id)?.lang) === "es");
+  useEffect(() => {
+    const w = work.trim();
+    if (!wantsEs || !w || spanishKnown(w)) return;
+    const t = setTimeout(() => { spanishWork(w).then(() => bump((n) => n + 1)); }, 500);
+    return () => clearTimeout(t);
+  }, [work, wantsEs]);
   // one tap on a row: that worker's texts, from now on, in that language
   const setLang = async (e: Worker, lang: Lang) => {
     const bad = await saveWorkerLang(sb(), e.id, lang);
@@ -84,12 +96,12 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   };
   // rows that need a text — a worker told a different day is told again as a move
   const send = async (only?: CrewRow) => {
-    const targets = (only ? [only] : need).map((r) => {
+    const targets = await Promise.all((only ? [only] : need).map(async (r) => {
       const e = emps.find((x) => x.id === r.employee_id);
       const first = (e?.name || "").split(" ")[0];
       const moved = r.texted && r.day !== day ? { from: r.day, to: day } : undefined;
-      return { rowId: r.id, to: e?.phone || "", body: crewMessage(job, first, work.trim(), moved, e?.lang), first };
-    });
+      return { rowId: r.id, to: e?.phone || "", body: await crewMessageFor(job, first, work.trim(), moved, e?.lang), first };
+    }));
     if (targets.some((t) => !cleanPhone(t.to))) { flash("Someone here has no number — add it in the box beside their name"); return; }
     setSending(true);
     // a worker told a different day carries a stale TEXTED mark until RUN_ME's
@@ -121,7 +133,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
         <span className="text-[11px] uppercase tracking-widest text-inksoft">What they get</span>
         <LangToggle value={shownLang} onChange={setPreviewLang} full name="Preview language" />
       </div>
-      <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 whitespace-pre-line text-[12px] text-inksoft [overflow-wrap:anywhere]" data-preview-lang={shownLang}>{crewMessage(job, "Name", work.trim(), undefined, shownLang)}<span className="mt-1 block text-[11px]">Each worker gets it in the language beside their name.</span></div>
+      <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 whitespace-pre-line text-[12px] text-inksoft [overflow-wrap:anywhere]" data-preview-lang={shownLang}>{crewPreview(job, "Name", work.trim(), undefined, shownLang)}<span className="mt-1 block text-[11px]">Each worker gets it in the language beside their name.</span></div>
       {rows.map((r) => {
         const e = emps.find((x) => x.id === r.employee_id);
         const name = e?.name || "?";

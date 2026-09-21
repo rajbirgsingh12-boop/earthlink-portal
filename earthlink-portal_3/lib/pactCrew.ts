@@ -1,7 +1,8 @@
 // A PACT job's crew lives in schedule_days, the same table the NYCHA day
 // schedule has always used: one row per worker per day, with the TEXTED mark.
 // These helpers read that crew for a job and write the text a worker gets.
-import { crewText } from "./crewText";
+import { spanishNow, spanishWork } from "./spanish";
+import { crewText, langOf } from "./crewText";
 import { mapLink as mapLinkOf } from "./mapLink";
 
 export interface CrewRow {
@@ -55,6 +56,13 @@ export const crewMessage = (j: CrewJob, first: string, work: string, moved?: { f
     moved: moved ? { from: moved.from || null, to: moved.to } : null,
   });
 };
+// the text as it goes out: a Spanish-reading worker gets the work line in
+// Spanish too — Claude's translation, or the glossary's when Claude can't answer
+export const crewMessageFor = async (j: CrewJob, first: string, work: string, moved?: { from: string; to: string }, lang?: string | null): Promise<string> =>
+  crewMessage(j, first, langOf(lang) === "es" ? await spanishWork(work) : work, moved, lang);
+// the text as the screen can show it right now (Claude's Spanish once it has answered, the glossary's until then)
+export const crewPreview = (j: CrewJob, first: string, work: string, moved?: { from: string; to: string }, lang?: string | null): string =>
+  crewMessage(j, first, langOf(lang) === "es" ? spanishNow(work) : work, moved, lang);
 
 // a worker's language, saved to the crew list — "" when it saved, else what to tell the person
 export async function saveWorkerLang(sbc: { from: (t: string) => { update: (v: Record<string, unknown>) => { eq: (k: string, v: string) => PromiseLike<{ error: { message: string } | null }> } } }, empId: string, lang: string): Promise<string> {

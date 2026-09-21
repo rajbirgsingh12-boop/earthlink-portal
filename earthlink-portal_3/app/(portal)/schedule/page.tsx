@@ -14,6 +14,7 @@ import type { Contract } from "@/lib/types";
 import { cleanPhone, smsHref, sendServerTexts, textMachineReady, textRows, stampRows } from "@/lib/notify";
 import { normText, saveWorkerLang } from "@/lib/pactCrew";
 import { crewText, langOf, LANG_LABEL, type Lang } from "@/lib/crewText";
+import { spanishKnown, spanishNow, spanishWork } from "@/lib/spanish";
 import LangToggle from "@/components/LangToggle";
 
 interface Emp { id: string; name: string; trade: string; active?: boolean; phone?: string | null; lang?: string | null; }
@@ -108,9 +109,26 @@ export default function Schedule() {
     addrBuf[relId] ?? rows.find((x) => x.release_id === relId && (x.address || "").trim())?.address
     ?? (rels.find((r) => r.id === relId)?.address || "");
   const mapLink = (addr: string) => `https://maps.google.com/?q=${encodeURIComponent(addr)}`;
-  // the street when one is known (typed, saved on the day, or read off the release PDF), the building always
+  // the street when one is known (typed, saved on the day, or read off the release PDF), the building always.
+  // A Spanish-reading worker gets the work in Spanish too: Claude's translation
+  // once it has answered (asked below, ahead of the tap), the glossary's until then
   const msgFor = (rel: RelRow, relId: string, who?: string, lang?: string | null) =>
-    crewText({ first: who, day, street: addrOf(relId), building: rel.location, work: descOf(relId), lang });
+    crewText({ first: who, day, street: addrOf(relId), building: rel.location, work: langOf(lang) === "es" ? spanishNow(descOf(relId)) : descOf(relId), lang });
+  const msgForAsync = async (rel: RelRow, relId: string, who?: string, lang?: string | null) =>
+    crewText({ first: who, day, street: addrOf(relId), building: rel.location, work: langOf(lang) === "es" ? await spanishWork(descOf(relId)) : descOf(relId), lang });
+  const [, bump] = useState(0);
+  useEffect(() => {
+    // every work line a Spanish-reading worker on this day will get: translated now, remembered
+    const want = new Set<string>();
+    for (const r of rows) {
+      const e = emps.find((x) => x.id === r.employee_id);
+      const w = descOf(r.release_id || "").trim();
+      if (r.release_id && langOf(e?.lang) === "es" && w && !spanishKnown(w)) want.add(w);
+    }
+    if (!want.size) return;
+    const t = setTimeout(() => { Promise.all([...want].map((w) => spanishWork(w))).then(() => bump((n) => n + 1)); }, 500);
+    return () => clearTimeout(t);
+  }, [rows, emps, descBuf]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // + Add worker just adds them to the day — no message goes out until Assign & text
   const addingNow = useRef<Set<string>>(new Set()); // guards a double-tap on the same name
@@ -139,7 +157,7 @@ export default function Schedule() {
     const targets = assigned
       .map((row) => ({ row, emp: emps.find((e) => e.id === row.employee_id) }))
       .filter((t): t is { row: Assign; emp: Emp } => !!t.emp && !!cleanPhone(t.emp.phone || ""))
-      .map((t) => ({ rowId: t.row.id, to: cleanPhone(t.emp.phone || ""), first: t.emp.name.split(" ")[0], body: msgFor(rel, rel.id, t.emp.name.split(" ")[0], t.emp.lang) }));
+      .map((t) => ({ rowId: t.row.id, to: cleanPhone(t.emp.phone || ""), first: t.emp.name.split(" ")[0], body: msgFor(rel, rel.id, t.emp.name.split(" ")[0], t.emp.lang), lang: t.emp.lang }));
     if (targets.length === 0) { flash("No saved numbers on this crew — add them in Payroll → Crew first"); return; }
     if (!descOf(rel.id).trim() && !window.confirm("No work description yet — send the assignments anyway?")) return;
     const stamp = async (ids: string[]) => {
@@ -150,6 +168,8 @@ export default function Schedule() {
     // the one sender every crew text goes through: row ids ride along so the
     // server stamps TEXTED itself and a retry after a dead spot skips workers
     // who were already texted — nobody gets doubled
+    // the Spanish ones wait for Claude's wording (the glossary's if Claude can't answer)
+    for (const t of targets) if (langOf(t.lang) === "es") t.body = await msgForAsync(rel, rel.id, t.first, t.lang);
     const out = await textRows(targets);
     setSending(null);
     if (out.status === "sent") {
@@ -327,7 +347,7 @@ export default function Schedule() {
                       <button className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline" title="Resend from the company number"
                         onClick={async () => {
                           const res = await sendServerTexts(
-                            [{ to: cleanPhone(emp.phone || ""), body: msgFor(rel, rel.id, emp.name.split(" ")[0], emp.lang), id: row.id }],
+                            [{ to: cleanPhone(emp.phone || ""), body: await msgForAsync(rel, rel.id, emp.name.split(" ")[0], emp.lang), id: row.id }],
                             (await sb().auth.getSession()).data.session?.access_token || null);
                           if (res.ok && (res.failed || []).length === 0) { markTexted(row.id); flash(`Texted ${emp.name.split(" ")[0]} ✓`); }
                           else flash(res.failed?.[0]?.error || res.error || "Couldn't send");

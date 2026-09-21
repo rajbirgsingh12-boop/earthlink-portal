@@ -109,7 +109,7 @@ export default function Schedule() {
   const mapLink = (addr: string) => `https://maps.google.com/?q=${encodeURIComponent(addr)}`;
   // the street when one is known (typed, saved on the day, or read off the release PDF), the building always
   const msgFor = (rel: RelRow, relId: string, who?: string) =>
-    crewText({ first: who, day, street: addrOf(relId), building: rel.location, work: descOf(relId), ref: `NYCHA release #${rel.rel_number}` });
+    crewText({ first: who, day, street: addrOf(relId), building: rel.location, work: descOf(relId) });
 
   // + Add worker just adds them to the day — no message goes out until Assign & text
   const addingNow = useRef<Set<string>>(new Set()); // guards a double-tap on the same name

@@ -40,14 +40,10 @@ export const workOf = (j: CrewJob): string => {
 };
 export const mapLink = mapLinkOf;
 
-// the text itself — lib/crewText lays it out; "moved" makes it read as a change, not a repeat
+// the text itself — lib/crewText writes it (no PO number: the crew doesn't need one); "moved" makes it read as a change, not a repeat
 export const crewMessage = (j: CrewJob, first: string, work: string, moved?: { from: string; to: string }): string => {
-  const po = (j.po_number || j.job_number || "").trim();
-  const partner = (j.partner || "").trim();
-  // "PO 116843 for Beacon Mgmt" — "a job for Beacon Mgmt" when the PO has no number yet
-  const ref = po ? `PO ${po}${partner ? ` for ${partner}` : ""}` : partner ? `a job for ${partner}` : "";
   return crewText({
-    first, day: j.start_date, street: j.address, building: j.development, apt: j.property_unit, work, ref,
+    first, day: j.start_date, street: j.address, building: j.development, apt: j.property_unit, work,
     moved: moved ? { from: moved.from || null, to: moved.to } : null,
   });
 };

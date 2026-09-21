@@ -11,7 +11,7 @@ import ActionMenu from "@/components/ActionMenu";
 import JobDates, { lastNote } from "@/components/JobDates";
 import Calendar, { type CalEvent, type CalView } from "@/components/Calendar";
 import CrewPanel from "@/components/CrewPanel";
-import { CAL_JOB_COLS, CREW_JOB_COLS, WORKER_COLS, WORKER_COLS_OLD, crewLine, crewMessage, crewState, offCalendar, rowsOfJob, siteOf, type CrewRow, type Worker } from "@/lib/pactCrew";
+import { CAL_JOB_COLS, CREW_JOB_COLS, WORKER_COLS, WORKER_COLS_OLD, crewLine, crewMessageFor, crewState, offCalendar, rowsOfJob, siteOf, type CrewRow, type Worker } from "@/lib/pactCrew";
 import { textRows, stampRows } from "@/lib/notify";
 import { intakePoFile, addJobByHand } from "@/lib/pactIntake";
 import { loadPrices } from "@/lib/priceBook";
@@ -41,6 +41,9 @@ const BLANK = { partner: "", po: "", address: "", apt: "", description: "", day:
 // its day has passed.
 export default function PactCalendar() {
   const [jobs, setJobs] = useState<Job[]>([]);
+  const jobsRef = useRef<Job[]>([]); // the list as last loaded — for a handler that just called load()
+  // priced jobs whose day has passed are off the calendar; a search can show one anyway
+  const [shown, setShown] = useState<Set<string>>(new Set());
   const [dayRows, setDayRows] = useState<DayRow[]>([]);
   const [emps, setEmps] = useState<Emp[]>([]);
   const [q, setQ] = useState("");
@@ -68,7 +71,9 @@ export default function PactCalendar() {
       res = await sb().from("pact_jobs").select(CREW_JOB_COLS).order("created_at", { ascending: false });
     }
     if (res.error) { flash(/relation|column|schema/i.test(res.error.message) ? "Run supabase/RUN_ME.sql first" : res.error.message); return; }
-    setJobs(((res.data || []) as Job[]).filter((j) => !j.canceled));
+    const fresh = ((res.data || []) as Job[]).filter((j) => !j.canceled);
+    jobsRef.current = fresh;
+    setJobs(fresh);
     // the crews — PACT rows only (no release), in pages: an unranged read stops
     // silently at 1000 rows and the oldest jobs would lose their crew
     const fetchRows = async () => {
@@ -106,12 +111,12 @@ export default function PactCalendar() {
   const textMove = async (j: Job, from: string, to: string) => {
     const rows = rowsOfJob(dayRows, j);
     const moved = { ...j, start_date: to };
-    const targets = rows.map((r) => {
+    const targets = await Promise.all(rows.map(async (r) => {
       const e = emps.find((x) => x.id === r.employee_id);
       const first = (e?.name || "").split(" ")[0];
       // told the old day → reads as a move; never told → the plain first text
-      return { rowId: r.id, to: e?.phone || "", body: crewMessage(moved, first, r.description || "", r.texted ? { from, to } : undefined, e?.lang), first };
-    });
+      return { rowId: r.id, to: e?.phone || "", body: await crewMessageFor(moved, first, r.description || "", r.texted ? { from, to } : undefined, e?.lang), first };
+    }));
     // the trigger clears the old stamps; clear them here too so the server
     // doesn't skip anyone where the trigger isn't in yet
     await stampRows(rows.map((r) => r.id), false);
@@ -154,7 +159,17 @@ export default function PactCalendar() {
   };
 
   // ---- POs coming in ----
-  const priceBook = async () => (await loadPrices()).items;
+  // the partner price list — and a note for the flash when the saved list
+  // couldn't be read and the standard sheet priced the PO instead
+  const bookNote = useRef("");
+  const priceBook = async () => {
+    const { items, ok } = await loadPrices();
+    bookNote.current = ok ? "" : "⚠ your saved price list couldn't be read, so the standard sheet priced it — check the prices on the Billing tab";
+    return items;
+  };
+  // the intake's own words when it says nothing was made; the upgrade hint when the database is behind
+  const intakeError = (m: string) => (/nothing was created/i.test(m) ? `${m}${/relation|column|schema/i.test(m) ? " — run supabase/RUN_ME.sql" : ""}`
+    : /relation|column|schema/i.test(m) ? "Database needs the upgrade — run supabase/RUN_ME.sql" : m);
   const handlePo = async (ev: React.ChangeEvent<HTMLInputElement>) => {
     const file = ev.target.files?.[0];
     ev.target.value = "";
@@ -163,24 +178,30 @@ export default function PactCalendar() {
     try {
       const out = await intakePoFile(file, priceBook);
       if (out.kind === "release") { flash("That's a NYCHA blanket release — upload it on the Releases tab (Import release PDFs). PACT only takes partner POs and proposal letters."); return; }
-      if (out.kind === "error") { flash(/relation|column|schema/i.test(out.message) ? "Database needs the upgrade — run supabase/RUN_ME.sql" : out.message); return; }
+      if (out.kind === "error") { flash(intakeError(out.message)); return; }
       await load();
       const label = out.po ? `PO ${out.po}` : "That PO";
+      const tail = [out.kind === "made" && out.attachError ? `(the PDF didn't attach: ${out.attachError})` : "", bookNote.current].filter(Boolean).map((t) => ` · ${t}`).join("");
       if (out.kind === "dupe") {
-        const j = jobs.find((x) => x.id === out.id);
+        // a canceled job is off this calendar — nothing to jump to
+        if (out.canceled) { flash(`${label} is already here, but canceled — nothing new was created. Un-cancel it on the Billing tab to use it again.`); return; }
+        const j = jobsRef.current.find((x) => x.id === out.id);
         const day = out.moved ? out.movedTo : j?.start_date;
         if (day) goTo(day);
-        flash(out.moved ? `${label} is already here — the new PO moves it to ${prettyDate(out.movedTo!)}` : `${label} is already here${out.canceled ? " (canceled)" : ""}${day ? ` — on ${prettyDate(day)}` : " — it has no day yet"}; nothing new was created`);
+        flash(out.moved ? `${label} is already here — the new PO moves it to ${prettyDate(out.movedTo!)}` : `${label} is already here${day ? ` — on ${prettyDate(day)}` : " — it has no day yet"}; nothing new was created`);
+        return;
+      }
+      if (out.unreadable) {
+        // a scan with no text: the job has no number, so nothing here can find it — the Billing tab can
+        flash(`${out.attachError ? "No text could be read from that PDF, and it didn't attach" : "PDF attached, but no text could be read"} (scanned copy?) — the job is on the Billing tab with no name yet. Type its PO number in there, then it can go on a day here.`);
         return;
       }
       const who = out.isDocx ? "our letter" : out.readBy === "claude" ? "read by Claude" : `⚠ read by the rules${out.readNote ? ` (${out.readNote})` : ""}`;
-      if (out.accessDate) { goTo(out.accessDate); flash(`${label} — ${who} · on the calendar for ${prettyDate(out.accessDate)} — now pick who's going${out.attachError ? ` (the PDF didn't attach: ${out.attachError})` : ""}`); }
+      if (out.accessDate) { goTo(out.accessDate); flash(`${label} — ${who} · on the calendar for ${prettyDate(out.accessDate)} — now pick who's going${tail}`); }
       else {
         // no day on the PO: it is first in the "+ Put a job on…" box, one tap from a day
         setAddQ(out.po || "");
-        flash(out.unreadable
-          ? `PDF attached, but no text could be read (scanned copy?) — the job is here with no name; fill it in on the Billing tab, or put it on a day below`
-          : `${label} — ${who} · no date on the PO — it's in the "+ Put a job on…" box below, tap it to put it on ${prettyDate(selected)}`);
+        flash(`${label} — ${who} · no date on the PO — it's in the "+ Put a job on…" box below, tap it to put it on ${prettyDate(selected)}${tail}`);
       }
     } catch (err) {
       flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
@@ -194,11 +215,12 @@ export default function PactCalendar() {
         partner: draft.partner, job_number: draft.po, description: draft.description || `PO ${draft.po.trim()}`, address: draft.address, property_unit: draft.apt,
         start_date: draft.day || undefined, notes: draft.day ? `📅 Put on the calendar for ${prettyDate(draft.day)} when it was typed in` : "",
       });
-      if (out.kind === "error") { flash(/relation|column|schema/i.test(out.message) ? "Database needs the upgrade — run supabase/RUN_ME.sql" : out.message); return; }
+      if (out.kind === "error") { flash(intakeError(out.message)); return; }
       await load();
       if (out.kind === "dupe") {
+        if (out.canceled) { flash(`PO ${draft.po.trim()} is already here, but canceled — nothing new was created. Un-cancel it on the Billing tab to use it again.`); return; }
         if (out.start_date) goTo(out.start_date);
-        flash(`PO ${draft.po.trim()} is already here${out.canceled ? " (canceled)" : ""}${out.start_date ? ` — on ${prettyDate(out.start_date)}` : " — it has no day yet"}; nothing new was created`);
+        flash(`PO ${draft.po.trim()} is already here${out.start_date ? ` — on ${prettyDate(out.start_date)}` : " — it has no day yet"}; nothing new was created`);
         return;
       }
       const day = draft.day;
@@ -208,11 +230,14 @@ export default function PactCalendar() {
     } finally { setBusy(false); }
   };
 
-  // what the calendar holds: not canceled, not priced-and-past
-  const live = jobs.filter((j) => !offCalendar(j, today));
+  // what the calendar holds: not canceled, not priced-and-past (unless a search showed it)
+  const live = jobs.filter((j) => !offCalendar(j, today) || shown.has(j.id));
   const hit = (j: Job) => !q.trim() || `${j.partner} ${poOf(j)} ${j.address || ""} ${j.property_unit || ""} ${j.description}`.toLowerCase().includes(q.trim().toLowerCase());
   const list = live.filter(hit);
-  const undated = live.filter((j) => !(j.start_date || "").trim() && !j.work_done);
+  // a scan nobody could read: no number, no partner, no address — nothing typed here can find it
+  const nameless = (j: Job) => !poOf(j) && !(j.partner || "").trim() && !(j.address || "").trim() && !(j.description || "").trim();
+  const undated = live.filter((j) => !(j.start_date || "").trim() && !j.work_done && !nameless(j));
+  const unread = jobs.filter((j) => nameless(j) && !j.work_done).length;
   // the search's own answer: every PO that matches, on the calendar or not
   const found = q.trim() ? jobs.filter(hit).sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")) : [];
 
@@ -315,6 +340,7 @@ export default function PactCalendar() {
               </div>
             )}
             {!aq && undated.length > 0 && <div className="mt-1 text-[11px] text-inksoft">{undated.length} PO{undated.length === 1 ? " has" : "s have"} no day yet — start typing and {undated.length === 1 ? "it comes" : "they come"} up first.</div>}
+            {!aq && unread > 0 && <div className="mt-1 text-[11px] text-inksoft">{unread} PDF{unread === 1 ? "" : "s"} with no number yet — give {unread === 1 ? "it its" : "them their"} PO number on the Billing tab, then {unread === 1 ? "it" : "they"} can go on a day here.</div>}
           </div>
         )}
       </div>
@@ -346,10 +372,11 @@ export default function PactCalendar() {
             <input className={field} placeholder="Address" value={draft.address} onChange={(e) => setDraft({ ...draft, address: e.target.value })} />
             <input className={field} placeholder="Apt" value={draft.apt} onChange={(e) => setDraft({ ...draft, apt: e.target.value })} />
             <input className={`${field} sm:col-span-2`} placeholder="What's the work? (optional)" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
-            <label className="flex items-center gap-2 text-[11px] uppercase tracking-widest text-inksoft">Day
-              <input type="date" className={`${field} font-mono`} value={draft.day} onChange={(e) => setDraft({ ...draft, day: e.target.value })} />
-              {draft.day && <button type="button" className="btn btn-ghost min-h-[36px] px-2 py-1 text-[12px] normal-case tracking-normal" onClick={() => setDraft({ ...draft, day: "" })}>No day yet</button>}
-            </label>
+            <div className="flex items-center gap-2">
+              <label htmlFor="po-by-hand-day" className="text-[11px] uppercase tracking-widest text-inksoft">Day</label>
+              <input id="po-by-hand-day" type="date" className={`${field} min-w-0 font-mono`} value={draft.day} onChange={(e) => setDraft({ ...draft, day: e.target.value })} />
+              {draft.day && <button type="button" className="btn btn-ghost min-h-[44px] shrink-0 whitespace-nowrap px-3 py-1 text-[12px] normal-case tracking-normal" onClick={() => setDraft({ ...draft, day: "" })}>No day yet</button>}
+            </div>
           </div>
           <div className="mt-3 flex gap-2">
             <button className="btn btn-primary" onClick={addByHand} disabled={busy}>Add PO</button>
@@ -362,10 +389,16 @@ export default function PactCalendar() {
         <div className="mb-3 max-h-72 overflow-y-auto rounded-sm border border-rulesoft bg-white" data-po-results>
           {found.slice(0, 20).map((j) => {
             const day = (j.start_date || "").trim();
-            const tail = j.work_done ? `done ✓${day ? ` · ${prettyDate(day)}` : ""}` : offCalendar(j, today) ? `priced, off the calendar · ${prettyDate(day)}` : day ? `on ${prettyDate(day)} → go there` : canEdit ? `no day yet → put on ${prettyDate(selected)}` : "no day yet";
+            const off = offCalendar(j, today) && !shown.has(j.id);
+            const tail = off ? `priced, off the calendar · ${prettyDate(day)} → show it` : j.work_done ? `done ✓${day ? ` · ${prettyDate(day)} → go there` : " · no day"} ` : day ? `on ${prettyDate(day)} → go there` : canEdit ? `no day yet → put on ${prettyDate(selected)}` : "no day yet";
             return (
               <button key={j.id} type="button" className="flex min-h-[44px] w-full items-center justify-between gap-2 border-b border-rulesoft px-3 py-2.5 text-left text-[13px] last:border-b-0 hover:bg-paper"
-                onClick={() => { if (day) { goTo(day); setQ(""); } else if (canEdit) putOnDay(j, selected); }}>
+                onClick={() => {
+                  if (off) { setShown((prev) => new Set(prev).add(j.id)); if (day) goTo(day); setQ(""); } // back on its day to look at, nothing written
+                  else if (day) { goTo(day); setQ(""); }
+                  else if (j.work_done) flash(`${poLabel(j)} is marked complete and never had a day — nothing to put on the calendar. It's on the Billing tab.`);
+                  else if (canEdit) putOnDay(j, selected);
+                }}>
                 {poLine(j)}
                 <span className="shrink-0 text-[11px] text-inksoft">{tail}</span>
               </button>

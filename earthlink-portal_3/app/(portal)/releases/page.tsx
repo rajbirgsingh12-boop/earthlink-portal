@@ -1573,7 +1573,7 @@ export default function Releases() {
           // a paid copy answers first — the import must see the settled one
           const existing = [...((existRows || []) as { id: string; received?: boolean }[])].sort((a, b) => Number(!!b.received) - Number(!!a.received));
           let relId: string;
-          const stripNew = (o: Record<string, unknown>) => { const { labor_breakdown: _b, labor_hours: _h, ...rest } = o; return rest; };
+          const stripNew = (o: Record<string, unknown>) => { const { labor_breakdown: _b, labor_hours: _h, address: _a, ...rest } = o; return rest; }; // the same fallback the single-file import has
           if (existing && existing[0]) {
             // a received (paid) release is settled business — the import may not
             // touch its numbers, line items, or files

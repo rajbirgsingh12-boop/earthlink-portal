@@ -40,12 +40,18 @@ const titleCase = (s: string) => s.toLowerCase().replace(/(^|[\s\-/'.])([a-z])/g
 // the city before ", NY": the two- and three-word ones the city has, else the one word
 const CITY_RE = /((?:NEW YORK|STATEN ISLAND|LONG ISLAND CITY|FAR ROCKAWAY|FOREST HILLS|REGO PARK|JACKSON HEIGHTS|EAST ELMHURST|SOUTH OZONE PARK|OZONE PARK|RICHMOND HILL|KEW GARDENS|COLLEGE POINT|FRESH MEADOWS|ST\.? ALBANS|SPRINGFIELD GARDENS|ROCKAWAY BEACH|ROCKAWAY PARK|SOUTH RICHMOND HILL|HOWARD BEACH|CAMBRIA HEIGHTS|QUEENS VILLAGE|MIDDLE VILLAGE|OAKLAND GARDENS|LITTLE NECK|BELLE HARBOR|BREEZY POINT|[A-Z][A-Z.'-]*)),\s*N\.?Y\.?\s+(\d{5}(?:-\d{4})?)/i;
 export const streetOf = (shipTo: string): string => {
-  const after = shipTo.replace(/^.*?-\s*\d{3,4}\b\s*/, "");
+  // the development's code sits at the head ("VAN DYKE-0216 …") and only
+  // there — a phone number's "-4000" further along is not one
+  const after = shipTo.replace(/^[A-Z0-9 .,'&-]+?-\s*\d{3,4}\b\s*/i, "");
   const cityM = after.match(CITY_RE);
   // the street runs up to the phone or the city line, whichever comes first
   const upTo = cityM && cityM.index !== undefined ? after.slice(0, cityM.index) : after;
-  const street = (upTo.split(/\s+(?:TELEPHONE|TEL\.?|PHONE)\b|\s+#?\(?\d{3}\)?[ -]?\d{3}-\d{4}/i)[0] || "").trim();
-  if (!/^\d/.test(street)) return ""; // no street number — a name, not an address
+  const head = (upTo.split(/\s+(?:TELEPHONE|TEL\.?|PHONE)\b|\s+#?\(?\d{3}\)?[ -]?\d{3}-\d{4}/i)[0] || "").trim();
+  // the street starts at its number ("370 BLAKE AVENUE", "2-10 ASTORIA BLVD");
+  // a name still in front of it is the development's, not the address
+  const at = head.search(/(^|\s)\d+(?:-\d+)?[A-Z]?\s+[A-Z]/i);
+  if (at < 0) return ""; // no street number — a name, not an address
+  const street = head.slice(at).trim().replace(/[,\s]+$/, "");
   const city = cityM ? `${cityM[1]}, NY ${cityM[2]}` : "";
   return [titleCase(street), city ? titleCase(city) : ""].filter(Boolean).join(", ");
 };

@@ -682,18 +682,21 @@ create unique index if not exists contract_items_contract_code_uq on contract_it
 --     Jobs numbered before this section keep their numbers.
 create or replace function public.pact_next_invoice_no() returns text
 language plpgsql security definer set search_path = public as $$
-declare n integer;
+declare n bigint;
 begin
   -- one at a time, whoever asks — the counter never hands out a twin
   perform pg_advisory_xact_lock(hashtext('pact_invoice_no'));
-  select greatest(568, coalesce(max(invoice_number::integer), 0)) + 1 into n
-    from pact_jobs where invoice_number ~ '^[0-9]+$';
+  -- a number typed by hand may carry a stray space (still the same number);
+  -- one far too long to be ours (a date-style 20260921001) is outside the
+  -- run, like the old "8300-1" style, and never breaks the counter
+  select greatest(568, coalesce(max(trim(invoice_number)::bigint), 0)) + 1 into n
+    from pact_jobs where trim(invoice_number) ~ '^[0-9]{1,9}$';
   return n::text;
 end $$;
 create or replace function public.pact_job_invoice_no() returns trigger
 language plpgsql as $$
 begin
-  if coalesce(new.priced, false) and coalesce(new.invoice_number, '') = '' then
+  if coalesce(new.priced, false) and coalesce(trim(new.invoice_number), '') = '' then
     new.invoice_number := public.pact_next_invoice_no();
   end if;
   return new;
@@ -707,8 +710,10 @@ create or replace function public.pact_claim_invoice_no(job uuid) returns text
 language plpgsql as $$
 declare cur text;
 begin
-  perform pg_advisory_xact_lock(hashtext('pact_invoice_no'));
-  select coalesce(invoice_number, '') into cur from pact_jobs where id = job for update;
+  -- the job's row first, then the counter — the same order a pricing save
+  -- takes them (the row, then the trigger's counter), so an invoice being
+  -- built while the office prices the same job never deadlocks
+  select coalesce(trim(invoice_number), '') into cur from pact_jobs where id = job for update;
   if not found then return null; end if;
   if cur = '' then
     cur := public.pact_next_invoice_no();

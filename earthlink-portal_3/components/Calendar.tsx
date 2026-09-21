@@ -38,11 +38,11 @@ type Drag = { e: CalEvent; x: number; y: number; over: string | null };
 // the day cell under a point on the screen
 const dayAt = (x: number, y: number): string | null =>
   (typeof document === "undefined" ? null : document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-day]")?.dataset.day) || null;
-// once a bar is being dragged, a finger moving is the drag, not the page scrolling
-const stopScroll = (ev: TouchEvent) => { ev.preventDefault(); };
 const HOLD_MS = 320;       // how long a finger holds a bar before it comes loose
 const HOLD_SLOP = 10;      // a finger that moves this far first is scrolling, not holding
 const MOUSE_SLOP = 5;      // a mouse that moves this far is dragging, not clicking
+const EDGE = 36;           // this close to the week's edge, the week scrolls under the bar
+const EDGE_STEP = 7;       // …this many pixels a frame
 
 export default function Calendar({ events, view, onView, anchor, onAnchor, selected, onSelect, onOpen, onMove, renderDay }: {
   events: CalEvent[];
@@ -64,15 +64,57 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
   // ---- dragging a bar to another day ----
   const [drag, setDrag] = useState<Drag | null>(null);
   // the pointer that pressed a bar, until it lets go: which bar, where it
-  // started, the hold timer on a phone, and whether the bar has come loose
-  const press = useRef<{ e: CalEvent; id: number; sx: number; sy: number; timer: ReturnType<typeof setTimeout> | null; live: boolean; el: HTMLElement } | null>(null);
+  // started, the hold timer on a phone, whether the bar has come loose, and
+  // the window listeners that follow it once it has
+  const press = useRef<{ e: CalEvent; id: number; sx: number; sy: number; timer: ReturnType<typeof setTimeout> | null; live: boolean; el: HTMLElement; off: () => void } | null>(null);
+  const dragging = useRef(false);      // a bar is loose right now (read by the scroll blocker)
+  const edge = useRef(0);              // -1 / 1 while the pointer rides the week's left / right edge
+  const weekScroll = useRef<HTMLDivElement | null>(null);
   const swallowClick = useRef(false); // the click that follows a drop is not a tap
-  useEffect(() => () => { document.removeEventListener("touchmove", stopScroll); }, []);
+  useEffect(() => {
+    // registered once, up front: iPhone Safari decides at the first touch
+    // whether the page may scroll under a finger, so a blocker added only
+    // when the bar comes loose would come too late. It blocks nothing until then.
+    const block = (ev: TouchEvent) => { if (dragging.current) ev.preventDefault(); };
+    document.addEventListener("touchmove", block, { passive: false });
+    return () => { document.removeEventListener("touchmove", block); press.current?.off(); dragging.current = false; };
+  }, []);
+  const follow = (x: number, y: number) => {
+    const p = press.current;
+    if (!p || !p.live) return;
+    // on a phone the week is wider than the screen: a bar held at its edge
+    // scrolls it, so a day off the screen is still a drop away
+    const sc = weekScroll.current;
+    if (sc && sc.scrollWidth > sc.clientWidth) { const r = sc.getBoundingClientRect(); edge.current = x < r.left + EDGE ? -1 : x > r.right - EDGE ? 1 : 0; }
+    else edge.current = 0;
+    setDrag({ e: p.e, x, y, over: dayAt(x, y) });
+  };
   const loosen = () => {
     const p = press.current;
     if (!p || p.live) return;
     p.live = true;
-    document.addEventListener("touchmove", stopScroll, { passive: false });
+    dragging.current = true;
+    // the window hears the rest of this pointer, so a bar redrawn elsewhere
+    // (a job someone else moved, a day that filled up) mid-drag never leaves
+    // a ghost pinned to the screen with the page stuck
+    const move = (ev: PointerEvent) => { if (press.current?.id === ev.pointerId) follow(ev.clientX, ev.clientY); };
+    const up = (ev: PointerEvent) => { if (press.current?.id === ev.pointerId) letGo(true, ev.clientX, ev.clientY); };
+    const cancel = (ev: PointerEvent) => { if (press.current?.id === ev.pointerId) letGo(false, ev.clientX, ev.clientY); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    let raf = 0;
+    const tick = () => {
+      if (!press.current?.live) return;
+      const sc = weekScroll.current;
+      if (edge.current && sc) {
+        sc.scrollLeft += edge.current * EDGE_STEP;
+        setDrag((d) => (d ? { ...d, over: dayAt(d.x, d.y) } : d));
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    p.off = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); window.removeEventListener("pointercancel", cancel); cancelAnimationFrame(raf); };
     setDrag({ e: p.e, x: p.sx, y: p.sy, over: p.e.day });
   };
   const letGo = (drop: boolean, x: number, y: number) => {
@@ -80,7 +122,9 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
     if (!p) return;
     if (p.timer) clearTimeout(p.timer);
     press.current = null;
-    document.removeEventListener("touchmove", stopScroll);
+    p.off();
+    dragging.current = false;
+    edge.current = 0;
     try { p.el.releasePointerCapture(p.id); } catch { /* fine */ }
     if (!p.live) return; // a tap — the click does its usual work
     // the click that follows a drop is not a tap — and when no click follows
@@ -93,7 +137,7 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
   };
   const onPointerDown = (e: CalEvent) => (ev: React.PointerEvent<HTMLButtonElement>) => {
     if (!onMove || e.done || ev.button !== 0 || press.current) return;
-    const p = { e, id: ev.pointerId, sx: ev.clientX, sy: ev.clientY, timer: null as ReturnType<typeof setTimeout> | null, live: false, el: ev.currentTarget as HTMLElement };
+    const p = { e, id: ev.pointerId, sx: ev.clientX, sy: ev.clientY, timer: null as ReturnType<typeof setTimeout> | null, live: false, el: ev.currentTarget as HTMLElement, off: () => {} };
     press.current = p;
     // the bar keeps hearing this pointer wherever it goes from here — a quick
     // mouse leaves a small bar before its first move would otherwise land on it
@@ -103,14 +147,10 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
   };
   const onPointerMove = (ev: React.PointerEvent<HTMLButtonElement>) => {
     const p = press.current;
-    if (!p || p.id !== ev.pointerId) return;
+    if (!p || p.id !== ev.pointerId || p.live) return; // loose: the window follows it
     const dist = Math.hypot(ev.clientX - p.sx, ev.clientY - p.sy);
-    if (!p.live) {
-      if (ev.pointerType === "mouse") { if (dist < MOUSE_SLOP) return; loosen(); }
-      else { if (dist > HOLD_SLOP) { if (p.timer) clearTimeout(p.timer); press.current = null; } return; }
-    }
-    ev.preventDefault();
-    setDrag({ e: p.e, x: ev.clientX, y: ev.clientY, over: dayAt(ev.clientX, ev.clientY) });
+    if (ev.pointerType === "mouse") { if (dist < MOUSE_SLOP) return; loosen(); follow(ev.clientX, ev.clientY); }
+    else if (dist > HOLD_SLOP) { if (p.timer) clearTimeout(p.timer); press.current = null; }
   };
   const onPointerUp = (ev: React.PointerEvent<HTMLButtonElement>) => { if (press.current?.id === ev.pointerId) letGo(true, ev.clientX, ev.clientY); };
   const onPointerCancel = (ev: React.PointerEvent<HTMLButtonElement>) => { if (press.current?.id === ev.pointerId) letGo(false, ev.clientX, ev.clientY); };
@@ -143,9 +183,11 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
         style={movable ? { WebkitUserSelect: "none", userSelect: "none", WebkitTouchCallout: "none" } : undefined}
         title={[e.title, e.subtitle, e.flag, movable ? "drag to another day to move it" : ""].filter(Boolean).join(" · ")}
         data-po-bar={e.id}
-        className={`block w-full rounded-[3px] border-l-[3px] text-left ${size === "chip" ? "px-[2px] py-0 font-mono text-[11px] leading-[1.35] tracking-tight" : size === "compact" ? "px-1 py-[1px] text-[11px] leading-[1.25]" : "px-2 py-1 text-[12px] leading-snug"} ${barCls(e)} ${lifted ? "opacity-40" : ""} ${movable ? "cursor-grab active:cursor-grabbing" : ""}`}>
-        {/* a phone's chip has no room for the ⚠ — the flag turns the number red instead */}
-        <span className={`block truncate font-semibold ${size === "chip" && e.flag ? "text-alert" : ""}`}>{e.flag && size !== "chip" ? "⚠ " : ""}{size === "chip" ? e.short || e.title : e.title}</span>
+        className={`block w-full rounded-[3px] border-l-[3px] text-left ${size === "chip" ? "min-h-[20px] px-[2px] py-[1px] font-mono text-[11px] leading-[18px] tracking-tight" : size === "compact" ? "px-1 py-[1px] text-[11px] leading-[1.25]" : "px-2 py-1 text-[12px] leading-snug"} ${barCls(e)} ${lifted ? "opacity-40" : ""} ${movable ? "cursor-grab active:cursor-grabbing" : ""}`}>
+        {/* a phone's chip has no room for the ⚠ — the flag turns the number red
+            instead — and a number too long for it keeps its last digits, the ones
+            that tell two POs apart (the cut lands at the front: right-to-left flow) */}
+        <span className={`block truncate font-semibold ${size === "chip" ? "text-left [direction:rtl]" : ""} ${size === "chip" && e.flag ? "text-alert" : ""}`}>{e.flag && size !== "chip" ? "⚠ " : ""}{size === "chip" ? e.short || e.title : e.title}</span>
         {size === "bar" && e.subtitle && <span className="block truncate text-[11px] text-inksoft">{e.subtitle}</span>}
         {size === "bar" && e.people && e.people.length > 0 && <span className="block truncate text-[11px] text-inksoft">👷 {e.people.join(", ")}</span>}
       </button>
@@ -203,7 +245,7 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
     const start = weekStart(anchor);
     const days = Array.from({ length: 7 }, (_, i) => addDays(start, i));
     return (
-      <div className="overflow-x-auto rounded-sm border border-rule bg-white">
+      <div ref={weekScroll} data-week-scroll className="overflow-x-auto rounded-sm border border-rule bg-white">
         <div className="grid min-w-[700px] grid-cols-7">
           {days.map((iso, i) => {
             const evs = byDay[iso] || [];
@@ -268,8 +310,9 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
       </div>
       {/* the bar in flight, riding just above the finger or the pointer */}
       {drag && (
-        <div className="pointer-events-none fixed z-[60]" style={{ left: Math.max(4, drag.x - 40), top: Math.max(4, drag.y - 52) }} aria-hidden>
-          <div className={`rounded-sm border-[1.5px] border-ink bg-white px-2.5 py-1.5 text-[13px] font-semibold shadow-lg ${drag.over && drag.over !== drag.e.day ? "" : "text-inksoft"}`}>
+        <div className="pointer-events-none fixed z-[60] max-w-[calc(100vw-8px)]" data-drag-ghost
+          style={{ top: Math.max(4, drag.y - 52), ...(drag.x > window.innerWidth / 2 ? { right: Math.max(4, window.innerWidth - drag.x - 40) } : { left: Math.max(4, drag.x - 40) }) }} aria-hidden>
+          <div className={`whitespace-nowrap rounded-sm border-[1.5px] border-ink bg-white px-2.5 py-1.5 text-[13px] font-semibold shadow-lg ${drag.over && drag.over !== drag.e.day ? "" : "text-inksoft"}`}>
             {drag.e.title} → {drag.over && drag.over !== drag.e.day ? fmt(drag.over, { weekday: "short", month: "short", day: "numeric" }) : "drop it on a day"}
           </div>
         </div>

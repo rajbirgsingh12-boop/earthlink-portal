@@ -32,13 +32,17 @@ export async function claimInvoiceNo(jobId: string, current?: string | null): Pr
   if ((current || "").trim()) return (current || "").trim();
   const rpc = await sb().rpc("pact_claim_invoice_no", { job: jobId });
   if (!rpc.error && typeof rpc.data === "string" && rpc.data) return rpc.data;
+  // the counter answered with nothing: no such job — it was deleted under this screen
+  if (!rpc.error) throw new Error("This job is no longer here — it was deleted");
   // the function isn't there yet (RUN_ME section 17 not run): count up here. Any other error is an error.
-  if (rpc.error && !/could not find|schema cache|does not exist|not found|404/i.test(rpc.error.message)) throw new Error(rpc.error.message);
+  if (!/could not find|schema cache|does not exist|not found|404/i.test(rpc.error.message)) throw new Error(rpc.error.message);
   const n = await nextInvoiceNo();
   const { error } = await sb().from("pact_jobs").update({ invoice_number: n }).eq("id", jobId).or("invoice_number.is.null,invoice_number.eq.");
   if (error) throw new Error(error.message);
-  const { data } = await sb().from("pact_jobs").select("invoice_number").eq("id", jobId).single();
-  return String((data as { invoice_number?: string } | null)?.invoice_number || n);
+  const { data, error: re } = await sb().from("pact_jobs").select("invoice_number").eq("id", jobId).maybeSingle();
+  if (re) throw new Error(re.message);
+  if (!data) throw new Error("This job is no longer here — it was deleted");
+  return String((data as { invoice_number?: string }).invoice_number || n);
 }
 export const subtotalOf = (items: { qty: number; unit_price: number }[]) =>
   Math.round(items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0) * 100) / 100;
@@ -194,8 +198,9 @@ export async function intakePoFile(file: File, priceBook: () => Promise<PriceIte
       && (oldD === "" || newD.toLowerCase().includes(oldD.toLowerCase()));
     if (grew) await sb().from("pact_jobs").update({ description: newD }).eq("id", dupe.id);
     // the partner re-issued the PO with a different access date: that IS
-    // the new schedule — unless the work is already done
-    const moved = !!f.accessDate && !dupe.work_done && (dupe.start_date || "") !== f.accessDate;
+    // the new schedule — unless the work is already done, or the job was
+    // canceled (a canceled job is off the calendar; nothing moves it there)
+    const moved = !!f.accessDate && !dupe.work_done && !dupe.canceled && (dupe.start_date || "") !== f.accessDate;
     if (moved) {
       const was = dupe.start_date ? ` (was ${prettyDate(dupe.start_date)})` : "";
       const line = `📅 Moved to ${prettyDate(f.accessDate!)} by a re-uploaded PO${was}`;

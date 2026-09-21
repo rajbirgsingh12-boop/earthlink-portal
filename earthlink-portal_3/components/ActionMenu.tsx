@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 // One dropdown for every cluster of related actions. Opens on tap (never
 // hover — phones), closes on a tap outside, Escape, or picking an item.
@@ -27,7 +27,18 @@ export default function ActionMenu({ label, items, variant = "ghost", align = "r
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLDivElement | null>(null);
   const trigger = useRef<HTMLButtonElement | null>(null);
+  const menu = useRef<HTMLDivElement | null>(null);
+  // which way the panel hangs: the way asked for, unless that runs it off the
+  // screen — a button that wrapped to the left of a phone opens rightward
+  const [side, setSide] = useState<"left" | "right">(align);
   const id = useId();
+  useLayoutEffect(() => {
+    if (!open) { setSide(align); return; }
+    const r = menu.current?.getBoundingClientRect();
+    if (!r) return;
+    if (align === "right" && r.left < 4) setSide("left");
+    else if (align === "left" && r.right > window.innerWidth - 4) setSide("right");
+  }, [open, align]);
   const visible = items.filter((i) => !i.hidden);
   const shown = [...visible.filter((i) => !i.destructive), ...visible.filter((i) => i.destructive)];
 
@@ -77,8 +88,8 @@ export default function ActionMenu({ label, items, variant = "ghost", align = "r
         {variant !== "bare" && <span className={`text-[10px] transition-transform duration-150 ${open ? "rotate-180" : ""}`}>▾</span>}
       </button>
       {open && (
-        <div id={id} role="menu"
-          className={`menu absolute top-full z-40 mt-1 ${align === "right" ? "right-0" : "left-0"}`}>
+        <div id={id} role="menu" ref={menu}
+          className={`menu absolute top-full z-40 mt-1 ${side === "right" ? "right-0" : "left-0"}`}>
           {shown.map((it, i) => {
             const cls = `menu-item ${it.destructive ? "menu-item-danger" : ""} ${it.disabled ? "cursor-not-allowed opacity-50" : ""} ${it.destructive && i > 0 && !shown[i - 1].destructive ? "border-t-[1.5px] border-rule" : ""}`;
             const inner = <>{it.glyph ? <span className="mr-2">{it.glyph}</span> : null}{it.label}</>;

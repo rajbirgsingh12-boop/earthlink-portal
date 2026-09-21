@@ -78,6 +78,9 @@ export default function Pact() {
   const today = () => localISO();
   const isImg = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n);
   const itemsOf = (j: Job): Item[] => (Array.isArray(j.items) ? j.items : []);
+  // a job with a line to bill — an invoice number is only ever given out for one of these
+  const hasLines = (j: Job) => cleanLineWording(itemsOf(j)).items.some((it) => Number(it.qty) > 0 && it.description.trim());
+  const atFocus = useRef(""); // what a text box held when it was tapped into — a blur that changed nothing writes nothing
   // the job's short name: the street and the apartment, nothing else. The
   // borough, the state and the zip are on the invoice, not in a list you
   // scroll on a phone.
@@ -430,11 +433,17 @@ export default function Pact() {
     } finally { if (!quiet) setBusy(false); }
   };
 
-  const saveInvoiceFor = async (j: Job, quiet = false): Promise<boolean> => {
+  const saveInvoiceFor = async (j0: Job, quiet = false): Promise<boolean> => {
+    let j = j0;
     if (!quiet) setBusy(true);
     try {
       const theOrg = await companyOrg();
       if (!theOrg) { flash("Company details haven't loaded — check your signal and try again"); return false; }
+      if (!hasLines(j)) { flash("Couldn't build the invoice — the job needs at least one priced work line"); return false; }
+      // the invoice number is given out the moment an invoice is built, if the
+      // job has none yet — the same number the zip package carries later
+      const no = await claimInvoiceNo(j.id, j.invoice_number);
+      if (no !== (j.invoice_number || "")) { j = { ...j, invoice_number: no }; setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, invoice_number: no } : x))); }
       const bytes = await buildPackageBytes(j, theOrg);
       if (!bytes) { flash("Couldn't build the invoice — the job needs at least one priced work line"); return false; }
       saveBytes(bytes, invoiceFileName(j), "application/pdf");
@@ -690,7 +699,8 @@ export default function Pact() {
       const out = await intakePoFile(file, priceBook);
       setBusy(false);
       if (out.kind === "release") { flash("That's a NYCHA blanket release — upload it on the Releases tab (Import release PDFs). PACT only takes partner POs and proposal letters."); return; }
-      if (out.kind === "error") { flash(upgradeHint(out.message)); return; }
+      // the intake's own words when it says nothing was made — the hint alone would hide that
+      if (out.kind === "error") { flash(/nothing was created/i.test(out.message) ? out.message : upgradeHint(out.message)); return; }
       await load();
       setOpenId(out.id); showDetailsFor(out.id);
       if (out.kind === "dupe") {
@@ -988,6 +998,7 @@ export default function Pact() {
         // whatever was corrected since the import is what gets billed — and
         // the invoice number is given out right here, in this order
         const j1 = jobs.find((x) => x.id === j0.id) || j0;
+        if (!hasLines(j1)) continue; // nothing to bill — no number spent on it
         const j = { ...j1, invoice_number: await claimInvoiceNo(j1.id, j1.invoice_number) };
         const bytes = await buildPackageBytes(j, theOrg);
         if (!bytes) continue;
@@ -1215,6 +1226,7 @@ export default function Pact() {
     if (!theOrg) { flash("Company details haven't loaded — check your signal and try again"); return; }
     setBusy(true);
     try {
+      if (!hasLines(j)) { flash("Fill in the invoice lines first (open the job → Papers → Edit invoice)"); setBusy(false); return; }
       // the invoice number is given out the moment an invoice is built, if the job has none yet
       const no = await claimInvoiceNo(j.id, j.invoice_number);
       if (no !== (j.invoice_number || "")) { j = { ...j, invoice_number: no }; setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, invoice_number: no } : x))); }
@@ -1443,7 +1455,8 @@ export default function Pact() {
                   {([["partner", "Partner"], ["address", "Work address (ship to)"], ["po_number", "PO #"], ...(canInvoice ? [["invoice_number", "Invoice #"]] : []), ["property_unit", "Property unit"], ["contact", "Contact"], ["description", "Work description"]] as ["partner" | "address" | "po_number" | "invoice_number" | "property_unit" | "contact" | "description", string][]).map(([k, label]) => (
                     <div key={k} className={k === "description" || k === "address" ? "col-span-2" : ""}><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
                       <input className="field" value={j[k] || ""} readOnly={!canEdit} onChange={(e) => canEdit && setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, [k]: e.target.value } : x)))}
-                        onBlur={(e) => canEdit && patch(j, { [k]: e.target.value } as Partial<Job>)} /></div>
+                        onFocus={(e) => { atFocus.current = e.target.value; }}
+                        onBlur={(e) => { const v = k === "invoice_number" ? e.target.value.trim() : e.target.value; if (canEdit && v !== atFocus.current) patch(j, { [k]: v } as Partial<Job>); }} /></div>
                   ))}
                 </div>
                 </Disclosure>
@@ -1555,7 +1568,8 @@ export default function Pact() {
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Invoice #</div>
                   <input className="field" value={j.invoice_number || ""} placeholder="given out when priced" title="The number comes on its own once the job is priced — or the moment its invoice is built"
                     onChange={(e) => { setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, invoice_number: e.target.value } : x))); setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, invoice_number: e.target.value } : prev)); }}
-                    onBlur={(e) => patch(j, { invoice_number: e.target.value })} /></div>
+                    onFocus={(e) => { atFocus.current = e.target.value; }}
+                    onBlur={(e) => { const v = e.target.value.trim(); if (v !== atFocus.current) patch(j, { invoice_number: v }); }} /></div>
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Subtotal</div>
                   <div className="field bg-paper font-mono">{fmt(invSubtotal(j))}</div></div>
                 <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Tax %</div>

@@ -9,6 +9,7 @@ import { myProfile } from "@/lib/profile";
 import { prettyDate, addDays, localISO } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
 import PageHeader from "@/components/PageHeader";
+import TextedPhotos from "@/components/TextedPhotos";
 import ContractPicker, { contractLabel } from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
 import type { Contract } from "@/lib/types";
@@ -277,6 +278,7 @@ export default function Schedule() {
         Scheduling for <b className="text-ink">{prettyDate(day)}</b> — add a release, write the description, add workers, then <b className="text-ink">Assign &amp; text</b> messages the whole crew at once
         {machine ? " from the company number." : " (opens a group text on this phone)."}
       </div>
+      <TextedPhotos canEdit={canEdit} flash={flash} />
 
       {canEdit && (
         <div className="mb-3 grid gap-2 md:grid-cols-2">

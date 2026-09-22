@@ -43,11 +43,16 @@ export async function sendServerTexts(
 }
 
 export async function textMachineReady(): Promise<boolean> {
+  return (await textMachine()).configured;
+}
+// …and whether photos texted back to it go on the job (then every text from
+// it ends asking for them)
+export async function textMachine(): Promise<{ configured: boolean; photosIn: boolean }> {
   try {
     const res = await fetch("/api/text");
-    const j = (await res.json()) as { configured?: boolean };
-    return !!j.configured;
-  } catch { return false; }
+    const j = (await res.json()) as { configured?: boolean; photosIn?: boolean };
+    return { configured: !!j.configured, photosIn: !!j.configured && !!j.photosIn };
+  } catch { return { configured: false, photosIn: false }; }
 }
 
 // ---- the one way a crew gets texted ----

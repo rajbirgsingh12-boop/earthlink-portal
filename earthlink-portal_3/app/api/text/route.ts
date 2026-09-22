@@ -10,6 +10,8 @@
 //   (or TWILIO_MESSAGING_SERVICE_SID instead of TWILIO_FROM)
 import { NextResponse } from "next/server";
 import { sendTexts, twilioConfigured } from "@/lib/twilio";
+import { photosBackOn } from "@/lib/photoStore";
+import { withPhotoInvite } from "@/lib/crewText";
 
 // a full 100-message batch takes ~30s of sequential Twilio calls — don't let
 // the platform kill the function mid-loop
@@ -31,8 +33,10 @@ const overLimit = (userId: string, count: number) => {
   return false;
 };
 
+// photosIn: a picture texted back to the company number lands on the job
+// (/api/sms-in), so the texts end by asking for them
 export async function GET() {
-  return NextResponse.json({ configured: configured() });
+  return NextResponse.json({ configured: configured(), photosIn: configured() && (await photosBackOn()) });
 }
 
 export async function POST(req: Request) {
@@ -84,6 +88,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Texting limit reached for this hour — try again later" }, { status: 429 });
   }
 
+  // once pictures texted back go on the job, the text asks for them
+  if (await photosBackOn()) messages = messages.map((m) => ({ ...m, body: withPhotoInvite(m.body) }));
   // the send itself, and the TEXTED mark the moment Twilio takes each one —
   // even if the phone never sees this response, a retry knows who was texted
   const { sent, failed } = await sendTexts(messages, async (m) => {

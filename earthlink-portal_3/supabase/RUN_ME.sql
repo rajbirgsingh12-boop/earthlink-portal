@@ -30,8 +30,10 @@
 -- on each job, and a moved job takes its crew with it. A
 -- priced job comes off the calendar (15), a contract's
 -- price book holds each code once (16), invoice numbers are
--- held until a job is priced (17), and each worker has a
--- language for the crew text (18).
+-- held until a job is priced (17), each worker has a
+-- language for the crew text (18), a crew text can be set
+-- up for later (19), and photos the crew texts back to the
+-- company number land on the job (20).
 -- ============================================================
 
 -- ---------- from upgrade_invoices_aging_docs.sql ----------
@@ -736,3 +738,63 @@ alter table employees add column if not exists lang text default 'en';
 --     are set in Vercel; until then they go out while the portal is open.
 alter table schedule_days add column if not exists send_at timestamptz;
 create index if not exists schedule_days_send_at on schedule_days (send_at) where send_at is not null;
+
+-- 20) Photos the crew texts back. A worker answers the crew text with
+--     pictures; the company number hands them to the portal, which puts them
+--     on the job that worker is on that day (or the PO they name in the
+--     text). Each text that brings pictures is kept here, so the office sees
+--     who sent what, can move a batch that landed on the wrong job, and picks
+--     the job for any the portal couldn't place. The pictures themselves sit
+--     with the job's other documents, so ⬇ Photos takes them too.
+--     Needs SUPABASE_SERVICE_ROLE_KEY in Vercel, and the number pointed at
+--     /api/sms-in in Twilio (Settings → System check says how).
+create table if not exists texted_photos (
+  id uuid primary key default gen_random_uuid(),
+  employee_id uuid references employees(id) on delete set null,
+  from_phone text default '',
+  body text default '',
+  photos jsonb default '[]'::jsonb,
+  status text default 'held',   -- held (waiting for the office) · filed (on a job) · gone (thrown away) · note (a text with no pictures)
+  pact_job_id uuid references pact_jobs(id) on delete set null,
+  release_id uuid references releases(id) on delete set null,
+  msg_sid text,
+  created_at timestamptz default now()
+);
+create unique index if not exists texted_photos_msg on texted_photos (msg_sid) where msg_sid is not null;
+create index if not exists texted_photos_recent on texted_photos (created_at desc);
+alter table texted_photos enable row level security;
+-- the office reads them; every write comes from the server, which checks
+-- who is asking (Twilio's signature, or an admin/office sign-in) first
+drop policy if exists "texted_photos read" on texted_photos;
+create policy "texted_photos read" on texted_photos for select
+  using ((select public.my_role()) in ('admin','office'));
+do $$ begin alter publication supabase_realtime add table texted_photos; exception when duplicate_object then null; end $$;
+-- pictures onto a job (and off another) in one step: two texts landing in
+-- the same second — a phone often splits five pictures into five texts —
+-- each add theirs, and neither loses the other's. Only the server may call it.
+create or replace function public.texted_photos_put(p_pact uuid, p_rel uuid, p_add jsonb, p_drop text[])
+returns boolean language plpgsql security definer set search_path = public as $$
+declare
+  adds jsonb := case when jsonb_typeof(p_add) = 'array' then p_add else '[]'::jsonb end;
+  gone text[] := coalesce(p_drop, '{}') || coalesce((select array_agg(x->>'path') from jsonb_array_elements(adds) x), '{}');
+  hit int := 0;
+begin
+  if p_pact is not null then
+    update pact_jobs set attachments = coalesce((
+      select jsonb_agg(t.a order by t.o)
+        from jsonb_array_elements(case when jsonb_typeof(attachments) = 'array' then attachments else '[]'::jsonb end) with ordinality t(a, o)
+       where not (coalesce(t.a->>'path', '') = any(gone))), '[]'::jsonb) || adds
+     where id = p_pact;
+    get diagnostics hit = row_count;
+  elsif p_rel is not null then
+    update releases set attachments = coalesce((
+      select jsonb_agg(t.a order by t.o)
+        from jsonb_array_elements(case when jsonb_typeof(attachments) = 'array' then attachments else '[]'::jsonb end) with ordinality t(a, o)
+       where not (coalesce(t.a->>'path', '') = any(gone))), '[]'::jsonb) || adds
+     where id = p_rel;
+    get diagnostics hit = row_count;
+  end if;
+  return hit > 0;
+end $$;
+revoke all on function public.texted_photos_put(uuid, uuid, jsonb, text[]) from public, anon, authenticated;
+grant execute on function public.texted_photos_put(uuid, uuid, jsonb, text[]) to service_role;

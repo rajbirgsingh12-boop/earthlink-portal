@@ -84,3 +84,13 @@ export function crewText(t: CrewTextInput): string {
   if (street) paras.push(`Here is the map: ${mapLink(street)}`);
   return paras.join("\n\n");
 }
+
+// The line at the end of a text from the company number, once photos sent
+// back to it go on the job (/api/sms-in) — added by the server, which is the
+// only one that sends from that number. Language by the text's own greeting.
+export const PHOTO_INVITE = { en: "Reply to this text with photos of the work.", es: "Responda a este mensaje con fotos del trabajo." };
+export function withPhotoInvite(body: string): string {
+  const b = (body || "").trimEnd();
+  if (!b || b.includes(PHOTO_INVITE.en) || b.includes(PHOTO_INVITE.es)) return b;
+  return `${b}\n\n${/^hola\b/i.test(b.trimStart()) ? PHOTO_INVITE.es : PHOTO_INVITE.en}`;
+}

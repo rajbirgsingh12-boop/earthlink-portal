@@ -1,11 +1,11 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { sb } from "@/lib/supabase";
-import { cleanPhone, prettyPhone, textRows, stampRows, textMachineReady } from "@/lib/notify";
+import { cleanPhone, prettyPhone, textRows, stampRows, textMachine } from "@/lib/notify";
 import { prettyDate } from "@/lib/docs";
 import { crewMessageFor, crewPreview, normText, rowNeedsText, saveWorkerLang, siteOf, workOf, type CrewJob, type CrewRow, type Worker } from "@/lib/pactCrew";
 import { spanishKnown, spanishWork } from "@/lib/spanish";
-import { langOf, LANG_LABEL, type Lang } from "@/lib/crewText";
+import { langOf, LANG_LABEL, withPhotoInvite, type Lang } from "@/lib/crewText";
 import { goesOnItsOwn, isQueued, isLate, localStamp, prettyWhen, queueRows, sendPicks, unqueueRows } from "@/lib/sendLater";
 import LangToggle from "@/components/LangToggle";
 import Stamp from "@/components/Stamp";
@@ -30,7 +30,8 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   useEffect(() => { goesOnItsOwn().then(setOnItsOwn); }, []);
   const [phoneBuf, setPhoneBuf] = useState<Record<string, string>>({});
   const [machine, setMachine] = useState(true); // company number set up? (else a group text opens on this phone)
-  useEffect(() => { textMachineReady().then(setMachine); }, []);
+  const [photosIn, setPhotosIn] = useState(false); // photos texted back go on the job — the text asks for them
+  useEffect(() => { textMachine().then((m) => { setMachine(m.configured); setPhotosIn(m.photosIn); }); }, []);
   const addingNow = useRef<Set<string>>(new Set()); // guards a double-tap on the same name
   const day = (job.start_date || "").trim();
   // the work the crew is told — the rows' saved wording, else the PO's own
@@ -158,7 +159,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
         <span className="text-[11px] uppercase tracking-widest text-inksoft">What they get</span>
         <LangToggle value={shownLang} onChange={setPreviewLang} full name="Preview language" />
       </div>
-      <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 whitespace-pre-line text-[12px] text-inksoft [overflow-wrap:anywhere]" data-preview-lang={shownLang}>{crewPreview(job, (emps.find((e) => rows[0] && e.id === rows[0].employee_id)?.name || "Name").split(" ")[0], work.trim(), undefined, shownLang)}<span className="mt-1 block text-[11px]">Each worker gets it in the language beside their name.</span></div>
+      <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 whitespace-pre-line text-[12px] text-inksoft [overflow-wrap:anywhere]" data-preview-lang={shownLang}>{(() => { const t = crewPreview(job, (emps.find((e) => rows[0] && e.id === rows[0].employee_id)?.name || "Name").split(" ")[0], work.trim(), undefined, shownLang); return machine && photosIn ? withPhotoInvite(t) : t; })()}<span className="mt-1 block text-[11px]">Each worker gets it in the language beside their name.</span></div>
       {rows.map((r) => {
         const e = emps.find((x) => x.id === r.employee_id);
         const name = e?.name || "?";

@@ -12,6 +12,7 @@ import ActionMenu from "@/components/ActionMenu";
 import JobDates, { lastNote } from "@/components/JobDates";
 import Calendar, { type CalEvent, type CalView } from "@/components/Calendar";
 import CrewPanel from "@/components/CrewPanel";
+import TextedPhotos from "@/components/TextedPhotos";
 import { CAL_JOB_COLS, CREW_JOB_COLS, WORKER_COLS, WORKER_COLS_OLD, crewLine, crewMessageFor, crewState, offCalendar, rowsOfJob, siteOf, type CrewRow, type Worker } from "@/lib/pactCrew";
 import { textRows, stampRows } from "@/lib/notify";
 import { intakePoFile, addJobByHand } from "@/lib/pactIntake";
@@ -380,6 +381,7 @@ export default function PactCalendar() {
         <Link className="btn btn-ghost min-h-[44px]" href="/pact">🧾 Billing</Link>
       </PageHeader>
       <input ref={poRef} type="file" accept="application/pdf,.pdf,.docx" className="hidden" onChange={handlePo} />
+      <TextedPhotos canEdit={canEdit} flash={flash} />
       {handOpen && canEdit && (
         <div className="card mb-3 border-work p-4">
           <div className="mb-2 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">A PO, typed in</div>

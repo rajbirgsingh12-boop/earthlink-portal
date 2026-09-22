@@ -1,7 +1,8 @@
 // The company texting number, in one place: both /api/text (the office taps
 // "Text crew") and /api/text-due (a text that was set up for later) send
 // through here, so a message goes out the same way whoever asked for it.
-// Server-only — the keys are Vercel's, never the browser's.
+// Server-only — the keys are Vercel's, never the browser's. (TWILIO_API_BASE
+// is for trying it all against a stand-in; leave it unset.)
 const env = (k: string) => process.env[k] || "";
 export const twilioConfigured = () =>
   !!(env("TWILIO_ACCOUNT_SID") && env("TWILIO_AUTH_TOKEN") && (env("TWILIO_FROM") || env("TWILIO_MESSAGING_SERVICE_SID")));
@@ -24,7 +25,7 @@ export async function sendTexts(messages: TextOut[], onSent?: (m: TextOut) => Pr
     const form = new URLSearchParams({ To: m.to, Body: m.body });
     if (msvc) form.set("MessagingServiceSid", msvc); else form.set("From", from);
     try {
-      const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
+      const r = await fetch(`${(env("TWILIO_API_BASE") || "https://api.twilio.com").replace(/\/+$/, "")}/2010-04-01/Accounts/${sid}/Messages.json`, {
         method: "POST",
         headers: { Authorization: `Basic ${basic}`, "Content-Type": "application/x-www-form-urlencoded" },
         body: form.toString(),

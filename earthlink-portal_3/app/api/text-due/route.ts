@@ -15,10 +15,11 @@
 //   • The portal itself calls it while someone has it open, with their own
 //     sign-in. That is the catch-up when the cron isn't set up yet.
 import { NextResponse } from "next/server";
-import { langOf } from "@/lib/crewText";
+import { langOf, withPhotoInvite } from "@/lib/crewText";
 import { dueBody, dueSkip, dueWork } from "@/lib/dueText";
 import { spanishWorkServer } from "@/lib/smartTranslate";
 import { sendTexts, twilioConfigured } from "@/lib/twilio";
+import { photosBackOn } from "@/lib/photoStore";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -123,6 +124,7 @@ async function sweep(req: Request) {
 
   const missed: string[] = [];
   const out: { to: string; body: string; id: string }[] = [];
+  const invite = await photosBackOn();
   for (const row of due) {
     const emp = empOf.get(row.employee_id);
     const job = row.pact_job_id ? jobOf.get(row.pact_job_id) : undefined;
@@ -133,7 +135,8 @@ async function sweep(req: Request) {
     if (dueSkip(row, { emp, job, rel, phone, now })) { missed.push(row.id); continue; }
     const raw = dueWork(row, job);
     const work = langOf(emp!.lang) === "es" && raw ? await spanishWorkServer(raw) : raw;
-    out.push({ to: phone, body: dueBody(row, { emp: emp!, job, rel, work }), id: row.id });
+    const body = dueBody(row, { emp: emp!, job, rel, work });
+    out.push({ to: phone, body: invite ? withPhotoInvite(body) : body, id: row.id });
   }
   await clear(missed);
   if (out.length === 0) return NextResponse.json({ sent: 0, missed: missed.length, failed: 0, due: due.length });

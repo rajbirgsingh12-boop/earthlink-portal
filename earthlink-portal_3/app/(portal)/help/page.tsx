@@ -52,6 +52,7 @@ const SECTIONS: { icon?: string; title: string; lines: string[] }[] = [
       "Map opens a mini map window — type the address, check the pin, tap Use this location. The workers' texts then include a tap-to-navigate map link.",
       "Assign & text messages the whole crew in one tap — date, release #, address with map link, and the work description.",
       "With the company number connected (Twilio keys in Vercel), texts send silently from that number; otherwise a group text opens on your phone. TEXTED ✓ shows who's been told; “resend” re-sends one person.",
+      "Workers can answer the crew text with photos. They go straight onto the job that worker is on that day (or the PO they type in the text), and they get a text back saying where they went. Photos the portal can't place — two jobs that day, or a phone not on the crew list — wait in the “📱 Photos texted in” card on the Schedule tabs for you to pick the job; “Wrong job?” there moves a batch. To switch it on, see Settings → System check.",
     ],
   },
   {

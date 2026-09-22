@@ -17,15 +17,18 @@ interface Props {
   org: Org; number: string; date: string;
   contractNumber: string; releaseNumber: string; development: string;
   workOrder?: string; periodFrom?: string | null; periodTo?: string | null;
-  items: NychaItem[]; close: () => void; onExcel?: () => void;
+  items: NychaItem[]; close: () => void; onExcel?: () => void; onPdf?: () => void;
 }
+// the file, named the way the package is: invoice_<contract>_rel<release>
+export const invoiceFileBase = (contractNumber: string, releaseNumber: string) => `invoice_${contractNumber}_rel${releaseNumber}`;
 
 const shortDate = (iso: string) => { const m = (iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${Number(m[2])}/${Number(m[3])}/${m[1].slice(2)}` : iso; };
 
 export default function NychaInvoicePrint(p: Props) {
   const total = p.items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
   return (
-    <PrintShell>
+    // a PDF saved from the print dialog takes the page title as its name — the same name the download gets
+    <PrintShell title={invoiceFileBase(p.contractNumber, p.releaseNumber)}>
     <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
       <div className="printable mx-auto max-w-4xl bg-white p-8 font-sans text-ink">
         <div className="pb-2 text-center text-[26px] font-bold">Standard Invoice</div>
@@ -102,6 +105,7 @@ export default function NychaInvoicePrint(p: Props) {
         </div>
       </div>
       <div className="no-print mx-auto mt-3 flex max-w-4xl justify-end gap-2">
+        {p.onPdf && <button className="btn bg-white" onClick={p.onPdf}>⬇ Invoice (PDF)</button>}
         {p.onExcel && <button className="btn bg-white" onClick={p.onExcel}>⬇ Invoice (Excel)</button>}
         <button className="btn bg-white" onClick={() => window.print()}>Print / Save as PDF</button>
         <button className="btn btn-ghost bg-white" onClick={p.close}>Close</button>

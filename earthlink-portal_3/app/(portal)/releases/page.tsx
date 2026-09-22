@@ -14,7 +14,7 @@ import { prettyDate, localISO, type Org } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged } from "@/lib/labor";
 import { useLive } from "@/lib/useLive";
 import ContractPicker from "@/components/ContractPicker";
-import NychaInvoicePrint from "@/components/NychaInvoicePrint";
+import NychaInvoicePrint, { invoiceFileBase } from "@/components/NychaInvoicePrint";
 import { gatherReleaseDoc, buildInvoiceXlsx, buildInvoicePdfBytes, type DocRow } from "@/lib/releaseDoc";
 import { buildPackagePdf, downloadPdf } from "@/lib/packageDocs";
 import PrintShell from "@/components/PrintShell";
@@ -2339,7 +2339,8 @@ export default function Releases() {
           contractNumber={invPreview.cNumber} releaseNumber={invPreview.relNum} development={invPreview.dev}
           workOrder={invPreview.workOrder}
           items={invPreview.rows.map((it) => ({ line: it.line, code: it.code, category: it.category, description: it.description, unit: it.uom, qty: it.qty, unit_price: it.unit_price }))}
-          onExcel={() => { const fname = askFileName(`invoice_${invPreview.cNumber}_rel${invPreview.relNum}.xlsx`); if (fname) buildInvoiceXlsx({ org, cNumber: invPreview.cNumber, relNum: invPreview.relNum, workOrder: invPreview.workOrder, dev: invPreview.dev, number: invPreview.number, date: invPreview.date, rows: invPreview.rows, filename: fname }); }}
+          onPdf={async () => { const fname = askFileName(`${invoiceFileBase(invPreview.cNumber, invPreview.relNum)}.pdf`); if (!fname) return; downloadPdf(await buildInvoicePdfBytes({ org, cNumber: invPreview.cNumber, relNum: invPreview.relNum, workOrder: invPreview.workOrder, dev: invPreview.dev, number: invPreview.number, date: invPreview.date, rows: invPreview.rows }), fname); }}
+          onExcel={() => { const fname = askFileName(`${invoiceFileBase(invPreview.cNumber, invPreview.relNum)}.xlsx`); if (fname) buildInvoiceXlsx({ org, cNumber: invPreview.cNumber, relNum: invPreview.relNum, workOrder: invPreview.workOrder, dev: invPreview.dev, number: invPreview.number, date: invPreview.date, rows: invPreview.rows, filename: fname }); }}
           close={() => setInvPreview(null)} />
       )}
 

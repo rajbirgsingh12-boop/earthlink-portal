@@ -2,16 +2,19 @@
 import { useEffect, useRef, useState } from "react";
 import Modal from "@/components/Modal";
 import Stamp from "@/components/Stamp";
+import PhotoMarker from "@/components/PhotoMarker";
 import { sb } from "@/lib/supabase";
 import { shrinkImage } from "@/lib/shrinkImage";
-import { CONF_LABEL, DEFAULT_HINTS, MAX_PHOTOS, measureNote, measurePhotos, roundSf, sfLines, type MeasureHints, type MeasureResult, type SfLine } from "@/lib/measure";
+import { annotate } from "@/lib/photoMark";
+import { CONF_LABEL, DEFAULT_HINTS, MAX_PHOTOS, measureNote, measurePhotos, roundSf, sfLines, type MeasureHints, type MeasureResult, type PhotoMarks, type SfLine } from "@/lib/measure";
 
 // "Sq ft from photos" on a PACT job: pick the photos of the wall or ceiling
-// (or take them right here — they go on the job as before-photos), tell it
-// what's being measured, and Claude works out the square feet from something
-// of known size in the shot. Every number can be changed before it lands on
-// the job's square-foot line. No dollar figure ever shows here — the office
-// uses this too.
+// (or take them right here — they go on the job as before-photos), mark a
+// ruler on each one when nothing in the shot has a known size (floor to
+// ceiling works in any room), tell it what's being measured, and Claude
+// works out the square feet — from the ruler's arithmetic when there is
+// one. Every number can be changed before it lands on the job's square-foot
+// line. No dollar figure ever shows here — the office uses this too.
 export interface MeasureJob { id: string; label: string; attachments: { name: string; path: string }[]; items: SfLine[] }
 const isImg = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n);
 const today = () => { const d = new Date(); return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); };
@@ -27,15 +30,20 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
     .sort((a, b) => Number(!a.name.toLowerCase().startsWith("before")) - Number(!b.name.toLowerCase().startsWith("before")));
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const fresh = useRef<Map<string, File>>(new Map()); // the bytes of photos taken here — no download needed
+  const objUrls = useRef<Map<string, string>>(new Map());
   const [urls, setUrls] = useState<Record<string, string>>({});
+  const [marks, setMarks] = useState<Record<string, PhotoMarks>>({});
   const [hints, setHints] = useState<MeasureHints>({ ...DEFAULT_HINTS });
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<MeasureResult | null>(null);
+  const [sent, setSent] = useState<string[]>([]);       // the paths that went, in photo order
   const [edits, setEdits] = useState<Record<number, string>>({});   // the owner's own number for a row, as typed
   const lines = sfLines(job.items);
   const [lineIdx, setLineIdx] = useState<number | null>(lines.length ? lines[0] : null);
   const input = useRef<HTMLInputElement>(null);
   const [saving, setSaving] = useState(false);
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; objUrls.current.forEach((u) => URL.revokeObjectURL(u)); }, []);
 
   // thumbnails: a short-lived signed link per photo on the job
   useEffect(() => {
@@ -44,9 +52,10 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
     sb().storage.from("docs").createSignedUrls(paths, 900).then(({ data }) => {
       const m: Record<string, string> = {};
       (data || []).forEach((d) => { if (d.signedUrl && d.path) m[d.path] = d.signedUrl; });
-      setUrls(m);
-    }).catch(() => setUrls({}));
+      if (alive.current) setUrls(m);
+    }).catch(() => { if (alive.current) setUrls({}); });
   }, [job.attachments]); // eslint-disable-line react-hooks/exhaustive-deps
+  const srcOf = (path: string): string => objUrls.current.get(path) || urls[path] || "";
 
   const toggle = (path: string) => setPicked((prev) => {
     const next = new Set(prev);
@@ -65,7 +74,7 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
       const shrunk = await Promise.all(files.map((f) => shrinkImage(f)));
       const named = shrunk.map((f, i) => new File([f], `before_${stamp}${files.length > 1 ? `_${i + 1}` : ""}${(f.name.match(/\.\w+$/) || [".jpg"])[0]}`, { type: f.type }));
       const added = await onAttach(named);
-      added.forEach((a) => { const f = named.find((x) => x.name === a.name); if (f) fresh.current.set(a.path, f); });
+      added.forEach((a) => { const f = named.find((x) => x.name === a.name); if (f) { fresh.current.set(a.path, f); objUrls.current.set(a.path, URL.createObjectURL(f)); } });
       setPicked((prev) => { const next = new Set(prev); added.forEach((a) => { if (next.size < MAX_PHOTOS) next.add(a.path); }); return next; });
     } finally { setBusy(false); }
   };
@@ -80,15 +89,20 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
   const measure = async () => {
     const paths = photos.map((a) => a.path).filter((p) => picked.has(p));
     if (paths.length === 0) { flash("Pick a photo first — tap one, or take one"); return; }
+    const half = paths.filter((p) => marks[p]?.ruler && !(marks[p].ruler!.inches > 0));
+    if (half.length) { flash("A ruler on one photo has no length yet — pick how long it is, or clear it"); return; }
     setBusy(true);
     try {
-      const got = await Promise.all(paths.map(async (p) => ({ name: photos.find((a) => a.path === p)?.name || "photo.jpg", blob: await bytesOf(p) })));
+      const got = await Promise.all(paths.map(async (p) => ({ path: p, name: photos.find((a) => a.path === p)?.name || "photo.jpg", blob: await bytesOf(p) })));
       const missing = got.filter((g) => !g.blob);
       if (missing.length) { flash(`Couldn't load ${missing.map((g) => g.name).join(", ")} — check your signal and try again`); return; }
-      const out = await measurePhotos(got.map((g) => ({ name: g.name, blob: g.blob! })), hints);
+      // the marks are drawn onto the copies that go, and sent as numbers too
+      const drawn = await Promise.all(got.map(async (g) => { const a = await annotate(g.blob!, marks[g.path]); return { name: g.name, blob: a.blob, width: a.width, height: a.height, marks: marks[g.path] }; }));
+      const out = await measurePhotos(drawn, hints);
+      if (!alive.current) return;
       if (!out.ok) { flash(out.note); return; }
-      setResult(out.result); setEdits({});
-    } finally { setBusy(false); }
+      setResult(out.result); setSent(paths); setEdits({});
+    } finally { if (alive.current) setBusy(false); }
   };
   // the number for a row: the owner's, when typed, else Claude's
   const sqOf = (i: number): number => {
@@ -98,15 +112,17 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
     return e === undefined ? a.sq_ft : roundSf(parseFloat(e) || 0);
   };
   const total = result ? result.areas.reduce((s, _a, i) => s + sqOf(i), 0) : 0;
-  const nPicked = photos.filter((a) => picked.has(a.path)).length;
+  const pickedPaths = photos.map((a) => a.path).filter((p) => picked.has(p));
+  const nPicked = pickedPaths.length;
+  const nRulers = pickedPaths.filter((p) => marks[p]?.ruler && marks[p].ruler!.inches > 0).length;
   const apply = async () => {
     if (!result || total <= 0) { flash("Nothing to put on the job yet"); return; }
     setSaving(true);
     try {
       const r: MeasureResult = { ...result, areas: result.areas.map((a, i) => ({ ...a, sq_ft: sqOf(i) })), total_sq_ft: total };
-      const ok = await onApply(lineIdx, total, measureNote(r, nPicked || 1, today()));
+      const ok = await onApply(lineIdx, total, measureNote(r, sent.length || 1, today()));
       if (ok) { flash(`${total} sq ft is on the job — check it with the tape`); onClose(); }
-    } finally { setSaving(false); }
+    } finally { if (alive.current) setSaving(false); }
   };
   const tone = (c: "low" | "medium" | "high") => (c === "high" ? "ok" : c === "medium" ? "work" : "alert");
 
@@ -131,7 +147,7 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
         onChange={(e) => { const fs = Array.from(e.target.files || []); e.target.value = ""; void addPhotos(fs); }} />
       {!result && (
         <>
-          <p className="mb-2 text-[13px] text-inksoft">Tap the photos of the wall or ceiling. Something of a known size in the shot is the ruler: a door, an outlet cover, a tile, a tape measure. The number that comes back is a starting point — the tape measure wins.</p>
+          <p className="mb-2 text-[13px] text-inksoft">Tap the photos of the wall or ceiling. Best shot: step back so the floor and the ceiling are both in the picture. The number that comes back is a starting point — the tape measure wins.</p>
           {photos.length === 0 && <div className="mb-2 rounded-sm border border-rulesoft bg-paper p-3 text-[13px] text-inksoft">No photos on this job yet — take some, or pick them from the camera roll.</div>}
           {photos.length > 0 && (
             <div className="mb-3 grid grid-cols-3 gap-1.5">
@@ -140,14 +156,28 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
                 return (
                   <button key={a.path} type="button" role="checkbox" aria-checked={on} aria-label={a.name} data-measure-photo={a.name} onClick={() => toggle(a.path)}
                     className={`relative block min-h-[44px] w-full rounded-sm border-2 ${on ? "border-work" : "border-rulesoft"}`}>
-                    {urls[a.path]
+                    {srcOf(a.path)
                       // eslint-disable-next-line @next/next/no-img-element
-                      ? <img src={urls[a.path]} alt={a.name} className="h-24 w-full rounded-[2px] object-cover" />
+                      ? <img src={srcOf(a.path)} alt={a.name} className="h-24 w-full rounded-[2px] object-cover" />
                       : <div className="grid h-24 w-full place-items-center px-1 text-center text-[11px] text-inksoft">{a.name.replace(/\.\w+$/, "")}</div>}
                     {on && <span className="absolute right-1 top-1 grid h-6 w-6 place-items-center rounded-full bg-work text-[13px] font-bold text-white">✓</span>}
                   </button>
                 );
               })}
+            </div>
+          )}
+          {nPicked > 0 && (
+            <div className="mb-3" data-measure-marks>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-widest text-inksoft">A ruler on each photo — {nRulers} of {nPicked}</div>
+              <p className="mb-2 text-[12px] text-inksoft">When nothing in the shot has a known size, mark one thing you do know: tap the floor and the ceiling on the wall (that's {hints.ceilingFt || 8} ft), the top and bottom of a door, or two ends of something you measured with the tape. With a ruler the number is worked out, not guessed.</p>
+              <div className="grid gap-2">
+                {pickedPaths.map((p) => {
+                  const a = photos.find((x) => x.path === p)!;
+                  return srcOf(p)
+                    ? <PhotoMarker key={p} src={srcOf(p)} name={a.name} natural={null} marks={marks[p] || {}} onChange={(m) => setMarks((prev) => ({ ...prev, [p]: m }))} ceilingFt={hints.ceilingFt || 8} />
+                    : <div key={p} className="rounded-sm border border-rulesoft bg-paper p-3 text-[12px] text-inksoft">{a.name} — can't be shown right now (no signal?), so no ruler on it; Claude will look for one in the shot.</div>;
+                })}
+              </div>
             </div>
           )}
           <div className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-inksoft">What to measure</div>
@@ -168,6 +198,16 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
       {result && (
         <div data-measure-result>
           {result.warnings.map((w, i) => <div key={i} className="mb-2 rounded-sm border border-alert/40 bg-white px-3 py-2 text-[13px] text-alert">⚠ {w}</div>)}
+          {/* the photos, with what got measured drawn on them */}
+          <div className="mb-2 grid gap-2">
+            {sent.map((p, pi) => {
+              const a = photos.find((x) => x.path === p);
+              const boxes = result.areas.map((ar, i) => ({ ar, i })).filter(({ ar }) => ar.photo === pi + 1 && !ar.same_as && ar.box).map(({ ar, i }) => ({ box: ar.box!, label: `${sqOf(i)} sq ft` }));
+              return a && srcOf(p) && boxes.length
+                ? <PhotoMarker key={p} src={srcOf(p)} name={a.name} natural={null} marks={marks[p] || {}} onChange={() => null} ceilingFt={hints.ceilingFt || 8} boxes={boxes} readOnly />
+                : null;
+            })}
+          </div>
           {result.areas.map((a, i) => (
             <div key={i} className="flex flex-wrap items-center gap-2 border-t border-rulesoft py-2 first:border-t-0" data-measure-area>
               <div className="min-w-0 flex-1">
@@ -191,7 +231,7 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
             <span className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">Total</span>
             <span className="font-mono text-[15px] font-bold" data-measure-total>{total} sq ft</span>
           </div>
-          <p className="mt-2 text-[12px] text-inksoft">Not the right number? Change it above. A photo can't be measured exactly — the tape measure wins.</p>
+          <p className="mt-2 text-[12px] text-inksoft">Not the right number? Change it above. {nRulers ? "Solid rows were worked out from your ruler." : "For a solid number next time, mark a ruler on the photo."} The tape measure wins.</p>
           <div className="mt-3 text-[11px] font-semibold uppercase tracking-widest text-inksoft">Put it on</div>
           <div role="radiogroup" aria-label="Which line" className="mt-1">
             {lines.map((i) => {

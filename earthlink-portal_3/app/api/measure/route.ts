@@ -5,7 +5,7 @@
 import { NextResponse } from "next/server";
 import { smartConfigured } from "@/lib/smartPo";
 import { measureSmart, type MeasureImage } from "@/lib/smartMeasure";
-import { MAX_PHOTOS, type MeasureHints } from "@/lib/measure";
+import { MAX_PHOTOS, type BoxMark, type MeasureHints, type RulerMark } from "@/lib/measure";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -31,7 +31,7 @@ export async function POST(req: Request) {
 
   let body: { images?: unknown; hints?: unknown } = {};
   try { body = (await req.json()) as typeof body; } catch { return NextResponse.json({ error: "Send the photos as JSON" }, { status: 400 }); }
-  const raw = Array.isArray(body.images) ? (body.images as { media_type?: unknown; data?: unknown }[]) : [];
+  const raw = Array.isArray(body.images) ? (body.images as { media_type?: unknown; data?: unknown; width?: unknown; height?: unknown; ruler?: unknown; box?: unknown }[]) : [];
   if (raw.length === 0) return NextResponse.json({ error: "No photos to measure" }, { status: 400 });
   if (raw.length > MAX_PHOTOS) return NextResponse.json({ error: `Up to ${MAX_PHOTOS} photos at a time` }, { status: 400 });
   const images: MeasureImage[] = [];
@@ -43,7 +43,16 @@ export async function POST(req: Request) {
     if (data.length > MAX_ONE) return NextResponse.json({ error: "One of the photos is too big — the phone should have shrunk it; try picking it again" }, { status: 413 });
     total += data.length;
     if (total > MAX_ALL) return NextResponse.json({ error: "Too many big photos at once — try fewer" }, { status: 413 });
-    images.push({ media_type: media as MeasureImage["media_type"], data });
+    // the photo's size and the owner's marks, in its pixels — checked, never trusted
+    const width = Math.max(0, Math.min(10000, Math.round(Number(im.width) || 0))), height = Math.max(0, Math.min(10000, Math.round(Number(im.height) || 0)));
+    const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : NaN);
+    const rr = (im.ruler || null) as Record<string, unknown> | null;
+    const ruler: RulerMark | null = rr && [rr.x1, rr.y1, rr.x2, rr.y2, rr.inches].every((v) => !Number.isNaN(num(v))) && num(rr.inches) > 0 && num(rr.inches) <= 600
+      ? { x1: num(rr.x1), y1: num(rr.y1), x2: num(rr.x2), y2: num(rr.y2), inches: num(rr.inches) } : null;
+    const bb = (im.box || null) as Record<string, unknown> | null;
+    const box: BoxMark | null = bb && [bb.x1, bb.y1, bb.x2, bb.y2].every((v) => !Number.isNaN(num(v)))
+      ? { x1: Math.min(num(bb.x1), num(bb.x2)), y1: Math.min(num(bb.y1), num(bb.y2)), x2: Math.max(num(bb.x1), num(bb.x2)), y2: Math.max(num(bb.y1), num(bb.y2)) } : null;
+    images.push({ media_type: media as MeasureImage["media_type"], data, width, height, ruler, box });
   }
   const h = (body.hints || {}) as Partial<MeasureHints>;
   const hints: MeasureHints = {

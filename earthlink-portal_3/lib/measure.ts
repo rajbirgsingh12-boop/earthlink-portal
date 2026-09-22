@@ -10,6 +10,14 @@ import { normUnit } from "./priceBook";
 
 export type Surface = "wall" | "ceiling" | "floor" | "other";
 export type Confidence = "low" | "medium" | "high";
+// marks the owner puts on a photo, in that photo's own pixels (0,0 top-left):
+// a ruler — two ends of something whose length is known — and an outline of
+// the spot to measure. The ruler is what makes a photo with nothing of a
+// known size in it measurable: floor to ceiling works in any room.
+export interface RulerMark { x1: number; y1: number; x2: number; y2: number; inches: number }
+export interface BoxMark { x1: number; y1: number; x2: number; y2: number }
+export interface PhotoMarks { ruler?: RulerMark | null; box?: BoxMark | null }
+export interface ImageMeta { width: number; height: number; ruler: RulerMark | null; box: BoxMark | null }
 export interface MeasuredArea {
   photo: number;          // which photo, 1-based, in the order sent
   where: string;          // "bedroom wall left of the window"
@@ -21,6 +29,8 @@ export interface MeasuredArea {
   confidence: Confidence;
   same_as: number;        // 0, or the photo number this area was already counted under
   note: string;
+  box: BoxMark | null;    // where it is in the photo, in pixels — drawn back for the owner to check
+  same_plane: boolean;    // on the same flat surface as the photo's marked ruler (or no ruler marked)
 }
 export interface MeasureResult { areas: MeasuredArea[]; total_sq_ft: number; warnings: string[] }
 export interface MeasureHints {
@@ -55,6 +65,9 @@ export function cleanMeasure(raw: unknown): MeasureResult {
     if (!sq && w && h) sq = roundSf(w * h);
     const same = Math.max(0, Math.floor(Number(a.same_as) || 0));
     if (!sq && !same) continue;
+    const bx = (a.box || null) as Record<string, unknown> | null;
+    const box = bx && [bx.x1, bx.y1, bx.x2, bx.y2].every((v) => Number.isFinite(Number(v)))
+      ? { x1: Math.min(Number(bx.x1), Number(bx.x2)), y1: Math.min(Number(bx.y1), Number(bx.y2)), x2: Math.max(Number(bx.x1), Number(bx.x2)), y2: Math.max(Number(bx.y1), Number(bx.y2)) } : null;
     areas.push({
       photo: Math.max(1, Math.floor(Number(a.photo) || 1)),
       where: String(a.where || "").replace(/\s+/g, " ").trim() || "the area in the photo",
@@ -65,12 +78,45 @@ export function cleanMeasure(raw: unknown): MeasureResult {
       confidence: confs.includes(a.confidence as Confidence) ? (a.confidence as Confidence) : "low",
       same_as: same,
       note: String(a.note || "").replace(/\s+/g, " ").trim(),
+      box: box && box.x2 - box.x1 >= 1 && box.y2 - box.y1 >= 1 ? box : null,
+      same_plane: a.same_plane !== false,
     });
   }
   const warnings = (Array.isArray(r.warnings) ? (r.warnings as unknown[]) : []).map((w) => String(w || "").trim()).filter(Boolean);
   return { areas, total_sq_ft: totalOf(areas), warnings };
 }
 export const totalOf = (areas: { sq_ft: number; same_as?: number }[]): number => areas.reduce((s, a) => s + (a.same_as ? 0 : roundSf(a.sq_ft)), 0);
+
+// ---- the ruler's arithmetic: done here, not guessed ----
+export const rulerPx = (r: RulerMark): number => Math.hypot(r.x2 - r.x1, r.y2 - r.y1);
+// pixels per inch along the marked ruler — 0 when the mark is too short to trust
+export const pxPerInch = (r: RulerMark): number => (r.inches > 0 && rulerPx(r) >= 20 ? rulerPx(r) / r.inches : 0);
+export const halfFt = (inches: number): number => Math.round((inches / 12) * 2) / 2;
+// A photo with a ruler on it: every area on the same surface is sized from
+// its box and the ruler's scale — the owner's mark, not Claude's eye, sets
+// the size. An outline the owner drew is the box for that photo's one area.
+export function refineWithRulers(result: MeasureResult, metas: (ImageMeta | null | undefined)[]): MeasureResult {
+  const areas = result.areas.map((a) => {
+    if (a.same_as) return a;
+    const m = metas[a.photo - 1];
+    if (!m || !m.ruler) return a;
+    const scale = pxPerInch(m.ruler);
+    if (!scale) return a;
+    const only = result.areas.filter((x) => x.photo === a.photo && !x.same_as).length === 1;
+    const box = m.box && only ? m.box : a.box;
+    if (!box || !a.same_plane) return a;
+    const wIn = Math.abs(box.x2 - box.x1) / scale, hIn = Math.abs(box.y2 - box.y1) / scale;
+    if (wIn <= 0 || hIn <= 0) return a;
+    return {
+      ...a, box,
+      width_ft: halfFt(wIn), height_ft: halfFt(hIn),
+      sq_ft: Math.min(MAX_SQFT, Math.max(1, roundSf((wIn * hIn) / 144))),
+      ruler: `your mark (${m.ruler.inches % 12 === 0 ? `${m.ruler.inches / 12} ft` : `${m.ruler.inches} in`})`,
+      confidence: "high" as Confidence,
+    };
+  });
+  return { ...result, areas, total_sq_ft: totalOf(areas) };
+}
 
 // the measured square feet onto the job's lines: the chosen square-foot line
 // takes the number (its key and wording kept), or a Plaster line is added
@@ -96,7 +142,7 @@ export const CONF_LABEL: Record<Confidence, string> = { high: "solid", medium: "
 
 // ---- asking the server ----
 export type MeasureOutcome = { ok: true; result: MeasureResult } | { ok: false; note: string };
-export interface MeasurePhoto { name: string; blob: Blob }
+export interface MeasurePhoto { name: string; blob: Blob; width?: number; height?: number; marks?: PhotoMarks }
 const b64 = async (blob: Blob): Promise<string> => {
   const bytes = new Uint8Array(await blob.arrayBuffer());
   let s = "";
@@ -113,7 +159,11 @@ export async function measurePhotos(photos: MeasurePhoto[], hints: MeasureHints)
   if (photos.length === 0) return { ok: false, note: "Pick at least one photo" };
   if (photos.length > MAX_PHOTOS) return { ok: false, note: `Up to ${MAX_PHOTOS} photos at a time` };
   try {
-    const images = await Promise.all(photos.map(async (p) => ({ name: p.name, media_type: mediaOf(p), data: await b64(p.blob) })));
+    const images = await Promise.all(photos.map(async (p) => ({
+      name: p.name, media_type: mediaOf(p), data: await b64(p.blob),
+      width: p.width || 0, height: p.height || 0,
+      ruler: p.marks?.ruler || null, box: p.marks?.box || null,
+    })));
     // loaded here, not at the top: the server reads this file too (for the form's cleanup) and has no browser client
     const { sb } = await import("./supabase");
     const { data: { session } } = await sb().auth.getSession();

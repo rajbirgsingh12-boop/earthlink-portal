@@ -6,7 +6,7 @@ import PhotoMarker from "@/components/PhotoMarker";
 import { sb } from "@/lib/supabase";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { annotate } from "@/lib/photoMark";
-import { CONF_LABEL, DEFAULT_HINTS, MAX_PHOTOS, measureNote, measurePhotos, roundSf, sfLines, typedNote, type MeasureHints, type MeasureResult, type PhotoMarks, type SfLine } from "@/lib/measure";
+import { CONF_LABEL, DEFAULT_HINTS, MAX_PHOTOS, lineHasNumber, measureNote, measurePhotos, roundSf, sfLines, typedNote, type MeasureHints, type MeasureResult, type PhotoMarks, type SfLine } from "@/lib/measure";
 
 // "Sq ft from photos" on a PACT job: pick the photos of the wall or ceiling
 // (or take them right here — they go on the job as before-photos), mark a
@@ -41,6 +41,7 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
   const [sent, setSent] = useState<string[]>([]);       // the paths that went, in photo order
   const [edits, setEdits] = useState<Record<number, string>>({});   // the owner's own number for a row, as typed — blank means Claude's
   const [manual, setManual] = useState("");                          // square feet typed straight in, no photo
+  const [ownTotal, setOwnTotal] = useState("");                      // the owner's own total over the measured rows — beats everything
   const lines = sfLines(job.items);
   const [lineIdx, setLineIdx] = useState<number | null>(lines.length ? lines[0] : null);
   const input = useRef<HTMLInputElement>(null);
@@ -105,6 +106,7 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
       if (!alive.current) return;
       if (!out.ok) { flash(out.note); return; }
       setResult(out.result); setSent(paths); setEdits({});
+      setOwnTotal(manual.trim()); // a number already typed is never lost to the estimate
     } finally { if (alive.current) setBusy(false); }
   };
   // the number for a row: the owner's, when they typed one, else Claude's estimate
@@ -114,20 +116,28 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
     if (a.same_as) return 0;
     return mine(i) ? roundSf(parseFloat(edits[i]) || 0) : a.sq_ft;
   };
-  const total = result ? result.areas.reduce((s, _a, i) => s + sqOf(i), 0) : 0;
+  const rowsTotal = result ? result.areas.reduce((s, _a, i) => s + sqOf(i), 0) : 0;
+  const ownN = roundSf(parseFloat(ownTotal) || 0);
+  const useOwn = ownTotal.trim() !== "" && ownN > 0;
+  const total = useOwn ? ownN : rowsTotal;
   const estimateTotal = result ? result.total_sq_ft : 0;
   const nMine = result ? result.areas.filter((a, i) => !a.same_as && mine(i)).length : 0;
+  const typedAny = useOwn || nMine > 0;
   const manualN = roundSf(parseFloat(manual) || 0);
   const pickedPaths = photos.map((a) => a.path).filter((p) => picked.has(p));
   const nPicked = pickedPaths.length;
   const nRulers = pickedPaths.filter((p) => marks[p]?.ruler && marks[p].ruler!.inches > 0).length;
   const apply = async () => {
     if (!result || total <= 0) { flash("Nothing to put on the job yet"); return; }
+    // a number already on the line — typed on the card, or read off the PO — stays unless the owner types the new one
+    if (!typedAny && lineHasNumber(job.items, lineIdx)) { flash(`That line already has ${Number(job.items[lineIdx!].qty)} sq ft on it. An estimate never replaces a number that's there — type the new one in "Your own total" if you want it changed.`); return; }
     setSaving(true);
     try {
-      const r: MeasureResult = { ...result, areas: result.areas.map((a, i) => ({ ...a, sq_ft: sqOf(i) })), total_sq_ft: total };
-      const ok = await onApply(lineIdx, total, measureNote(r, sent.length || 1, today(), estimateTotal));
-      if (ok) { flash(`${total} sq ft is on the job${nMine ? "" : " — check it with the tape"}`); onClose(); }
+      const note = useOwn
+        ? typedNote(total, today(), estimateTotal)
+        : measureNote({ ...result, areas: result.areas.map((a, i) => ({ ...a, sq_ft: sqOf(i) })), total_sq_ft: total }, sent.length || 1, today(), estimateTotal);
+      const ok = await onApply(lineIdx, total, note);
+      if (ok) { flash(`${total} sq ft is on the job${typedAny ? "" : " — check it with the tape"}`); onClose(); }
     } finally { if (alive.current) setSaving(false); }
   };
   // the number typed straight in: onto the line, no photo, no estimate
@@ -281,12 +291,18 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
             <span className="font-mono text-[15px] font-bold" data-measure-total>{total} sq ft</span>
           </div>
           <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-[12px] text-inksoft" data-measure-using>
-            <span>{nMine ? `Using your number on ${nMine} row${nMine === 1 ? "" : "s"} — Claude's estimate was ${estimateTotal} sq ft.` : "Using Claude's estimate. Type your own in any row to use that instead."}</span>
-            {nMine > 0 && <button type="button" className="min-h-[44px] text-[12px] underline" onClick={() => setEdits({})}>Use Claude's estimate for all</button>}
+            <span>{useOwn ? `Using your own total — Claude's estimate was ${estimateTotal} sq ft.` : nMine ? `Using your number on ${nMine} row${nMine === 1 ? "" : "s"} — Claude's estimate was ${estimateTotal} sq ft.` : "Using Claude's estimate. Type your own in any row, or your own total, to use that instead."}</span>
+            {(nMine > 0 || useOwn) && <button type="button" className="min-h-[44px] text-[12px] underline" onClick={() => { setEdits({}); setOwnTotal(""); }}>Use Claude's estimate for all</button>}
           </div>
+          <label className="mt-1 flex flex-wrap items-center gap-2 text-[13px]" data-measure-own>
+            <span className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">Your own total</span>
+            <input className="field w-24 px-2 py-1.5 text-right font-mono" inputMode="decimal" placeholder={String(rowsTotal)} aria-label="Your own total, in square feet" value={ownTotal} onChange={(e) => setOwnTotal(e.target.value)} />sq ft
+            <span className="text-[11px] text-inksoft">— a number you type always wins</span>
+          </label>
           <p className="mt-2 text-[12px] text-inksoft">{nRulers ? "Solid rows were worked out from your ruler." : "For a solid number next time, mark a ruler on the photo."} The tape measure wins.</p>
           <div className="mt-3 text-[11px] font-semibold uppercase tracking-widest text-inksoft">Put it on</div>
           {lineChooser()}
+          <p className="mt-2 text-[11px] text-inksoft">Only this line's square feet change. The photos, the PO and the other lines are not touched, and a number already on the line stays unless you type the new one.</p>
         </div>
       )}
     </Modal>

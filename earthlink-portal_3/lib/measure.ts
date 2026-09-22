@@ -140,8 +140,14 @@ export const measureNote = (r: MeasureResult, photos: number, day: string, estim
   const changed = estimateTotal !== undefined && roundSf(estimateTotal) !== roundSf(r.total_sq_ft);
   return `📷 ${day} · ${r.total_sq_ft} sq ft ${changed ? `from ${photos} photo${photos === 1 ? "" : "s"}, Claude's estimate of ${roundSf(estimateTotal!)} sq ft changed by hand` : `measured from ${photos} photo${photos === 1 ? "" : "s"}`}${parts.length ? ` (${parts.join(", ")})` : ""}${rulers.length ? ` · ruler: ${rulers.join(", ")}` : ""}${changed ? "" : " · check it with the tape"}`;
 };
-// the note when the owner typed the number in themselves — no photo, no estimate
-export const typedNote = (sqft: number, day: string): string => `📷 ${day} · ${roundSf(sqft)} sq ft typed in by hand`;
+// the note when the owner typed the number in themselves — with Claude's estimate on record when there was one
+export const typedNote = (sqft: number, day: string, estimateTotal?: number): string =>
+  `📷 ${day} · ${roundSf(sqft)} sq ft typed in by hand${estimateTotal !== undefined ? ` (Claude's estimate was ${roundSf(estimateTotal)} sq ft)` : ""}`;
+// a line that already carries a number — typed on the card, or read off the
+// PO — is never overwritten by an estimate; only a typed number replaces it.
+// The price list's own lines start at 1, which is the blank.
+export const lineHasNumber = (items: SfLine[], lineIndex: number | null): boolean =>
+  lineIndex !== null && lineIndex >= 0 && lineIndex < items.length && Number(items[lineIndex].qty) > 1;
 export const CONF_LABEL: Record<Confidence, string> = { high: "solid", medium: "rough", low: "a guess" };
 
 // ---- asking the server ----

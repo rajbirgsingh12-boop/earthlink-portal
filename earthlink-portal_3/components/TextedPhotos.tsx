@@ -142,7 +142,9 @@ export default function TextedPhotos({ canEdit, flash, onShow }: { canEdit: bool
             {(b.note || "").trim() && <div className="mt-0.5 text-[13px]" data-nobody-note>{(b.note || "").trim()}</div>}
             {(b.photos || []).length > 0 && strip(b)}
             <div className="mt-2 flex flex-wrap gap-2">
-              {onShow && <button className="btn btn-primary min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => onShow(b)} data-show-job>Give it a new day…</button>}
+              {onShow && (b.pact_job_id || b.release_id)
+                ? <button className="btn btn-primary min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => onShow(b)} data-show-job>Give it a new day…</button>
+                : <span className="self-center text-[12px] text-inksoft" data-job-gone>That job isn&apos;t in the portal any more.</span>}
               <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
             </div>
           </div>

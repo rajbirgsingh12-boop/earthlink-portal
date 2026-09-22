@@ -12,21 +12,33 @@ import { langOf, longDay, PHOTO_INVITE, type Lang } from "./crewText";
 const norm = (s: string) => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
   .replace(/[’‘`´]/g, "'").replace(/[^a-z0-9' ]+/g, " ").replace(/\s+/g, " ").trim();
 
-// said in so many words, English or Spanish
+// Said in so many words, English or Spanish — about the door or the tenant,
+// never just any "no": "Home Depot not open", "no está el material", "hoy no
+// puedo, estoy enfermo", "the delivery got cancelled" are not a door.
+const WHO = "(tenant|tenants|resident|they|she|he|lady|guy|owner|family|people)";
 const SAID = new RegExp([
-  "\\b(nobody|no ?one|no body)('?s)? (is )?(home|there|here|answer\\w*|opens?|opened|opening)\\b",
-  "\\bnot (at )?home\\b", "\\bno answer\\b", "\\bno access\\b", "\\bno entry\\b", "\\bno show\\b",
-  "\\b(can'?t|cannot|couldn'?t|could not) (get|go) in(side)?\\b", "\\b(can'?t|cannot|couldn'?t) get access\\b",
-  "\\b(won'?t|will not|didn'?t|did not|doesn'?t|does not|not) (open|opening|answer\\w*)\\b",
-  "\\b(won'?t|will not|not) let(ting)? (us|me) in\\b", "\\bdoor (is )?locked\\b",
-  "\\btenant (is )?(not|isn'?t|wasn'?t) (home|there|here|in)\\b", "\\btenant (cancel\\w*|said no|says no|refus\\w*)\\b",
-  "\\bcancel+(ed|led)\\b", "\\breschedul\\w*\\b", "\\b(can'?t|cannot) (do|make it|do it) today\\b", "\\bnot today\\b",
+  "\\b(nobody|no ?one|no body)('?s)? (is )?(home|there|here|answer\\w*|opens?|opened|opening|came|coming)\\b",
+  "\\bnot (at )?home\\b",
+  "\\bno answer( (at|from) (the )?(door|apt|apartment|unit|tenant))?$",
+  "\\bno (access|entry)( (to|at|for) (the )?(apt|apartment|unit))?$",
+  "\\b(tenant )?no show$",
+  "\\b(can'?t|cannot|couldn'?t|could not) get in(side)?\\b", "\\b(can'?t|cannot|couldn'?t|could not) get access\\b",
+  `\\b${WHO}( is| are|'s|'re)? (won'?t|will not|didn'?t|did not|doesn'?t|does not|not|isn'?t|aren'?t|never) ?(open\\w*|answer\\w*|home|there|here|in)\\b`,
+  "\\b(won'?t|will not|didn'?t|did not|doesn'?t|does not|not) (open|opening|answer\\w*) (the |my |our )?door\\b",
+  `\\b${WHO} (won'?t|will not|not|didn'?t) let(ting)? (us|me) in\\b`, "\\bdoor (is )?(locked|closed)\\b",
+  `\\b${WHO} (cancel\\w*|said no|says no|refus\\w*)\\b`, `\\b${WHO} (said|says) (not today|tomorrow|another day)\\b`,
+  `\\b${WHO} (can'?t|cannot|can not) (do it |make it |do |make )?today\\b`,
+  `\\b${WHO} (want|wants|asked|asks|need|needs)( us| me)? to reschedul\\w*`, `\\b${WHO} reschedul\\w*`,
+  "\\b(appointment|appt) (got |was |is )?cancel+\\w*",
   // español
-  "\\bnadie\\b", "\\bno (esta|estan|estaba|estaban)\\b", "\\bno (abre|abren|abrio|abrieron|abrian)\\b",
-  "\\bno (me|nos) (abre|abren|abrio|abrieron|deja|dejan|dejaron) ?(entrar)?\\b",
-  "\\bno (contesta|contestan|contesto|contestaron|responde|responden)\\b",
-  "\\b(no se puede|no puedo|no podemos|no pudimos|no pude) entrar\\b", "\\bcancel(o|aron|ado|ada)\\b",
-  "\\bhoy no\\b", "\\bno (puede|pueden) hoy\\b", "\\binquilin[oa] no\\b",
+  "\\bnadie\\b",
+  "^(el |la )?(inquilin[oa]s?|senor(a|es)?|duen[oa]s?|familia)? ?no (esta|estan|estaba|estaban)( (en casa|aqui|ahi|alli|nadie))?$",
+  "\\bno (esta|estan|estaba|estaban) (en casa|nadie)\\b",
+  "\\bno (abre|abren|abrio|abrieron|abrian)\\b", "\\bno (me|nos) (abre|abren|abrio|abrieron|deja|dejan|dejaron) ?(entrar)?\\b",
+  "\\bno (contesta|contestan|contesto|contestaron|responde|responden|respondio)( (la puerta|el inquilino|la inquilina))?$",
+  "\\bno (se puede|puedo|podemos|pudimos|pude) entrar( (al|en el) (apartamento|apto|apt|departamento|unidad))?$",
+  "\\b(inquilin[oa]s?|senor(a)?|la familia) cancel\\w*", "\\b(la )?cita (se )?cancel\\w*",
+  "\\bno (puede|pueden) hoy\\b", "\\bhoy no (puede|pueden)\\b", "\\binquilin[oa]s? no\\b",
 ].join("|"));
 // a plain "no" — alone, or with the job's number: "no", "NO 116843", "nope", "nah"
 const BARE = /^(no+|nope|nah|nada|no po|no no)$/;
@@ -82,15 +94,22 @@ export type Missed =
 //  • else, when every job today is already flagged, the flagged one (the
 //    other worker at the same door said it first) — they still need a next job.
 export const SAME_DOOR_MS = 20 * 60_000;
+// the day's hours for a door: before 6 AM or from 7 PM on, a "no" is not one
+// (it's an answer to the evening text about tomorrow, most likely) — and a
+// next day's job is moved up to today only until 2 PM, while there's a day left to work
+export const DOOR_HOURS = { from: 6, to: 19 };
+export const MOVE_UP_UNTIL = 14;
 export function whichMissed(ctx: {
   body: string; today: string; jobs: DayJob[];            // this worker's jobs, today and after
   flagged: Set<string>; visited: Set<string>;               // job ids flagged / photographed today
-  justFlagged?: Set<string>;                                // …flagged in the last twenty minutes (by them, or the other worker at that door)
-  photosJustNow: boolean;                                   // photos of theirs went on a job in the last ten minutes
+  sameDoor?: Set<string>;                                   // …flagged in the last twenty minutes by the other worker at that door, not yet answered by this one
+  answerToPhotos: boolean;                                  // the last thing we texted them was "got your photos" (half an hour at most)
 }): Missed {
   const today = dedupe(ctx.jobs.filter((j) => j.day === ctx.today)).sort(byLabel);
   const nums = numbersIn(ctx.body);
-  if (bareNo(ctx.body) && !nums.length && ctx.photosJustNow) return { kind: "skip" };
+  // "No" / "No, 116900" right after "Got it — 3 photos on PO 116843 … wrong
+  // job? reply with the right PO": that's about the photos, not a door
+  if (bareNo(ctx.body) && ctx.answerToPhotos) return { kind: "skip" };
   if (nums.length) {
     const hit = today.filter((j) => j.keys.some((k) => nums.includes(k)));
     if (hit.length === 1) return { kind: "missed", job: hit[0], already: ctx.flagged.has(hit[0].id) };
@@ -100,10 +119,10 @@ export function whichMissed(ctx: {
     if (big) return { kind: "not_today", number: big };
   }
   if (today.length === 0) return { kind: "nothing_today" };
-  // a door reported in the last twenty minutes that they were at too: this
-  // "no" is about it (the other worker said it first, or it's said twice) —
-  // not about the job they were just sent on to, which they can't have reached
-  const same = today.filter((j) => ctx.justFlagged?.has(j.id));
+  // a door the other worker reported in the last twenty minutes, that they
+  // were at too: this "no" is about it — not about the job the portal just
+  // sent them on to, which they can't have reached yet
+  const same = today.filter((j) => ctx.sameDoor?.has(j.id));
   if (same.length) return { kind: "missed", job: same[same.length - 1], already: true };
   const open = today.filter((j) => !ctx.flagged.has(j.id) && !ctx.visited.has(j.id));
   if (open.length === 1) return { kind: "missed", job: open[0], already: false };
@@ -121,11 +140,16 @@ export const LOOK_AHEAD_DAYS = 14;
 // Their next job: another of today's still open, in the calendar's order;
 // else the first job of their next working day (in the next two weeks),
 // which moves up to today.
-export function whichNext(ctx: { today: string; jobs: DayJob[]; missed: DayJob; flagged: Set<string>; visited: Set<string>; lastDay: string }): Next {
+export function whichNext(ctx: { today: string; jobs: DayJob[]; missed: DayJob; flagged: Set<string>; visited: Set<string>; lastDay: string; moveUp?: boolean }): Next {
   const all = dedupe(ctx.jobs);
   const todayOpen = all.filter((j) => j.day === ctx.today && j.id !== ctx.missed.id && !ctx.flagged.has(j.id) && !ctx.visited.has(j.id)).sort(byLabel);
   if (todayOpen.length) return { kind: "today", job: todayOpen[0] };
-  const later = all.filter((j) => j.day > ctx.today && j.day <= ctx.lastDay && j.id !== ctx.missed.id);
+  if (ctx.moveUp === false) return { kind: "none" };
+  // a later day's job — not one they're already on today (a release that runs
+  // several days), not one they were at or that was reported empty today
+  const onToday = new Set(all.filter((j) => j.day === ctx.today).map((j) => j.id));
+  const later = all.filter((j) => j.day > ctx.today && j.day <= ctx.lastDay && j.id !== ctx.missed.id
+    && !onToday.has(j.id) && !ctx.flagged.has(j.id) && !ctx.visited.has(j.id));
   if (!later.length) return { kind: "none" };
   const first = later.map((j) => j.day).sort()[0];
   const job = later.filter((j) => j.day === first).sort(byLabel)[0];
@@ -170,6 +194,18 @@ export function askWhichText(options: DayJob[], lang0?: string | null): string {
   return lang === "es"
     ? `¿En qué trabajo no hay nadie? Responda NO con el número, así: ${list}.`
     : `Which job has nobody home? Reply NO with its number, like: ${list}.`;
+}
+// a plain "no" that could be about the photos just sent: how to report a door
+export function hintText(options: DayJob[], lang0?: string | null): string {
+  const lang = langOf(lang0);
+  const nums = options.slice(0, 2).map((j) => `NO ${(j.label.match(/\d[\w-]*$/) || [j.label])[0]}`);
+  const list = nums.length === 2 ? `${nums[0]} ${lang === "es" ? "o" : "or"} ${nums[1]}` : nums[0];
+  return lang === "es"
+    ? `Si no hay nadie en un trabajo, responda NO con su número, así: ${list}.`
+    : `If nobody's home at a job, reply NO with its number, like: ${list}.`;
+}
+export function noMoveUpText(lang0?: string | null): string {
+  return langOf(lang0) === "es" ? "No tiene otro trabajo hoy. Su próximo trabajo sigue en su día." : "You have no other job today. Your next job stays on its day.";
 }
 export function notTodayText(number: string, lang0?: string | null): string {
   return langOf(lang0) === "es"

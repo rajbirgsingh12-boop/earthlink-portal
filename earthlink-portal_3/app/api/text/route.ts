@@ -97,6 +97,10 @@ export async function POST(req: Request) {
     await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, {
       method: "PATCH", headers: supaHeaders, body: JSON.stringify({ texted: true }),
     }).catch(() => {});
+    // when it went (RUN_ME section 21) — its own write, so a database without the column still gets the TEXTED mark
+    await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, {
+      method: "PATCH", headers: supaHeaders, body: JSON.stringify({ texted_at: new Date().toISOString() }),
+    }).catch(() => {});
   });
   return NextResponse.json({ configured: true, sent, skipped, failed });
 }

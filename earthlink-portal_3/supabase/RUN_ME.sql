@@ -809,7 +809,16 @@ grant execute on function public.texted_photos_put(uuid, uuid, jsonb, text[]) to
 --     comes off by itself once the office gives the job a new day. Needs
 --     section 20.
 alter table texted_photos add column if not exists note text default '';   -- what the portal did about it: "Moved PO 220011 up from Wed Sep 23 and sent Jose"
+alter table texted_photos add column if not exists day text;                -- the work day (New York) a door was reported on
 create index if not exists texted_photos_open on texted_photos (status) where status in ('held', 'nobody', 'reply');
+-- one report per door per day: two workers at the same door texting in the
+-- same second can't both move the next job up — the second one is told it's
+-- already reported
+create unique index if not exists texted_photos_one_door on texted_photos (coalesce(pact_job_id, release_id), day)
+  where status = 'nobody' and day is not null;
+-- when each crew text went out from the company number: a plain "no" soon
+-- after a text about tomorrow is an answer to that text, not a door
+alter table schedule_days add column if not exists texted_at timestamptz;
 -- a PACT job given a new day: its ⚠ is done with
 create or replace function public.texted_nobody_moved() returns trigger
 language plpgsql security definer set search_path = public as $$

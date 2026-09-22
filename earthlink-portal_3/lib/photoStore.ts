@@ -26,8 +26,13 @@ export function serviceDb() {
       return r && r.ok ? { ok: true, rows: ((await r.json().catch(() => [])) as T[]) || [] } : { ok: false, rows: [] };
     },
     async insert(table: string, row: Record<string, unknown>): Promise<boolean> {
+      const st = await db.insertStatus(table, row);
+      return st >= 200 && st < 300;
+    },
+    // the same, saying how it went: 201 in, 409 a twin already there, 400 a column this database doesn't have yet, 0 unreachable
+    async insertStatus(table: string, row: Record<string, unknown>): Promise<number> {
       const r = await fetch(`${url}/rest/v1/${table}`, { method: "POST", headers: { ...J, Prefer: "return=minimal" }, body: JSON.stringify(row) }).catch(() => null);
-      return !!r && r.ok;
+      return r ? r.status : 0;
     },
     async patch(path: string, row: Record<string, unknown>): Promise<boolean> {
       const r = await fetch(`${url}/rest/v1/${path}`, { method: "PATCH", headers: { ...J, Prefer: "return=minimal" }, body: JSON.stringify(row) }).catch(() => null);

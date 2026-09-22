@@ -24,6 +24,10 @@ export function useLive(
 ) {
   const cb = useRef(onChange);
   cb.current = onChange;
+  // each hook its own channel: two on one page watching the same table (the
+  // Schedule page and its "From the crew" card) would otherwise share a topic,
+  // and joining it the second time drops the first
+  const own = useRef(Math.random().toString(36).slice(2, 10));
   const enabled = opts?.enabled !== false;
   const delay = opts?.delay ?? 400;
   const skipWhileTyping = opts?.skipWhileTyping ?? false;
@@ -49,7 +53,7 @@ export function useLive(
         cb.current(changed.length > 0 ? changed : undefined);
       }, delay);
     };
-    const chan = sb().channel(`live-${key}`);
+    const chan = sb().channel(`live-${key}-${own.current}`);
     tables.forEach((t) => chan.on("postgres_changes", { event: "*", schema: "public", table: t }, () => fire(t)));
     chan.subscribe();
     return () => { if (timer) clearTimeout(timer); sb().removeChannel(chan); };

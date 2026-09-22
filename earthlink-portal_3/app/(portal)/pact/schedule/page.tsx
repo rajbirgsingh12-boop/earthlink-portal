@@ -133,6 +133,9 @@ export default function PactCalendar() {
     const j = jobsRef.current.find((x) => x.id === id);
     if (!j) { flash("That PO isn't on the calendar any more"); return; }
     if (!(j.start_date || "").trim()) { flash(`${poLabel(j)} has no day yet — give it one below`); setQ(poOf(j)); return; }
+    // on the calendar even when a search is typed, or it's a priced job whose day has passed
+    setQ("");
+    if (offCalendar(j, today)) setShown((prev) => new Set(prev).add(j.id));
     goTo(j.start_date!);
     setTimeout(() => document.querySelector(`[data-po-card="${poOf(j)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 350);
   };

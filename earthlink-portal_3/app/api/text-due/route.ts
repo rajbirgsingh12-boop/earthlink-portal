@@ -146,6 +146,7 @@ async function sweep(req: Request) {
 
   const { sent, failed } = await sendTexts(mine, async (m) => {
     await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ texted: true }) }).catch(() => {});
+    await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ texted_at: new Date().toISOString() }) }).catch(() => {});
   });
   return NextResponse.json({ sent, missed: missed.length, failed: failed.length, due: due.length, ...(failed.length ? { errors: failed.slice(0, 5) } : {}) });
 }

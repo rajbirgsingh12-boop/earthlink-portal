@@ -13,6 +13,8 @@ import PageHeader from "@/components/PageHeader";
 import CardToolbar from "@/components/CardToolbar";
 import Modal from "@/components/Modal";
 import Disclosure from "@/components/Disclosure";
+import MeasurePanel from "@/components/MeasurePanel";
+import { applyMeasure } from "@/lib/measure";
 import { useLive } from "@/lib/useLive";
 import { findDupe, DUPE_COLS } from "@/lib/po";
 import { INVOICE_FLOOR, insertJob, subtotalOf, intakePoFile, claimInvoiceNo } from "@/lib/pactIntake";
@@ -57,6 +59,7 @@ export default function Pact() {
   const [draft, setDraft] = useState({ ...BLANK });
   const [openId, setOpenId] = useState<string | null>(null);
   const [attachJob, setAttachJob] = useState<Job | null>(null);
+  const [measureJob, setMeasureJob] = useState<Job | null>(null); // "Sq ft from photos" is open for this job
   const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
   const [invJob, setInvJob] = useState<Job | null>(null);
   // which jobs show their details panel — per job, so opening one job's
@@ -805,14 +808,14 @@ export default function Pact() {
   };
 
   // ---------- attachments & photos ----------
-  const attachFiles = async (j: Job, files: File[]): Promise<void> => {
-    if (files.length === 0) return;
+  const attachFiles = async (j: Job, files: File[]): Promise<{ name: string; path: string }[]> => {
+    if (files.length === 0) return [];
     setBusy(true);
     const added: { name: string; path: string }[] = [];
     for (const file of files) {
       const path = `pact/${j.id}/${file.name}`;
       const { error } = await sb().storage.from("docs").upload(path, file, { upsert: true });
-      if (error) { setBusy(false); flash(/bucket/i.test(error.message) ? "Storage not set up — run supabase/upgrade_invoices_aging_docs.sql" : error.message); return; }
+      if (error) { setBusy(false); flash(/bucket/i.test(error.message) ? "Storage not set up — run supabase/upgrade_invoices_aging_docs.sql" : error.message); return []; }
       added.push({ name: file.name, path });
     }
     // merge against the freshest row so multi-photo batches and other devices never lose files
@@ -825,8 +828,24 @@ export default function Pact() {
     else {
       setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, attachments: list } : x)));
       setAttachJob((prev) => (prev && prev.id === j.id ? { ...prev, attachments: list } : prev));
+      setMeasureJob((prev) => (prev && prev.id === j.id ? { ...prev, attachments: list } : prev));
     }
     setBusy(false);
+    return e2 ? [] : added;
+  };
+  // the measured square feet, onto the job: the chosen square-foot line takes
+  // the number (or a Plaster line is added, priced from the list for Admin 1),
+  // and the job's notes say what was measured from what
+  const applyMeasured = async (j0: Job, lineIndex: number | null, sqft: number, note: string): Promise<boolean> => {
+    const j = jobs.find((x) => x.id === j0.id) || j0;
+    const price = canPrice ? ((await priceBook()).find((p) => p.key === "plaster")?.price || 0) : 0;
+    const next = applyMeasure(itemsOf(j), lineIndex, sqft, price) as Item[];
+    setItems(j, next, true);
+    const notes = `${(j.notes || "").trim()}${(j.notes || "").trim() ? "\n" : ""}${note}`;
+    const { error } = await sb().from("pact_jobs").update({ notes }).eq("id", j.id);
+    if (error) { flash(error.message); return false; }
+    setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, notes } : x)));
+    return true;
   };
   // "Upload files": pictures are shrunk like camera shots, a photos zip (the
   // one "⬇ Photos" makes) is opened back up into its pictures — their
@@ -1435,6 +1454,7 @@ export default function Pact() {
                 <div className="mb-2.5 flex flex-wrap items-center gap-2">
                   {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "before")} disabled={busy}>📷 Before{beforeN > 0 ? ` · ${beforeN}` : ""}</button>}
                   {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "after")} disabled={busy}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}
+                  {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => setMeasureJob(j)} disabled={busy} title="Claude works out the square feet from the photos — a door or an outlet cover in the shot is the ruler">Sq ft from photos</button>}
                   {photoN > 0 && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => downloadPhotos(j)} disabled={busy} title="Just the pictures — no PO, no invoice">⬇ Photos · {photoN}</button>}
                   <RowActions items={[
                     { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },
@@ -1713,6 +1733,14 @@ export default function Pact() {
         );
       })()}
 
+      {measureJob && (() => {
+        const j = jobs.find((x) => x.id === measureJob.id) || measureJob;
+        return (
+          <MeasurePanel job={{ id: j.id, label: `PO ${j.po_number || j.job_number || ""}`, attachments: j.attachments || [], items: itemsOf(j) }}
+            onAttach={(files) => attachFiles(j, files)} onApply={(li, sq, note) => applyMeasured(j, li, sq, note)}
+            onClose={() => setMeasureJob(null)} flash={flash} />
+        );
+      })()}
       {attachJob && (
         <Modal title={`Documents · PO ${attachJob.po_number || attachJob.job_number || ""}`} onClose={() => setAttachJob(null)}
           footer={(() => {
@@ -1722,6 +1750,7 @@ export default function Pact() {
                 {canEdit && <button className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "before")} disabled={busy}>📷 Before</button>}
                 {canEdit && <button className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "after")} disabled={busy}>📷 After</button>}
                 {canEdit && <button className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy} title="Pictures, a photos zip, or a document — several at once">Upload files</button>}
+                {canEdit && <button className="btn btn-ghost" onClick={() => setMeasureJob(attachJob)} disabled={busy} title="Claude works out the square feet from the photos">Sq ft from photos</button>}
                 {photoN > 0 && <button className="btn btn-ghost" onClick={() => downloadPhotos(attachJob)} disabled={busy} title="Just the pictures — no PO, no invoice">⬇ Photos · {photoN}</button>}
               </div>
             ) : undefined;

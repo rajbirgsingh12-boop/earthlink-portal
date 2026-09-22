@@ -1,0 +1,135 @@
+// Square feet from photos. The owner takes pictures of the wall or ceiling
+// that needs plaster; Claude looks at them on the server (/api/measure) and
+// works out the area from something of known size in the shot — a door, an
+// outlet cover, a tile, the ceiling height — and the number lands on the
+// job's square-foot line. A photo can never be measured exactly: every
+// number here is a starting point the tape measure overrules, and the
+// screen says so. Nothing in this file touches the database or the screen;
+// the measuring itself lives in lib/smartMeasure.ts (server only).
+import { normUnit } from "./priceBook";
+
+export type Surface = "wall" | "ceiling" | "floor" | "other";
+export type Confidence = "low" | "medium" | "high";
+export interface MeasuredArea {
+  photo: number;          // which photo, 1-based, in the order sent
+  where: string;          // "bedroom wall left of the window"
+  surface: Surface;
+  width_ft: number;
+  height_ft: number;
+  sq_ft: number;          // whole square feet, rounded up
+  ruler: string;          // what gave the scale: "door (80 in tall)"
+  confidence: Confidence;
+  same_as: number;        // 0, or the photo number this area was already counted under
+  note: string;
+}
+export interface MeasureResult { areas: MeasuredArea[]; total_sq_ft: number; warnings: string[] }
+export interface MeasureHints {
+  scope: "spots" | "whole";   // just the damaged spots, or the whole wall/ceiling shown
+  ceilingFt: number;          // the room's ceiling height — 8 ft in most NYC apartments
+  note: string;               // anything else the owner knows ("the door is 32 in wide")
+}
+export const DEFAULT_HINTS: MeasureHints = { scope: "spots", ceilingFt: 8, note: "" };
+export const MAX_PHOTOS = 6;          // per measuring — keeps the request under the server's body cap
+export const MAX_SQFT = 5000;         // no apartment wall is bigger; anything above is a misread
+
+// ---- the square-foot lines on a job ----
+export const SF_KEYS = ["plaster", "wall_repair", "popcorn", "sheetrock"];
+export interface SfLine { description: string; qty: number; unit: string; unit_price: number; key?: string; base?: string }
+// a line measured in square feet: by its price-book key, or by its unit
+export const isSfLine = (it: SfLine): boolean => (!!it.key && SF_KEYS.includes(it.key)) || normUnit(it.unit || "") === "SF";
+export const sfLines = (items: SfLine[]): number[] => items.map((it, i) => (isSfLine(it) ? i : -1)).filter((i) => i >= 0);
+export const roundSf = (n: number): number => Math.max(0, Math.ceil(Number(n) || 0));
+
+// the answer, made safe: bad rows dropped, sizes clamped, a duplicate of an
+// earlier photo counted once, the total recomputed here (never trusted)
+export function cleanMeasure(raw: unknown): MeasureResult {
+  const r = (raw || {}) as { areas?: unknown; warnings?: unknown };
+  const list = Array.isArray(r.areas) ? (r.areas as Record<string, unknown>[]) : [];
+  const surfaces: Surface[] = ["wall", "ceiling", "floor", "other"];
+  const confs: Confidence[] = ["low", "medium", "high"];
+  const areas: MeasuredArea[] = [];
+  for (const a of list) {
+    if (!a || typeof a !== "object") continue;
+    const w = Math.max(0, Number(a.width_ft) || 0), h = Math.max(0, Number(a.height_ft) || 0);
+    let sq = roundSf(Number(a.sq_ft) || 0);
+    if (!sq && w && h) sq = roundSf(w * h);
+    const same = Math.max(0, Math.floor(Number(a.same_as) || 0));
+    if (!sq && !same) continue;
+    areas.push({
+      photo: Math.max(1, Math.floor(Number(a.photo) || 1)),
+      where: String(a.where || "").replace(/\s+/g, " ").trim() || "the area in the photo",
+      surface: surfaces.includes(a.surface as Surface) ? (a.surface as Surface) : "other",
+      width_ft: Math.round(w * 2) / 2, height_ft: Math.round(h * 2) / 2,
+      sq_ft: same ? 0 : Math.min(MAX_SQFT, sq),
+      ruler: String(a.ruler || "").replace(/\s+/g, " ").trim(),
+      confidence: confs.includes(a.confidence as Confidence) ? (a.confidence as Confidence) : "low",
+      same_as: same,
+      note: String(a.note || "").replace(/\s+/g, " ").trim(),
+    });
+  }
+  const warnings = (Array.isArray(r.warnings) ? (r.warnings as unknown[]) : []).map((w) => String(w || "").trim()).filter(Boolean);
+  return { areas, total_sq_ft: totalOf(areas), warnings };
+}
+export const totalOf = (areas: { sq_ft: number; same_as?: number }[]): number => areas.reduce((s, a) => s + (a.same_as ? 0 : roundSf(a.sq_ft)), 0);
+
+// the measured square feet onto the job's lines: the chosen square-foot line
+// takes the number (its key and wording kept), or a Plaster line is added
+// when the job has none. The price is the book's when the caller may price;
+// otherwise 0, and the admin's auto-price fills it on their next open.
+export function applyMeasure(items: SfLine[], lineIndex: number | null, sqft: number, plasterPrice = 0): SfLine[] {
+  const n = roundSf(sqft);
+  const next = items.map((it) => ({ ...it }));
+  if (lineIndex !== null && lineIndex >= 0 && lineIndex < next.length) {
+    next[lineIndex] = { ...next[lineIndex], qty: n, unit: normUnit(next[lineIndex].unit || "") === "SF" ? next[lineIndex].unit : "SF" };
+    return next;
+  }
+  next.push({ description: "Plaster", qty: n, unit: "SF", unit_price: plasterPrice, key: "plaster" });
+  return next;
+}
+// the line on the job's notes — what was measured, from what, and by what
+export const measureNote = (r: MeasureResult, photos: number, day: string): string => {
+  const parts = r.areas.filter((a) => !a.same_as && a.sq_ft > 0).map((a) => `${a.where} ${a.sq_ft} sq ft`);
+  const rulers = [...new Set(r.areas.map((a) => a.ruler).filter(Boolean))];
+  return `📷 ${day} · ${r.total_sq_ft} sq ft measured from ${photos} photo${photos === 1 ? "" : "s"}${parts.length ? ` (${parts.join(", ")})` : ""}${rulers.length ? ` · ruler: ${rulers.join(", ")}` : ""} · check it with the tape`;
+};
+export const CONF_LABEL: Record<Confidence, string> = { high: "solid", medium: "rough", low: "a guess" };
+
+// ---- asking the server ----
+export type MeasureOutcome = { ok: true; result: MeasureResult } | { ok: false; note: string };
+export interface MeasurePhoto { name: string; blob: Blob }
+const b64 = async (blob: Blob): Promise<string> => {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+};
+const mediaOf = (p: MeasurePhoto): string => {
+  const t = (p.blob.type || "").toLowerCase();
+  if (/^image\/(jpeg|png|webp|gif)$/.test(t)) return t;
+  return /\.png$/i.test(p.name) ? "image/png" : /\.webp$/i.test(p.name) ? "image/webp" : "image/jpeg";
+};
+// the photos (already shrunk) and the hints, to Claude, through the server
+export async function measurePhotos(photos: MeasurePhoto[], hints: MeasureHints): Promise<MeasureOutcome> {
+  if (photos.length === 0) return { ok: false, note: "Pick at least one photo" };
+  if (photos.length > MAX_PHOTOS) return { ok: false, note: `Up to ${MAX_PHOTOS} photos at a time` };
+  try {
+    const images = await Promise.all(photos.map(async (p) => ({ name: p.name, media_type: mediaOf(p), data: await b64(p.blob) })));
+    // loaded here, not at the top: the server reads this file too (for the form's cleanup) and has no browser client
+    const { sb } = await import("./supabase");
+    const { data: { session } } = await sb().auth.getSession();
+    const res = await fetch("/api/measure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) },
+      body: JSON.stringify({ images, hints }),
+    });
+    const out = (await res.json().catch(() => ({}))) as { ok?: boolean; result?: unknown; note?: string; error?: string };
+    if (res.status === 413) return { ok: false, note: "Those photos are too big to send together — try fewer at a time" };
+    if (!res.ok) return { ok: false, note: out.error || out.note || `The server said ${res.status}` };
+    if (!out.ok) return { ok: false, note: out.note || "Claude couldn't measure these" };
+    const result = cleanMeasure(out.result);
+    if (result.areas.length === 0) return { ok: false, note: result.warnings[0] || "Claude couldn't make out an area to measure in these photos — try one with a door or an outlet in the shot" };
+    return { ok: true, result };
+  } catch {
+    return { ok: false, note: "No signal — try again in a moment" };
+  }
+}

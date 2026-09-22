@@ -1,5 +1,7 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { matches } from "@/lib/search";
+import { useDebounced } from "@/lib/useDebounced";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the export
 // the export engine is heavy — it loads on demand, never with the page itself
 let XLSX!: typeof import("xlsx-js-style");
@@ -651,20 +653,29 @@ export default function Proposals() {
   };
 
   // ---------- walk sheet grouping / filtering ----------
-  const groups = useMemo(() => {
-    if (!catalog) return [];
-    const q = search.trim().toLowerCase();
-    const rows = q
-      ? catalog.filter((ci) => String(ci.line) === q || ci.code.toLowerCase().includes(q) || ci.description.toLowerCase().includes(q) || ci.category.toLowerCase().includes(q))
+  // the search settles before the book is rebuilt, and only so many lines
+  // are drawn at once — a contract book runs to a couple of thousand, and
+  // redrawing them all on every letter is what made this feel stuck. Any
+  // line that already has a quantity is always drawn, wherever it sits.
+  const searchSettled = useDebounced(search);
+  const SHOWN_LINES = 200;
+  const { groups, hiddenLines } = useMemo(() => {
+    if (!catalog) return { groups: [] as { category: string; rows: ContractItem[] }[], hiddenLines: 0 };
+    const q = searchSettled.trim().toLowerCase();
+    const found = q
+      ? catalog.filter((ci) => String(ci.line) === q || matches(q, ci.code, ci.description, ci.category))
       : catalog;
+    const filled = new Set(found.filter((ci) => parseNum(qty[ci.code] || "") > 0).map((ci) => ci.id));
+    let room = Math.max(SHOWN_LINES, filled.size);
+    const rows = found.filter((ci) => { if (filled.has(ci.id)) return true; if (room <= 0) return false; room -= 1; return true; });
     const out: { category: string; rows: ContractItem[] }[] = [];
     rows.forEach((ci) => {
       const g = out[out.length - 1];
       if (g && g.category === ci.category) g.rows.push(ci);
       else out.push({ category: ci.category, rows: [ci] });
     });
-    return out;
-  }, [catalog, search]);
+    return { groups: out, hiddenLines: found.length - rows.length };
+  }, [catalog, searchSettled, qty]);
 
   // ================= WALK SHEET EDITOR =================
   if (doc && doc.contract_id) {
@@ -724,9 +735,12 @@ export default function Proposals() {
           <>
             <input className="field mb-1" placeholder="Search line #, code, or word…"
               value={search} onChange={(e) => setSearch(e.target.value)} />
-            <div className="mb-3 text-[11px] text-inksoft">{catalog!.length} lines in this price book</div>
+            <div className="mb-3 text-[11px] text-inksoft">
+              {catalog!.length} lines in this price book
+              {hiddenLines > 0 ? ` · showing ${SHOWN_LINES} at a time — type in the box to find the rest` : ""}
+            </div>
             {groups.map((g, gi) => {
-              const isOpen = !!search || !collapsed.has(g.category);
+              const isOpen = !!searchSettled || !collapsed.has(g.category);
               const filled = g.rows.filter((ci) => parseNum(qty[ci.code] || "") > 0).length;
               return (
                 <div key={`${g.category}-${gi}`} className="card mb-2 overflow-hidden">
@@ -977,8 +991,7 @@ export default function Proposals() {
           .filter((p) => {
             if (!listQ) return true;
             const c = contracts.find((x) => x.id === p.contract_id);
-            return `${p.number} ${p.job} ${p.client_name} ${p.development || ""} ${p.address || ""} ${p.apt || ""} ${p.stairhall || ""} ${p.release_number || ""} ${c?.number || ""}`
-              .toLowerCase().includes(listQ.toLowerCase());
+            return matches(listQ, p.number, p.job, p.client_name, p.development, p.address, p.apt, p.stairhall, p.release_number, c?.number);
           });
         // on a phone the name and total take the whole first line; the buttons
         // sit under them instead of squeezing the name into a column

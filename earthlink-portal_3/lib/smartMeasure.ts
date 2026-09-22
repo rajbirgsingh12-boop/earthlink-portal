@@ -17,7 +17,8 @@ export const AreaSchema = z.object({
     height_ft: z.number().describe("Real height (or depth, for a ceiling) in feet, to the nearest half foot."),
     sq_ft: z.number().describe("width_ft × height_ft, rounded UP to a whole number of square feet. 0 when same_as is set."),
     ruler: z.string().describe("What gave the scale, with its size: 'the marked ruler (96 in)', 'interior door (80 in tall)', 'outlet cover (4.5 in tall)', 'ceiling height (8 ft, as told)'. Empty if nothing did."),
-    same_plane: z.boolean().describe("true when the area lies on the same flat surface (the same wall, or the same ceiling) as the ruler marked in its photo — or when no ruler is marked. false when the marked ruler is on a different wall or at a different distance from the camera."),
+    same_plane: z.boolean().describe("true when the area lies on the same flat surface (the same wall, or the same ceiling) as the ruler marked in its photo — or when no ruler is marked. false only when the marked ruler is on a DIFFERENT surface (another wall, the floor, a door on the opposite wall). A wall photographed at an angle is still the same surface: answer true and use scale_ratio for the distance."),
+    scale_ratio: z.number().describe("How much bigger a real foot looks at this area than at the marked ruler, in pixels: measure the same thing (the wall's floor-to-ceiling span, a course of tile, the baseboard's height) in pixels at the ruler and again at the area, and divide area ÷ ruler. 1 when the area is the same distance from the camera as the ruler; less than 1 when the area is further away (the wall receding from you); more than 1 when it is nearer. 1 when no ruler is marked."),
     confidence: z.enum(["low", "medium", "high"]),
     same_as: z.number().describe("0 normally. When this is the SAME area already reported for an earlier photo, that photo's number — so it is not counted twice."),
     note: z.string().describe("One short remark when something should be checked: a steep angle, a spot partly out of frame, a ruler far from the area. Empty when clean."),
@@ -34,7 +35,7 @@ THE RULER. Scale comes from something whose real size is known.
 - Always: the ceiling height the owner gives (8 ft in most of these apartments). When both the floor line and the ceiling line of a wall are in the photo, that span IS a ruler for that wall — use it, and say so. Only when no floor, no ceiling, no marked ruler and no standard object are in view is the confidence low.
 
 THE MEASUREMENT.
-- Give each area's box in the photo's own pixels, and its real width and height. Size = pixel extent ÷ scale. A wall seen at an angle recedes: a foot near the camera spans more pixels than a foot far away — take the scale at the area's own position (compare the wall's floor-to-ceiling height in pixels at the ruler and at the area, and correct by that ratio), and say in the note when you corrected for it.
+- Give each area's box in the photo's own pixels, and its real width and height. Size = pixel extent ÷ scale. A wall seen at an angle recedes: a foot near the camera spans more pixels than a foot far away. Take the scale at the area's own position, and report that correction as scale_ratio — the pixels one real foot covers at the area ÷ the pixels it covers at the marked ruler (measure the wall's floor-to-ceiling span, a tile course or the baseboard at both places). A patch at the far end of a wall shot from the doorway is commonly 0.5 to 0.8; one nearer the camera than the ruler is above 1. Say in the note when you corrected for the angle. Your own width_ft/height_ft/sq_ft must already include this correction.
 - An outline the owner marked (a red dashed box) is exactly what to measure: report that box, and nothing else in that photo unless it is plainly a second, separate spot.
 - Scope "spots": the damaged, cracked, peeling, patched or water-stained region — the smallest rectangle that covers it, width and height to the nearest half foot. Each separate spot is its own row. Scope "whole": the whole wall shown (width × ceiling height) or the whole ceiling shown (length × width), one row per wall or ceiling.
 - sq_ft is width × height rounded UP to a whole number; a small patch is at least 1 sq ft.
@@ -68,7 +69,7 @@ export async function askClaudeMeasure(images: MeasureImage[], hints: MeasureHin
   ].filter(Boolean).join("\n");
   const res = await client.messages.parse({
     model: "claude-opus-5",
-    max_tokens: 6000,
+    max_tokens: 12000,
     output_config: { effort: "high", format: zodOutputFormat(AreaSchema) },
     system: MEASURE_SYSTEM,
     messages: [{

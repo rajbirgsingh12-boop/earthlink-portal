@@ -1,5 +1,6 @@
 "use client";
 import { useDeferredValue, useEffect, useRef, useState } from "react";
+import { matches } from "@/lib/search";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the SOS export
 // the export engine is heavy — it loads on demand, never with the page itself
 let XLSX!: typeof import("xlsx-js-style");
@@ -351,10 +352,10 @@ export default function Releases() {
   if (filter === "payroll") list = prPend;
   if (filter === "received") list = receivedRows;
   if (filter === "canceled") list = canceledRows;
-  if (dq) list = list.filter((r) => `${r.rel_number} ${r.location} ${r.buildings} ${r.ticket}`.toLowerCase().includes(dq.toLowerCase()));
+  if (dq) list = list.filter((r) => matches(dq, r.rel_number, r.location, r.buildings, r.ticket));
   const shown = list.slice(0, limit);
   // the hours tab draws from this list — computed here so its Show more knows the full count
-  const hoursList = live.filter((r) => (Number(r.labor_hours) > 0 || (logged?.[r.id] || 0) > 0) && (!dq || `${r.rel_number} ${r.location} ${r.buildings} ${r.ticket}`.toLowerCase().includes(dq.toLowerCase())));
+  const hoursList = live.filter((r) => (Number(r.labor_hours) > 0 || (logged?.[r.id] || 0) > 0) && matches(dq, r.rel_number, r.location, r.buildings, r.ticket));
 
   const toggle = async (r: Release, patch: Partial<Release>) => {
     setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, ...patch } : x)));

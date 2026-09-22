@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { matches } from "@/lib/search";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the export
 // the export engine is heavy — it loads on demand, never with the page itself
 let XLSX!: typeof import("xlsx-js-style");
@@ -629,13 +630,13 @@ export default function Payroll() {
             const inSection = new Set(ents.map((e) => e.employee_id));
             const query = addQ.trim().toLowerCase();
             // full roster — the dropdown scrolls, so never hide anyone behind a cap
-            const crewMatch = emps.filter((e) => e.active !== false).filter((e) => !query || e.name.toLowerCase().includes(query));
+            const crewMatch = emps.filter((e) => e.active !== false).filter((e) => matches(query, e.name));
             // a name only drops off the template list once it is on the ACTIVE crew —
             // otherwise someone taken off the crew shows in neither list and can
             // never be put back on
             const tplMatch = TEMPLATE_CREW.map((t, i) => ({ ...t, idx: i }))
               .filter((t) => !emps.some((e) => e.active !== false && e.name.trim().toLowerCase() === t.name.toLowerCase()))
-              .filter((t) => !query || t.name.toLowerCase().includes(query));
+              .filter((t) => matches(query, t.name));
             const contract = rel ? contracts.find((x) => x.id === rel.contract_id) : null;
             return (
               <div key={sec.key} className="card mb-3 p-3.5">

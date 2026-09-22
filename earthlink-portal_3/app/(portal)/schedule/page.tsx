@@ -3,6 +3,7 @@
 // Assigning a worker with a saved number opens a prefilled text right away —
 // release location and work description already written, one tap to send.
 import { useEffect, useRef, useState } from "react";
+import { matches } from "@/lib/search";
 import { sb } from "@/lib/supabase";
 import { myProfile } from "@/lib/profile";
 import { prettyDate, addDays, localISO } from "@/lib/docs";
@@ -312,7 +313,7 @@ export default function Schedule() {
         const assigned = rows.filter((x) => x.release_id === rel.id);
         const inCard = new Set(assigned.map((x) => x.employee_id));
         const q = addQ.trim().toLowerCase();
-        const match = emps.filter((e) => !inCard.has(e.id)).filter((e) => !q || e.name.toLowerCase().includes(q));
+        const match = emps.filter((e) => !inCard.has(e.id)).filter((e) => matches(q, e.name));
         const contract = contracts.find((x) => x.id === rel.contract_id);
         return (
           <div key={rel.id} className="card mb-3 p-3.5">

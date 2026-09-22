@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { matches } from "@/lib/search";
 import Link from "next/link";
 // pdf-lib is heavy — loaded only when a package PDF is actually built
 import { sb } from "@/lib/supabase";
@@ -838,7 +839,8 @@ export default function Pact() {
   // and the job's notes say what was measured from what
   const applyMeasured = async (j0: Job, lineIndex: number | null, sqft: number, note: string): Promise<boolean> => {
     const j = jobs.find((x) => x.id === j0.id) || j0;
-    const price = canPrice ? ((await priceBook()).find((p) => p.key === "plaster")?.price || 0) : 0;
+    const needsPrice = lineIndex === null;   // a new Plaster line; an existing line keeps its own price
+    const price = needsPrice ? ((await priceBook()).find((p) => p.key === "plaster")?.price || 0) : 0;
     const next = applyMeasure(itemsOf(j), lineIndex, sqft, price) as Item[];
     setItems(j, next, true);
     const notes = `${(j.notes || "").trim()}${(j.notes || "").trim() ? "\n" : ""}${note}`;
@@ -1273,7 +1275,7 @@ export default function Pact() {
   const tot = live.reduce((s, j) => s + Number(j.amount), 0);
   const days = (iso: string) => Math.max(0, Math.floor((Date.now() - new Date(iso + "T00:00:00").getTime()) / 86400000));
   const partners = [...new Set(jobs.map((j) => j.partner).filter(Boolean))];
-  const list = jobs.filter((j) => !q || `${j.partner} ${j.development} ${j.job_number} ${j.po_number || ""} ${j.address || ""} ${j.description}`.toLowerCase().includes(q.toLowerCase()));
+  const list = jobs.filter((j) => matches(q, j.partner, j.development, j.job_number, j.po_number, j.address, j.description));
   const pipeline = (j: Job): [string, boolean][] => [
     ["PROPOSAL", !!j.proposal_sent], ["APPROVED", j.approved], ["WORK DONE", j.work_done],
     ...(canInvoice ? ([["INVOICED", !!j.invoice_sent], ["PAID", j.received]] as [string, boolean][]) : []),
@@ -1750,7 +1752,7 @@ export default function Pact() {
                 {canEdit && <button className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "before")} disabled={busy}>📷 Before</button>}
                 {canEdit && <button className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "after")} disabled={busy}>📷 After</button>}
                 {canEdit && <button className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy} title="Pictures, a photos zip, or a document — several at once">Upload files</button>}
-                {canEdit && <button className="btn btn-ghost" onClick={() => setMeasureJob(attachJob)} disabled={busy} title="Claude works out the square feet from the photos">Sq ft from photos</button>}
+                {canEdit && <button className="btn btn-ghost" onClick={() => { setMeasureJob(attachJob); setAttachJob(null); }} disabled={busy} title="Claude works out the square feet from the photos">Sq ft from photos</button>}
                 {photoN > 0 && <button className="btn btn-ghost" onClick={() => downloadPhotos(attachJob)} disabled={busy} title="Just the pictures — no PO, no invoice">⬇ Photos · {photoN}</button>}
               </div>
             ) : undefined;

@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { matches } from "@/lib/search";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the export
 // the export engine is heavy — it loads on demand, never with the page itself
 let XLSX!: typeof import("xlsx-js-style");
@@ -366,7 +367,7 @@ export default function InvoicePackage() {
               <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
                 <th className="p-2.5">Release</th><th className="p-2.5">Location</th><th className="p-2.5">Invoiced</th><th className="p-2.5 text-right">Days out</th><th className="p-2.5 text-right">Balance</th><th className="p-2.5"></th></tr></thead>
               <tbody>
-                {sorted.filter((r) => !tq.trim() || `${r.rel_number} ${r.location} ${r.buildings}`.toLowerCase().includes(tq.trim().toLowerCase())).map((r) => {
+                {sorted.filter((r) => matches(tq, r.rel_number, r.location, r.buildings)).map((r) => {
                   const d = days(r);
                   return (
                     <tr key={r.id} className="border-b border-rulesoft">

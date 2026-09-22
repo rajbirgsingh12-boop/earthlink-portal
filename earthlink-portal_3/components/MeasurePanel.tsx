@@ -6,7 +6,7 @@ import PhotoMarker from "@/components/PhotoMarker";
 import { sb } from "@/lib/supabase";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { annotate } from "@/lib/photoMark";
-import { CONF_LABEL, DEFAULT_HINTS, MAX_PHOTOS, lineHasNumber, measureNote, measurePhotos, roundSf, sfLines, typedNote, type MeasureHints, type MeasureResult, type PhotoMarks, type SfLine } from "@/lib/measure";
+import { CONF_LABEL, DEFAULT_HINTS, MAX_PHOTOS, firstSfLine, lineHasNumber, measureNote, measurePhotos, roundSf, sfLines, typedNote, type MeasureHints, type MeasureResult, type PhotoMarks, type SfLine } from "@/lib/measure";
 
 // "Sq ft from photos" on a PACT job: pick the photos of the wall or ceiling
 // (or take them right here — they go on the job as before-photos), mark a
@@ -36,6 +36,9 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
   const [urls, setUrls] = useState<Record<string, string>>({});
   const [marks, setMarks] = useState<Record<string, PhotoMarks>>({});
   const [hints, setHints] = useState<MeasureHints>({ ...DEFAULT_HINTS });
+  // held as typed: a number in the box would swallow the dot in "8.5"
+  const [ceiling, setCeiling] = useState(String(DEFAULT_HINTS.ceilingFt));
+  const ceilingFt = Number(ceiling) > 0 ? Number(ceiling) : DEFAULT_HINTS.ceilingFt;
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<MeasureResult | null>(null);
   const [sent, setSent] = useState<string[]>([]);       // the paths that went, in photo order
@@ -43,7 +46,7 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
   const [manual, setManual] = useState("");                          // square feet typed straight in, no photo
   const [ownTotal, setOwnTotal] = useState("");                      // the owner's own total over the measured rows — beats everything
   const lines = sfLines(job.items);
-  const [lineIdx, setLineIdx] = useState<number | null>(lines.length ? lines[0] : null);
+  const [lineIdx, setLineIdx] = useState<number | null>(firstSfLine(job.items));
   const input = useRef<HTMLInputElement>(null);
   const [saving, setSaving] = useState(false);
   const alive = useRef(true);
@@ -102,7 +105,7 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
       if (missing.length) { flash(`Couldn't load ${missing.map((g) => g.name).join(", ")} — check your signal and try again`); return; }
       // the marks are drawn onto the copies that go, and sent as numbers too
       const drawn = await Promise.all(got.map(async (g) => { const a = await annotate(g.blob!, marks[g.path]); return { name: g.name, blob: a.blob, width: a.width, height: a.height, marks: marks[g.path] }; }));
-      const out = await measurePhotos(drawn, hints);
+      const out = await measurePhotos(drawn, { ...hints, ceilingFt });
       if (!alive.current) return;
       if (!out.ok) { flash(out.note); return; }
       setResult(out.result); setSent(paths); setEdits({});
@@ -215,12 +218,12 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
           {nPicked > 0 && (
             <div className="mb-3" data-measure-marks>
               <div className="mb-1 text-[11px] font-semibold uppercase tracking-widest text-inksoft">A ruler on each photo — {nRulers} of {nPicked}</div>
-              <p className="mb-2 text-[12px] text-inksoft">When nothing in the shot has a known size, mark one thing you do know: tap the floor and the ceiling on the wall (that's {hints.ceilingFt || 8} ft), the top and bottom of a door, or two ends of something you measured with the tape. With a ruler the number is worked out, not guessed.</p>
+              <p className="mb-2 text-[12px] text-inksoft">When nothing in the shot has a known size, mark one thing you do know: tap the floor and the ceiling on the wall (that's {ceilingFt} ft), the top and bottom of a door, or two ends of something you measured with the tape. With a ruler the number is worked out, not guessed.</p>
               <div className="grid gap-2">
                 {pickedPaths.map((p) => {
                   const a = photos.find((x) => x.path === p)!;
                   return srcOf(p)
-                    ? <PhotoMarker key={p} src={srcOf(p)} name={a.name} natural={null} marks={marks[p] || {}} onChange={(m) => setMarks((prev) => ({ ...prev, [p]: m }))} ceilingFt={hints.ceilingFt || 8} />
+                    ? <PhotoMarker key={p} src={srcOf(p)} name={a.name} natural={null} marks={marks[p] || {}} onChange={(m) => setMarks((prev) => ({ ...prev, [p]: m }))} ceilingFt={ceilingFt} />
                     : <div key={p} className="rounded-sm border border-rulesoft bg-paper p-3 text-[12px] text-inksoft">{a.name} — can't be shown right now (no signal?), so no ruler on it; Claude will look for one in the shot.</div>;
                 })}
               </div>
@@ -235,7 +238,7 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
           </div>
           <div className="grid gap-2 sm:grid-cols-[140px_1fr]">
             <label className="block"><span className="mb-1 block text-[11px] uppercase tracking-widest text-inksoft">Ceiling height (ft)</span>
-              <input className="field font-mono" inputMode="decimal" value={hints.ceilingFt} onChange={(e) => setHints({ ...hints, ceilingFt: Number(e.target.value) || 0 })} /></label>
+              <input className="field font-mono" inputMode="decimal" value={ceiling} onChange={(e) => setCeiling(e.target.value)} /></label>
             <label className="block"><span className="mb-1 block text-[11px] uppercase tracking-widest text-inksoft">Anything it should know</span>
               <input className="field" placeholder="e.g. the door is 32 in wide, the tile is 4 in" value={hints.note} onChange={(e) => setHints({ ...hints, note: e.target.value })} /></label>
           </div>
@@ -261,7 +264,7 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
               const a = photos.find((x) => x.path === p);
               const boxes = result.areas.map((ar, i) => ({ ar, i })).filter(({ ar }) => ar.photo === pi + 1 && !ar.same_as && ar.box).map(({ ar, i }) => ({ box: ar.box!, label: `${sqOf(i)} sq ft` }));
               return a && srcOf(p) && boxes.length
-                ? <PhotoMarker key={p} src={srcOf(p)} name={a.name} natural={null} marks={marks[p] || {}} onChange={() => null} ceilingFt={hints.ceilingFt || 8} boxes={boxes} readOnly />
+                ? <PhotoMarker key={p} src={srcOf(p)} name={a.name} natural={null} marks={marks[p] || {}} onChange={() => null} ceilingFt={ceilingFt} boxes={boxes} readOnly />
                 : null;
             })}
           </div>

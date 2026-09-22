@@ -31,6 +31,7 @@ export interface MeasuredArea {
   note: string;
   box: BoxMark | null;    // where it is in the photo, in pixels — drawn back for the owner to check
   same_plane: boolean;    // on the same flat surface as the photo's marked ruler (or no ruler marked)
+  scale_ratio: number;    // how much bigger a foot looks here than at the ruler (1 = the same distance)
 }
 export interface MeasureResult { areas: MeasuredArea[]; total_sq_ft: number; warnings: string[] }
 export interface MeasureHints {
@@ -45,9 +46,22 @@ export const MAX_SQFT = 5000;         // no apartment wall is bigger; anything a
 // ---- the square-foot lines on a job ----
 export const SF_KEYS = ["plaster", "wall_repair", "popcorn", "sheetrock"];
 export interface SfLine { description: string; qty: number; unit: string; unit_price: number; key?: string; base?: string }
+// Painting and priming are priced by the room or by the apartment, never by
+// the square foot — and a PO that printed no unit can still land here as
+// "SF". Putting square feet on one of those would multiply an apartment
+// price by the area, so they are never a target, whatever unit they carry.
+const isPainting = (it: SfLine): boolean =>
+  /^(paint_|primer$)/.test(it.key || "") || (!it.key && /(^|[^a-z])(paint|painting|painted|primer|prime|priming)([^a-z]|$)/i.test(it.description || ""));
 // a line measured in square feet: by its price-book key, or by its unit
-export const isSfLine = (it: SfLine): boolean => (!!it.key && SF_KEYS.includes(it.key)) || normUnit(it.unit || "") === "SF";
+export const isSfLine = (it: SfLine): boolean =>
+  !isPainting(it) && ((!!it.key && SF_KEYS.includes(it.key)) || normUnit(it.unit || "") === "SF");
 export const sfLines = (items: SfLine[]): number[] => items.map((it, i) => (isSfLine(it) ? i : -1)).filter((i) => i >= 0);
+// the line the panel starts on: one the price book itself calls square feet.
+// A line read off a PO is offered, but never chosen for the owner.
+export const firstSfLine = (items: SfLine[]): number | null => {
+  const keyed = items.findIndex((it) => isSfLine(it) && !!it.key && SF_KEYS.includes(it.key));
+  return keyed >= 0 ? keyed : null;
+};
 export const roundSf = (n: number): number => Math.max(0, Math.ceil(Number(n) || 0));
 
 // the answer, made safe: bad rows dropped, sizes clamped, a duplicate of an
@@ -63,13 +77,17 @@ export function cleanMeasure(raw: unknown): MeasureResult {
     const w = Math.max(0, Number(a.width_ft) || 0), h = Math.max(0, Number(a.height_ft) || 0);
     let sq = roundSf(Number(a.sq_ft) || 0);
     if (!sq && w && h) sq = roundSf(w * h);
-    const same = Math.max(0, Math.floor(Number(a.same_as) || 0));
+    // a duplicate must point at an EARLIER photo; anything else (itself, a
+    // photo further down, one that was never sent) is a real area, not a copy
+    const photo = Math.max(1, Math.floor(Number(a.photo) || 1));
+    const claimed = Math.max(0, Math.floor(Number(a.same_as) || 0));
+    const same = claimed > 0 && claimed < photo ? claimed : 0;
     if (!sq && !same) continue;
     const bx = (a.box || null) as Record<string, unknown> | null;
     const box = bx && [bx.x1, bx.y1, bx.x2, bx.y2].every((v) => Number.isFinite(Number(v)))
       ? { x1: Math.min(Number(bx.x1), Number(bx.x2)), y1: Math.min(Number(bx.y1), Number(bx.y2)), x2: Math.max(Number(bx.x1), Number(bx.x2)), y2: Math.max(Number(bx.y1), Number(bx.y2)) } : null;
     areas.push({
-      photo: Math.max(1, Math.floor(Number(a.photo) || 1)),
+      photo,
       where: String(a.where || "").replace(/\s+/g, " ").trim() || "the area in the photo",
       surface: surfaces.includes(a.surface as Surface) ? (a.surface as Surface) : "other",
       width_ft: Math.round(w * 2) / 2, height_ft: Math.round(h * 2) / 2,
@@ -80,6 +98,7 @@ export function cleanMeasure(raw: unknown): MeasureResult {
       note: String(a.note || "").replace(/\s+/g, " ").trim(),
       box: box && box.x2 - box.x1 >= 1 && box.y2 - box.y1 >= 1 ? box : null,
       same_plane: a.same_plane !== false,
+      scale_ratio: Number(a.scale_ratio) > 0 ? Math.min(4, Math.max(0.25, Number(a.scale_ratio))) : 1,
     });
   }
   const warnings = (Array.isArray(r.warnings) ? (r.warnings as unknown[]) : []).map((w) => String(w || "").trim()).filter(Boolean);
@@ -92,27 +111,52 @@ export const rulerPx = (r: RulerMark): number => Math.hypot(r.x2 - r.x1, r.y2 - 
 // pixels per inch along the marked ruler — 0 when the mark is too short to trust
 export const pxPerInch = (r: RulerMark): number => (r.inches > 0 && rulerPx(r) >= 20 ? rulerPx(r) / r.inches : 0);
 export const halfFt = (inches: number): number => Math.round((inches / 12) * 2) / 2;
-// A photo with a ruler on it: every area on the same surface is sized from
-// its box and the ruler's scale — the owner's mark, not Claude's eye, sets
-// the size. An outline the owner drew is the box for that photo's one area.
+export const rulerLabel = (r: RulerMark): string => `your mark (${r.inches % 12 === 0 ? `${r.inches / 12} ft` : `${r.inches} in`})`;
+// How far the ruler's arithmetic may land from what Claude read off the
+// picture before the mark is the thing to doubt, not the eye. A wall
+// photographed from the side runs away from the camera: a foot at the far
+// end covers fewer pixels than a foot at the ruler, so one scale across the
+// whole photo is wrong — Claude reports how much bigger a foot looks at the
+// spot (scale_ratio), and that correction is applied. When the two still
+// disagree badly, the picture is telling us the mark can't be trusted there.
+const AGREE = 1.5;
+// A photo with a ruler on it: an area on the same surface is sized from its
+// box and the ruler's scale at that spot — the owner's mark, not Claude's
+// eye. An outline the owner drew is the box for that photo's one area.
 export function refineWithRulers(result: MeasureResult, metas: (ImageMeta | null | undefined)[]): MeasureResult {
   const areas = result.areas.map((a) => {
     if (a.same_as) return a;
     const m = metas[a.photo - 1];
     if (!m || !m.ruler) return a;
-    const scale = pxPerInch(m.ruler);
-    if (!scale) return a;
+    const base = pxPerInch(m.ruler);
+    if (!base) return a;
     const only = result.areas.filter((x) => x.photo === a.photo && !x.same_as).length === 1;
-    const box = m.box && only ? m.box : a.box;
+    // the owner drew the outline themselves and marked the ruler: that is the
+    // measurement, and no second-guessing it
+    const ownOutline = !!(m.box && only);
+    const box = ownOutline ? m.box! : a.box;
     if (!box || !a.same_plane) return a;
+    // a foot at the spot covers scale_ratio times the pixels it covers at the mark
+    const ratio = a.scale_ratio > 0 ? a.scale_ratio : 1;
+    const scale = base * ratio;
     const wIn = Math.abs(box.x2 - box.x1) / scale, hIn = Math.abs(box.y2 - box.y1) / scale;
     if (wIn <= 0 || hIn <= 0) return a;
+    const sq = Math.min(MAX_SQFT, Math.max(1, roundSf((wIn * hIn) / 144)));
+    // the mark and the eye must land near each other; when they don't, the
+    // eye is kept and the owner is told to put the mark beside the spot
+    const eye = Math.max(1, roundSf(a.sq_ft));
+    const off = Math.max(sq / eye, eye / sq);
+    if (!ownOutline && a.sq_ft > 0 && off > AGREE) {
+      return { ...a, box, confidence: (a.confidence === "high" ? "medium" : a.confidence) as Confidence,
+        note: [a.note, "your ruler is far from this spot — mark one beside it for a solid number"].filter(Boolean).join(" · ") };
+    }
     return {
       ...a, box,
-      width_ft: halfFt(wIn), height_ft: halfFt(hIn),
-      sq_ft: Math.min(MAX_SQFT, Math.max(1, roundSf((wIn * hIn) / 144))),
-      ruler: `your mark (${m.ruler.inches % 12 === 0 ? `${m.ruler.inches / 12} ft` : `${m.ruler.inches} in`})`,
-      confidence: "high" as Confidence,
+      width_ft: halfFt(wIn), height_ft: halfFt(hIn), sq_ft: sq,
+      ruler: rulerLabel(m.ruler),
+      // square to the mark, or the owner's own outline, is solid; measured a
+      // long way from the mark is not
+      confidence: (ownOutline || (ratio >= 0.8 && ratio <= 1.25) ? "high" : "medium") as Confidence,
     };
   });
   return { ...result, areas, total_sq_ft: totalOf(areas) };

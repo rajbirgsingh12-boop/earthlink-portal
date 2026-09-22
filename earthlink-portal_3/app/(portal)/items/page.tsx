@@ -1,5 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { matches } from "@/lib/search";
+import { useDebounced } from "@/lib/useDebounced";
 // the sheet reader is heavy — it loads on demand, never with the page itself
 let XLSX!: typeof import("xlsx-js-style");
 const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
@@ -171,7 +173,14 @@ export default function Items() {
     e.target.value = "";
   };
 
-  const list = items.filter((it) => `${it.line || ""} ${it.code} ${it.description} ${it.category}`.toLowerCase().includes(q.toLowerCase()));
+  // the search settles before the table is rebuilt, and only the first
+  // SHOWN lines are drawn — a 1,500-line book redrawn on every letter is
+  // what made this feel stuck
+  const qd = useDebounced(q);
+  const found = items.filter((it) => matches(qd, it.line || "", it.code, it.description, it.category));
+  const SHOWN = 150;
+  const list = found.slice(0, SHOWN);
+  const more = found.length - list.length;
 
   return (
     <div>
@@ -205,7 +214,11 @@ export default function Items() {
           <button className="btn btn-primary" onClick={add}>Add</button>
         </div>
       )}
-      <input className="field mb-3" placeholder="Search line #, code, description…" value={q} onChange={(e) => setQ(e.target.value)} />
+      <input className="field mb-1" placeholder="Search line #, code, description…" value={q} onChange={(e) => setQ(e.target.value)} />
+      <div className="mb-3 text-[11px] text-inksoft">
+        {found.length === items.length ? `${items.length} line${items.length === 1 ? "" : "s"} in this book` : `${found.length} of ${items.length} lines match`}
+        {more > 0 ? ` · showing the first ${SHOWN} — type more to narrow it down` : ""}
+      </div>
       <div className="card overflow-x-auto">
         <table className="w-full border-collapse text-sm" style={{ minWidth: 560 }}>
           <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">

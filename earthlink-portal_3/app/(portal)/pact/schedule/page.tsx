@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { matches } from "@/lib/search";
 import Link from "next/link";
 import { sb } from "@/lib/supabase";
 import { myProfile } from "@/lib/profile";
@@ -248,7 +249,7 @@ export default function PactCalendar() {
 
   // what the calendar holds: not canceled, not priced-and-past (unless a search showed it)
   const live = jobs.filter((j) => !offCalendar(j, today) || shown.has(j.id));
-  const hit = (j: Job) => !q.trim() || `${j.partner} ${poOf(j)} ${j.address || ""} ${j.property_unit || ""} ${j.description}`.toLowerCase().includes(q.trim().toLowerCase());
+  const hit = (j: Job) => matches(q, j.partner, poOf(j), j.address, j.property_unit, j.description);
   const list = live.filter(hit);
   // a scan nobody could read: no number, no partner, no address — nothing typed here can find it
   const nameless = (j: Job) => !poOf(j) && !(j.partner || "").trim() && !(j.address || "").trim() && !(j.description || "").trim();
@@ -335,7 +336,7 @@ export default function PactCalendar() {
     const aq = addQ.trim().toLowerCase();
     const pick = jobs
       .filter((j) => j.start_date !== iso && !j.work_done)
-      .filter((j) => !aq || `${j.partner} ${poOf(j)} ${j.address || ""} ${j.property_unit || ""} ${j.description}`.toLowerCase().includes(aq))
+      .filter((j) => matches(aq, j.partner, poOf(j), j.address, j.property_unit, j.description))
       .sort((a, b) => Number(!!(a.start_date || "").trim()) - Number(!!(b.start_date || "").trim()) || (b.created_at || "").localeCompare(a.created_at || ""));
     return (
       <div>

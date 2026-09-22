@@ -8,6 +8,10 @@
 //     whether or not anyone has the portal open. In Vercel → Settings →
 //     Environment Variables add CRON_SECRET (any long random string) and
 //     SUPABASE_SERVICE_ROLE_KEY (Supabase → Settings → API → service_role).
+//     vercel.json runs it once a day, which is all a free Vercel plan
+//     allows — a deploy is refused outright for anything more often. On a
+//     paid plan change that schedule to "*/15 * * * *" and a text set for
+//     a particular hour goes out on the quarter hour without anybody there.
 //   • The portal itself calls it while someone has it open, with their own
 //     sign-in. That is the catch-up when the cron isn't set up yet.
 import { NextResponse } from "next/server";

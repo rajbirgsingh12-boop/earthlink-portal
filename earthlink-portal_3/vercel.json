@@ -1,5 +1,5 @@
 {
   "crons": [
-    { "path": "/api/text-due", "schedule": "*/15 * * * *" }
+    { "path": "/api/text-due", "schedule": "0 11 * * *" }
   ]
 }

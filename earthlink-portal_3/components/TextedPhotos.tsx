@@ -39,12 +39,14 @@ export default function TextedPhotos({ canEdit, flash }: { canEdit: boolean; fla
 
   const load = async () => {
     const since = new Date(Date.now() - LATELY_DAYS * 86_400_000).toISOString();
-    const { data, error } = await sb().from("texted_photos")
-      .select("id,employee_id,from_phone,body,photos,status,pact_job_id,release_id,created_at")
-      .or(`status.eq.held,and(status.eq.filed,created_at.gte.${since})`)
-      .order("created_at", { ascending: false }).limit(40);
-    if (error) { setRows([]); return; } // before RUN_ME section 20 — nothing to show
-    const list = ((data || []) as Batch[]).filter((b) => Array.isArray(b.photos) && b.photos.length > 0);
+    const cols = "id,employee_id,from_phone,body,photos,status,pact_job_id,release_id,created_at";
+    // the waiting ones on their own: a busy few days of placed ones never push one off
+    const [h, f] = await Promise.all([
+      sb().from("texted_photos").select(cols).eq("status", "held").order("created_at", { ascending: false }).limit(200),
+      sb().from("texted_photos").select(cols).eq("status", "filed").gte("created_at", since).order("created_at", { ascending: false }).limit(40),
+    ]);
+    if (h.error) { setRows([]); return; } // before RUN_ME section 20 — nothing to show
+    const list = ([...(h.data || []), ...(f.data || [])] as Batch[]).filter((b) => Array.isArray(b.photos) && b.photos.length > 0);
     setRows(list);
     const emp = [...new Set(list.map((b) => b.employee_id).filter(Boolean) as string[])];
     const pIds = [...new Set(list.map((b) => b.pact_job_id).filter(Boolean) as string[])];
@@ -65,7 +67,13 @@ export default function TextedPhotos({ canEdit, flash }: { canEdit: boolean; fla
     ((s.data || []) as { path: string | null; signedUrl: string }[]).forEach((d) => { if (d.path && d.signedUrl) t[d.path] = d.signedUrl; });
     setThumbs(t);
   };
-  useEffect(() => { if (canEdit) load(); }, [canEdit]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!canEdit) return;
+    load();
+    // the picture links last an hour: fresh ones every half hour for a tab left open
+    const t = setInterval(load, 30 * 60_000);
+    return () => clearInterval(t);
+  }, [canEdit]); // eslint-disable-line react-hooks/exhaustive-deps
   useLive(["texted_photos"], () => load(), { enabled: canEdit });
 
   const act = async (b: Batch, body: Record<string, string>) => {
@@ -85,9 +93,12 @@ export default function TextedPhotos({ canEdit, flash }: { canEdit: boolean; fla
   const filed = rows.filter((b) => b.status === "filed");
   if (!canEdit || rows.length === 0) return null;
   const who = (b: Batch) => (b.employee_id && names[b.employee_id]) || (b.employee_id ? "A worker" : `${prettyPhone(b.from_phone || "")} (not on the crew list)`);
+  // a fresh link every time; the window opens on the tap itself, so a phone doesn't block it
   const open = async (path: string) => {
-    const url = thumbs[path] || (await sb().storage.from("docs").createSignedUrl(path, 3600)).data?.signedUrl;
-    if (url) window.open(url, "_blank");
+    const w = window.open("", "_blank");
+    const url = (await sb().storage.from("docs").createSignedUrl(path, 600)).data?.signedUrl;
+    if (url && w) w.location.href = url;
+    else { w?.close(); flash("Couldn't open that photo"); }
   };
   const strip = (b: Batch) => (
     <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -196,7 +207,7 @@ function JobPick({ batch, busy, onPick, onCancel }: { batch: Batch; busy: boolea
   return (
     <div className="mt-2 rounded-sm border border-rule bg-white p-2" data-job-pick>
       {near.length > 0 && <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Where they were working</div>}
-      <input className="field mb-2 py-2 font-mono" inputMode="text" placeholder="Or type a PO or release number" value={q} onChange={(e) => setQ(e.target.value)} />
+      <input className="field mb-2 min-h-[44px] py-2 font-mono" inputMode="text" placeholder="Or type a PO or release number" value={q} onChange={(e) => setQ(e.target.value)} />
       <div className="grid gap-1.5">
         {choices.map((s) => (
           <button key={s.id} className="min-h-[44px] rounded-sm border border-rulesoft px-3 py-2 text-left text-[14px] hover:border-work" onClick={() => onPick(s)} disabled={busy} data-spot={s.id}>

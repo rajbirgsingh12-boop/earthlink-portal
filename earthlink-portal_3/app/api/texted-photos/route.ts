@@ -50,7 +50,7 @@ export async function POST(req: Request) {
     if (r) target = relKey(r);
   }
   if (!target) return NextResponse.json({ error: "That job isn't in the portal" }, { status: 404 });
-  const n = await fileBatch(db, b, target);
+  const n = await fileBatch(db, b, target, "office");
   if (!n) return NextResponse.json({ error: "Couldn't move the photos — try again" }, { status: 500 });
   return NextResponse.json({ ok: true, n, label: target.label });
 }

@@ -757,6 +757,7 @@ create table if not exists texted_photos (
   status text default 'held',   -- held (waiting for the office) · filed (on a job) · gone (thrown away) · note (a text with no pictures)
   pact_job_id uuid references pact_jobs(id) on delete set null,
   release_id uuid references releases(id) on delete set null,
+  how text default '',          -- how it got to its job: number (named in a text), burst (sent right along with one that did), day (the one job that day), office
   msg_sid text,
   created_at timestamptz default now()
 );

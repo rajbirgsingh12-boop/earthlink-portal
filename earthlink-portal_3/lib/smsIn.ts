@@ -27,8 +27,19 @@ export function validTwilio(token: string, urls: string[], params: Params, signa
   });
 }
 
-// the last ten digits: "+1 (917) 555-0123", "9175550123" and "19175550123" are one phone
-export const phoneKey = (s?: string | null): string => (s || "").replace(/\D/g, "").slice(-10);
+// the whole number with its country code: "+1 (917) 555-0123", "9175550123"
+// and "19175550123" are one US phone — but +91 91755 50123 is someone else
+export const phoneKey = (s?: string | null): string => {
+  const d = (s || "").replace(/\D/g, "");
+  if (d.length === 10) return `1${d}`;
+  return d.length >= 11 ? d : "";
+};
+// A text with no pictures that is just a job's number ("220011", "PO 220011",
+// "wrong job, it's PO 220011") — the worker answering "which job?" or fixing
+// one. A longer message that happens to name a PO ("tomorrow I'm at PO
+// 116900, need the key") is talk, and moves nothing that was already placed.
+export const justANumber = (body: string): boolean =>
+  refsIn(body).length > 0 && (body || "").replace(/\s+/g, " ").trim().length <= 32;
 
 // ---- the pictures that came with the text ----
 const EXT: Record<string, string> = {

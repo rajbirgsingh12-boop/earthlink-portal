@@ -10,6 +10,7 @@ export interface Photo { name: string; path: string }
 export interface Batch {
   id: string; employee_id?: string | null; from_phone?: string | null; body?: string | null; photos?: Photo[] | null;
   status?: string | null; pact_job_id?: string | null; release_id?: string | null; created_at?: string | null;
+  how?: string | null; // how it got to its job: number (named in a text), burst (sent with one that did), day (the one job that day), office
 }
 export type Target = Pick<JobKey, "kind" | "id" | "label">;
 
@@ -73,28 +74,34 @@ export const inboxOf = (batchId: string) => `inbox/${batchId}/`;
 
 // A batch onto a job: the pictures move into that job's folder and onto its
 // documents, and off the job they were on before (if they were). Returns how
-// many made it. A picture already taken off the old job by hand stays gone.
-export async function fileBatch(db: Db, b: Batch, t: Target): Promise<number> {
+// many made it. The new job lists them first, so a failure there leaves
+// everything where it was; a picture that won't move (taken off the old job by
+// hand since) comes back off the new job's list.
+export async function fileBatch(db: Db, b: Batch, t: Target, how = "office"): Promise<number> {
   const photos = Array.isArray(b.photos) ? b.photos.filter((p) => p && p.name && p.path) : [];
+  if (!photos.length) return 0;
   const dir = folderOf(t);
   const was = b.status === "filed" ? (b.pact_job_id ? { kind: "pact" as const, id: b.pact_job_id } : b.release_id ? { kind: "rel" as const, id: b.release_id } : null) : null;
   const same = !!was && was.kind === t.kind && was.id === t.id;
-  const placed: Photo[] = [];
+  const want = photos.map((p) => ({ from: p.path, name: p.name, to: dir + p.name }));
+  const moving = want.filter((w) => w.from !== w.to);
+  if (!(same && moving.length === 0)) {
+    if (!(await db.attach(t, want.map((w) => ({ name: w.name, path: w.to })), []))) return 0;
+  }
+  const stuck: string[] = [];
   const left: string[] = [];
-  for (const p of photos) {
-    const dest = dir + p.name;
-    if (p.path === dest) { placed.push(p); continue; }
-    if (await db.move(p.path, dest)) { placed.push({ name: p.name, path: dest }); left.push(p.path); }
+  for (const w of moving) {
+    if (await db.move(w.from, w.to)) left.push(w.from); else stuck.push(w.to);
   }
+  if (stuck.length) await db.attach(t, [], stuck);
+  const placed = want.filter((w) => !stuck.includes(w.to)).map((w) => ({ name: w.name, path: w.to }));
   if (!placed.length) return 0;
-  if (!(same && left.length === 0)) {
-    if (!(await db.attach(t, placed, []))) return 0;
-    if (was && !same && left.length) await db.attach(was, [], left);
-  }
   await db.patch(`texted_photos?id=eq.${b.id}`, {
-    status: "filed", photos: placed,
+    status: "filed", photos: placed, how,
     pact_job_id: t.kind === "pact" ? t.id : null, release_id: t.kind === "rel" ? t.id : null,
   });
+  // off the job they were on (tried twice — a stale entry there would point at nothing)
+  if (was && !same && left.length && !(await db.attach(was, [], left))) await db.attach(was, [], left);
   return placed.length;
 }
 

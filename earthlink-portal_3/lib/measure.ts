@@ -132,12 +132,16 @@ export function applyMeasure(items: SfLine[], lineIndex: number | null, sqft: nu
   next.push({ description: "Plaster", qty: n, unit: "SF", unit_price: plasterPrice, key: "plaster" });
   return next;
 }
-// the line on the job's notes — what was measured, from what, and by what
-export const measureNote = (r: MeasureResult, photos: number, day: string): string => {
+// the line on the job's notes — what was measured, from what, and by what;
+// when the owner changed Claude's numbers, what the estimate was
+export const measureNote = (r: MeasureResult, photos: number, day: string, estimateTotal?: number): string => {
   const parts = r.areas.filter((a) => !a.same_as && a.sq_ft > 0).map((a) => `${a.where} ${a.sq_ft} sq ft`);
   const rulers = [...new Set(r.areas.map((a) => a.ruler).filter(Boolean))];
-  return `📷 ${day} · ${r.total_sq_ft} sq ft measured from ${photos} photo${photos === 1 ? "" : "s"}${parts.length ? ` (${parts.join(", ")})` : ""}${rulers.length ? ` · ruler: ${rulers.join(", ")}` : ""} · check it with the tape`;
+  const changed = estimateTotal !== undefined && roundSf(estimateTotal) !== roundSf(r.total_sq_ft);
+  return `📷 ${day} · ${r.total_sq_ft} sq ft ${changed ? `from ${photos} photo${photos === 1 ? "" : "s"}, Claude's estimate of ${roundSf(estimateTotal!)} sq ft changed by hand` : `measured from ${photos} photo${photos === 1 ? "" : "s"}`}${parts.length ? ` (${parts.join(", ")})` : ""}${rulers.length ? ` · ruler: ${rulers.join(", ")}` : ""}${changed ? "" : " · check it with the tape"}`;
 };
+// the note when the owner typed the number in themselves — no photo, no estimate
+export const typedNote = (sqft: number, day: string): string => `📷 ${day} · ${roundSf(sqft)} sq ft typed in by hand`;
 export const CONF_LABEL: Record<Confidence, string> = { high: "solid", medium: "rough", low: "a guess" };
 
 // ---- asking the server ----

@@ -6,15 +6,17 @@ import PhotoMarker from "@/components/PhotoMarker";
 import { sb } from "@/lib/supabase";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { annotate } from "@/lib/photoMark";
-import { CONF_LABEL, DEFAULT_HINTS, MAX_PHOTOS, measureNote, measurePhotos, roundSf, sfLines, type MeasureHints, type MeasureResult, type PhotoMarks, type SfLine } from "@/lib/measure";
+import { CONF_LABEL, DEFAULT_HINTS, MAX_PHOTOS, measureNote, measurePhotos, roundSf, sfLines, typedNote, type MeasureHints, type MeasureResult, type PhotoMarks, type SfLine } from "@/lib/measure";
 
 // "Sq ft from photos" on a PACT job: pick the photos of the wall or ceiling
 // (or take them right here — they go on the job as before-photos), mark a
 // ruler on each one when nothing in the shot has a known size (floor to
 // ceiling works in any room), tell it what's being measured, and Claude
 // works out the square feet — from the ruler's arithmetic when there is
-// one. Every number can be changed before it lands on the job's square-foot
-// line. No dollar figure ever shows here — the office uses this too.
+// one. Claude's number is an estimate the owner can take as it is or replace
+// with their own, row by row — and the square feet can be typed straight in
+// with no photo at all (measured with the tape). No dollar figure ever
+// shows here — the office uses this too.
 export interface MeasureJob { id: string; label: string; attachments: { name: string; path: string }[]; items: SfLine[] }
 const isImg = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n);
 const today = () => { const d = new Date(); return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); };
@@ -37,7 +39,8 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<MeasureResult | null>(null);
   const [sent, setSent] = useState<string[]>([]);       // the paths that went, in photo order
-  const [edits, setEdits] = useState<Record<number, string>>({});   // the owner's own number for a row, as typed
+  const [edits, setEdits] = useState<Record<number, string>>({});   // the owner's own number for a row, as typed — blank means Claude's
+  const [manual, setManual] = useState("");                          // square feet typed straight in, no photo
   const lines = sfLines(job.items);
   const [lineIdx, setLineIdx] = useState<number | null>(lines.length ? lines[0] : null);
   const input = useRef<HTMLInputElement>(null);
@@ -104,14 +107,17 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
       setResult(out.result); setSent(paths); setEdits({});
     } finally { if (alive.current) setBusy(false); }
   };
-  // the number for a row: the owner's, when typed, else Claude's
+  // the number for a row: the owner's, when they typed one, else Claude's estimate
+  const mine = (i: number): boolean => (edits[i] || "").trim() !== "";
   const sqOf = (i: number): number => {
     const a = result!.areas[i];
     if (a.same_as) return 0;
-    const e = edits[i];
-    return e === undefined ? a.sq_ft : roundSf(parseFloat(e) || 0);
+    return mine(i) ? roundSf(parseFloat(edits[i]) || 0) : a.sq_ft;
   };
   const total = result ? result.areas.reduce((s, _a, i) => s + sqOf(i), 0) : 0;
+  const estimateTotal = result ? result.total_sq_ft : 0;
+  const nMine = result ? result.areas.filter((a, i) => !a.same_as && mine(i)).length : 0;
+  const manualN = roundSf(parseFloat(manual) || 0);
   const pickedPaths = photos.map((a) => a.path).filter((p) => picked.has(p));
   const nPicked = pickedPaths.length;
   const nRulers = pickedPaths.filter((p) => marks[p]?.ruler && marks[p].ruler!.inches > 0).length;
@@ -120,10 +126,40 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
     setSaving(true);
     try {
       const r: MeasureResult = { ...result, areas: result.areas.map((a, i) => ({ ...a, sq_ft: sqOf(i) })), total_sq_ft: total };
-      const ok = await onApply(lineIdx, total, measureNote(r, sent.length || 1, today()));
-      if (ok) { flash(`${total} sq ft is on the job — check it with the tape`); onClose(); }
+      const ok = await onApply(lineIdx, total, measureNote(r, sent.length || 1, today(), estimateTotal));
+      if (ok) { flash(`${total} sq ft is on the job${nMine ? "" : " — check it with the tape"}`); onClose(); }
     } finally { if (alive.current) setSaving(false); }
   };
+  // the number typed straight in: onto the line, no photo, no estimate
+  const applyManual = async () => {
+    if (!(manualN > 0)) { flash("Type the square feet first"); return; }
+    setSaving(true);
+    try {
+      const ok = await onApply(lineIdx, manualN, typedNote(manualN, today()));
+      if (ok) { flash(`${manualN} sq ft is on the job`); onClose(); }
+    } finally { if (alive.current) setSaving(false); }
+  };
+  // which line takes the number — the job's square-foot lines, or a new Plaster line
+  const lineChooser = () => (
+    <div role="radiogroup" aria-label="Which line" className="mt-1">
+      {lines.map((i) => {
+        const it = job.items[i];
+        return (
+          <button key={i} type="button" role="radio" aria-checked={lineIdx === i} onClick={() => setLineIdx(i)}
+            className={`flex min-h-[44px] w-full items-center gap-2 border-b border-rulesoft px-2 text-left text-[13px] last:border-b-0 ${lineIdx === i ? "bg-work/10" : ""}`}>
+            <span className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border-[1.5px] border-ink text-[11px] ${lineIdx === i ? "bg-ink text-white" : ""}`}>{lineIdx === i ? "✓" : ""}</span>
+            <span className="min-w-0 flex-1 truncate">{it.description || "(no wording)"}</span>
+            <span className="shrink-0 font-mono text-[11px] text-inksoft">now {Number(it.qty) || 0} {it.unit || "SF"}</span>
+          </button>
+        );
+      })}
+      <button type="button" role="radio" aria-checked={lineIdx === null} onClick={() => setLineIdx(null)}
+        className={`flex min-h-[44px] w-full items-center gap-2 px-2 text-left text-[13px] ${lines.length ? "border-t border-rulesoft" : ""} ${lineIdx === null ? "bg-work/10" : ""}`}>
+        <span className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border-[1.5px] border-ink text-[11px] ${lineIdx === null ? "bg-ink text-white" : ""}`}>{lineIdx === null ? "✓" : ""}</span>
+        <span>+ A new Plaster line</span>
+      </button>
+    </div>
+  );
   const tone = (c: "low" | "medium" | "high") => (c === "high" ? "ok" : c === "medium" ? "work" : "alert");
 
   return (
@@ -193,6 +229,17 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
             <label className="block"><span className="mb-1 block text-[11px] uppercase tracking-widest text-inksoft">Anything it should know</span>
               <input className="field" placeholder="e.g. the door is 32 in wide, the tile is 4 in" value={hints.note} onChange={(e) => setHints({ ...hints, note: e.target.value })} /></label>
           </div>
+          <div className="mt-4 border-t border-rulesoft pt-3" data-measure-manual>
+            <div className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">Or type it in yourself</div>
+            <p className="mb-1.5 text-[12px] text-inksoft">Measured it with the tape? Put the number straight on the job — no photos needed.</p>
+            <label className="inline-flex items-center gap-2 text-[13px]">
+              <input className="field w-28 px-2 py-2 text-right font-mono" inputMode="decimal" placeholder="0" aria-label="Square feet, typed in" value={manual} onChange={(e) => setManual(e.target.value)} />sq ft
+            </label>
+            {lineChooser()}
+            <button type="button" className="btn btn-primary mt-2 min-h-[44px]" disabled={saving || !(manualN > 0)} onClick={applyManual} data-measure-manual-go>
+              {saving ? "Saving…" : `Put ${manualN || ""} sq ft on the job`}
+            </button>
+          </div>
         </>
       )}
       {result && (
@@ -217,13 +264,15 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
                 </div>
               </div>
               {!a.same_as && (
-                <>
+                <div className="flex basis-full flex-wrap items-center gap-2 pt-1">
                   <Stamp label={CONF_LABEL[a.confidence]} tone={tone(a.confidence)} />
-                  <label className="flex items-center gap-1 text-[11px] uppercase tracking-widest text-inksoft">
-                    <input className="field w-20 px-1.5 py-1.5 text-right font-mono" inputMode="decimal" aria-label={`Square feet for ${a.where}`} value={edits[i] ?? String(a.sq_ft)}
+                  <span className={`text-[13px] ${mine(i) ? "text-inksoft line-through decoration-rulesoft" : "font-semibold"}`} data-measure-estimate>Claude: {a.sq_ft} sq ft</span>
+                  <label className="ml-auto flex items-center gap-1 text-[11px] uppercase tracking-widest text-inksoft">Yours
+                    <input className="field w-20 px-1.5 py-1.5 text-right font-mono normal-case" inputMode="decimal" aria-label={`Square feet for ${a.where}`} placeholder={String(a.sq_ft)} value={edits[i] ?? ""}
                       onChange={(e) => setEdits({ ...edits, [i]: e.target.value })} />sq ft
                   </label>
-                </>
+                  {mine(i) && <button type="button" className="min-h-[44px] px-2 text-[12px] text-inksoft underline" onClick={() => setEdits({ ...edits, [i]: "" })}>use Claude's</button>}
+                </div>
               )}
             </div>
           ))}
@@ -231,26 +280,13 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
             <span className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">Total</span>
             <span className="font-mono text-[15px] font-bold" data-measure-total>{total} sq ft</span>
           </div>
-          <p className="mt-2 text-[12px] text-inksoft">Not the right number? Change it above. {nRulers ? "Solid rows were worked out from your ruler." : "For a solid number next time, mark a ruler on the photo."} The tape measure wins.</p>
-          <div className="mt-3 text-[11px] font-semibold uppercase tracking-widest text-inksoft">Put it on</div>
-          <div role="radiogroup" aria-label="Which line" className="mt-1">
-            {lines.map((i) => {
-              const it = job.items[i];
-              return (
-                <button key={i} type="button" role="radio" aria-checked={lineIdx === i} onClick={() => setLineIdx(i)}
-                  className={`flex min-h-[44px] w-full items-center gap-2 border-b border-rulesoft px-2 text-left text-[13px] last:border-b-0 ${lineIdx === i ? "bg-work/10" : ""}`}>
-                  <span className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border-[1.5px] border-ink text-[11px] ${lineIdx === i ? "bg-ink text-white" : ""}`}>{lineIdx === i ? "✓" : ""}</span>
-                  <span className="min-w-0 flex-1 truncate">{it.description || "(no wording)"}</span>
-                  <span className="shrink-0 font-mono text-[11px] text-inksoft">now {Number(it.qty) || 0} {it.unit || "SF"}</span>
-                </button>
-              );
-            })}
-            <button type="button" role="radio" aria-checked={lineIdx === null} onClick={() => setLineIdx(null)}
-              className={`flex min-h-[44px] w-full items-center gap-2 px-2 text-left text-[13px] ${lines.length ? "border-t border-rulesoft" : ""} ${lineIdx === null ? "bg-work/10" : ""}`}>
-              <span className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border-[1.5px] border-ink text-[11px] ${lineIdx === null ? "bg-ink text-white" : ""}`}>{lineIdx === null ? "✓" : ""}</span>
-              <span>+ A new Plaster line</span>
-            </button>
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-[12px] text-inksoft" data-measure-using>
+            <span>{nMine ? `Using your number on ${nMine} row${nMine === 1 ? "" : "s"} — Claude's estimate was ${estimateTotal} sq ft.` : "Using Claude's estimate. Type your own in any row to use that instead."}</span>
+            {nMine > 0 && <button type="button" className="min-h-[44px] text-[12px] underline" onClick={() => setEdits({})}>Use Claude's estimate for all</button>}
           </div>
+          <p className="mt-2 text-[12px] text-inksoft">{nRulers ? "Solid rows were worked out from your ruler." : "For a solid number next time, mark a ruler on the photo."} The tape measure wins.</p>
+          <div className="mt-3 text-[11px] font-semibold uppercase tracking-widest text-inksoft">Put it on</div>
+          {lineChooser()}
         </div>
       )}
     </Modal>

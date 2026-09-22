@@ -115,7 +115,7 @@ export default function PactCalendar() {
       const e = emps.find((x) => x.id === r.employee_id);
       const first = (e?.name || "").split(" ")[0];
       // told the old day → reads as a move; never told → the plain first text
-      return { rowId: r.id, to: e?.phone || "", body: await crewMessageFor(moved, first, r.description || "", r.texted ? { from, to } : undefined, e?.lang), first };
+      return { rowId: r.id, to: e?.phone || "", body: await crewMessageFor(moved, first, r.description || "", r.texted ? { from, to } : undefined, e?.lang), first, lang: e?.lang };
     }));
     // the trigger clears the old stamps; clear them here too so the server
     // doesn't skip anyone where the trigger isn't in yet

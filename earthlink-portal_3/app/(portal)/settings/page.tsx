@@ -98,7 +98,7 @@ export default function Settings() {
     flash(`Texts to ${emps.find((e) => e.id === empId)?.name.split(" ")[0] || "them"} go out in ${LANG_LABEL[lang]}`);
   };
   // English | Español, one tap
-  const langPick = (value: Lang, onPick: (l: Lang) => void, disabled = false) => <LangToggle value={value} onChange={onPick} disabled={disabled} full />;
+  const langPick = (value: Lang, onPick: (l: Lang) => void, disabled = false, name?: string) => <LangToggle value={value} onChange={onPick} disabled={disabled} full name={name} />;
   useEffect(() => { loadEmps(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useLive(["employees"], loadEmps, { skipWhileTyping: true });
   const savePhone = async (empId: string, raw: string) => {
@@ -115,9 +115,11 @@ export default function Settings() {
     if (crewDraft.lang !== "en") row.lang = crewDraft.lang;
     let { error } = await sb().from("employees").insert(row);
     if (error && ("phone" in row || "lang" in row) && /column|schema cache/i.test(error.message)) {
-      delete row.phone; delete row.lang;
+      // only the column the database says it lacks is left out — a phone typed beside a language is kept
+      const missing = /\blang\b/i.test(error.message) ? ["lang"] : /\bphone\b/i.test(error.message) ? ["phone"] : ["phone", "lang"];
+      for (const k of missing) delete row[k];
       ({ error } = await sb().from("employees").insert(row));
-      if (!error) flash("Run supabase/RUN_ME.sql so phone numbers and languages save");
+      if (!error) flash(`Run supabase/RUN_ME.sql so ${missing.includes("phone") && missing.includes("lang") ? "phone numbers and languages save" : missing[0] === "lang" ? "each worker's language saves — the phone number was kept" : "phone numbers save — the language was kept"}`);
     }
     if (error) { flash(error.message); return; }
     setCrewDraft({ name: "", trade: "", phone: "", lang: "en" }); loadEmps();
@@ -543,7 +545,7 @@ export default function Settings() {
                   <input className="field w-44 px-2 py-1.5 text-[13px]" placeholder="Phone number" inputMode="tel" readOnly={me?.role === "accountant"}
                     value={buf} onChange={(ev) => setPhoneBuf((p) => ({ ...p, [e.id]: ev.target.value }))}
                     onBlur={() => { if (cleanPhone(buf) !== cleanPhone(e.phone || "")) savePhone(e.id, buf); }} />
-                  {langPick(langOf(e.lang), (l) => saveLang(e.id, l), me?.role === "accountant")}
+                  {langPick(langOf(e.lang), (l) => saveLang(e.id, l), me?.role === "accountant", `Language for ${e.name}`)}
                   {me?.role !== "accountant" && <button className="btn-icon text-alert" title="Remove from the crew list" onClick={async () => { if (!window.confirm(`Remove ${e.name} from the crew?`)) return; await sb().from("employees").update({ active: false }).eq("id", e.id); loadEmps(); }}>✕</button>}
                 </span>
               </div>

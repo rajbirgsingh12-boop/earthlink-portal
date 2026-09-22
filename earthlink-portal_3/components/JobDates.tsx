@@ -48,7 +48,7 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true, crew,
     const ok = await onSave({ start_date: to, notes: appendNote(job.notes, line) });
     if (ok === false) return; // refused — the box stays open, the page said why
     setMoving(false);
-    if (tellCrew && to && crew?.names.length && onMoved) await onMoved(job.start_date || "", to);
+    if (tellCrew && to && to !== (job.start_date || "") && crew?.names.length && onMoved) await onMoved(job.start_date || "", to);
   };
   const clear = () => onSave({ start_date: "", notes: appendNote(job.notes, `📅 Date cleared ${prettyDate(today)}${job.start_date ? ` (was ${prettyDate(job.start_date)})` : ""} — off the calendar until it gets a day`) });
 

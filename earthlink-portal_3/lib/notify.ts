@@ -56,7 +56,7 @@ export async function textMachineReady(): Promise<boolean> {
 // never leads to a double text. With no company number the phone's own group
 // text opens instead — and the stamp waits for the person to confirm it sent.
 import { sb } from "./supabase";
-export interface TextTarget { rowId: string; to: string; body: string; first: string }
+export interface TextTarget { rowId: string; to: string; body: string; first: string; lang?: string | null }
 export type TextOutcome =
   | { status: "sent"; sent: number; skipped: number; failed: { to: string; error: string }[]; message: string }
   | { status: "fallback"; message: string; rowIds: string[] }
@@ -77,9 +77,13 @@ export async function textRows(targets: TextTarget[], opts: { skipTexted?: boole
     return { status: "sent", sent, skipped, failed: fails, message };
   }
   if (res.status === 501) {
-    // group text from this phone; the caller confirms before anything is stamped
-    // one text to everyone: the greeting drops the one name ("Hi Jose, this is…" → "Hi, this is…")
-    const forAll = good[0].first ? good[0].body.replace(`Hi ${good[0].first}, `, "Hi, ").replace(`${good[0].first}, `, "") : good[0].body;
+    // group text from this phone; the caller confirms before anything is stamped.
+    // One text to everyone: each greeting drops its name ("Hi Jose, this is…" →
+    // "Hi, this is…", "Hola Jose, le habla…" → "Hola, le habla…"), and a crew
+    // that reads two languages gets both, English first — nobody gets only the
+    // other worker's language
+    const strip = (t: TextTarget) => (t.first ? t.body.replace(new RegExp(`^(Hi|Hola) ${t.first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, `), "$1, ") : t.body);
+    const forAll = [...new Set(good.map(strip))].join("\n\n");
     window.location.href = `sms:${good.map((t) => cleanPhone(t.to)).join(",")}?&body=${encodeURIComponent(forAll)}`;
     return { status: "fallback", message: "Company number isn't set up — a group text opened on this phone", rowIds: good.map((t) => t.rowId) };
   }

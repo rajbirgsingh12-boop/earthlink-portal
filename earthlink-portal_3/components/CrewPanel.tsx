@@ -68,7 +68,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
 
   const addWorker = async (e: Worker) => {
     if (!day) { flash("Give the job a day first — the start date above"); return; }
-    if (!siteOf(job)) { flash("Give the job an address first — the crew is texted where to go"); return; }
+    if (!(job.address || job.development || "").trim()) { flash("Give the job an address first — the crew is texted where to go"); return; }
     if (addingNow.current.has(e.id) || onJob.has(e.id)) return;
     addingNow.current.add(e.id);
     setAdding(true);
@@ -100,7 +100,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
       const e = emps.find((x) => x.id === r.employee_id);
       const first = (e?.name || "").split(" ")[0];
       const moved = r.texted && r.day !== day ? { from: r.day, to: day } : undefined;
-      return { rowId: r.id, to: e?.phone || "", body: await crewMessageFor(job, first, work.trim(), moved, e?.lang), first };
+      return { rowId: r.id, to: e?.phone || "", body: await crewMessageFor(job, first, work.trim(), moved, e?.lang), first, lang: e?.lang };
     }));
     if (targets.some((t) => !cleanPhone(t.to))) { flash("Someone here has no number — add it in the box beside their name"); return; }
     setSending(true);
@@ -133,7 +133,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
         <span className="text-[11px] uppercase tracking-widest text-inksoft">What they get</span>
         <LangToggle value={shownLang} onChange={setPreviewLang} full name="Preview language" />
       </div>
-      <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 whitespace-pre-line text-[12px] text-inksoft [overflow-wrap:anywhere]" data-preview-lang={shownLang}>{crewPreview(job, "Name", work.trim(), undefined, shownLang)}<span className="mt-1 block text-[11px]">Each worker gets it in the language beside their name.</span></div>
+      <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 whitespace-pre-line text-[12px] text-inksoft [overflow-wrap:anywhere]" data-preview-lang={shownLang}>{crewPreview(job, (emps.find((e) => rows[0] && e.id === rows[0].employee_id)?.name || "Name").split(" ")[0], work.trim(), undefined, shownLang)}<span className="mt-1 block text-[11px]">Each worker gets it in the language beside their name.</span></div>
       {rows.map((r) => {
         const e = emps.find((x) => x.id === r.employee_id);
         const name = e?.name || "?";

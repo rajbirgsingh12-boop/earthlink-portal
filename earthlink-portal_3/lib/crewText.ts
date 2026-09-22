@@ -14,7 +14,7 @@ export const LANG_LABEL: Record<Lang, string> = { en: "English", es: "Español" 
 
 // "Wednesday, September 23" / "miércoles, 23 de septiembre" — the whole word, the way a person says it
 export const longDay = (iso?: string | null, lang: Lang = "en") =>
-  iso && /^\d{4}-\d{2}-\d{2}$/.test(iso) ? new Date(iso + "T00:00:00").toLocaleDateString(lang === "es" ? "es" : "en-US", { weekday: "long", month: "long", day: "numeric" }) : "";
+  iso && /^\d{4}-\d{2}-\d{2}$/.test(iso) && !Number.isNaN(new Date(iso + "T00:00:00").getTime()) ? new Date(iso + "T00:00:00").toLocaleDateString(lang === "es" ? "es" : "en-US", { weekday: "long", month: "long", day: "numeric" }) : "";
 const flat = (s?: string | null) => (s || "").replace(/\s+/g, " ").trim();
 const sameText = (a: string, b: string) => flat(a).toLowerCase() === flat(b).toLowerCase();
 
@@ -31,37 +31,43 @@ export type CrewTextInput = {
 export function crewText(t: CrewTextInput): string {
   const lang = langOf(t.lang);
   const first = flat(t.first);
-  const street = flat(t.street);
-  const building = flat(t.building);
-  const apt = flat(t.apt).replace(/^apt\.?\s*/i, "");
+  // a trailing period on a street or building would land mid-sentence
+  const street = flat(t.street).replace(/[.\s]+$/, "");
+  const building = flat(t.building).replace(/[.\s]+$/, "");
+  // "Apt 4B", "Apartment 4B", "Unit 4B", "#4B" — the label is put on here, once
+  const apt = flat(t.apt).replace(/^(apt\.?|apartment|unit|#)\s*/i, "");
+  // the work's own last stop is kept ("Paint everything!" / a cut line's "…"); a period is added only where there is none
   const work = flat(t.work).replace(/[.\s]+$/, "");
+  const stop = /[!?…]$/.test(work) ? "" : ".";
+  // a "move" to the same day is not a move — the old day is not repeated
+  const moved = t.moved && t.moved.from && t.moved.from === t.moved.to ? { to: t.moved.to } : t.moved;
   // "Van Dyke (370 Blake Avenue, Brooklyn, NY 11212), Apt 4B" — the building only when the street doesn't already name it
   const showBuilding = !!building && !sameText(building, street) && !(street && street.toLowerCase().includes(building.toLowerCase()));
   const place = building && street ? (showBuilding ? `${building} (${street})` : street) : street || building;
-  const where = [place, apt && `Apt ${apt}`].filter(Boolean).join(", ");
+  const where = [place, apt && `${lang === "es" ? "Apto" : "Apt"} ${apt}`].filter(Boolean).join(", ");
   const paras: string[] = [];
   if (lang === "es") {
     const hello = `Hola${first ? ` ${first}` : ""}, le habla Earth Link.`;
-    if (t.moved) {
-      const to = longDay(t.moved.to, "es"), from = longDay(t.moved.from, "es");
+    if (moved) {
+      const to = longDay(moved.to, "es"), from = longDay(moved.from, "es");
       paras.push(`${hello} El trabajo${where ? ` en ${where}` : ""} se cambió ${to ? `al ${to}` : "a otro día"}.${from ? ` Antes era el ${from}.` : ""}`);
     } else {
       const day = longDay(t.day, "es");
       paras.push(`${hello} Tiene trabajo${day ? ` el ${day}` : ""}${where ? ` en ${where}` : ""}.${day ? "" : " El día se le avisará pronto."}${where ? "" : " La dirección se le enviará después."}`);
     }
-    if (work) paras.push(`El trabajo es: ${work}.`);
+    if (work) paras.push(`El trabajo es: ${work}${stop}`);
     if (street) paras.push(`Aquí está el mapa: ${mapLink(street)}`);
     return paras.join("\n\n");
   }
   const hello = `Hi${first ? ` ${first}` : ""}, this is Earth Link.`;
-  if (t.moved) {
-    const to = longDay(t.moved.to), from = longDay(t.moved.from);
+  if (moved) {
+    const to = longDay(moved.to), from = longDay(moved.from);
     paras.push(`${hello} The job${where ? ` at ${where}` : ""} has moved to ${to || "a new day"}.${from ? ` It was on ${from}.` : ""}`);
   } else {
     const day = longDay(t.day);
     paras.push(`${hello} You are scheduled to work${day ? ` on ${day}` : ""}${where ? ` at ${where}` : ""}.${day ? "" : " The day will be set soon."}${where ? "" : " The address will follow."}`);
   }
-  if (work) paras.push(`Here is the work: ${work}.`);
+  if (work) paras.push(`Here is the work: ${work}${stop}`);
   if (street) paras.push(`Here is the map: ${mapLink(street)}`);
   return paras.join("\n\n");
 }

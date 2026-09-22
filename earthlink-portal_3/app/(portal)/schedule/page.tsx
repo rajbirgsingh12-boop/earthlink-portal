@@ -368,7 +368,7 @@ export default function Schedule() {
                   {match.map((e) => (
                     <button key={e.id} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
                       onMouseDown={(ev) => { ev.preventDefault(); addWorker(rel, e); setAddQ(""); }}>
-                      <span>{e.name}</span>
+                      <span>{e.name}{langOf(e.lang) === "es" ? <span className="chip ml-1.5 text-inksoft" title="Texted in Spanish">ES</span> : null}</span>
                       <span className="text-[11px] text-inksoft">{cleanPhone(e.phone || "") ? "+ add" : "+ add (no number)"}</span>
                     </button>
                   ))}

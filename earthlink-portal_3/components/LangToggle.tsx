@@ -10,8 +10,8 @@ export default function LangToggle({ value, onChange, full = false, disabled = f
   return (
     <span className="inline-flex rounded-sm border-[1.5px] border-ink" role="radiogroup" aria-label={name}>
       {(["en", "es"] as Lang[]).map((l, i) => (
-        <button key={l} type="button" role="radio" aria-checked={value === l} aria-label={LANG_LABEL[l]} title={`Texts in ${LANG_LABEL[l]}`} disabled={disabled} onClick={() => onChange(l)}
-          className={`min-h-[44px] min-w-[44px] font-display text-[12px] font-semibold uppercase tracking-wider ${full ? "px-3" : "px-2"} ${i > 0 ? "border-l-[1.5px] border-ink" : ""} ${value === l ? "bg-ink text-white" : "bg-white text-ink"} disabled:opacity-50`}>
+        <button key={l} type="button" role="radio" aria-checked={value === l} aria-label={LANG_LABEL[l]} title={`Texts in ${LANG_LABEL[l]}`} disabled={disabled} onClick={() => { if (l !== value) onChange(l); }}
+          className={`min-h-[44px] min-w-[44px] font-display text-[12px] font-semibold uppercase tracking-wider ${full ? "px-3" : "px-2"} ${i > 0 ? "border-l-[1.5px] border-ink" : ""} ${value === l ? "bg-ink text-white" : "bg-white text-ink"} disabled:cursor-default`}>
           {full ? LANG_LABEL[l] : l.toUpperCase()}
         </button>
       ))}

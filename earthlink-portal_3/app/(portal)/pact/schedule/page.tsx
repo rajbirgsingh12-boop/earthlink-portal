@@ -27,6 +27,8 @@ interface Job {
 }
 type DayRow = CrewRow;
 type Emp = Worker;
+// the New York day of a moment ("2026-09-22T02:10Z" is still the 21st there)
+const nyDayOf = (iso: string) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(iso));
 const appendNote = (notes: string | null | undefined, line: string) => `${(notes || "").trim()}${(notes || "").trim() ? "\n" : ""}${line}`;
 // the job's name on this tab: its PO number, the way the office and the partners say it
 const poOf = (j: Job) => (j.po_number || j.job_number || "").trim();
@@ -114,6 +116,33 @@ export default function PactCalendar() {
     return () => { stop = true; clearInterval(t); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useLive(["pact_jobs", "schedule_days", "employees"], () => load(), { skipWhileTyping: true });
+  // jobs a worker texted "nobody home" about, waiting for a new day (RUN_ME
+  // section 21 clears the mark once the job's day changes)
+  const [nobody, setNobody] = useState<Map<string, string>>(new Map());
+  const loadNobody = async () => {
+    const { data, error } = await sb().from("texted_photos").select("pact_job_id,created_at").eq("status", "nobody").not("pact_job_id", "is", null).limit(200);
+    if (error) return; // before section 20
+    setNobody(new Map(((data || []) as { pact_job_id: string; created_at: string }[]).map((n) => [n.pact_job_id, n.created_at])));
+  };
+  // admin and office only — the notices are theirs (the database says so too)
+  useEffect(() => { if (canEdit) loadNobody(); }, [canEdit]); // eslint-disable-line react-hooks/exhaustive-deps
+  useLive(["texted_photos"], () => loadNobody(), { enabled: canEdit });
+  // "Give it a new day…" on a notice (or ?job= from the other Schedule tab):
+  // the calendar opens on the job's day, at its card
+  const showJob = (id: string) => {
+    const j = jobsRef.current.find((x) => x.id === id);
+    if (!j) { flash("That PO isn't on the calendar any more"); return; }
+    if (!(j.start_date || "").trim()) { flash(`${poLabel(j)} has no day yet — give it one below`); setQ(poOf(j)); return; }
+    goTo(j.start_date!);
+    setTimeout(() => document.querySelector(`[data-po-card="${poOf(j)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 350);
+  };
+  const jobParamDone = useRef(false);
+  useEffect(() => {
+    if (jobParamDone.current || jobs.length === 0) return;
+    jobParamDone.current = true;
+    const id = new URLSearchParams(window.location.search).get("job") || "";
+    if (id) showJob(id);
+  }, [jobs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // a new start_date here moves the job's crew rows to the new day and clears
   // their TEXTED mark (RUN_ME section 14's trigger) — the cards then show who
@@ -269,9 +298,9 @@ export default function PactCalendar() {
       short: poOf(j) || (j.address || j.partner || "").split(",")[0],
       subtitle: [where, j.partner].filter(Boolean).join(" · "),
       people: crew.map((r) => emps.find((e) => e.id === r.employee_id)?.name.split(" ")[0] || "").filter(Boolean),
-      flag: crewState(crew, j) === "not_told" ? "crew not told" : undefined,
+      flag: nobody.has(j.id) ? "nobody home — needs a new day" : crewState(crew, j) === "not_told" ? "crew not told" : undefined,
     };
-  }), [list, dayRows, emps]);
+  }), [list, dayRows, emps, nobody]);
 
   const card = (j: Job) => {
     const crew = rowsOfJob(dayRows, j);
@@ -287,6 +316,7 @@ export default function PactCalendar() {
             <div className="max-w-[520px] truncate text-[11px] text-inksoft">{j.partner}{j.description ? ` · ${j.description}` : ""}</div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {nobody.has(j.id) && <span data-nobody-stamp><Stamp label="⚠ NOBODY HOME" tone="alert" /></span>}
             {/* priced but still ahead: it stays until its day has passed */}
             {j.priced && <Stamp label="PRICED" tone="ok" />}
             {canEdit ? (
@@ -381,7 +411,10 @@ export default function PactCalendar() {
         <Link className="btn btn-ghost min-h-[44px]" href="/pact">🧾 Billing</Link>
       </PageHeader>
       <input ref={poRef} type="file" accept="application/pdf,.pdf,.docx" className="hidden" onChange={handlePo} />
-      <TextedPhotos canEdit={canEdit} flash={flash} />
+      <TextedPhotos canEdit={canEdit} flash={flash} onShow={(b) => {
+        if (b.pact_job_id) showJob(b.pact_job_id);
+        else if (b.release_id) window.location.href = `/schedule?day=${nyDayOf(b.created_at)}&release=${b.release_id}`;
+      }} />
       {handOpen && canEdit && (
         <div className="card mb-3 border-work p-4">
           <div className="mb-2 text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">A PO, typed in</div>

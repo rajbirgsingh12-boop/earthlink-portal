@@ -32,8 +32,9 @@
 -- price book holds each code once (16), invoice numbers are
 -- held until a job is priced (17), each worker has a
 -- language for the crew text (18), a crew text can be set
--- up for later (19), and photos the crew texts back to the
--- company number land on the job (20).
+-- up for later (19), photos the crew texts back to the
+-- company number land on the job (20), and a worker who
+-- texts "no" (nobody home) is sent their next job (21).
 -- ============================================================
 
 -- ---------- from upgrade_invoices_aging_docs.sql ----------
@@ -754,7 +755,7 @@ create table if not exists texted_photos (
   from_phone text default '',
   body text default '',
   photos jsonb default '[]'::jsonb,
-  status text default 'held',   -- held (waiting for the office) · filed (on a job) · gone (thrown away) · note (a text with no pictures)
+  status text default 'held',   -- held (waiting for the office) · filed (on a job) · gone (thrown away) · note (a text with no pictures) · nobody / reply / seen / moved (section 21)
   pact_job_id uuid references pact_jobs(id) on delete set null,
   release_id uuid references releases(id) on delete set null,
   how text default '',          -- how it got to its job: number (named in a text), burst (sent right along with one that did), day (the one job that day), office
@@ -799,3 +800,41 @@ begin
 end $$;
 revoke all on function public.texted_photos_put(uuid, uuid, jsonb, text[]) from public, anon, authenticated;
 grant execute on function public.texted_photos_put(uuid, uuid, jsonb, text[]) to service_role;
+
+-- 21) "Nobody home." A worker who can't get in (nobody answers, the tenant
+--     can't do it today) texts the company number "no". The job gets a
+--     ⚠ Nobody home mark — a line on the job's notes, and a notice on the
+--     Schedule tabs — and the worker is sent their next job (another one
+--     they have today, or their next day's job moved up to today). The mark
+--     comes off by itself once the office gives the job a new day. Needs
+--     section 20.
+alter table texted_photos add column if not exists note text default '';   -- what the portal did about it: "Moved PO 220011 up from Wed Sep 23 and sent Jose"
+create index if not exists texted_photos_open on texted_photos (status) where status in ('held', 'nobody', 'reply');
+-- a PACT job given a new day: its ⚠ is done with
+create or replace function public.texted_nobody_moved() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.start_date is distinct from old.start_date then
+    update texted_photos set status = 'moved' where pact_job_id = new.id and status = 'nobody';
+  end if;
+  return new;
+end $$;
+drop trigger if exists pact_job_nobody_moved on pact_jobs;
+create trigger pact_job_nobody_moved
+  after update of start_date on pact_jobs
+  for each row execute function public.texted_nobody_moved();
+-- a release put on a later day on the Schedule tab: the same
+create or replace function public.texted_nobody_rebooked() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.release_id is not null then
+    update texted_photos set status = 'moved'
+     where release_id = new.release_id and status = 'nobody'
+       and new.day > to_char(created_at at time zone 'America/New_York', 'YYYY-MM-DD');
+  end if;
+  return new;
+end $$;
+drop trigger if exists schedule_days_nobody_rebooked on schedule_days;
+create trigger schedule_days_nobody_rebooked
+  after insert on schedule_days
+  for each row execute function public.texted_nobody_rebooked();

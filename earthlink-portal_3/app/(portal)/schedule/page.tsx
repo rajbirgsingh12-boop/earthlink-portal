@@ -103,9 +103,27 @@ export default function Schedule() {
   // the calendar links here with ?day=YYYY-MM-DD (read after mount — the
   // first paint is today's, the same on the server and the phone)
   useEffect(() => {
-    const d = new URLSearchParams(window.location.search).get("day") || "";
+    const qs = new URLSearchParams(window.location.search);
+    const d = qs.get("day") || "";
     if (/^\d{4}-\d{2}-\d{2}$/.test(d)) setDay(d);
+    const r = qs.get("release") || "";
+    if (r) setTimeout(() => document.querySelector(`[data-rel-card="${r}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 900);
   }, []);
+  // releases a worker texted "nobody home" about, waiting for a new day
+  // (RUN_ME section 21 clears the mark once the release is put on a later day)
+  const [nobodyRel, setNobodyRel] = useState<Set<string>>(new Set());
+  const loadNobody = async () => {
+    const { data, error } = await sb().from("texted_photos").select("release_id").eq("status", "nobody").not("release_id", "is", null).limit(200);
+    if (!error) setNobodyRel(new Set(((data || []) as { release_id: string }[]).map((n) => n.release_id)));
+  };
+  // admin and office only — the notices are theirs (the database says so too)
+  useEffect(() => { if (canEdit) loadNobody(); }, [canEdit]); // eslint-disable-line react-hooks/exhaustive-deps
+  useLive(["texted_photos"], () => loadNobody(), { enabled: canEdit });
+  // "Give it a new day…": the day it was missed, at its card — add it to another day from there
+  const showRelease = (id: string, d: string) => {
+    setDay(d);
+    setTimeout(() => document.querySelector(`[data-rel-card="${id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 700);
+  };
 
   const loadDay = async (d: string) => {
     const { data, error } = await sb().from("schedule_days").select("*").eq("day", d).order("created_at");
@@ -278,7 +296,12 @@ export default function Schedule() {
         Scheduling for <b className="text-ink">{prettyDate(day)}</b> — add a release, write the description, add workers, then <b className="text-ink">Assign &amp; text</b> messages the whole crew at once
         {machine ? " from the company number." : " (opens a group text on this phone)."}
       </div>
-      <TextedPhotos canEdit={canEdit} flash={flash} />
+      <TextedPhotos canEdit={canEdit} flash={flash} onShow={(b) => {
+        if (b.pact_job_id) { window.location.href = `/pact/schedule?job=${b.pact_job_id}`; return; }
+        if (!b.release_id) return;
+        const d = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(b.created_at));
+        showRelease(b.release_id, d);
+      }} />
 
       {canEdit && (
         <div className="mb-3 grid gap-2 md:grid-cols-2">
@@ -318,9 +341,10 @@ export default function Schedule() {
         const match = emps.filter((e) => !inCard.has(e.id)).filter((e) => matches(q, e.name));
         const contract = contracts.find((x) => x.id === rel.contract_id);
         return (
-          <div key={rel.id} className="card mb-3 p-3.5">
+          <div key={rel.id} className="card mb-3 p-3.5" data-rel-card={rel.id}>
             <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0">
+                {nobodyRel.has(rel.id) && <span className="mr-2" data-nobody-stamp><Stamp label="⚠ NOBODY HOME" tone="alert" /></span>}
                 <b className="font-mono text-[14px]">#{rel.rel_number}</b>
                 <span className="ml-2 text-[14px]">{rel.location}</span>
                 {contract && <span className="ml-1.5 text-[11px] text-inksoft">· {contractLabel(contract)}</span>}

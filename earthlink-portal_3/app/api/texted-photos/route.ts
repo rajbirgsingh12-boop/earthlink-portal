@@ -1,6 +1,6 @@
 // The office's side of the photos the crew texts in: put a batch on a job
-// (one the portal couldn't place, or one that landed on the wrong job), or
-// throw away a batch nobody could place. The sign-in is checked first —
+// (one the portal couldn't place, or one that landed on the wrong job),
+// throw away a batch nobody could place, or clear a "nobody home" notice. The sign-in is checked first —
 // admin or office only — and then the portal moves the pictures itself,
 // since they sit in a folder no one's own sign-in can move out of.
 import { NextResponse } from "next/server";
@@ -35,6 +35,11 @@ export async function POST(req: Request) {
   const b = (await db.get<Batch>(`texted_photos?id=eq.${body.id}&select=*`)).rows[0];
   if (!b) return NextResponse.json({ error: "Those photos aren't there any more" }, { status: 404 });
 
+  // a "nobody home" notice (or a crew reply) the office has dealt with
+  if (body.action === "seen") {
+    if (b.status !== "nobody" && b.status !== "reply") return NextResponse.json({ error: "Nothing to clear there" }, { status: 409 });
+    return (await db.patch(`texted_photos?id=eq.${b.id}`, { status: "seen" })) ? NextResponse.json({ ok: true }) : NextResponse.json({ error: "Couldn't clear it — try again" }, { status: 500 });
+  }
   if (body.action === "throw") {
     if (b.status !== "held") return NextResponse.json({ error: "These are on a job already — take them off from the job's Documents" }, { status: 409 });
     return (await dropBatch(db, b)) ? NextResponse.json({ ok: true }) : NextResponse.json({ error: "Couldn't throw them away — try again" }, { status: 500 });

@@ -38,11 +38,12 @@ export function dueSkip(row: DueRow, ctx: { emp?: DueEmp | null; job?: DueJob | 
 }
 // the text itself, written at the moment it goes out — so a job that moved
 // since it was set up says the new day
-export function dueBody(row: DueRow, ctx: { emp: DueEmp; job?: DueJob | null; rel?: DueRel | null; work: string }): string {
+export function dueBody(row: DueRow, ctx: { emp: DueEmp; job?: DueJob | null; rel?: DueRel | null; work: string; moved?: { from: string; to: string } | null }): string {
   const { emp, job, rel } = ctx;
   return crewText({
     first: (emp.name || "").split(" ")[0],
     day: dueDay(row, job),
+    moved: ctx.moved || null,
     work: ctx.work,
     lang: emp.lang,
     street: (job ? job.address : row.address || rel?.address) || "",

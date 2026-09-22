@@ -1,9 +1,12 @@
 "use client";
-// Photos the crew texted back to the company number (/api/sms-in). Most go
-// straight onto the job the worker is on; this card shows the office the
+// What the crew texts back to the company number (/api/sms-in). Photos: most
+// go straight onto the job the worker is on; this card shows the office the
 // ones the portal couldn't place (two jobs that day, no job, a phone not on
 // the crew list) to pick a job for, and the ones it placed lately, so a batch
-// on the wrong job moves in one tap. Admin and office only — no money here.
+// on the wrong job moves in one tap. "Nobody home": the job a worker couldn't
+// get into, and where the portal sent them next — until the office gives the
+// job a new day (then it clears by itself) or taps ✓ Got it. Admin and office
+// only — no money here.
 import { useEffect, useMemo, useState } from "react";
 import { sb } from "@/lib/supabase";
 import { useLive } from "@/lib/useLive";
@@ -11,9 +14,9 @@ import { prettyPhone } from "@/lib/notify";
 import { useDebounced } from "@/lib/useDebounced";
 
 interface Photo { name: string; path: string }
-interface Batch {
+export interface Batch {
   id: string; employee_id?: string | null; from_phone?: string | null; body?: string | null; photos?: Photo[] | null;
-  status: string; pact_job_id?: string | null; release_id?: string | null; created_at: string;
+  status: string; pact_job_id?: string | null; release_id?: string | null; created_at: string; note?: string | null;
 }
 interface Spot { kind: "pact" | "rel"; id: string; label: string; sub: string }
 const LATELY_DAYS = 3;
@@ -28,7 +31,7 @@ const dayOf = (iso: string, back: number) => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
 
-export default function TextedPhotos({ canEdit, flash }: { canEdit: boolean; flash: (m: string) => void }) {
+export default function TextedPhotos({ canEdit, flash, onShow }: { canEdit: boolean; flash: (m: string) => void; onShow?: (b: Batch) => void }) {
   const [rows, setRows] = useState<Batch[]>([]);
   const [names, setNames] = useState<Record<string, string>>({});
   const [spots, setSpots] = useState<Record<string, Spot>>({});
@@ -41,12 +44,18 @@ export default function TextedPhotos({ canEdit, flash }: { canEdit: boolean; fla
     const since = new Date(Date.now() - LATELY_DAYS * 86_400_000).toISOString();
     const cols = "id,employee_id,from_phone,body,photos,status,pact_job_id,release_id,created_at";
     // the waiting ones on their own: a busy few days of placed ones never push one off
-    const [h, f] = await Promise.all([
+    const [h, f, n0] = await Promise.all([
       sb().from("texted_photos").select(cols).eq("status", "held").order("created_at", { ascending: false }).limit(200),
       sb().from("texted_photos").select(cols).eq("status", "filed").gte("created_at", since).order("created_at", { ascending: false }).limit(40),
+      sb().from("texted_photos").select(`${cols},note`).in("status", ["nobody", "reply"]).order("created_at", { ascending: false }).limit(100),
     ]);
     if (h.error) { setRows([]); return; } // before RUN_ME section 20 — nothing to show
-    const list = ([...(h.data || []), ...(f.data || [])] as Batch[]).filter((b) => Array.isArray(b.photos) && b.photos.length > 0);
+    // before section 21 there's no note to read — the notices come without it
+    const n = n0.error ? await sb().from("texted_photos").select(cols).in("status", ["nobody", "reply"]).order("created_at", { ascending: false }).limit(100) : n0;
+    const list = [
+      ...([...(h.data || []), ...(f.data || [])] as Batch[]).filter((b) => Array.isArray(b.photos) && b.photos.length > 0),
+      ...((n.data || []) as Batch[]),
+    ];
     setRows(list);
     const emp = [...new Set(list.map((b) => b.employee_id).filter(Boolean) as string[])];
     const pIds = [...new Set(list.map((b) => b.pact_job_id).filter(Boolean) as string[])];
@@ -83,7 +92,7 @@ export default function TextedPhotos({ canEdit, flash }: { canEdit: boolean; fla
       const res = await fetch("/api/texted-photos", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ id: b.id, ...body }) });
       const j = (await res.json().catch(() => ({}))) as { error?: string; n?: number; label?: string };
       if (!res.ok) { flash(j.error || "Couldn't do that — try again"); return; }
-      flash(body.action === "throw" ? "Thrown away" : `${photosN(j.n || 0)} on ${j.label} ✓`);
+      flash(body.action === "throw" ? "Thrown away" : body.action === "seen" ? "Cleared ✓" : `${photosN(j.n || 0)} on ${j.label} ✓`);
       setPicking(null);
       await load();
     } finally { setBusy(false); }
@@ -91,6 +100,8 @@ export default function TextedPhotos({ canEdit, flash }: { canEdit: boolean; fla
 
   const held = rows.filter((b) => b.status === "held");
   const filed = rows.filter((b) => b.status === "filed");
+  const nobody = rows.filter((b) => b.status === "nobody");
+  const replies = rows.filter((b) => b.status === "reply");
   if (!canEdit || rows.length === 0) return null;
   const who = (b: Batch) => (b.employee_id && names[b.employee_id]) || (b.employee_id ? "A worker" : `${prettyPhone(b.from_phone || "")} (not on the crew list)`);
   // a fresh link every time; the window opens on the tap itself, so a phone doesn't block it
@@ -117,9 +128,33 @@ export default function TextedPhotos({ canEdit, flash }: { canEdit: boolean; fla
   return (
     <div className="card mb-3 p-3" data-texted-photos>
       <div className="mb-1 flex flex-wrap items-center gap-2">
-        <div className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">📱 Photos texted in</div>
+        <div className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">📱 From the crew</div>
+        {nobody.length > 0 && <span className="stamp border-alert text-alert" data-nobody-count>⚠ {nobody.length} nobody home</span>}
         {held.length > 0 && <span className="stamp border-alert text-alert" data-texted-waiting>{held.length} need a job</span>}
       </div>
+      {nobody.map((b) => {
+        const at = spots[b.pact_job_id || b.release_id || ""];
+        const words = (b.body || "").trim();
+        return (
+          <div key={b.id} className="border-t border-rulesoft py-2.5" data-nobody={b.id}>
+            <div className="text-[14px]"><b className="text-alert">⚠ Nobody home</b> · <b>{at ? at.label : "a job"}</b>{at?.sub ? <span className="text-inksoft"> · {at.sub}</span> : null}</div>
+            <div className="text-[12px] text-inksoft">{who(b)} · {when(b.created_at)}{words && !/^no+\.?$/i.test(words) ? <> · “{words}”</> : null}</div>
+            {(b.note || "").trim() && <div className="mt-0.5 text-[13px]" data-nobody-note>{(b.note || "").trim()}</div>}
+            {(b.photos || []).length > 0 && strip(b)}
+            <div className="mt-2 flex flex-wrap gap-2">
+              {onShow && <button className="btn btn-primary min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => onShow(b)} data-show-job>Give it a new day…</button>}
+              <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
+            </div>
+          </div>
+        );
+      })}
+      {replies.map((b) => (
+        <div key={b.id} className="border-t border-rulesoft py-2.5" data-reply={b.id}>
+          <div className="text-[14px]"><b>{who(b)}</b> texted “{(b.body || "").trim()}” · {when(b.created_at)}</div>
+          {(b.note || "").trim() && <div className="text-[12px] text-inksoft">{(b.note || "").trim()}</div>}
+          <button className="btn btn-ghost mt-1.5 min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
+        </div>
+      ))}
       {held.map((b) => (
         <div key={b.id} className="border-t border-rulesoft py-2.5" data-held={b.id}>
           <div className="text-[14px]"><b>{who(b)}</b> texted {photosN((b.photos || []).length)} · {when(b.created_at)}</div>

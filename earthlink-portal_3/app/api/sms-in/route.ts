@@ -2,7 +2,9 @@
 // page. A worker who answers the crew text with pictures gets them put on the
 // job they're on (or the PO they name in the text); pictures the portal can't
 // place wait for the office on the Schedule tabs. The worker gets a short
-// answer saying where the pictures went, in their own language.
+// answer saying where the pictures went, in their own language. A worker who
+// texts "no" (nobody home, the tenant can't do it today) gets their next job
+// back, and the missed one is flagged for a new day (lib/nobodyFlow.ts).
 //
 // To switch it on:
 //   • Vercel → Settings → Environment Variables: SUPABASE_SERVICE_ROLE_KEY
@@ -24,6 +26,8 @@ import {
   type JobKey, type MineRow, type Params, type Reply,
 } from "@/lib/smsIn";
 import { fileBatch, folderOf, inboxOf, photosBackReady, serviceDb, type Batch, type Db, type Photo, type Target } from "@/lib/photoStore";
+import { bareNo, nobodyHome } from "@/lib/noAccess";
+import { nobodyFlow } from "@/lib/nobodyFlow";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -137,7 +141,7 @@ export async function POST(req: Request) {
   // the same text twice (Twilio trying again) is not filed twice
   if (sid && (await db.get<{ id: string }>(`texted_photos?msg_sid=eq.${enc(sid)}&select=id&limit=1`)).rows.length) return answer();
 
-  // who sent it — by the last ten digits of the phone
+  // who sent it — by the whole phone number, country code and all
   let emps = await db.get<Emp>("employees?select=id,name,phone,lang,active");
   if (!emps.ok) emps = await db.get<Emp>("employees?select=id,name,phone,active"); // before the language column
   const key = phoneKey(from);
@@ -154,6 +158,12 @@ export async function POST(req: Request) {
       return say({ k: "stranger", n: 0 });
     }
     if (other > 0) return say({ k: "notphoto" }, lang);
+    // "no" / "nobody home" / "nadie": the job is flagged for a new day and
+    // they get their next one (lib/nobodyFlow.ts)
+    if (nobodyHome(body)) {
+      const flow = await nobodyFlow(db, { emp, emps: emps.rows, body, from, sid, now });
+      if (flow.handled) return answer(flow.reply);
+    }
     // the owner testing the number from a phone on the crew list still switches it on
     if (!(await db.get<{ id: string }>("texted_photos?select=id&limit=1")).rows.length) await db.insert("texted_photos", { employee_id: emp.id, from_phone: from, body, status: "note", msg_sid: sid || null });
     // a job's number: the pictures they just sent go there — ones still
@@ -177,6 +187,29 @@ export async function POST(req: Request) {
     }
     if (pick.kind === "ask" && pick.why === "unknown" && group.some((b) => b.status === "held")) return say({ k: "unknown", number: pick.number || "" }, lang);
     return answer();
+  }
+
+  // fetch each picture from Twilio and store it in that folder — all at once,
+  // so ten pictures take about as long as one (Twilio waits 15 seconds for the answer)
+  const store = async (dir: string, kind: string): Promise<Photo[]> => (await Promise.all(photos.map(async (m, i): Promise<Photo | null> => {
+    const got = await fetchMedia(m.url);
+    if (!got) return null;
+    const name = photoName(kind, now, (emp?.name || "").trim().split(/\s+/)[0] || "", sid, i, photos.length, m.ext);
+    return (await db.upload(dir + name, got.bytes, got.type || m.type)) ? { name, path: dir + name } : null;
+  }))).filter((p): p is Photo => !!p);
+
+  // a picture of the door with "nobody home": it goes on that job, and they get their next one
+  if (emp && nobodyHome(body) && !bareNo(body)) {
+    const flow = await nobodyFlow(db, { emp, emps: emps.rows, body, from, sid, now, proof: (dir) => store(dir, "noaccess") });
+    if (flow.handled) {
+      if (!flow.missed) {
+        // which job wasn't clear: the pictures wait for the office, quietly (the answer asks)
+        const batchId = randomUUID();
+        const put = await store(inboxOf(batchId), "noaccess");
+        if (put.length && !(await db.insert("texted_photos", { id: batchId, employee_id: emp.id, from_phone: from, body, photos: put, status: "held" }))) await db.remove(put.map((p) => p.path));
+      }
+      return answer(flow.reply);
+    }
   }
 
   // pictures from a phone nobody knows: kept for the office, a few batches a day at most
@@ -203,18 +236,7 @@ export async function POST(req: Request) {
   const target = pick.kind === "ask" ? null : pick;
   const batchId = randomUUID();
   const dir = target ? folderOf(target) : inboxOf(batchId);
-  const kind = photoKind(body);
-  const first = (emp?.name || "").trim().split(/\s+/)[0] || "";
-
-  // fetch each picture from Twilio and store it — all at once, so ten pictures
-  // take about as long as one (Twilio waits 15 seconds for the answer)
-  const stored = await Promise.all(photos.map(async (m, i): Promise<Photo | null> => {
-    const got = await fetchMedia(m.url);
-    if (!got) return null;
-    const name = photoName(kind, now, first, sid, i, photos.length, m.ext);
-    return (await db.upload(dir + name, got.bytes, got.type || m.type)) ? { name, path: dir + name } : null;
-  }));
-  const put = stored.filter((p): p is Photo => !!p);
+  const put = await store(dir, photoKind(body));
   if (put.length === 0) return say({ k: "failed" }, lang);
 
   const row = { id: batchId, employee_id: emp?.id || null, from_phone: from, body, photos: put, msg_sid: sid || null };

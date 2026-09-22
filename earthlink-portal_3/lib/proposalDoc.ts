@@ -298,7 +298,7 @@ export const BLANK_PROPOSAL: ProposalFields = {
   serviceAddress: "123 EXAMPLE STREET, Brooklyn, NY 11207, Apartment 4B",
   lines: [
     { description: "Scrape and plaster", qty: 100, unit: "SF", unit_price: 6 },
-    { description: "Primer", qty: 1, unit: "ROOM", unit_price: 125 },
+    { description: "Primer", qty: 1, unit: "ROOM", unit_price: 150 },
     { description: "Paint", qty: 1, unit: "ROOM", unit_price: 220 },
   ],
 };

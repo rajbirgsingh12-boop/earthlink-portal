@@ -53,7 +53,7 @@ export const PRICE_BOOK: PriceItem[] = [
   // priming and painting are priced by the room, not by the square foot
   // the coat count is how WE price, not something the customer is told —
   // the line just says "Primer" (the old wording still reads back in)
-  { key: "primer", description: "Primer", unit: "ROOM", price: 125, group: "Painting", words: "primer|prime\\b|priming|seal(?:er|ing)?\\s*coat" },
+  { key: "primer", description: "Primer", unit: "ROOM", price: 150, group: "Painting", words: "primer|prime\\b|priming|seal(?:er|ing)?\\s*coat" },
   // just "Paint" — they don't do two coats. The two-coat wording stays in the
   // trigger words so a letter already sent out still reads back as this line.
   { key: "paint_sf", description: "Paint", unit: "ROOM", price: 220, group: "Painting", words: "paint(?:ing|ed)?\\b|re\\s*paint|finish\\s*coat|two\\s*coats?|2\\s*coats?" },

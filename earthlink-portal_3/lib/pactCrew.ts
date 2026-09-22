@@ -8,6 +8,7 @@ import { mapLink as mapLinkOf } from "./mapLink";
 export interface CrewRow {
   id: string; day: string; release_id: string | null; pact_job_id?: string | null;
   employee_id: string; description: string; texted: boolean; address?: string | null;
+  send_at?: string | null;   // a text set up for later (RUN_ME section 19); empty = none waiting
 }
 export interface CrewJob {
   id: string; po_number?: string | null; job_number?: string | null; partner?: string | null;
@@ -49,10 +50,12 @@ export const workOf = (j: CrewJob): string => {
 };
 export const mapLink = mapLinkOf;
 
-// the text itself — lib/crewText writes it (no PO number: the crew doesn't need one); "moved" makes it read as a change, not a repeat
+// the text itself — lib/crewText writes it, the job's PO number included so
+// anyone can say which job they mean; "moved" makes it read as a change, not a repeat
 export const crewMessage = (j: CrewJob, first: string, work: string, moved?: { from: string; to: string }, lang?: string | null): string => {
   return crewText({
     first, day: j.start_date, street: j.address, building: j.development, apt: j.property_unit, work, lang,
+    po: (j.po_number || j.job_number || "").trim(),
     moved: moved ? { from: moved.from || null, to: moved.to } : null,
   });
 };
@@ -78,11 +81,15 @@ export const rowsOfJob = (rows: CrewRow[], j: CrewJob): CrewRow[] => rows.filter
 // a worker who hasn't been told, or was told a different day — computed here,
 // so a mismatch shows even where the database trigger isn't in yet
 export const rowNeedsText = (r: CrewRow, j: CrewJob) => !r.texted || (!!j.start_date && r.day !== j.start_date);
-export const crewState = (rows: CrewRow[], j: CrewJob): "none" | "told" | "not_told" =>
-  rows.length === 0 ? "none" : rows.some((r) => rowNeedsText(r, j)) ? "not_told" : "told";
+export const crewState = (rows: CrewRow[], j: CrewJob): "none" | "told" | "not_told" | "waiting" =>
+  rows.length === 0 ? "none"
+    : !rows.some((r) => rowNeedsText(r, j)) ? "told"
+    // every one still to tell has a text waiting for its time — not a red flag
+    : rows.filter((r) => rowNeedsText(r, j)).every((r) => !!r.send_at) ? "waiting"
+    : "not_told";
 // "Jose TEXTED ✓ · Luis not told" — the one wording every screen uses
 export const crewLine = (rows: CrewRow[], j: CrewJob, emps: Worker[]): string =>
   rows.length === 0 ? "No one sent yet" : rows.map((r) => {
     const first = (emps.find((e) => e.id === r.employee_id)?.name || "?").split(" ")[0];
-    return `${first} ${!r.texted ? "not told" : j.start_date && r.day !== j.start_date ? "needs the new day" : "TEXTED ✓"}`;
+    return `${first} ${r.texted && !(j.start_date && r.day !== j.start_date) ? "TEXTED ✓" : r.send_at ? "text set up" : !r.texted ? "not told" : "needs the new day"}`;
   }).join(" · ");

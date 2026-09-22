@@ -74,6 +74,12 @@ export async function textRows(targets: TextTarget[], opts: { skipTexted?: boole
       // never a ✓ when nothing went out — that is how a crew ends up never told
       : sent === 0 ? "Everyone here was already texted — nothing new went out"
       : `Sent ${sent} text${sent === 1 ? "" : "s"} from the company number ✓${skipped ? ` (${skipped} already texted — skipped)` : ""}`;
+    // a text that was set up for later has now gone by hand — drop the stamp
+    // (silent before RUN_ME section 19: there is no column to clear)
+    if (sent > 0) {
+      const done = good.filter((t) => !fails.some((f) => f.to === cleanPhone(t.to))).map((t) => t.rowId).filter(Boolean);
+      if (done.length) await sb().from("schedule_days").update({ send_at: null }).in("id", done).then(() => null, () => null);
+    }
     return { status: "sent", sent, skipped, failed: fails, message };
   }
   if (res.status === 501) {

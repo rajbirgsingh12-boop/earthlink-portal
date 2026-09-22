@@ -2,13 +2,14 @@
 // the PO reader uses. A short line in, a short line out; the phone falls
 // back to its own glossary when this can't answer.
 import { NextResponse } from "next/server";
-import { smartClient, smartConfigured, smartErrorNote } from "@/lib/smartPo";
+import { smartConfigured, smartErrorNote } from "@/lib/smartPo";
+import { askClaudeSpanish } from "@/lib/smartTranslate";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
 const env = (k: string) => process.env[k] || "";
 
-const SYSTEM = `You translate short work descriptions from partner purchase orders into Spanish for construction laborers in New York City (plaster, paint, doors, floors, kitchens, bathrooms). Write plain, natural Spanish the way a foreman in Brooklyn would say it — usted, no slang, no explanations. Keep the same order and every detail: rooms, counts, apartment or unit labels (like 11A, 2nd floor), measurements, product names and anything in parentheses. Keep "move-out" as it is. Do not add anything. Answer with the translation only.`;
+// the wording lives in lib/smartTranslate, so a text set up for later reads the same as one sent by hand
 
 export async function POST(req: Request) {
   // signed-in admin/office users only — same gate as the PO reader
@@ -31,14 +32,7 @@ export async function POST(req: Request) {
   if (text.length > 1500) return NextResponse.json({ error: "Too long to translate" }, { status: 400 });
   if (!smartConfigured()) return NextResponse.json({ ok: false, note: "Claude isn't set up — add ANTHROPIC_API_KEY in Vercel" });
   try {
-    const client = await smartClient(20_000);
-    const res = await client.messages.create({
-      model: "claude-opus-5",
-      max_tokens: 600,
-      system: SYSTEM,
-      messages: [{ role: "user", content: text }],
-    });
-    const out = res.content.map((c) => (c.type === "text" ? c.text : "")).join("").trim();
+    const out = await askClaudeSpanish(text);
     if (!out) return NextResponse.json({ ok: false, note: "Claude answered with nothing" });
     return NextResponse.json({ ok: true, text: out });
   } catch (e) {

@@ -9,14 +9,15 @@
 //   TWILIO_FROM          — the purchased number, e.g. +18885551234
 //   (or TWILIO_MESSAGING_SERVICE_SID instead of TWILIO_FROM)
 import { NextResponse } from "next/server";
+import { sendTexts, twilioConfigured } from "@/lib/twilio";
 
 // a full 100-message batch takes ~30s of sequential Twilio calls — don't let
 // the platform kill the function mid-loop
 export const maxDuration = 60;
 
 const env = (k: string) => process.env[k] || "";
-const configured = () =>
-  !!(env("TWILIO_ACCOUNT_SID") && env("TWILIO_AUTH_TOKEN") && (env("TWILIO_FROM") || env("TWILIO_MESSAGING_SERVICE_SID")));
+// the keys themselves live in lib/twilio, which /api/text-due sends through too
+const configured = twilioConfigured;
 
 // spend guard: even a signed-in account can't fire more than 200 texts an hour
 // (a 20-man crew texted daily is ~20 — this only stops runaways and stolen sessions)
@@ -83,42 +84,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Texting limit reached for this hour — try again later" }, { status: 429 });
   }
 
-  const sid = env("TWILIO_ACCOUNT_SID");
-  const basic = Buffer.from(`${sid}:${env("TWILIO_AUTH_TOKEN")}`).toString("base64");
-  const from = env("TWILIO_FROM");
-  const msvc = env("TWILIO_MESSAGING_SERVICE_SID");
-  const failed: { to: string; error: string }[] = [];
-  let sent = 0;
-  const sendOne = async (m: { to: string; body: string; id: string }) => {
-    const form = new URLSearchParams({ To: m.to, Body: m.body });
-    if (msvc) form.set("MessagingServiceSid", msvc); else form.set("From", from);
-    try {
-      const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
-        method: "POST",
-        headers: { Authorization: `Basic ${basic}`, "Content-Type": "application/x-www-form-urlencoded" },
-        body: form.toString(),
-      });
-      if (r.ok) {
-        sent += 1;
-        // the database records the send right here — even if the phone never
-        // sees this response, a retry knows this worker was already texted
-        if (m.id) {
-          await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, {
-            method: "PATCH", headers: supaHeaders, body: JSON.stringify({ texted: true }),
-          }).catch(() => {});
-        }
-      } else {
-        const j = (await r.json().catch(() => ({}))) as { message?: string };
-        failed.push({ to: m.to, error: j.message || `Twilio error ${r.status}` });
-      }
-    } catch (e) {
-      failed.push({ to: m.to, error: e instanceof Error ? e.message : "network error" });
-    }
-  };
-  // five at a time — a 20-worker crew goes out in ~2s instead of ~8s, still
-  // gentle enough for Twilio's per-number rate limits
-  for (let i = 0; i < messages.length; i += 5) {
-    await Promise.all(messages.slice(i, i + 5).map(sendOne));
-  }
+  // the send itself, and the TEXTED mark the moment Twilio takes each one —
+  // even if the phone never sees this response, a retry knows who was texted
+  const { sent, failed } = await sendTexts(messages, async (m) => {
+    if (!m.id) return;
+    await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, {
+      method: "PATCH", headers: supaHeaders, body: JSON.stringify({ texted: true }),
+    }).catch(() => {});
+  });
   return NextResponse.json({ configured: true, sent, skipped, failed });
 }

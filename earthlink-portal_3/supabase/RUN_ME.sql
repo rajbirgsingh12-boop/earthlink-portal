@@ -726,3 +726,13 @@ end $$;
 --     Spanish, worker by worker — set on Settings → Crew. Nothing set
 --     reads as English.
 alter table employees add column if not exists lang text default 'en';
+
+-- 19) A crew text can be set up for later.
+--     The office picks a time — tonight, or tomorrow morning — and the text
+--     telling each worker which job to go to goes out then, written fresh at
+--     that moment (so a job that moved in between says the new day). Empty
+--     means "no text waiting"; it is cleared the moment the text goes out.
+--     Texts go out on their own once CRON_SECRET and SUPABASE_SERVICE_ROLE_KEY
+--     are set in Vercel; until then they go out while the portal is open.
+alter table schedule_days add column if not exists send_at timestamptz;
+create index if not exists schedule_days_send_at on schedule_days (send_at) where send_at is not null;

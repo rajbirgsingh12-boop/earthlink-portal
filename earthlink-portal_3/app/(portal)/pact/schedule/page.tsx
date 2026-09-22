@@ -15,6 +15,7 @@ import { CAL_JOB_COLS, CREW_JOB_COLS, WORKER_COLS, WORKER_COLS_OLD, crewLine, cr
 import { textRows, stampRows } from "@/lib/notify";
 import { intakePoFile, addJobByHand } from "@/lib/pactIntake";
 import { loadPrices } from "@/lib/priceBook";
+import { sendDueNow } from "@/lib/sendLater";
 
 // the job as the calendar reads it — CAL_JOB_COLS, never the money
 interface Job {
@@ -95,6 +96,21 @@ export default function PactCalendar() {
     setDayRows(d); setEmps((e || []) as Emp[]);
   };
   useEffect(() => { load(); myProfile().then((p) => setRole(p?.role || "")); }, []);
+  // a text set up for later whose time has come goes out now — the catch-up
+  // for when the Vercel cron isn't set up; with it, this finds nothing to do
+  useEffect(() => {
+    let stop = false;
+    const tick = async () => {
+      const out = await sendDueNow();
+      if (stop || !out) return;
+      if (out.sent > 0) flash(`${out.sent} text${out.sent === 1 ? "" : "s"} that ${out.sent === 1 ? "was" : "were"} set up just went out ✓`);
+      else if (out.missed > 0) flash(`${out.missed} text${out.missed === 1 ? "" : "s"} set up for earlier didn't go out (no number, or that day has passed) — the crew shows as not told`);
+      if (out.sent > 0 || out.missed > 0) load();
+    };
+    tick();
+    const t = setInterval(tick, 5 * 60_000);
+    return () => { stop = true; clearInterval(t); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useLive(["pact_jobs", "schedule_days", "employees"], () => load(), { skipWhileTyping: true });
 
   // a new start_date here moves the job's crew rows to the new day and clears

@@ -1,9 +1,9 @@
 // The text a worker gets — one shape for every job, PACT or NYCHA, written
 // in whole sentences a phone reads at a glance: who it's for, the day, where
 // (the street, the building when the street isn't the whole story, the
-// apartment), the work, a map. No PO or release number — the crew doesn't
-// need one. A day change is the same message saying what changed. Each
-// worker gets it in their own language: English, or Spanish.
+// apartment), the work, the job's number so anyone can say which job they
+// mean, and a map. A day change is the same message saying what changed.
+// Each worker gets it in their own language: English, or Spanish.
 import { mapLink } from "./mapLink";
 export { mapLink };
 
@@ -27,6 +27,16 @@ export type CrewTextInput = {
   work?: string | null;             // what they're going there to do
   moved?: { from?: string | null; to: string } | null;  // a day change: the new day, and the old one when known
   lang?: string | null;             // the worker's language — "es" for Spanish, else English
+  po?: string | null;               // a PACT job's PO number
+  release?: string | null;          // a NYCHA release number
+};
+// the job's own number, the way the office and the partners say it. "PO" and
+// "release" stay as they are in Spanish — that is what everyone calls them.
+const jobRef = (t: CrewTextInput): string => {
+  const po = flat(t.po).replace(/^(po\s*#?|#)\s*/i, "");
+  if (po) return `PO ${po}`;
+  const rel = flat(t.release).replace(/^(release\s*#?|#)\s*/i, "");
+  return rel ? `release ${rel}` : "";
 };
 export function crewText(t: CrewTextInput): string {
   const lang = langOf(t.lang);
@@ -41,6 +51,7 @@ export function crewText(t: CrewTextInput): string {
   const stop = /[!?…]$/.test(work) ? "" : ".";
   // a "move" to the same day is not a move — the old day is not repeated
   const moved = t.moved && t.moved.from && t.moved.from === t.moved.to ? { to: t.moved.to } : t.moved;
+  const ref = jobRef(t);
   // "Van Dyke (370 Blake Avenue, Brooklyn, NY 11212), Apt 4B" — the building only when the street doesn't already name it
   const showBuilding = !!building && !sameText(building, street) && !(street && street.toLowerCase().includes(building.toLowerCase()));
   const place = building && street ? (showBuilding ? `${building} (${street})` : street) : street || building;
@@ -56,6 +67,7 @@ export function crewText(t: CrewTextInput): string {
       paras.push(`${hello} Tiene trabajo${day ? ` el ${day}` : ""}${where ? ` en ${where}` : ""}.${day ? "" : " El día se le avisará pronto."}${where ? "" : " La dirección se le enviará después."}`);
     }
     if (work) paras.push(`El trabajo es: ${work}${stop}`);
+    if (ref) paras.push(`Este trabajo es el ${ref}.`);
     if (street) paras.push(`Aquí está el mapa: ${mapLink(street)}`);
     return paras.join("\n\n");
   }
@@ -68,6 +80,7 @@ export function crewText(t: CrewTextInput): string {
     paras.push(`${hello} You are scheduled to work${day ? ` on ${day}` : ""}${where ? ` at ${where}` : ""}.${day ? "" : " The day will be set soon."}${where ? "" : " The address will follow."}`);
   }
   if (work) paras.push(`Here is the work: ${work}${stop}`);
+  if (ref) paras.push(`This job is ${ref}.`);
   if (street) paras.push(`Here is the map: ${mapLink(street)}`);
   return paras.join("\n\n");
 }

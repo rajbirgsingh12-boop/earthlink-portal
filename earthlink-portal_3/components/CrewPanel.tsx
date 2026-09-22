@@ -6,6 +6,7 @@ import { prettyDate } from "@/lib/docs";
 import { crewMessageFor, crewPreview, normText, rowNeedsText, saveWorkerLang, siteOf, workOf, type CrewJob, type CrewRow, type Worker } from "@/lib/pactCrew";
 import { spanishKnown, spanishWork } from "@/lib/spanish";
 import { langOf, LANG_LABEL, type Lang } from "@/lib/crewText";
+import { goesOnItsOwn, isQueued, isLate, localStamp, prettyWhen, queueRows, sendPicks, unqueueRows } from "@/lib/sendLater";
 import LangToggle from "@/components/LangToggle";
 import Stamp from "@/components/Stamp";
 
@@ -22,6 +23,11 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   const [q, setQ] = useState("");
   const [adding, setAdding] = useState(false);
   const [sending, setSending] = useState(false);
+  // "Send later": the picker being open, and the time typed into it
+  const [later, setLaterOpen] = useState(false);
+  const [when, setWhen] = useState("");
+  const [onItsOwn, setOnItsOwn] = useState<boolean | null>(null); // does the timer send it, or the open portal?
+  useEffect(() => { goesOnItsOwn().then(setOnItsOwn); }, []);
   const [phoneBuf, setPhoneBuf] = useState<Record<string, string>>({});
   const [machine, setMachine] = useState(true); // company number set up? (else a group text opens on this phone)
   useEffect(() => { textMachineReady().then(setMachine); }, []);
@@ -63,6 +69,25 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   };
   const onJob = new Set(rows.map((r) => r.employee_id));
   const need = rows.filter((r) => rowNeedsText(r, job));
+  const waiting = rows.filter((r) => isQueued(r));
+  const nextWhen = waiting.map((r) => r.send_at || "").sort()[0] || "";
+  // set the whole crew's texts up for a time — the ones still to tell
+  const setLater0 = async (t: Date) => {
+    const ids = (need.length ? need : rows).map((r) => r.id);
+    if (ids.length === 0) { flash("Nobody on the job yet"); return; }
+    if (!day) { flash("Give the job a day first — the crew is texted the day"); return; }
+    const bad = await queueRows(ids, t);
+    if (bad) { flash(bad); return; }
+    setLaterOpen(false); setWhen("");
+    flash(`${ids.length === 1 ? "The text goes" : `${ids.length} texts go`} out ${prettyWhen(t.toISOString())}`);
+    await onChange();
+  };
+  const dropLater = async () => {
+    const bad = await unqueueRows(waiting.map((r) => r.id));
+    if (bad) { flash(bad); return; }
+    flash("The text that was set up is called off — nothing goes out on its own");
+    await onChange();
+  };
   const cq = q.trim().toLowerCase();
   const pick = emps.filter((e) => e.active !== false && !onJob.has(e.id)).filter((e) => !cq || e.name.toLowerCase().includes(cq));
 
@@ -144,8 +169,9 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
             <b className="text-[13px]">{name}</b>
             {e && <LangToggle value={langOf(e.lang)} onChange={(l) => setLang(e, l)} disabled={!canEdit} name={`Language for ${name}`} />}
             {r.texted && !needs && <Stamp label="TEXTED ✓" tone="ok" />}
-            {r.texted && needs && <Stamp label="NEEDS THE NEW DAY" tone="alert" />}
-            {!r.texted && <Stamp label="NOT TEXTED" tone="mute" />}
+            {needs && isQueued(r) && <Stamp label={`${isLate(r) ? "STILL WAITING · " : "GOES OUT "}${prettyWhen(r.send_at)}`} tone={isLate(r) ? "alert" : "work"} />}
+            {r.texted && needs && !isQueued(r) && <Stamp label="NEEDS THE NEW DAY" tone="alert" />}
+            {!r.texted && !isQueued(r) && <Stamp label="NOT TEXTED" tone="mute" />}
             {canEdit && (
               <span className="ml-auto flex items-center gap-2">
                 {needs && cleanPhone(e?.phone || "") && <button type="button" className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline" disabled={sending} onClick={() => send(r)}>send</button>}
@@ -178,8 +204,39 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
             <button type="button" className="btn btn-primary min-h-[44px]" disabled={sending || need.length === 0 || !day} onClick={() => send()}>
               {sending ? "Sending…" : need.length ? `📱 Text crew (${need.length})` : "Crew is up to date ✓"}
             </button>
+            {machine && need.length > 0 && !later && (
+              <button type="button" className="btn min-h-[44px]" disabled={sending || !day} onClick={() => { setLaterOpen(true); setWhen(localStamp(sendPicks()[0]?.when || new Date())); }} data-crew-later>📅 Send it later…</button>
+            )}
             <span className="text-[11px] text-inksoft">{machine ? "from the company number" : "opens a group text on this phone"} · each person once</span>
           </div>
+          {waiting.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-2 rounded-sm border border-rulesoft bg-white px-3 py-2 text-[13px]" data-crew-waiting>
+              <span>{isLate(waiting[0]) ? "⚠ " : "📅 "}{waiting.length === 1 ? "A text is" : `${waiting.length} texts are`} set to go out {prettyWhen(nextWhen)}{isLate(waiting[0]) ? " — it hasn't gone yet" : ""}.</span>
+              <span className="ml-auto flex items-center gap-2">
+                <button type="button" className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline" disabled={sending} onClick={() => send()}>send it now</button>
+                <button type="button" className="inline-flex min-h-[44px] items-center text-[13px] text-alert underline" onClick={dropLater}>call it off</button>
+              </span>
+            </div>
+          )}
+          {later && (
+            <div className="mt-2 rounded-sm border border-work bg-white p-3" data-crew-picker>
+              <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-widest text-inksoft">When should it go out?</div>
+              <div className="mb-2 flex flex-wrap gap-1.5">
+                {sendPicks().map((p) => (
+                  <button key={p.label} type="button" className="btn min-h-[44px] px-3 py-1.5 text-[12px] normal-case tracking-normal" onClick={() => void setLater0(p.when)}>{p.label}</button>
+                ))}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input type="datetime-local" className="field min-h-[44px] w-auto font-mono" aria-label="When the text goes out" value={when} onChange={(e) => setWhen(e.target.value)} />
+                <button type="button" className="btn btn-primary min-h-[44px]" disabled={!when} onClick={() => { const t = new Date(when); if (Number.isNaN(t.getTime())) { flash("That time doesn't look right"); return; } void setLater0(t); }}>Set it</button>
+                <button type="button" className="btn btn-ghost min-h-[44px]" onClick={() => setLaterOpen(false)}>Cancel</button>
+              </div>
+              <div className="mt-1.5 text-[11px] text-inksoft">
+                The text is written when it goes out, so if the job moves it says the new day.
+                {onItsOwn === false ? " It goes out the next time somebody has the portal open — Settings → System check says how to have it go out on its own." : onItsOwn ? " It goes out on its own, whether or not anyone has the portal open." : ""}
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>

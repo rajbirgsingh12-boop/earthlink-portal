@@ -15,12 +15,13 @@ import { cleanPhone, smsHref, sendServerTexts, textMachineReady, textRows, stamp
 import { normText, saveWorkerLang } from "@/lib/pactCrew";
 import { crewText, langOf, LANG_LABEL, type Lang } from "@/lib/crewText";
 import { spanishKnown, spanishNow, spanishWork } from "@/lib/spanish";
+import { goesOnItsOwn, isLate, isQueued, localStamp, prettyWhen, queueRows, sendDueNow, sendPicks, unqueueRows } from "@/lib/sendLater";
 import LangToggle from "@/components/LangToggle";
 
 interface Emp { id: string; name: string; trade: string; active?: boolean; phone?: string | null; lang?: string | null; }
 interface RelRow { id: string; rel_number: string; location: string; contract_id: string; address?: string | null; }
 // (a row with pact_job_id belongs to a PACT job — those live on the PACT calendar, not here)
-interface Assign { id: string; day: string; release_id: string | null; pact_job_id?: string | null; employee_id: string; description: string; texted: boolean; address?: string | null; }
+interface Assign { id: string; day: string; release_id: string | null; pact_job_id?: string | null; employee_id: string; description: string; texted: boolean; address?: string | null; send_at?: string | null; }
 
 const upgradeMsg = "Run supabase/upgrade_day_schedule.sql first";
 
@@ -46,8 +47,28 @@ export default function Schedule() {
   const [msg, setMsg] = useState("");
   const [machine, setMachine] = useState(false); // company Twilio number configured?
   const [sending, setSending] = useState<string | null>(null); // release currently texting
+  const [laterFor, setLaterFor] = useState<string | null>(null); // release whose "send it later" picker is open
+  const [when, setWhen] = useState("");
+  const [onItsOwn, setOnItsOwn] = useState<boolean | null>(null);
+  useEffect(() => { goesOnItsOwn().then(setOnItsOwn); }, []);
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 4000); };
   useEffect(() => { textMachineReady().then(setMachine); }, []);
+  // anything set up for later whose time has come goes out now. With the
+  // Vercel cron set up it has gone already; this is the catch-up for when it
+  // isn't, and it costs one small call whenever the schedule is open.
+  useEffect(() => {
+    let stop = false;
+    const tick = async () => {
+      const out = await sendDueNow();
+      if (stop || !out) return;
+      if (out.sent > 0) flash(`${out.sent} text${out.sent === 1 ? "" : "s"} that ${out.sent === 1 ? "was" : "were"} set up just went out ✓`);
+      else if (out.missed > 0) flash(`${out.missed} text${out.missed === 1 ? "" : "s"} set up for earlier didn't go out (no number, or that day has passed) — the crew shows as not told`);
+      if (out.sent > 0 || out.missed > 0) load();
+    };
+    tick();
+    const t = setInterval(tick, 5 * 60_000);
+    return () => { stop = true; clearInterval(t); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const load = async () => {
     // independent reads go out together; releases only carry the columns the
@@ -113,9 +134,9 @@ export default function Schedule() {
   // A Spanish-reading worker gets the work in Spanish too: Claude's translation
   // once it has answered (asked below, ahead of the tap), the glossary's until then
   const msgFor = (rel: RelRow, relId: string, who?: string, lang?: string | null) =>
-    crewText({ first: who, day, street: addrOf(relId), building: rel.location, work: langOf(lang) === "es" ? spanishNow(descOf(relId)) : descOf(relId), lang });
+    crewText({ first: who, day, street: addrOf(relId), building: rel.location, release: rel.rel_number, work: langOf(lang) === "es" ? spanishNow(descOf(relId)) : descOf(relId), lang });
   const msgForAsync = async (rel: RelRow, relId: string, who?: string, lang?: string | null) =>
-    crewText({ first: who, day, street: addrOf(relId), building: rel.location, work: langOf(lang) === "es" ? await spanishWork(descOf(relId)) : descOf(relId), lang });
+    crewText({ first: who, day, street: addrOf(relId), building: rel.location, release: rel.rel_number, work: langOf(lang) === "es" ? await spanishWork(descOf(relId)) : descOf(relId), lang });
   const [, bump] = useState(0);
   useEffect(() => {
     // every work line a Spanish-reading worker on this day will get: translated now, remembered
@@ -336,6 +357,7 @@ export default function Schedule() {
                         await sb().from("schedule_days").update({ texted: false }).eq("id", row.id);
                       }}><Stamp label="TEXTED ✓" tone="ok" /></button>
                     : <Stamp label="TEXTED ✓" tone="ok" />)}
+                  {isQueued(row) && <Stamp label={`${isLate(row) ? "STILL WAITING · " : "GOES OUT "}${prettyWhen(row.send_at)}`} tone={isLate(row) ? "alert" : "work"} />}
                   {!ok && <span className="text-[11px] text-inksoft">no number in the crew list</span>}
                   <span className="ml-auto flex items-center gap-2.5">
                     {ok && !machine && (
@@ -376,7 +398,19 @@ export default function Schedule() {
                 </div>
               </div>
             )}
-            {canEdit && addFor !== rel.id && (
+            {canEdit && addFor !== rel.id && (() => {
+              const waiting = assigned.filter((r) => isQueued(r));
+              const setUp = async (t: Date) => {
+                const ids = assigned.filter((r) => !r.texted || isQueued(r)).map((r) => r.id);
+                if (ids.length === 0) { flash("Everyone here has already been texted"); return; }
+                const bad = await queueRows(ids, t);
+                if (bad) { flash(bad); return; }
+                setLaterFor(null); setWhen("");
+                flash(`${ids.length === 1 ? "The text goes" : `${ids.length} texts go`} out ${prettyWhen(t.toISOString())}`);
+                loadDay(day);
+              };
+              return (
+              <>
               <div className="mt-2 flex flex-wrap gap-2">
                 <button className="btn min-h-[44px] px-3 text-[13px]" onClick={() => { setAddFor(rel.id); setAddQ(""); }}>+ Add worker</button>
                 {assigned.length > 0 && (
@@ -385,8 +419,42 @@ export default function Schedule() {
                     {sending === rel.id ? "Sending…" : `Assign & text ${assigned.length === 1 ? "worker" : "crew"}`}
                   </button>
                 )}
+                {machine && assigned.length > 0 && laterFor !== rel.id && (
+                  <button className="btn min-h-[44px] px-3 text-[13px]" data-later={rel.rel_number}
+                    onClick={() => { setLaterFor(rel.id); setWhen(localStamp(sendPicks()[0]?.when || new Date())); }}>📅 Send it later…</button>
+                )}
               </div>
-            )}
+              {waiting.length > 0 && (
+                <div className="mt-2 flex flex-wrap items-center gap-2 rounded-sm border border-rulesoft bg-white px-3 py-2 text-[13px]" data-later-waiting={rel.rel_number}>
+                  <span>{isLate(waiting[0]) ? "⚠ " : "📅 "}{waiting.length === 1 ? "A text is" : `${waiting.length} texts are`} set to go out {prettyWhen(waiting.map((r) => r.send_at || "").sort()[0])}{isLate(waiting[0]) ? " — it hasn't gone yet" : ""}.</span>
+                  <span className="ml-auto flex items-center gap-2">
+                    <button className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline" disabled={sending === rel.id} onClick={() => textCrew(rel)}>send it now</button>
+                    <button className="inline-flex min-h-[44px] items-center text-[13px] text-alert underline" onClick={async () => { const bad = await unqueueRows(waiting.map((r) => r.id)); if (bad) { flash(bad); return; } flash("The text that was set up is called off"); loadDay(day); }}>call it off</button>
+                  </span>
+                </div>
+              )}
+              {laterFor === rel.id && (
+                <div className="mt-2 rounded-sm border border-work bg-white p-3" data-later-picker>
+                  <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-widest text-inksoft">When should it go out?</div>
+                  <div className="mb-2 flex flex-wrap gap-1.5">
+                    {sendPicks().map((p) => (
+                      <button key={p.label} className="btn min-h-[44px] px-3 py-1.5 text-[12px] normal-case tracking-normal" onClick={() => void setUp(p.when)}>{p.label}</button>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input type="datetime-local" className="field min-h-[44px] w-auto font-mono" aria-label="When the text goes out" value={when} onChange={(e) => setWhen(e.target.value)} />
+                    <button className="btn btn-primary min-h-[44px]" disabled={!when} onClick={() => { const t = new Date(when); if (Number.isNaN(t.getTime())) { flash("That time doesn't look right"); return; } void setUp(t); }}>Set it</button>
+                    <button className="btn btn-ghost min-h-[44px]" onClick={() => setLaterFor(null)}>Cancel</button>
+                  </div>
+                  <div className="mt-1.5 text-[11px] text-inksoft">
+                    The text is written when it goes out, so a change here before then goes with it.
+                    {onItsOwn === false ? " It goes out the next time somebody has the portal open — Settings → System check says how to have it go out on its own." : onItsOwn ? " It goes out on its own, whether or not anyone has the portal open." : ""}
+                  </div>
+                </div>
+              )}
+              </>
+              );
+            })()}
           </div>
         );
       })}

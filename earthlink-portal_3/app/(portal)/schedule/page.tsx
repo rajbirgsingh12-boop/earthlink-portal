@@ -107,7 +107,7 @@ export default function Schedule() {
     const d = qs.get("day") || "";
     if (/^\d{4}-\d{2}-\d{2}$/.test(d)) setDay(d);
     const r = qs.get("release") || "";
-    if (r) setTimeout(() => document.querySelector(`[data-rel-card="${r}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 900);
+    if (r) setFocusRel(r);
   }, []);
   // releases a worker texted "nobody home" about, waiting for a new day
   // (RUN_ME section 21 clears the mark once the release is put on a later day)
@@ -119,17 +119,29 @@ export default function Schedule() {
   // admin and office only — the notices are theirs (the database says so too)
   useEffect(() => { if (canEdit) loadNobody(); }, [canEdit]); // eslint-disable-line react-hooks/exhaustive-deps
   useLive(["texted_photos"], () => loadNobody(), { enabled: canEdit });
-  // "Give it a new day…": the day it was missed, at its card — add it to another day from there
-  const showRelease = (id: string, d: string) => {
-    setDay(d);
-    setTimeout(() => document.querySelector(`[data-rel-card="${id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 700);
-  };
+  // "Give it a new day…" (and ?release= from the PACT tab): the day it was
+  // missed, at its card — add it to another day from there. It waits for the
+  // releases and that day's crew to load, clears a contract filter that would
+  // hide it, and puts its card on the day even if nobody's on it any more.
+  const [focusRel, setFocusRel] = useState("");
+  const [rowsDay, setRowsDay] = useState("");
+  const showRelease = (id: string, d: string) => { setDay(d); setFocusRel(id); };
+  useEffect(() => {
+    if (!focusRel || rels.length === 0 || rowsDay !== day) return;
+    const id = focusRel;
+    setFocusRel("");
+    if (!rels.some((r) => r.id === id)) { flash("That release isn't on the schedule any more (it may have been canceled)"); return; }
+    setLinkContract("");
+    setExtraRels((prev) => (prev.includes(id) ? prev : [...prev, id]));
+    setTimeout(() => document.querySelector(`[data-rel-card="${id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 250);
+  }, [focusRel, rels, rowsDay, day]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadDay = async (d: string) => {
     const { data, error } = await sb().from("schedule_days").select("*").eq("day", d).order("created_at");
     if (dayRef.current !== d) return; // switched days while this was in flight
     if (error) { if (/relation|column|schema cache/i.test(error.message)) flash(upgradeMsg); return; }
     setRows((data || []) as Assign[]);
+    setRowsDay(d);
   };
   const dayRef = useRef(day);
   useEffect(() => { dayRef.current = day; setExtraRels([]); setAddFor(null); setAddQ(""); setDescBuf({}); setAddrBuf({}); setMapFor(null); loadDay(day); }, [day]); // eslint-disable-line react-hooks/exhaustive-deps

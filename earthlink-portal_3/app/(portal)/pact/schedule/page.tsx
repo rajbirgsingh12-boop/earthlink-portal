@@ -137,15 +137,22 @@ export default function PactCalendar() {
     setQ("");
     if (offCalendar(j, today)) setShown((prev) => new Set(prev).add(j.id));
     goTo(j.start_date!);
-    setTimeout(() => document.querySelector(`[data-po-card="${poOf(j)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 350);
+    let tries = 0;
+    const scroll = () => {
+      const el = document.querySelector(`[data-po-card="${poOf(j)}"]`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+      else if (++tries < 12) setTimeout(scroll, 150);
+    };
+    setTimeout(scroll, 150);
   };
   const jobParamDone = useRef(false);
   useEffect(() => {
-    if (jobParamDone.current || jobs.length === 0) return;
+    // the calendar draws once the sign-in is known — wait for both
+    if (jobParamDone.current || jobs.length === 0 || !role) return;
     jobParamDone.current = true;
     const id = new URLSearchParams(window.location.search).get("job") || "";
     if (id) showJob(id);
-  }, [jobs]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [jobs, role]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // a new start_date here moves the job's crew rows to the new day and clears
   // their TEXTED mark (RUN_ME section 14's trigger) — the cards then show who

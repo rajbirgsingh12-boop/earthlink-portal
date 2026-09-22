@@ -15,33 +15,35 @@ const norm = (s: string) => (s || "").toLowerCase().normalize("NFD").replace(/[\
 // Said in so many words, English or Spanish — about the door or the tenant,
 // never just any "no": "Home Depot not open", "no está el material", "hoy no
 // puedo, estoy enfermo", "the delivery got cancelled" are not a door.
-const WHO = "(tenant|tenants|resident|they|she|he|lady|guy|owner|family|people)";
+const TENANT = "(tenant|tenants|resident|lady|owner|family)";
+const PRON = "(they|she|he)";   // only with the door's own verbs — "they said tomorrow" is the lumber yard
 const SAID = new RegExp([
   "\\b(nobody|no ?one|no body)('?s)? (is )?(home|there|here|answer\\w*|opens?|opened|opening|came|coming)\\b",
-  "\\bnot (at )?home\\b",
+  "\\bnot (at )?home\\b(?! depot)",
   "\\bno answer( (at|from) (the )?(door|apt|apartment|unit|tenant))?$",
   "\\bno (access|entry)( (to|at|for) (the )?(apt|apartment|unit))?$",
   "\\b(tenant )?no show$",
   "\\b(can'?t|cannot|couldn'?t|could not) get in(side)?\\b", "\\b(can'?t|cannot|couldn'?t|could not) get access\\b",
-  `\\b${WHO}( is| are|'s|'re)? (won'?t|will not|didn'?t|did not|doesn'?t|does not|not|isn'?t|aren'?t|never) ?(open\\w*|answer\\w*|home|there|here|in)\\b`,
+  `\\b(${TENANT}|${PRON})( is| are|'s|'re)? (won'?t|will not|didn'?t|did not|doesn'?t|does not|not|never) ?(open\\w*|answer\\w*)\\b`,
+  `\\b${TENANT}( is| are|'s|'re)? (not|isn'?t|aren'?t|wasn'?t|never) (home|there|here|in)\\b`,
   "\\b(won'?t|will not|didn'?t|did not|doesn'?t|does not|not) (open|opening|answer\\w*) (the |my |our )?door\\b",
-  `\\b${WHO} (won'?t|will not|not|didn'?t) let(ting)? (us|me) in\\b`, "\\bdoor (is )?(locked|closed)\\b",
-  `\\b${WHO} (cancel\\w*|said no|says no|refus\\w*)\\b`, `\\b${WHO} (said|says) (not today|tomorrow|another day)\\b`,
-  `\\b${WHO} (can'?t|cannot|can not) (do it |make it |do |make )?today\\b`,
-  `\\b${WHO} (want|wants|asked|asks|need|needs)( us| me)? to reschedul\\w*`, `\\b${WHO} reschedul\\w*`,
+  `\\b(${TENANT}|${PRON}) (won'?t|will not|not|didn'?t) let(ting)? (us|me) in\\b`, "\\bdoor (is )?(locked|closed)\\b",
+  `\\b${TENANT} (cancel\\w*|said no|says no|refus\\w*)\\b`, `\\b${TENANT} (said|says) (not today|tomorrow|another day)\\b`,
+  `\\b${TENANT} (can'?t|cannot|can not) (do it |make it |do |make )?today\\b`,
+  `\\b${TENANT} (want|wants|asked|asks|need|needs)( us| me)? to reschedul\\w*`, `\\b${TENANT} reschedul\\w*`,
   "\\b(appointment|appt) (got |was |is )?cancel+\\w*",
   // español
-  "\\bnadie\\b",
+  "^nadie$", "\\bno (hay|habia) nadie\\b", "\\bnadie (en casa|abre|abrio|abren|contesta|contesto|responde|respondio|esta|estaba|aqui|alli|ahi)\\b",
   "^(el |la )?(inquilin[oa]s?|senor(a|es)?|duen[oa]s?|familia)? ?no (esta|estan|estaba|estaban)( (en casa|aqui|ahi|alli|nadie))?$",
   "\\bno (esta|estan|estaba|estaban) (en casa|nadie)\\b",
   "\\bno (abre|abren|abrio|abrieron|abrian)\\b", "\\bno (me|nos) (abre|abren|abrio|abrieron|deja|dejan|dejaron) ?(entrar)?\\b",
   "\\bno (contesta|contestan|contesto|contestaron|responde|responden|respondio)( (la puerta|el inquilino|la inquilina))?$",
   "\\bno (se puede|puedo|podemos|pudimos|pude) entrar( (al|en el) (apartamento|apto|apt|departamento|unidad))?$",
   "\\b(inquilin[oa]s?|senor(a)?|la familia) cancel\\w*", "\\b(la )?cita (se )?cancel\\w*",
-  "\\bno (puede|pueden) hoy\\b", "\\bhoy no (puede|pueden)\\b", "\\binquilin[oa]s? no\\b",
+  "\\b(inquilin[oa]s?|senor(a)?|familia) no (puede|pueden)( hoy)?\\b", "\\binquilin[oa]s? no\\b",
 ].join("|"));
 // a plain "no" — alone, or with the job's number: "no", "NO 116843", "nope", "nah"
-const BARE = /^(no+|nope|nah|nada|no po|no no)$/;
+const BARE = /^(no+|nope|nah|no po|no no)$/;
 // "no problem", "no worries" — a no that isn't about the door
 const NOT_IT = /\b(no problem|no prob|no worries|no worry|no hay problema|no te preocupes|no se preocupe|no pasa nada|wrong job|equivocad\w*)\b/;
 
@@ -109,7 +111,10 @@ export function whichMissed(ctx: {
   const nums = numbersIn(ctx.body);
   // "No" / "No, 116900" right after "Got it — 3 photos on PO 116843 … wrong
   // job? reply with the right PO": that's about the photos, not a door
-  if (bareNo(ctx.body) && ctx.answerToPhotos) return { kind: "skip" };
+  // …unless the number is one of today's doors they haven't been through —
+  // "NO 116900" is how the portal teaches a door to be reported
+  if (bareNo(ctx.body) && ctx.answerToPhotos
+    && !today.some((j) => !ctx.visited.has(j.id) && !ctx.flagged.has(j.id) && j.keys.some((k) => nums.includes(k)))) return { kind: "skip" };
   if (nums.length) {
     const hit = today.filter((j) => j.keys.some((k) => nums.includes(k)));
     if (hit.length === 1) return { kind: "missed", job: hit[0], already: ctx.flagged.has(hit[0].id) };

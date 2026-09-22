@@ -139,12 +139,15 @@ export async function nobodyFlow(db: Db, o: {
     await tellOffice(`Texted at ${nyTime(now)} — after hours, so nothing was changed`);
     return { handled: true, reply: toldOfficeText(lang) };
   }
-  if (bare) {
+  if (bare && !numbersIn(o.body).length) {
     const told = rows.filter((r) => r.day > today && r.texted_at && now.getTime() - Date.parse(r.texted_at) < 3 * 3_600_000)
       .sort((a, b) => Date.parse(b.texted_at || "") - Date.parse(a.texted_at || ""))[0];
     if (told && Date.parse(told.texted_at || "") > Math.max(lastMine, lastPhotos)) {
-      await tellOffice(`Answered the text about ${shortDay(told.day)} — nothing was changed`);
-      return { handled: true, reply: toldOfficeText(lang) };
+      // it could be about that text, or about a door today: the office hears
+      // it either way, and a worker with a door open today is told how to say so
+      await tellOffice(`Texted “${o.body.trim()}” after the text about ${shortDay(told.day)} — nothing was changed`);
+      const open = jobs.filter((j) => j.day === today && !flagged.has(j.id) && !visited.has(j.id));
+      return { handled: true, reply: open.length ? `${toldOfficeText(lang)} ${hintText(open, lang)}` : toldOfficeText(lang) };
     }
   }
 
@@ -281,9 +284,12 @@ export async function nobodyFlow(db: Db, o: {
       }
       if (out.length && twilioConfigured()) {
         await sendTexts(out, async (msg) => {
-          sentTo.push(first(o.emps.find((x) => cleanPhone(x.phone) === msg.to)));
+          const e = o.emps.find((x) => cleanPhone(x.phone) === msg.to);
+          sentTo.push(first(e));
           await db.patch(`schedule_days?id=eq.${msg.id}`, { texted: true });
           await db.patch(`schedule_days?id=eq.${msg.id}`, { texted_at: now.toISOString() });
+          // on their record: their next "no" is about the job they were just sent to
+          if (e) await db.insert("texted_photos", { employee_id: e.id, from_phone: msg.to, body: "", status: "note", how: "nobody", photos: [] });
         });
       }
     }
@@ -297,9 +303,17 @@ export async function nobodyFlow(db: Db, o: {
     const table = missed.kind === "pact" ? "pact_jobs" : "releases";
     const cur = (await db.get<{ notes?: string | null }>(`${table}?id=eq.${missed.id}&select=notes`)).rows[0];
     if (cur) await db.patch(`${table}?id=eq.${missed.id}`, { notes: appendLine(cur.notes, nobodyNote(today, first(emp), nyTime(now))) });
-    if (noticeId && !(await db.patch(`texted_photos?id=eq.${noticeId}`, { note: summary, photos: proof }))) await db.patch(`texted_photos?id=eq.${noticeId}`, { photos: proof });
+    if (noticeId) {
+      // the other worker at the door may have added theirs in the meantime: keep it
+      const had = (await db.get<{ note?: string | null }>(`texted_photos?id=eq.${noticeId}&select=note`)).rows[0]?.note || "";
+      const note = [summary, had.trim()].filter(Boolean).join(" · ");
+      if (!(await db.patch(`texted_photos?id=eq.${noticeId}`, { note, photos: proof }))) await db.patch(`texted_photos?id=eq.${noticeId}`, { photos: proof });
+    }
   } else {
-    const open = notices.find((n) => jobOfMark(n) === missed.id && n.status === "nobody");
+    // the notice as it is now (the other worker's, maybe written after this text came in)
+    const col = missed.kind === "pact" ? "pact_job_id" : "release_id";
+    const open = notices.find((n) => jobOfMark(n) === missed.id && n.status === "nobody")
+      || (await db.get<Mark>(`texted_photos?status=eq.nobody&how=eq.nobody&${col}=eq.${missed.id}&created_at=gte.${since}&select=id,note&order=created_at.desc&limit=1`)).rows[0];
     if (open && !(open.note || "").includes(summary)) await db.patch(`texted_photos?id=eq.${open.id}`, { note: `${(open.note || "").trim()}${open.note ? " · " : ""}${summary}` });
   }
   return { handled: true, reply: replied ? "" : reply, missed };

@@ -7,14 +7,10 @@
 // the same money.
 import { COMPANY } from "./company";
 import { money, lineTotal, proposalFileName, type ProposalFields } from "./proposalDoc";
+import { LOGO_RGB, type Rgb } from "./logoColors";
 
-// the letter's palette, as in the .docx
-type Rgb = readonly [number, number, number];
-const INK: Rgb = [0.122, 0.137, 0.157];
-const MUTED: Rgb = [0.431, 0.431, 0.400];
-const BRAND: Rgb = [0.761, 0.290, 0.039];
-const BAND: Rgb = [0.957, 0.945, 0.922];
-const HAIR: Rgb = [0.863, 0.843, 0.796];
+// the letter's palette, as in the .docx — the logo's colors
+const { ink: INK, muted: MUTED, brown: BROWN, teal: TEAL, green: GREEN, tan: TAN, cream: BAND, hair: HAIR } = LOGO_RGB;
 const WHITE: Rgb = [1, 1, 1];
 
 const cents = (v: number) => Math.round((Number(v) || 0) * 100) / 100;
@@ -148,7 +144,7 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
       y -= h + 7; // clear air between the logo and the name — no overlap
     } catch { /* unreadable logo — text letterhead */ }
   }
-  ctr(L.name, 14.5, bold);
+  ctr(L.name, 14.5, bold, BROWN);
   y -= 15;
   ctr(L.address, 8.5, helv, MUTED);
   y -= 11.5;
@@ -156,16 +152,18 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
   y -= 11.5;
   ctr(L.emails.replace(/^Email:\s*/, "").replace(/\s*\|\s*Office Email:\s*/, "  ·  "), 8.5, helv, MUTED);
   y -= 10;
-  rule(y, 2, BRAND);
+  // the globe's two halves, ocean then land
+  page.drawRectangle({ x: M, y: y - 1.25, width: W / 2, height: 2.5, color: C(TEAL) });
+  page.drawRectangle({ x: M + W / 2, y: y - 1.25, width: W / 2, height: 2.5, color: C(GREEN) });
   y -= S.afterRule;
 
   // ---- title, with what identifies this letter set against it ----
-  track("PROPOSAL", M, 19, bold, BRAND, 2.2);
+  track("PROPOSAL", M, 19, bold, BROWN, 2.2);
   const meta = (label: string, value: string) => {
     const vw = bold.widthOfTextAtSize(value, 10.5);
     putAt(value, RIGHT - vw, y, 10.5, bold);
     const lw = trackW(label, 7.5, bold, 1.4);
-    track(label, RIGHT - vw - 9 - lw, 7.5, bold, MUTED, 1.4, y + 1);
+    track(label, RIGHT - vw - 9 - lw, 7.5, bold, TAN, 1.4, y + 1);
   };
   if (f.poNumber) { meta("PO #", f.poNumber); y -= S.metaRow; }
   meta("DATE", f.date || "");
@@ -192,22 +190,22 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
   const addrX = M + 10 + labW + 8;
   const addrLines = wrap(f.serviceAddress || "—", RIGHT - 10 - addrX, 10.5, bold);
   page.drawRectangle({ x: M, y: y - 8 - (addrLines.length - 1) * 14, width: W, height: 26 + (addrLines.length - 1) * 14, color: C(BAND) });
-  track("SERVICE ADDRESS:", M + 10, 8, bold, MUTED, 1.2, y);
+  track("SERVICE ADDRESS:", M + 10, 8, bold, TAN, 1.2, y);
   addrLines.forEach((ln, i) => putAt(ln, addrX, y - i * 14, 10.5, bold));
   y -= S.afterBand + (addrLines.length - 1) * 14;
 
   // ---- the work ----
-  track("SCOPE OF WORK", M, 9, bold, BRAND, 1.7);
+  track("SCOPE OF WORK", M, 9, bold, TEAL, 1.7);
   y -= S.afterScope;
   const CQ = 374, UX = 470, AX = RIGHT;      // qty column CENTER / right edges of unit price and amount
   const DW = 290;                             // the description column
   const tableHead = (label: string) => {
     page.drawRectangle({ x: M, y: y - 7, width: W, height: 20, color: C(BAND) });
-    page.drawLine({ start: { x: M, y: y - 7 }, end: { x: RIGHT, y: y - 7 }, thickness: 1.4, color: C(BRAND) });
-    track(label, M + 8, 8, bold, MUTED, 1.2);
-    track("QTY", CQ - trackW("QTY", 8, bold, 1.2) / 2, 8, bold, MUTED, 1.2);
-    track("UNIT PRICE", UX - trackW("UNIT PRICE", 8, bold, 1.2), 8, bold, MUTED, 1.2);
-    track("AMOUNT", AX - trackW("AMOUNT", 8, bold, 1.2), 8, bold, MUTED, 1.2);
+    page.drawLine({ start: { x: M, y: y - 7 }, end: { x: RIGHT, y: y - 7 }, thickness: 1.4, color: C(BROWN) });
+    track(label, M + 8, 8, bold, TAN, 1.2);
+    track("QTY", CQ - trackW("QTY", 8, bold, 1.2) / 2, 8, bold, TAN, 1.2);
+    track("UNIT PRICE", UX - trackW("UNIT PRICE", 8, bold, 1.2), 8, bold, TAN, 1.2);
+    track("AMOUNT", AX - trackW("AMOUNT", 8, bold, 1.2), 8, bold, TAN, 1.2);
     y -= S.afterHead;
   };
   tableHead("DESCRIPTION");
@@ -250,13 +248,13 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
   const grand = Math.round((sub + tax) * 100) / 100;
   if (y < tailHeight(S)) { page = doc.addPage([612, 792]); y = 738; }
   y -= S.preTot;
-  putR("Total Cost — labor and materials", RIGHT - 92, 10, helv, MUTED);
+  putR("Total Cost (labor and materials)", RIGHT - 92, 10, helv, MUTED);
   putR(money(sub), AX, 10);
   y -= S.totRow;
   putR(`Sales Tax (${taxPct}%)`, RIGHT - 92, 10, helv, MUTED);
   putR(money(tax), AX, 10);
   y -= S.preGrand;
-  page.drawRectangle({ x: M, y: y - 8, width: W, height: 27, color: C(BRAND) });
+  page.drawRectangle({ x: M, y: y - 8, width: W, height: 27, color: C(BROWN) });
   const gtW = trackW("GRAND TOTAL", 11, bold, 1.6);
   track("GRAND TOTAL", RIGHT - 92 - gtW, 11, bold, WHITE, 1.6);
   putR(money(grand), AX, 12.5, bold, WHITE);
@@ -269,8 +267,8 @@ async function render(f: ProposalFields, S: Space, logo?: Uint8Array): Promise<{
   rule(y, 0.6, HAIR, M, M + half);
   rule(y, 0.6, HAIR, M + half + 26, RIGHT);
   y -= S.signLab;
-  track("ACCEPTED BY", M, 7.5, bold, MUTED, 1.4);
-  track("DATE", M + half + 26, 7.5, bold, MUTED, 1.4);
+  track("ACCEPTED BY", M, 7.5, bold, TAN, 1.4);
+  track("DATE", M + half + 26, 7.5, bold, TAN, 1.4);
   y -= S.postSign;
 
   put("Best regards,", M, 10);

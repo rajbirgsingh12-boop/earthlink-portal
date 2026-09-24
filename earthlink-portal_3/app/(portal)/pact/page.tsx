@@ -1649,43 +1649,44 @@ export default function Pact() {
         return (
           <PrintShell title={`proposal ${f.poNumber || ""} ${(f.serviceAddress || "").split(",")[0]}`.trim()}>
             <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
-              <div className="printable mx-auto max-w-3xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
+              <div className="printable mx-auto max-w-3xl rounded-sm bg-white p-8 text-logo-ink">
                 {/* centered, matching the letter the PDF and Word file print */}
                 <div className="text-center">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src="/logo.png" alt="" className="mx-auto h-12 w-auto" />
-                  <div className="mt-1 font-display text-xl font-bold">{COMPANY.letterhead.name}</div>
-                  <div className="text-[11px] text-inksoft">{COMPANY.letterhead.address}</div>
-                  <div className="text-[11px] text-inksoft">{COMPANY.letterhead.phones.replace(/^Phone:\s*/, "").replace(/\s*\|\s*/g, "  ·  ")}</div>
-                  <div className="text-[11px] text-inksoft">{COMPANY.letterhead.emails.replace(/^Email:\s*/, "").replace(/\s*\|\s*Office Email:\s*/, "  ·  ")}</div>
-                  <div className="mt-2 border-b-2 border-work" />
+                  <div className="mt-1 font-display text-xl font-bold text-logo-brown">{COMPANY.letterhead.name}</div>
+                  <div className="text-[11px] text-logo-muted">{COMPANY.letterhead.address}</div>
+                  <div className="text-[11px] text-logo-muted">{COMPANY.letterhead.phones.replace(/^Phone:\s*/, "").replace(/\s*\|\s*/g, "  ·  ")}</div>
+                  <div className="text-[11px] text-logo-muted">{COMPANY.letterhead.emails.replace(/^Email:\s*/, "").replace(/\s*\|\s*Office Email:\s*/, "  ·  ")}</div>
+                  {/* the globe's two halves, ocean then land */}
+                  <div className="mt-2 flex h-[3px]"><div className="flex-1 bg-logo-teal" /><div className="flex-1 bg-logo-green" /></div>
                 </div>
                 {/* this is the letter they are about to send — it reads the same
                     as the PDF and the Word file, down to the sign-off */}
-                <div className="mt-4 flex items-end justify-between border-b-[3px] border-work pb-2">
-                  <div className="font-display text-2xl font-bold uppercase tracking-wide text-work">Proposal</div>
+                <div className="mt-5 flex items-end justify-between pb-2">
+                  <div className="font-display text-2xl font-bold uppercase tracking-wide text-logo-brown">Proposal</div>
                   <div className="text-right text-[12px] leading-tight">
-                    {f.poNumber && <div><span className="text-[10px] uppercase tracking-widest text-inksoft">PO # </span><b>{f.poNumber}</b></div>}
-                    <div><span className="text-[10px] uppercase tracking-widest text-inksoft">Date </span><b>{f.date}</b></div>
+                    {f.poNumber && <div><span className="text-[10px] font-bold uppercase tracking-widest text-logo-tan">PO # </span><b>{f.poNumber}</b></div>}
+                    <div><span className="text-[10px] font-bold uppercase tracking-widest text-logo-tan">Date </span><b>{f.date}</b></div>
                   </div>
                 </div>
                 <div className="mt-4 text-[13px] leading-relaxed">
                   {f.attn && <div className="font-semibold">ATTN: {f.attn}</div>}
-                  {f.attnTitle && <div className="text-inksoft">{f.attnTitle}</div>}
-                  {f.billTo.map((b, i) => <div key={i} className="text-inksoft">{b}</div>)}
+                  {f.attnTitle && <div className="text-logo-muted">{f.attnTitle}</div>}
+                  {f.billTo.map((b, i) => <div key={i} className="text-logo-muted">{b}</div>)}
                   <div className="mt-3">Dear {(f.attn || "").split(/[\s,]+/)[0] || "Sir or Madam"},</div>
                   <div className="mt-2">
                     {COMPANY.letterhead.name} is pleased to submit this proposal for the following work
                     {(f.serviceAddress || "").split(",")[0].trim() ? ` at ${(f.serviceAddress || "").split(",")[0].trim()}` : ""}.
                   </div>
                 </div>
-                <div className="mt-3 bg-card px-3 py-2 text-[13px]">
-                  <span className="text-[10px] uppercase tracking-widest text-inksoft">Service Address: </span>
+                <div className="mt-3 bg-logo-cream px-3 py-2 text-[13px]">
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-logo-tan">Service Address: </span>
                   <b>{f.serviceAddress || "—"}</b>
                 </div>
-                <div className="mt-4 font-display text-[13px] font-bold uppercase tracking-widest text-work">Scope of Work</div>
+                <div className="mt-4 font-display text-[13px] font-bold uppercase tracking-widest text-logo-teal">Scope of Work</div>
                 <table className="mt-1 w-full border-collapse text-[12px]">
-                  <thead><tr className="border-b-2 border-work bg-card text-left font-display text-[10px] uppercase tracking-widest text-inksoft">
+                  <thead><tr className="border-b-2 border-logo-brown bg-logo-cream text-left font-display text-[10px] uppercase tracking-widest text-logo-tan">
                     <th className="p-1.5">Description</th>
                     <th className="p-1.5 text-center">Qty</th>
                     <th className="p-1.5 text-right">Unit price</th>
@@ -1693,34 +1694,34 @@ export default function Pact() {
                   </tr></thead>
                   <tbody>
                     {f.lines.map((l, i) => (
-                      <tr key={i} className="align-top border-b border-rulesoft [&>td]:py-2">
+                      <tr key={i} className="align-top border-b border-logo-hair [&>td]:py-2">
                         <td className="p-1.5">{l.description}</td>
-                        <td className="p-1.5 text-center font-mono text-inksoft">{l.qty}{l.unit && l.unit.toUpperCase() !== "EACH" ? ` ${l.unit.toUpperCase()}` : ""}</td>
-                        <td className="p-1.5 text-right font-mono text-inksoft">{fmt(l.unit_price)}</td>
+                        <td className="p-1.5 text-center font-mono text-logo-muted">{l.qty}{l.unit && l.unit.toUpperCase() !== "EACH" ? ` ${l.unit.toUpperCase()}` : ""}</td>
+                        <td className="p-1.5 text-right font-mono text-logo-muted">{fmt(l.unit_price)}</td>
                         <td className="p-1.5 text-right font-mono font-semibold">{fmt(l.qty * l.unit_price)}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-                <div className="mt-3 flex flex-col items-end gap-0.5 text-[13px] text-inksoft">
-                  <div>Total Cost — labor and materials: <span className="font-mono text-ink">{fmt(sub)}</span></div>
-                  <div>Sales Tax ({f.taxPct}%): <span className="font-mono text-ink">{fmt(tax)}</span></div>
+                <div className="mt-3 flex flex-col items-end gap-0.5 text-[13px] text-logo-muted">
+                  <div>Total Cost (labor and materials): <span className="font-mono text-logo-ink">{fmt(sub)}</span></div>
+                  <div>Sales Tax ({f.taxPct}%): <span className="font-mono text-logo-ink">{fmt(tax)}</span></div>
                 </div>
-                <div className="mt-2 flex items-center justify-end gap-4 bg-work px-3 py-2 text-white">
+                <div className="mt-2 flex items-center justify-end gap-4 bg-logo-brown px-3 py-2 text-white">
                   <div className="font-display text-[13px] font-bold uppercase tracking-widest">Grand Total</div>
                   <div className="font-mono text-base font-bold">{fmt(sub + tax)}</div>
                 </div>
                 <div className="mt-4 text-[13px]">Please sign and return a copy of this proposal to authorize the work.</div>
-                <div className="mt-8 flex gap-6 text-[10px] uppercase tracking-widest text-inksoft">
-                  <div className="flex-1 border-t border-rulesoft pt-1">Accepted by</div>
-                  <div className="flex-1 border-t border-rulesoft pt-1">Date</div>
+                <div className="mt-8 flex gap-6 text-[10px] font-bold uppercase tracking-widest text-logo-tan">
+                  <div className="flex-1 border-t border-logo-hair pt-1">Accepted by</div>
+                  <div className="flex-1 border-t border-logo-hair pt-1">Date</div>
                 </div>
                 <div className="mt-6 text-[13px]">
                   <div>Best regards,</div>
                   <div className="mt-2 font-semibold">{COMPANY.letterhead.signer}</div>
-                  <div className="text-[12px] text-inksoft">{COMPANY.letterhead.signerTitle}  ·  {COMPANY.letterhead.name}</div>
+                  <div className="text-[12px] text-logo-muted">{COMPANY.letterhead.signerTitle}  ·  {COMPANY.letterhead.name}</div>
                 </div>
-                <div className="mt-6 border-t border-rulesoft pt-2 text-center text-[10px] text-inksoft">{COMPANY.letterhead.footer}</div>
+                <div className="mt-6 border-t border-logo-hair pt-2 text-center text-[10px] text-logo-muted">{COMPANY.letterhead.footer}</div>
               </div>
               <div className="no-print mx-auto mt-3 flex max-w-3xl flex-wrap justify-end gap-2">
                 <button className="btn btn-primary" disabled={busy} onClick={() => saveProposalPdfFor(j)}>⬇ Proposal (PDF)</button>

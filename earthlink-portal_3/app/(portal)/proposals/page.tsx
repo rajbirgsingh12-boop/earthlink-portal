@@ -783,47 +783,65 @@ export default function Proposals() {
         {printOpen && (
           <PrintShell title={fileSafe(sheetName(doc))}>
           <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
-            <div className="printable mx-auto max-w-4xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
+            <div className="printable mx-auto max-w-4xl rounded-sm bg-white p-8 text-logo-ink">
               <Letterhead />
-              {/* same band-and-rule look as the PACT proposal letter */}
-              <div className="mt-4 flex items-end justify-between border-b-[3px] border-work pb-2">
-                <div className="font-display text-2xl font-bold uppercase tracking-wide text-work">Proposal — NYCHA Walk Sheet</div>
-                <div className="text-right text-[12px] leading-tight">
-                  <div><span className="text-[11px] uppercase tracking-widest text-inksoft">Sheet # </span><b className="font-mono">{doc.number}</b></div>
+              {/* the same sheet the PDF download draws, in the logo's colors */}
+              <div className="mt-5 flex items-start justify-between">
+                <div>
+                  <div className="font-display text-3xl font-bold uppercase tracking-wide text-logo-brown">Proposal</div>
+                  <div className="text-[13px] text-logo-teal">NYCHA Walk Sheet</div>
+                </div>
+                <div className="text-right text-[13px] leading-snug">
+                  <div><span className="text-[11px] font-bold uppercase tracking-widest text-logo-tan">Sheet # </span><b className="text-logo-brown">{doc.number}</b></div>
+                  <div><span className="text-[11px] font-bold uppercase tracking-widest text-logo-tan">Date </span><b className="text-logo-brown">{new Date().toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" })}</b></div>
                 </div>
               </div>
-              <div className="mt-4 bg-card px-3 py-2 text-[13px]">
+              <div className="mt-4 flex flex-wrap gap-x-10 gap-y-2 bg-logo-cream px-4 py-3">
                 {([["Contract #", c?.number], ["Development", doc.development],
-                  ["Address", [doc.address, doc.apt && `Apt ${doc.apt}`].filter(Boolean).join(" · ")],
-                  ["For", doc.job]] as [string, string | undefined][]).map(([l, v]) => (
-                  <div key={l} className="flex gap-3 py-0.5"><span className="w-28 shrink-0 text-[11px] uppercase tracking-widest text-inksoft">{l}</span><b>{v || "—"}</b></div>
+                  ["Address", [doc.address, doc.apt && `Apt ${doc.apt}`, doc.stairhall && `Stairhall ${doc.stairhall}`].filter(Boolean).join(", ")],
+                  ["Release #", doc.release_number], ["Walk date", doc.walk_date],
+                  ["NYCHA staff", doc.nycha_staff], ["Vendor staff", doc.vendor_staff]] as [string, string | undefined][])
+                  .filter(([l, v]) => v || l === "Contract #" || l === "Development").map(([l, v]) => (
+                  <div key={l}>
+                    <div className="text-[11px] font-bold uppercase tracking-widest text-logo-tan">{l}</div>
+                    <div className="text-[14px] font-bold text-logo-brown">{v || "—"}</div>
+                  </div>
                 ))}
               </div>
-              <table className="mt-4 w-full border-collapse text-[12px]">
-                <thead><tr className="border-b-2 border-work bg-card text-left font-display text-[11px] uppercase tracking-widest text-inksoft">
-                  <th className="p-1.5">Line</th><th className="p-1.5">Item</th><th className="p-1.5">Category</th>
+              <table className="mt-5 w-full border-collapse text-[12px]">
+                <thead><tr className="border-b-2 border-logo-brown text-left font-display text-[11px] uppercase tracking-widest text-logo-tan">
+                  <th className="p-1.5">Line</th><th className="p-1.5">Item</th>
                   <th className="p-1.5">Description</th><th className="p-1.5">UOM</th>
                   <th className="p-1.5 text-right">Qty</th><th className="p-1.5 text-right">Price</th><th className="p-1.5 text-right">Total</th>
                 </tr></thead>
                 <tbody>
                   {billed.map((it, i) => (
-                    <tr key={i} className="align-top border-b border-rulesoft">
-                      <td className="p-1.5 font-mono text-inksoft">{it.line}</td>
-                      <td className="p-1.5 font-mono text-inksoft">{it.code}</td>
-                      <td className="p-1.5 text-[11px] text-inksoft">{it.category}</td>
-                      <td className="p-1.5">{it.description}</td>
-                      <td className="p-1.5 font-mono text-[11px] text-inksoft">{it.unit}</td>
-                      <td className="p-1.5 text-right font-mono">{it.qty}</td>
-                      <td className="p-1.5 text-right font-mono text-inksoft">{fmt(it.unit_price)}</td>
-                      <td className="p-1.5 text-right font-mono font-semibold">{fmt(it.qty * it.unit_price)}</td>
+                    <tr key={i} className="align-top border-b border-logo-hair">
+                      <td className="p-1.5 font-mono text-logo-muted">{it.line}</td>
+                      <td className="p-1.5 font-mono text-logo-muted">{it.code}</td>
+                      <td className="p-1.5">
+                        <div>{it.description}</div>
+                        {it.category && <div className="text-[11px] text-logo-muted">Category: {it.category}</div>}
+                      </td>
+                      <td className="p-1.5 font-mono text-[11px] text-logo-muted">{it.unit}</td>
+                      <td className="p-1.5 text-right font-mono">{it.qty.toLocaleString("en-US")}</td>
+                      <td className="p-1.5 text-right font-mono text-logo-muted">{fmt(it.unit_price)}</td>
+                      <td className="p-1.5 text-right font-mono font-semibold text-logo-brown">{fmt(it.qty * it.unit_price)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              <div className="mt-2 flex items-center justify-end gap-4 bg-work px-3 py-2 text-white">
+              <div className="mt-3 flex items-center justify-end gap-6 bg-logo-brown px-3 py-2.5 text-white">
                 <div className="font-display text-[13px] font-bold uppercase tracking-widest">Total</div>
-                <div className="font-mono text-base font-bold">{fmt(grand)}</div>
+                <div className="font-mono text-lg font-bold">{fmt(grand)}</div>
               </div>
+              {(doc.job || "").trim() && (
+                <div className="mt-6">
+                  <div className="text-[11px] font-bold uppercase tracking-widest text-logo-teal">Scope of Work</div>
+                  <div className="mt-1 h-px w-8 bg-logo-teal" />
+                  <div className="mt-2 text-[13px]">{doc.job}</div>
+                </div>
+              )}
             </div>
             <div className="no-print mx-auto mt-3 flex max-w-4xl flex-wrap justify-end gap-2">
               <button className="btn btn-primary" onClick={exportWalkSheet}>⬇ Walk sheet (Excel)</button>

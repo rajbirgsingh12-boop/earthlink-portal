@@ -14,6 +14,8 @@ const config: Config = {
         carbon: "#33566E",
         alert: "#B3261E",
         inksoft: "#6B6B63",
+        // the logo's colors (lib/logoColors.ts) — the proposals are drawn in these
+        logo: { brown: "#3A2B19", teal: "#10728C", green: "#516F11", tan: "#8A633C", ink: "#2B231B", muted: "#70665A", cream: "#F6F2EA", hair: "#E2DACD" },
       },
       fontFamily: {
         display: ["var(--font-display)", "'Barlow Condensed'", "sans-serif"],

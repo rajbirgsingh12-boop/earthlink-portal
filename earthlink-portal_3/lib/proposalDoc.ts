@@ -4,6 +4,7 @@
 // job without retyping. Same file is the blank template they fill in by hand.
 import { zipSync, strToU8 } from "fflate";
 import { COMPANY } from "./company";
+import { LOGO_HEX } from "./logoColors";
 
 export interface ProposalLine { description: string; qty: number; unit: string; unit_price: number; section?: string }
 export interface ProposalFields {
@@ -24,11 +25,14 @@ export const money = (n: number) => `$${(Math.round(n * 100) / 100).toLocaleStri
 // ---- the letter's palette and type scale ----
 // Sizes are half-points, widths are twips (1/1440 in), letter-spacing is
 // twentieths of a point — Word's own units, so nothing is guessed at.
-const INK = "1F2328";        // body text: a touch softer than pure black in print
-const MUTED = "6E6E66";      // labels and the second line of anything
-const BRAND = "C24A0A";      // the rule under the letterhead, the totals bar
-const BAND = "F4F1EB";       // the warm tint behind a heading row
-const HAIR = "DCD7CB";       // the line between two work lines
+// the logo's colors (lib/logoColors.ts), as in the PDF
+const INK = LOGO_HEX.ink;       // body text
+const MUTED = LOGO_HEX.muted;   // the second line of anything
+const LABEL = LOGO_HEX.tan;     // the small capital labels
+const BROWN = LOGO_HEX.brown;   // the name, the title, the rule under the table heading, the totals bar
+const TEAL = LOGO_HEX.teal;     // the rule under the letterhead, the Scope of Work heading
+const BAND = LOGO_HEX.cream;    // the tint behind a heading row
+const HAIR = LOGO_HEX.hair;     // the line between two work lines
 
 // Word checks the ORDER of these, not just their presence: rFonts, b, i, caps,
 // color, spacing, sz, szCs. Out of order and it opens the letter read-only and
@@ -122,7 +126,7 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
   // ---- letterhead: everything centered, the way the company's paper reads —
   // the logo above the name, the contact lines under it, a brand rule below
   const nameBlock =
-    para(L.name, { b: true, sz: 32, space: 40, track: 4, align: "center" }) +
+    para(L.name, { b: true, sz: 32, color: BROWN, space: 40, track: 4, align: "center" }) +
     para(L.address, { sz: 17, color: MUTED, space: 14, align: "center" }) +
     para(L.phones.replace(/^Phone:\s*/, "").replace(/\s*\|\s*/g, "  ·  "), { sz: 17, color: MUTED, space: 14, align: "center" }) +
     para(L.emails.replace(/^Email:\s*/, "").replace(/\s*\|\s*Office Email:\s*/, "  ·  "), { sz: 17, color: MUTED, space: 0, align: "center" });
@@ -130,10 +134,10 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
 
   // ---- the title, with what identifies this letter set against it
   const metaLine = (label: string, value: string) =>
-    paraOf(run(label, { sz: 15, color: MUTED, caps: true, track: 30 }) + run("   ", { sz: 15 })
+    paraOf(run(label, { sz: 15, color: LABEL, caps: true, track: 30 }) + run("   ", { sz: 15 })
       + run(value, { sz: 21, b: true }), { align: "right", space: 30 });
   const titleRow = table([
-    cell(para("PROPOSAL", { b: true, sz: 40, color: BRAND, track: 40, space: 0 }), 5000, { pad: [0, 0, 0, 0], valign: "bottom" })
+    cell(para("PROPOSAL", { b: true, sz: 40, color: BROWN, track: 40, space: 0 }), 5000, { pad: [0, 0, 0, 0], valign: "bottom" })
     + cell((f.poNumber ? metaLine("PO #", f.poNumber) : "") + metaLine("Date", f.date || ""),
       W - 5000, { pad: [0, 0, 0, 0], valign: "bottom" }),
   ], [5000, W - 5000]);
@@ -150,8 +154,8 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
   // between the lines is enough, and it reads as a document rather than a form.
   const COLS = [5180, 1300, 1700, 1900];
   const headCell = (t: string, i: number) =>
-    cell(para(t, { b: true, sz: 16, color: MUTED, caps: true, track: 24, space: 0, align: i === 1 ? "center" : i ? "right" : "left" }),
-      COLS[i], { shade: BAND, bottom: BRAND, bw: 12, pad: [80, 110, 80, 110] });
+    cell(para(t, { b: true, sz: 16, color: LABEL, caps: true, track: 24, space: 0, align: i === 1 ? "center" : i ? "right" : "left" }),
+      COLS[i], { shade: BAND, bottom: BROWN, bw: 12, pad: [80, 110, 80, 110] });
   const headRow = ["Description", "Qty", "Unit price", "Amount"].map(headCell).join("");
   const bodyRows: string[] = [];
   let sect = "";
@@ -176,20 +180,20 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
     + cell(para(amount, { sz: 20, space: 0, align: "right" }), TR, { pad: [70, 110, 70, 0] });
   const grandRow =
     cell(para("Grand Total", { b: true, sz: 24, space: 0, align: "right", color: "FFFFFF", caps: true, track: 20 }), TL,
-      { shade: BRAND, pad: [130, 110, 130, 0] })
+      { shade: BROWN, pad: [130, 110, 130, 0] })
     + cell(para(money(grand), { b: true, sz: 26, space: 0, align: "right", color: "FFFFFF" }), TR,
-      { shade: BRAND, pad: [130, 110, 130, 0] });
+      { shade: BROWN, pad: [130, 110, 130, 0] });
 
   // ---- somewhere to actually sign, since the letter asks them to
   const SIGW = Math.floor((W - 400) / 2);
   const signLine = (label: string) =>
     cell(para("", { space: 0, rule: HAIR, ruleW: 6, line: 400 })
-      + para(label, { sz: 15, color: MUTED, caps: true, track: 30, space: 0, before: 40 }),
+      + para(label, { sz: 15, color: LABEL, caps: true, track: 30, space: 0, before: 40 }),
       SIGW, { pad: [0, 0, 0, 0], valign: "bottom" });
 
   const body = [
     head,
-    para("", { rule: BRAND, ruleW: 18, space: 260 }),
+    para("", { rule: TEAL, ruleW: 18, space: 260 }),
     titleRow,
     gap(260),
     attnBlock,
@@ -198,14 +202,14 @@ export function buildProposalDocx(f: ProposalFields, logo?: Uint8Array): Uint8Ar
     para(`${L.name} is pleased to submit this proposal for the following work${site ? ` at ${site}` : ""}.`,
       { sz: 21, space: 220 }),
     // the one fact everything else hangs off, set apart so it cannot be missed
-    table([cell(paraOf(run("Service Address:  ", { sz: 16, b: true, color: MUTED, caps: true, track: 24 })
+    table([cell(paraOf(run("Service Address:  ", { sz: 16, b: true, color: LABEL, caps: true, track: 24 })
       + run(f.serviceAddress || "—", { sz: 21, b: true }), { space: 0 }),
       W, { shade: BAND, pad: [130, 160, 130, 160] })], [W]),
     gap(300),
-    para("Scope of Work", { b: true, sz: 18, color: BRAND, caps: true, track: 34, space: 90 }),
+    para("Scope of Work", { b: true, sz: 18, color: TEAL, caps: true, track: 34, space: 90 }),
     table([headRow, ...bodyRows], COLS),
     gap(180),
-    table([totalRow("Total Cost — labor and materials", money(sub)),
+    table([totalRow("Total Cost (labor and materials)", money(sub)),
       totalRow(`Sales Tax (${taxPct}%)`, money(tax)), grandRow], [TL, TR]),
     gap(400),
     para("Please sign and return a copy of this proposal to authorize the work.", { sz: 20, space: 60 }),

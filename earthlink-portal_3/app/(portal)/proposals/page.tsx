@@ -808,7 +808,14 @@ export default function Proposals() {
                   </div>
                 ))}
               </div>
-              <table className="mt-5 w-full border-collapse text-[12px]">
+              {(doc.job || "").trim() && (
+                <div className="mt-5">
+                  <div className="text-[11px] font-bold uppercase tracking-widest text-logo-teal">Scope of Work</div>
+                  <div className="mt-1 h-px w-8 bg-logo-teal" />
+                  <div className="mt-2 text-[13px]">{doc.job}</div>
+                </div>
+              )}
+              <table className="mt-6 w-full border-collapse text-[12px]">
                 <thead><tr className="border-b-2 border-logo-brown text-left font-display text-[11px] uppercase tracking-widest text-logo-tan">
                   <th className="p-1.5">Line</th><th className="p-1.5">Item</th>
                   <th className="p-1.5">Description</th><th className="p-1.5">UOM</th>
@@ -835,13 +842,6 @@ export default function Proposals() {
                 <div className="font-display text-[13px] font-bold uppercase tracking-widest">Total</div>
                 <div className="font-mono text-lg font-bold">{fmt(grand)}</div>
               </div>
-              {(doc.job || "").trim() && (
-                <div className="mt-6">
-                  <div className="text-[11px] font-bold uppercase tracking-widest text-logo-teal">Scope of Work</div>
-                  <div className="mt-1 h-px w-8 bg-logo-teal" />
-                  <div className="mt-2 text-[13px]">{doc.job}</div>
-                </div>
-              )}
             </div>
             <div className="no-print mx-auto mt-3 flex max-w-4xl flex-wrap justify-end gap-2">
               <button className="btn btn-primary" onClick={exportWalkSheet}>⬇ Walk sheet (Excel)</button>

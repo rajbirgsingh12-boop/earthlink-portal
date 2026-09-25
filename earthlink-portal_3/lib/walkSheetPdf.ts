@@ -1,9 +1,9 @@
 // The NYCHA walk sheet as a real PDF file — what "⬇ PDF" on the proposals
 // list hands over without opening the sheet. In the logo's colors: the
 // letterhead with a teal-and-green rule (the globe's two halves), the job's
-// details across one cream band, the line items with each category under its
-// description, a brown total bar, and what the work is for (the sheet's "For")
-// under it as the scope of work. The table carries on to a next page with its
+// details across one cream band, what the work is for (the sheet's "For") as
+// the scope of work, then the line items with each category under its
+// description and a brown total bar. The table carries on to a next page with its
 // header repeated; every page is footed "page N of M".
 import { COMPANY } from "./company";
 import { LOGO_RGB, type Rgb } from "./logoColors";
@@ -139,6 +139,37 @@ export async function buildWalkSheetPdf(f: WalkSheetFields, logo?: Uint8Array): 
   }
   y -= 21;
 
+  // ---- scope of work, right under the job — the groups when given, else the sheet's "For" ----
+  const groups = f.scope?.groups?.filter((g) => g.items.length) || [];
+  const intro = f.scope ? f.scope.intro || "" : (f.job || "").trim();
+  if (groups.length || intro) {
+    if (y - 50 < FLOOR) newPage();
+    put("SCOPE OF WORK", M, y, 8, bold, TEAL); y -= 8;
+    rule(y, 0.8, TEAL, M, M + 24); y -= 16;
+    for (const ln of intro ? wrap(intro, W, 10) : []) {
+      if (y < FLOOR) newPage();
+      put(ln, M, y, 10, helv, INK); y -= 13;
+    }
+    if (intro && groups.length) y -= 9;
+    let n = 0;
+    for (const g of groups) {
+      if (y - 32 < FLOOR) newPage();
+      page.drawRectangle({ x: M, y: y - 3, width: 2.5, height: 12, color: C(GREEN) });
+      put(g.title.toUpperCase(), M + 9, y, 7.5, bold, TAN);
+      y -= 17;
+      for (const item of g.items) {
+        n += 1;
+        const ls = wrap(item, W - 33, 10);
+        if (y - 13.5 * (ls.length - 1) < FLOOR) newPage();
+        putR(`${n}.`, M + 25, y, 9.5, bold, GREEN);
+        ls.forEach((ln, j) => put(ln, M + 33, y - j * 13, 10, helv, INK));
+        y -= 13.5 * ls.length;
+      }
+      y -= 10;
+    }
+    y -= groups.length ? 20 : 30.5; // clear air before the price
+  }
+
   // ---- line items ----
   // Line | Item | Description (its category under it) | UOM | Qty | Price | Total
   const X = { line: M + 12, code: M + 40, desc: M + 104, uom: M + 310, qtyR: M + 388, priceR: M + 438, totalR: RIGHT - 12 };
@@ -178,37 +209,7 @@ export async function buildWalkSheetPdf(f: WalkSheetFields, logo?: Uint8Array): 
   page.drawRectangle({ x: M, y: bandTop - 30, width: W, height: 30, color: C(BROWN) });
   putR("TOTAL", X.qtyR, bandTop - 19, 10, bold, WHITE);
   putR(walkSheetMoney(walkSheetTotal(f.lines)), X.totalR, bandTop - 19.5, 13, bold, WHITE);
-  y = bandTop - 30 - 32;
-
-  // ---- scope of work: the groups when given, else the sheet's "For" ----
-  const groups = f.scope?.groups?.filter((g) => g.items.length) || [];
-  const intro = f.scope ? f.scope.intro || "" : (f.job || "").trim();
-  if (groups.length || intro) {
-    if (y - 50 < FLOOR) newPage();
-    put("SCOPE OF WORK", M, y, 8, bold, TEAL); y -= 8;
-    rule(y, 0.8, TEAL, M, M + 24); y -= 16;
-    for (const ln of intro ? wrap(intro, W, 10) : []) {
-      if (y < FLOOR) newPage();
-      put(ln, M, y, 10, helv, INK); y -= 13;
-    }
-    if (intro && groups.length) y -= 9;
-    let n = 0;
-    for (const g of groups) {
-      if (y - 32 < FLOOR) newPage();
-      page.drawRectangle({ x: M, y: y - 3, width: 2.5, height: 12, color: C(GREEN) });
-      put(g.title.toUpperCase(), M + 9, y, 7.5, bold, TAN);
-      y -= 17;
-      for (const item of g.items) {
-        n += 1;
-        const ls = wrap(item, W - 33, 10);
-        if (y - 13.5 * (ls.length - 1) < FLOOR) newPage();
-        putR(`${n}.`, M + 25, y, 9.5, bold, GREEN);
-        ls.forEach((ln, j) => put(ln, M + 33, y - j * 13, 10, helv, INK));
-        y -= 13.5 * ls.length;
-      }
-      y -= 10;
-    }
-  }
+  y = bandTop - 30;
 
   // ---- footers, once the page count is known ----
   const pages = doc.getPages();

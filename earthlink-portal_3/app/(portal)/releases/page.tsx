@@ -492,7 +492,8 @@ export default function Releases() {
     }
     while (labor.length < 7) labor.push(blankSosLine());
     const sosTotal = rows.reduce((s, it) => s + it.qty * it.unit_price, 0);
-    void prop;
+    // the development the work was at: the walk sheet's, else the release's own
+    const development = ((prop?.development || "").trim() || (r.location || "").trim()).toUpperCase();
     setSosEdit({
       fileBase: `SOS_${c?.number || ""}_rel${r.rel_number}`,
       data: {
@@ -505,7 +506,7 @@ export default function Releases() {
         poRelease: `${c?.number || ""}-${r.rel_number}`,
         workOrder: r.ticket || "",
         dateOfServices: shortDate(r.date_completed || ""),
-        description: "",
+        description: development,
         labor,
         materials: [blankSosLine(), blankSosLine(), blankSosLine(), blankSosLine(), blankSosLine()],
         overhead: "", profit: "", totalCost: money2(sosTotal),

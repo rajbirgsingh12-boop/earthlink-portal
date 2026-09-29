@@ -4,11 +4,14 @@
 
 // Accepts anything the user types ("(917) 555-0123", "917.555.0123") and
 // returns a dialable +1XXXXXXXXXX, or "" when there aren't enough digits.
+// Extra digits ("917-555-0123 x22") are not a number in another country —
+// only a phone typed with its own + in front is sent abroad.
+// (lib/nobodyFlow.ts and app/api/text-due carry the same rule, server-side.)
 export const cleanPhone = (s: string): string => {
   const d = (s || "").replace(/\D/g, "");
   if (d.length === 10) return `+1${d}`;
   if (d.length === 11 && d.startsWith("1")) return `+${d}`;
-  return d.length > 11 ? `+${d}` : "";
+  return d.length > 11 && d.length <= 15 && (s || "").trim().startsWith("+") ? `+${d}` : "";
 };
 
 // "?&body=" instead of "?body=" — the odd form is the one both iPhones and
@@ -68,14 +71,17 @@ export type TextOutcome =
   | { status: "error"; message: string };
 export async function textRows(targets: TextTarget[], opts: { skipTexted?: boolean } = {}): Promise<TextOutcome> {
   const good = targets.filter((t) => cleanPhone(t.to));
-  if (good.length === 0) return { status: "error", message: "No saved numbers on this crew — add them in Payroll → Crew first" };
+  if (good.length === 0) return { status: "error", message: "No saved numbers on this crew — add them in Settings → Crew first" };
   const token = (await sb().auth.getSession()).data.session?.access_token || null;
   const res = await sendServerTexts(good.map((t) => ({ to: cleanPhone(t.to), body: t.body, id: t.rowId })), token, { skipTexted: opts.skipTexted ?? true });
   if (res.ok) {
     const fails = res.failed || [];
     const sent = res.sent || 0, skipped = res.skipped || 0;
+    // Twilio's own reason for the first one that failed: a trial account, a
+    // number that isn't registered yet, a worker who texted STOP — none of
+    // those is fixed by checking the worker's number
     const message = fails.length > 0
-      ? `Sent ${sent}, but ${fails.length} didn't go through — check those numbers in Payroll → Crew`
+      ? `Sent ${sent}, but ${fails.length} didn't go through — ${prettyPhone(fails[0].to)}: ${fails[0].error}`
       // never a ✓ when nothing went out — that is how a crew ends up never told
       : sent === 0 ? "Everyone here was already texted — nothing new went out"
       : `Sent ${sent} text${sent === 1 ? "" : "s"} from the company number ✓${skipped ? ` (${skipped} already texted — skipped)` : ""}`;

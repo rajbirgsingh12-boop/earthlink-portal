@@ -64,8 +64,9 @@ export default function Schedule() {
       const out = await sendDueNow();
       if (stop || !out) return;
       if (out.sent > 0) flash(`${out.sent} text${out.sent === 1 ? "" : "s"} that ${out.sent === 1 ? "was" : "were"} set up just went out ✓`);
+      else if (out.failed > 0) flash(`${out.failed} text${out.failed === 1 ? "" : "s"} set up for earlier didn't go through — ${out.errors?.[0]?.error || "see Settings → System check"}`);
       else if (out.missed > 0) flash(`${out.missed} text${out.missed === 1 ? "" : "s"} set up for earlier didn't go out (no number, or that day has passed) — the crew shows as not told`);
-      if (out.sent > 0 || out.missed > 0) load();
+      if (out.sent > 0 || out.missed > 0 || out.failed > 0) load();
     };
     tick();
     const t = setInterval(tick, 5 * 60_000);
@@ -211,7 +212,7 @@ export default function Schedule() {
       .map((row) => ({ row, emp: emps.find((e) => e.id === row.employee_id) }))
       .filter((t): t is { row: Assign; emp: Emp } => !!t.emp && !!cleanPhone(t.emp.phone || ""))
       .map((t) => ({ rowId: t.row.id, to: cleanPhone(t.emp.phone || ""), first: t.emp.name.split(" ")[0], body: msgFor(rel, rel.id, t.emp.name.split(" ")[0], t.emp.lang), lang: t.emp.lang }));
-    if (targets.length === 0) { flash("No saved numbers on this crew — add them in Payroll → Crew first"); return; }
+    if (targets.length === 0) { flash("No saved numbers on this crew — add them in Settings → Crew first"); return; }
     if (!descOf(rel.id).trim() && !window.confirm("No work description yet — send the assignments anyway?")) return;
     const stamp = async (ids: string[]) => {
       setRows((prev) => prev.map((x) => (ids.includes(x.id) ? { ...x, texted: true } : x)));
@@ -499,7 +500,7 @@ export default function Schedule() {
       })}
 
       <div className="mt-1 text-[11px] text-inksoft">
-        Phone numbers live in the crew list (Payroll → Crew) — enter each one once.
+        Phone numbers live in the crew list (Settings → Crew) — enter each one once.
         {machine
           ? " Company texting number is connected ✓"
           : " Want texts to come from a company number instead of your phone? Add the TWILIO keys in Vercel → Settings → Environment Variables."}

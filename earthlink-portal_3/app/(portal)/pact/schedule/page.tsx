@@ -108,8 +108,9 @@ export default function PactCalendar() {
       const out = await sendDueNow();
       if (stop || !out) return;
       if (out.sent > 0) flash(`${out.sent} text${out.sent === 1 ? "" : "s"} that ${out.sent === 1 ? "was" : "were"} set up just went out ✓`);
+      else if (out.failed > 0) flash(`${out.failed} text${out.failed === 1 ? "" : "s"} set up for earlier didn't go through — ${out.errors?.[0]?.error || "see Settings → System check"}`);
       else if (out.missed > 0) flash(`${out.missed} text${out.missed === 1 ? "" : "s"} set up for earlier didn't go out (no number, or that day has passed) — the crew shows as not told`);
-      if (out.sent > 0 || out.missed > 0) load();
+      if (out.sent > 0 || out.missed > 0 || out.failed > 0) load();
     };
     tick();
     const t = setInterval(tick, 5 * 60_000);

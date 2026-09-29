@@ -28,7 +28,7 @@ const cleanPhone = (s: string): string => {
   const d = (s || "").replace(/\D/g, "");
   if (d.length === 10) return `+1${d}`;
   if (d.length === 11 && d.startsWith("1")) return `+${d}`;
-  return d.length > 11 ? `+${d}` : "";
+  return d.length > 11 && d.length <= 15 && (s || "").trim().startsWith("+") ? `+${d}` : ""; // as lib/notify's
 };
 interface Row { id: string; day: string; employee_id: string; description?: string | null; address?: string | null; texted?: boolean; send_at?: string | null; release_id?: string | null; pact_job_id?: string | null }
 interface Emp { id: string; name?: string | null; phone?: string | null; lang?: string | null }
@@ -66,6 +66,9 @@ export async function GET(req: Request) {
   const secret = env("CRON_SECRET");
   const bearer = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim();
   if (secret && bearer === secret) return sweep(req);
+  // the cron knocking with the wrong secret: say so, loudly enough for
+  // Vercel's cron log to show the run red instead of a green nothing
+  if (bearer) return NextResponse.json({ error: secret ? "CRON_SECRET in Vercel doesn't match what the cron sent" : "Add CRON_SECRET in Vercel so the timer can send" }, { status: 401 });
   return NextResponse.json({
     texting: twilioConfigured(),
     onItsOwn: !!(env("CRON_SECRET") && env("SUPABASE_SERVICE_ROLE_KEY")),
@@ -79,9 +82,11 @@ async function sweep(req: Request) {
   if ("error" in who) return NextResponse.json({ error: who.error }, { status: who.status });
   const supaUrl = env("NEXT_PUBLIC_SUPABASE_URL");
   const H = { apikey: who.key, Authorization: `Bearer ${who.token}`, "Content-Type": "application/json" };
-  const get = async <T>(path: string): Promise<T[]> => {
-    const r = await fetch(`${supaUrl}/rest/v1/${path}`, { headers: H, cache: "no-store" });
-    return r.ok ? ((await r.json()) as T[]) : [];
+  // null when the read itself failed — an empty list and a failed lookup must
+  // not look alike, or one bad read would mark the whole night's texts missed
+  const get = async <T>(path: string): Promise<T[] | null> => {
+    const r = await fetch(`${supaUrl}/rest/v1/${path}`, { headers: H, cache: "no-store" }).catch(() => null);
+    return r && r.ok ? ((await r.json().catch(() => null)) as T[] | null) : null;
   };
   const clear = async (ids: string[]) => {
     if (!ids.length) return;
@@ -103,14 +108,17 @@ async function sweep(req: Request) {
 
   const now = new Date();
   const due = await get<Row>(`schedule_days?send_at=lte.${encodeURIComponent(now.toISOString())}&texted=is.false&select=id,day,employee_id,description,address,texted,send_at,release_id,pact_job_id&order=send_at&limit=200`);
+  if (!due) return NextResponse.json({ error: "Couldn't read the schedule — nothing was sent (RUN_ME.sql section 19 gives the schedule its send_at column)" }, { status: 500 });
   if (due.length === 0) return NextResponse.json({ sent: 0, missed: 0, failed: 0, due: 0 });
   if (!twilioConfigured()) {
     return NextResponse.json({ sent: 0, missed: 0, failed: 0, due: due.length, note: "The company texting number isn't set up, so a text can't go out on its own" });
   }
 
   const ids = (xs: (string | null | undefined)[]) => [...new Set(xs.filter(Boolean) as string[])];
+  const empQ = `employees?id=in.(${ids(due.map((r) => r.employee_id)).join(",")})&select=id,name,phone`;
   const [emps, jobs, rels] = await Promise.all([
-    get<Emp>(`employees?id=in.(${ids(due.map((r) => r.employee_id)).join(",")})&select=id,name,phone,lang`),
+    // before RUN_ME section 18 there is no language column — then everyone reads English
+    get<Emp>(`${empQ},lang`).then((e) => e ?? get<Emp>(empQ)),
     ids(due.map((r) => r.pact_job_id)).length
       ? get<Job>(`pact_jobs?id=in.(${ids(due.map((r) => r.pact_job_id)).join(",")})&select=id,po_number,job_number,address,development,property_unit,description,start_date,canceled,work_done`)
       : Promise.resolve([] as Job[]),
@@ -118,26 +126,33 @@ async function sweep(req: Request) {
       ? get<Rel>(`releases?id=in.(${ids(due.map((r) => r.release_id)).join(",")})&select=id,rel_number,location,address,canceled`)
       : Promise.resolve([] as Rel[]),
   ]);
+  // a lookup that failed leaves every text waiting for the next sweep — it
+  // must not turn the whole queue into "the worker isn't in the crew list"
+  if (!emps || !jobs || !rels) {
+    return NextResponse.json({ error: `Couldn't read the ${!emps ? "crew list" : !jobs ? "PACT jobs" : "releases"} — nothing was sent; the texts are still set up` }, { status: 500 });
+  }
   const empOf = new Map(emps.map((e) => [e.id, e]));
   const jobOf = new Map(jobs.map((j) => [j.id, j]));
   const relOf = new Map(rels.map((r) => [r.id, r]));
 
   const missed: string[] = [];
-  const out: { to: string; body: string; id: string }[] = [];
   const invite = await photosBackOn();
-  for (const row of due) {
+  // every text written at once — a Spanish work line waits on Claude, and
+  // five of them one after another would run the function out of time
+  const built = await Promise.all(due.map(async (row) => {
     const emp = empOf.get(row.employee_id);
     const job = row.pact_job_id ? jobOf.get(row.pact_job_id) : undefined;
     const rel = row.release_id ? relOf.get(row.release_id) : undefined;
     const phone = cleanPhone(emp?.phone || "");
     // the work is off, the day has gone by, nobody to text: the stamp comes
     // off and the crew shows as not told — never a text about a day that passed
-    if (dueSkip(row, { emp, job, rel, phone, now })) { missed.push(row.id); continue; }
+    if (dueSkip(row, { emp, job, rel, phone, now })) { missed.push(row.id); return null; }
     const raw = dueWork(row, job);
     const work = langOf(emp!.lang) === "es" && raw ? await spanishWorkServer(raw) : raw;
     const body = dueBody(row, { emp: emp!, job, rel, work });
-    out.push({ to: phone, body: invite ? withPhotoInvite(body) : body, id: row.id });
-  }
+    return { to: phone, body: invite ? withPhotoInvite(body) : body, id: row.id, sendAt: row.send_at || null };
+  }));
+  const out = built.filter((m): m is NonNullable<typeof m> => !!m);
   await clear(missed);
   if (out.length === 0) return NextResponse.json({ sent: 0, missed: missed.length, failed: 0, due: due.length });
   const held = await claim(out.map((m) => m.id));
@@ -148,5 +163,11 @@ async function sweep(req: Request) {
     await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ texted: true }) }).catch(() => {});
     await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ texted_at: new Date().toISOString() }) }).catch(() => {});
   });
+  // one Twilio said no to gets its time back, so the next sweep tries again
+  // (until it is a day late — then it is dropped and the crew shows as not told)
+  for (const f of failed) {
+    const m = mine.find((x) => x.to === f.to);
+    if (m?.sendAt) await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}&texted=is.false`, { method: "PATCH", headers: H, body: JSON.stringify({ send_at: m.sendAt }) }).catch(() => {});
+  }
   return NextResponse.json({ sent, missed: missed.length, failed: failed.length, due: due.length, ...(failed.length ? { errors: failed.slice(0, 5) } : {}) });
 }

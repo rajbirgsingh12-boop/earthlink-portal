@@ -68,7 +68,7 @@ export async function goesOnItsOwn(): Promise<boolean> {
 }
 // the catch-up: anything whose time has come goes out now. Called when the
 // portal is open — with the Vercel cron set up it has usually gone already.
-export type DueReport = { sent: number; missed: number; failed: number; note?: string };
+export type DueReport = { sent: number; missed: number; failed: number; note?: string; errors?: { to: string; error: string }[] };
 export async function sendDueNow(): Promise<DueReport | null> {
   try {
     const { data: { session } } = await sb().auth.getSession();

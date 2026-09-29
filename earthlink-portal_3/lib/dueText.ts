@@ -22,6 +22,11 @@ const workOf = (j: DueJob): string => {
 export interface DueRel { rel_number?: string | null; location?: string | null; address?: string | null; canceled?: boolean }
 export const LATE_MS = 24 * 3600_000;         // a text more than a day late is never sent
 const GONE_MS = 36 * 3600_000;                // …nor one for a work day this far behind us
+// today, the way the crew counts it — so a text for Tuesday's job set for
+// Tuesday 8 AM that nobody's open portal picked up is not sent by Wednesday
+// morning's timer. (The 36-hour rule alone let that through: 23 hours late,
+// and Tuesday is not behind a UTC date 36 hours back.)
+const nyDay = (d: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 
 export const dueDay = (row: DueRow, job?: DueJob | null): string => ((job?.start_date || row.day || "") as string).trim();
 // "" when it should go out; otherwise why it shouldn't, in plain words
@@ -33,7 +38,7 @@ export function dueSkip(row: DueRow, ctx: { emp?: DueEmp | null; job?: DueJob | 
   const at = new Date(row.send_at || 0).getTime();
   if (!at || at < ctx.now.getTime() - LATE_MS) return "it was more than a day late";
   const day = dueDay(row, ctx.job);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(day) && day < new Date(ctx.now.getTime() - GONE_MS).toISOString().slice(0, 10)) return "that work day has passed";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(day) && (day < new Date(ctx.now.getTime() - GONE_MS).toISOString().slice(0, 10) || day < nyDay(ctx.now))) return "that work day has passed";
   return "";
 }
 // the text itself, written at the moment it goes out — so a job that moved

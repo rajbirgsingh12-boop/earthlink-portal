@@ -35,7 +35,7 @@ const cleanPhone = (s?: string | null): string => {
   const d = (s || "").replace(/\D/g, "");
   if (d.length === 10) return `+1${d}`;
   if (d.length === 11 && d.startsWith("1")) return `+${d}`;
-  return d.length > 11 ? `+${d}` : "";
+  return d.length > 11 && d.length <= 15 && (s || "").trim().startsWith("+") ? `+${d}` : ""; // as lib/notify's
 };
 const first = (e?: FlowEmp | null) => (e?.name || "").trim().split(/\s+/)[0] || "";
 const ids = (xs: (string | null | undefined)[]) => [...new Set(xs.filter(Boolean) as string[])];

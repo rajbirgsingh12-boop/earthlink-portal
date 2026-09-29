@@ -12,7 +12,10 @@
 //     Twilio calls — next to the TWILIO keys that already send the texts.
 //   • Twilio console → Phone Numbers → the company number → Messaging →
 //     "A message comes in": Webhook, HTTP POST,
-//     https://<the portal's address>/api/sms-in
+//     https://<the portal's address>/api/sms-in (no slash at the end). A
+//     number inside a Messaging Service is governed by the service instead:
+//     Messaging → Services → the service → Integration → "Send a webhook"
+//     to the same address, or "Defer to sender's webhook".
 //   • Text the number once from any phone. From then on the crew texts end
 //     with "Reply to this text with photos of the work."
 // Every request is checked against TWILIO_AUTH_TOKEN, so nobody but Twilio
@@ -113,11 +116,17 @@ async function targetOf(db: Db, b: Batch): Promise<Target | null> {
 }
 
 export async function GET() {
-  // Settings reads this: can the portal take pictures in, and has a text come in yet
+  // Settings reads this: can the portal take pictures in, has a text come in
+  // yet — and when not, which piece is missing
   const db = serviceDb();
   const ready = photosBackReady();
-  const on = !!db && ready && (await db.get<{ id: string }>("texted_photos?select=id&limit=1")).rows.length > 0;
-  return NextResponse.json({ ready, on });
+  const first = db ? await db.get<{ id: string }>("texted_photos?select=id&limit=1") : null;
+  const on = !!db && ready && !!first && first.rows.length > 0;
+  const why = on ? "" : !db ? "SUPABASE_SERVICE_ROLE_KEY isn't in Vercel yet (then Redeploy)"
+    : !env("TWILIO_AUTH_TOKEN") ? "TWILIO_AUTH_TOKEN isn't in Vercel yet (then Redeploy)"
+    : first && !first.ok ? "the texted_photos table isn't there yet — paste RUN_ME.sql (section 20) in Supabase"
+    : "no text has reached the portal yet — check the webhook in Twilio, then text the company number once";
+  return NextResponse.json({ ready, on, why });
 }
 
 export async function POST(req: Request) {
@@ -164,14 +173,16 @@ export async function POST(req: Request) {
       const flow = await nobodyFlow(db, { emp, emps: emps.rows, body, from, sid, now });
       if (flow.handled) return answer(flow.reply);
     }
-    // the owner testing the number from a phone on the crew list still switches it on
-    if (!(await db.get<{ id: string }>("texted_photos?select=id&limit=1")).rows.length) await db.insert("texted_photos", { employee_id: emp.id, from_phone: from, body, status: "note", msg_sid: sid || null });
+    // the owner testing the number from a phone on the crew list still
+    // switches it on — and hears back that it worked, that once
+    const firstEver = !(await db.get<{ id: string }>("texted_photos?select=id&limit=1")).rows.length;
+    if (firstEver) await db.insert("texted_photos", { employee_id: emp.id, from_phone: from, body, status: "note", msg_sid: sid || null });
     // a job's number: the pictures they just sent go there — ones still
     // waiting (two days), or ones put on the wrong job (the last two hours;
     // only when the text is just the number). "Just sent" is the last batch
     // and any sent within ten minutes of it — a phone often splits five
     // pictures into five texts.
-    if (!refsIn(body).length) return answer(); // just talk ("ok", "on my way") — nothing to do
+    if (!refsIn(body).length) return firstEver ? say({ k: "connected" }, lang) : answer(); // just talk ("ok", "on my way") — nothing to do
     const fixing = justANumber(body);
     const recent = (await db.get<Batch>(`texted_photos?employee_id=eq.${emp.id}&or=(and(status.eq.held,created_at.gte.${since(2 * 86_400_000)}),and(status.eq.filed,created_at.gte.${since(2 * 3_600_000)}))&order=created_at.desc&limit=20&select=*`)).rows
       .filter((b) => fixing || b.status === "held");

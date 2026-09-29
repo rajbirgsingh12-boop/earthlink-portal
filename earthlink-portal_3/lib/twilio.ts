@@ -6,6 +6,19 @@
 const env = (k: string) => process.env[k] || "";
 export const twilioConfigured = () =>
   !!(env("TWILIO_ACCOUNT_SID") && env("TWILIO_AUTH_TOKEN") && (env("TWILIO_FROM") || env("TWILIO_MESSAGING_SERVICE_SID")));
+// A key that is there but can't be right — the number typed as "(917) 555-0123"
+// instead of +19175550123, say. Twilio would refuse every text, and the
+// portal would blame the workers' numbers; Settings → System check says this instead.
+export function twilioProblem(): string {
+  if (!twilioConfigured()) return "";
+  if (!/^AC[0-9a-f]{32}$/i.test(env("TWILIO_ACCOUNT_SID").trim())) return "TWILIO_ACCOUNT_SID should be the Account SID from the Twilio console (starts with AC, 34 characters)";
+  const msvc = env("TWILIO_MESSAGING_SERVICE_SID").trim();
+  if (msvc && !/^MG[0-9a-f]{32}$/i.test(msvc)) return "TWILIO_MESSAGING_SERVICE_SID should start with MG (34 characters)";
+  const from = env("TWILIO_FROM").trim();
+  if (!msvc && !/^\+[1-9]\d{9,14}$/.test(from)) return `TWILIO_FROM must be the company number with +1 in front and nothing else, like +19175550123 (it is "${from}")`;
+  if (env("TWILIO_API_BASE")) return "TWILIO_API_BASE is set in Vercel — that is only for testing; remove it so texts really go to Twilio";
+  return "";
+}
 
 export interface TextOut { to: string; body: string; id?: string }
 export interface TextReport { sent: number; failed: { to: string; error: string }[] }
@@ -17,8 +30,8 @@ export interface TextReport { sent: number; failed: { to: string; error: string 
 export async function sendTexts(messages: TextOut[], onSent?: (m: TextOut) => Promise<void>): Promise<TextReport> {
   const sid = env("TWILIO_ACCOUNT_SID");
   const basic = Buffer.from(`${sid}:${env("TWILIO_AUTH_TOKEN")}`).toString("base64");
-  const from = env("TWILIO_FROM");
-  const msvc = env("TWILIO_MESSAGING_SERVICE_SID");
+  const from = env("TWILIO_FROM").trim();
+  const msvc = env("TWILIO_MESSAGING_SERVICE_SID").trim();
   const failed: { to: string; error: string }[] = [];
   let sent = 0;
   const sendOne = async (m: TextOut) => {
@@ -34,8 +47,11 @@ export async function sendTexts(messages: TextOut[], onSent?: (m: TextOut) => Pr
         sent += 1;
         if (onSent) await onSent(m).catch(() => {});
       } else {
-        const j = (await r.json().catch(() => ({}))) as { message?: string };
-        failed.push({ to: m.to, error: j.message || `Twilio error ${r.status}` });
+        // Twilio's own words and its error code — 21608 (trial account), 30034
+        // (number not registered), 21610 (they texted STOP) are what the
+        // office needs to see, not "check the number"
+        const j = (await r.json().catch(() => ({}))) as { message?: string; code?: number };
+        failed.push({ to: m.to, error: `${j.message || `Twilio error ${r.status}`}${j.code ? ` (Twilio ${j.code})` : ""}` });
       }
     } catch (e) {
       failed.push({ to: m.to, error: e instanceof Error ? e.message : "network error" });

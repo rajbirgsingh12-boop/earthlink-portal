@@ -179,7 +179,8 @@ export type Reply =
   | { k: "notphoto" }
   | { k: "failed" }
   | { k: "resend" }
-  | { k: "stranger"; n: number };
+  | { k: "stranger"; n: number }
+  | { k: "connected" };
 const photos = (n: number, lang: Lang) => (lang === "es" ? (n === 1 ? "1 foto" : `${n} fotos`) : (n === 1 ? "1 photo" : `${n} photos`));
 export function replyText(r: Reply, lang0?: string | null): string {
   const lang = langOf(lang0);
@@ -207,6 +208,12 @@ export function replyText(r: Reply, lang0?: string | null): string {
       return es ? "No supimos de qué trabajo son sus fotos. Por favor envíelas otra vez con el número de PO en el mensaje." : "We couldn't tell which job your photos are for. Please send them again with the PO number in the text.";
     case "failed":
       return es ? "Sus fotos no llegaron bien. Por favor envíelas otra vez." : "Your photos didn't come through. Please send them again.";
+    case "connected":
+      // the very first text the number ever gets, from a phone on the crew
+      // list — the owner trying it. Silence would look like it didn't work.
+      return es
+        ? "Earth Link: este número está conectado. Responda a un mensaje del equipo con fotos del trabajo, o NO si no hay nadie en casa."
+        : "Earth Link: this number is connected. Reply to a crew text with photos of the work, or NO when nobody is home.";
     case "stranger":
       // nobody knows this phone's language yet: both
       return r.n > 0

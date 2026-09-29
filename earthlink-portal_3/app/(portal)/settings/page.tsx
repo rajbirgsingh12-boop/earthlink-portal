@@ -450,6 +450,8 @@ export default function Settings() {
   };
 
   type CheckResult = { label: string; fix: string; ok: boolean };
+  // what a probe found out, for a fix line that names the missing piece
+  const found: Record<string, string> = {};
   const [checks, setChecks] = useState<CheckResult[] | null>(null);
   // storage meter: how full the docs bucket is (via the storage_usage() function)
   const [storage, setStorage] = useState<{ bytes: number; files: number } | "missing" | null>(null);
@@ -465,7 +467,7 @@ export default function Settings() {
   const [checking, setChecking] = useState(false);
   const runSystemCheck = async () => {
     setChecking(true); setChecks(null);
-    const probes: { label: string; fix: string; probe: () => Promise<boolean> }[] = [
+    const probes: { label: string; fix: string | (() => string); probe: () => Promise<boolean> }[] = [
       { label: "Release line items", fix: "upgrade_invoices_aging_docs.sql", probe: async () => !(await sb().from("release_items").select("id").limit(1)).error },
       { label: "Release aging & attachments", fix: "upgrade_invoices_aging_docs.sql", probe: async () => !(await sb().from("releases").select("invoice_sent,paid_date,attachments,address").limit(1)).error },
       { label: "Document & photo storage", fix: "upgrade_invoices_aging_docs.sql", probe: async () => !(await sb().storage.from("docs").list("", { limit: 1 })).error },
@@ -476,10 +478,12 @@ export default function Settings() {
       { label: "Payroll entry classifications", fix: "upgrade_payroll_class.sql", probe: async () => !(await sb().from("timesheet_entries").select("trade").limit(1)).error },
       { label: "Worker phone numbers (tap-to-text)", fix: "upgrade_worker_phone.sql", probe: async () => !(await sb().from("employees").select("phone").limit(1)).error },
       { label: "Day schedule (Schedule tab)", fix: "upgrade_day_schedule.sql", probe: async () => !(await sb().from("schedule_days").select("id,address").limit(1)).error },
-      { label: "Company texting number (Twilio)", fix: "add TWILIO keys in Vercel → Settings → Environment Variables (texts fall back to your phone until then)", probe: async () => { try { const r = await fetch("/api/text"); return !!((await r.json()) as { configured?: boolean }).configured; } catch { return false; } } },
+      { label: "Company texting number (Twilio)", fix: () => found.twilio || "add TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_FROM (the number as +1 and ten digits) in Vercel → Settings → Environment Variables, then Redeploy (texts fall back to your phone until then)", probe: async () => { try { const r = await fetch("/api/text"); const j = (await r.json()) as { configured?: boolean; problem?: string }; found.twilio = j.problem || ""; return !!j.configured && !j.problem; } catch { return false; } } },
+      { label: "Each worker's language (Spanish texts)", fix: "RUN_ME.sql (section 18) — until then every crew text is in English", probe: async () => !(await sb().from("employees").select("lang").limit(1)).error },
       { label: "A crew text set up for later", fix: "RUN_ME.sql (section 19) — until then a text can only be sent right now", probe: async () => !(await sb().from("schedule_days").select("send_at").limit(1)).error },
       { label: "Set-up texts go out on their own", fix: "add CRON_SECRET (any long random string) and SUPABASE_SERVICE_ROLE_KEY (Supabase → Settings → API → service_role) in Vercel → Settings → Environment Variables, then Redeploy. Even then, a free Vercel plan only lets the timer run once a day (it refuses to deploy anything more often), so a text set for a particular hour really goes out the next time somebody has the portal open — which the office usually does each morning. On a paid plan, change the schedule in vercel.json to */15 * * * * and they go out on their own, on the quarter hour", probe: async () => { try { const r = await fetch("/api/text-due"); return !!((await r.json()) as { onItsOwn?: boolean }).onItsOwn; } catch { return false; } } },
-      { label: "Photos the crew texts back go on the job", fix: `RUN_ME.sql (section 20), and SUPABASE_SERVICE_ROLE_KEY in Vercel (Supabase → Settings → API → service_role). Then in Twilio: Phone Numbers → Active numbers → the company number → Messaging → "A message comes in": Webhook, HTTP POST, ${window.location.origin}/api/sms-in → Save. Last, text the company number once from any phone — that switches it on, and from then on every crew text ends with "Reply to this text with photos of the work."`, probe: async () => { try { const r = await fetch("/api/sms-in"); return !!((await r.json()) as { on?: boolean }).on; } catch { return false; } } },
+      { label: "Photos the crew texts back go on the job", fix: () => `${found.photos ? `${found.photos}. The whole setup: ` : ""}RUN_ME.sql (section 20), and SUPABASE_SERVICE_ROLE_KEY in Vercel (Supabase → Settings → API → service_role), then Redeploy. Then in Twilio: Phone Numbers → Active numbers → the company number → Messaging → "A message comes in": Webhook, HTTP POST, ${window.location.origin}/api/sms-in (typed exactly, no slash at the end) → Save. If the number is inside a Messaging Service, set that on the service instead: Messaging → Services → the service → Integration → "Send a webhook" to the same address. Last, text the company number once from any phone — that switches it on, and from then on every crew text ends with "Reply to this text with photos of the work."`, probe: async () => { try { const r = await fetch("/api/sms-in"); const j = (await r.json()) as { on?: boolean; why?: string }; found.photos = j.why || ""; return !!j.on; } catch { return false; } } },
+      { label: "Nobody-home marks and when each text went", fix: "RUN_ME.sql (section 21) — until then a ⚠ Nobody home mark doesn't clear itself and a worker's \"no\" right after an evening text counts as a door", probe: async () => !(await sb().from("schedule_days").select("texted_at").limit(1)).error },
       { label: "PACT crew on the day schedule", fix: "RUN_ME.sql (section 14) — until then a PACT crew is matched to its job by day and address only", probe: async () => !(await sb().from("schedule_days").select("pact_job_id").limit(1)).error },
       { label: "Smart reader (Claude) — POs and surveys", fix: "add ANTHROPIC_API_KEY in Vercel → Settings → Environment Variables, then Redeploy (POs and surveys read by the rules until then). A key made for more than one workspace also needs ANTHROPIC_WORKSPACE_ID — or make the key for one workspace in the Claude Console", probe: async () => { try { const r = await fetch("/api/parse-po"); return !!((await r.json()) as { smart?: boolean }).smart; } catch { return false; } } },
       { label: "PACT schedule dates", fix: "upgrade_schedule.sql", probe: async () => !(await sb().from("pact_jobs").select("start_date,finish_date").limit(1)).error },
@@ -489,7 +493,7 @@ export default function Settings() {
     for (const p of probes) {
       let ok = false;
       try { ok = await p.probe(); } catch { ok = false; }
-      results.push({ label: p.label, fix: p.fix, ok });
+      results.push({ label: p.label, fix: typeof p.fix === "function" ? p.fix() : p.fix, ok });
     }
     setChecks(results); setChecking(false);
   };

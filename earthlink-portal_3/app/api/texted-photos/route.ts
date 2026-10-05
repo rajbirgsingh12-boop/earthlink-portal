@@ -35,9 +35,9 @@ export async function POST(req: Request) {
   const b = (await db.get<Batch>(`texted_photos?id=eq.${body.id}&select=*`)).rows[0];
   if (!b) return NextResponse.json({ error: "Those photos aren't there any more" }, { status: 404 });
 
-  // a "nobody home" notice (or a crew reply) the office has dealt with
+  // a "nobody home" notice, a crew reply, or a texted measurement the office has seen
   if (body.action === "seen") {
-    if (b.status !== "nobody" && b.status !== "reply") return NextResponse.json({ error: "Nothing to clear there" }, { status: 409 });
+    if (b.status !== "nobody" && b.status !== "reply" && b.status !== "measure") return NextResponse.json({ error: "Nothing to clear there" }, { status: 409 });
     return (await db.patch(`texted_photos?id=eq.${b.id}`, { status: "seen" })) ? NextResponse.json({ ok: true }) : NextResponse.json({ error: "Couldn't clear it — try again" }, { status: 500 });
   }
   if (body.action === "throw") {

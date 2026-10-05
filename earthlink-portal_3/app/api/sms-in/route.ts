@@ -31,6 +31,12 @@ import {
 import { fileBatch, folderOf, inboxOf, photosBackReady, serviceDb, type Batch, type Db, type Photo, type Target } from "@/lib/photoStore";
 import { bareNo, nobodyHome } from "@/lib/noAccess";
 import { nobodyFlow } from "@/lib/nobodyFlow";
+import {
+  applyMeasures, askMeasureText, askWhichJobText, countKinds, gotAfterText, gotBeforeText, gotBothText, gotMeasureText, kindOfName, measureLines, measureNoteLine, parseMeasures, photoKindFor, stageOf,
+  type Change, type MeasureLine, type PhotoKind,
+} from "@/lib/jobFlow";
+import { bookPrice } from "@/lib/priceServer";
+import type { SfLine } from "@/lib/measure";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -115,6 +121,62 @@ async function targetOf(db: Db, b: Batch): Promise<Target | null> {
   return null;
 }
 
+// ---- a PACT job's thread (lib/jobFlow): where the job is, and a measurement texted in ----
+interface ThreadJob { id: string; po_number?: string | null; job_number?: string | null; items?: SfLine[] | null; attachments?: { name: string; path: string }[] | null; notes?: string | null; tax_pct?: number | null }
+const threadJob = async (db: Db, id: string): Promise<ThreadJob | null> =>
+  (await db.get<ThreadJob>(`pact_jobs?id=eq.${id}&select=id,po_number,job_number,items,attachments,notes,tax_pct`)).rows[0] || null;
+const itemsOf = (j: ThreadJob): SfLine[] => (Array.isArray(j.items) ? j.items : []);
+const stageOfJob = (j: ThreadJob) => stageOf({ ...countKinds((j.attachments || []).map((a) => a?.name || "")), needSf: measureLines(itemsOf(j)).some((l) => !l.has) });
+// the job a measurement is for: the PO said in the text, else the one job
+// today — the square feet themselves ("120", "10x12") must not read as a job number
+const jobRefsOnly = (body: string): string => [
+  ...(body || "").matchAll(/\b(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:\-]?\s*\d{1,12}\b/gi),
+  ...(body || "").matchAll(/\b\d{5,12}\b/g),
+].map((m) => m[0]).join(" ");
+const nyWhen = (d: Date) => new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(d).replace(/,/g, "");
+// "plaster 120 sf": onto the job's lines, so the proposal and the invoice
+// carry it; a note on the job and a line for the office. The reply, or
+// nothing when the text wasn't a measurement.
+async function measureIn(db: Db, o: { emp: Emp; body: string; from: string; sid: string; now: Date; today: string }): Promise<string | null> {
+  const lang = o.emp.lang;
+  const { rows, mine } = await jobsOf(db, o.emp, o.today);
+  const refs = jobRefsOnly(o.body);
+  const pick = pickJob(refs, rows, mine, o.today, await anyPoOf(db, refs, mine));
+  if (pick.kind !== "pact") {
+    // a measurement ("50 sf", "plaster 50") with no one job to put it on: say which
+    return parseMeasures(o.body, [], false).kind !== "none" ? askWhichJobText(lang) : null;
+  }
+  const job = await threadJob(db, pick.id);
+  if (!job) return null;
+  const lines = measureLines(itemsOf(job));
+  const parsed = parseMeasures(o.body, lines, lines.some((l) => !l.has));
+  if (parsed.kind === "none") return null;
+  if (parsed.kind === "ask") return askMeasureText(parsed, pick.label, lines, lang);
+  const done = await measureOnJob(db, job, parsed.hits, { ...o, sid: o.sid });
+  if (!done) return lang && /^(es|spa|esp)/i.test(lang) ? "No se pudo guardar la medida. Por favor mándela otra vez." : "Couldn't save that measurement. Please text it again.";
+  return gotMeasureText(done.changes, pick.label, done.stillBlank, lang);
+}
+// the numbers onto the job: its lines, its billed total (as the page keeps
+// it: never wiped by lines at no price), a 📏 line on its notes, and a row
+// for the office. `sid` is left off a text that already filed its pictures
+// under that id — one row per Twilio message id. Null when the save failed.
+async function measureOnJob(db: Db, job: ThreadJob, hits: Parameters<typeof applyMeasures>[1], o: { emp: Emp; body: string; from: string; sid: string; now: Date }): Promise<{ changes: Change[]; stillBlank: MeasureLine[] } | null> {
+  // a Plaster line the job never had: at the price Settings saved, not the built-in list's
+  const plasterPrice = hits.some((h) => h.index === -1) ? await bookPrice("plaster") : 0;
+  const { items, changes } = applyMeasures(itemsOf(job), hits, plasterPrice);
+  if (!changes.length) return null;
+  const sub = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
+  const tax = job.tax_pct === null || job.tax_pct === undefined ? 8.875 : Number(job.tax_pct);
+  const who = (o.emp.name || "").trim().split(/\s+/)[0] || "";
+  const line = measureNoteLine(changes, who, nyWhen(o.now));
+  const notes = `${(job.notes || "").trim()}${(job.notes || "").trim() ? "\n" : ""}${line}`;
+  const saved = await db.patch(`pact_jobs?id=eq.${job.id}`, { items, notes, ...(sub > 0 ? { amount: Math.round(sub * (1 + tax / 100) * 100) / 100 } : {}) });
+  if (!saved) return null;
+  const row = { employee_id: o.emp.id, from_phone: o.from, body: o.body, status: "measure", how: "measure", pact_job_id: job.id, photos: [], msg_sid: o.sid || null };
+  if (!(await db.insert("texted_photos", { ...row, note: line }))) await db.insert("texted_photos", row); // before section 21: no note column
+  return { changes, stillBlank: measureLines(items).filter((l) => !l.has) };
+}
+
 export async function GET() {
   // Settings reads this: can the portal take pictures in, has a text come in
   // yet — and when not, which piece is missing
@@ -177,6 +239,9 @@ export async function POST(req: Request) {
     // switches it on — and hears back that it worked, that once
     const firstEver = !(await db.get<{ id: string }>("texted_photos?select=id&limit=1")).rows.length;
     if (firstEver) await db.insert("texted_photos", { employee_id: emp.id, from_phone: from, body, status: "note", msg_sid: sid || null });
+    // the square feet, texted: onto the job's lines (lib/jobFlow)
+    const measured = await measureIn(db, { emp, body, from, sid, now, today });
+    if (measured) return answer(measured);
     // a job's number: the pictures they just sent go there — ones still
     // waiting (two days), or ones put on the wrong job (the last two hours;
     // only when the text is just the number). "Just sent" is the last batch
@@ -230,7 +295,13 @@ export async function POST(req: Request) {
   }
   // what this phone sent in the last ten minutes: one phone often splits five
   // pictures into five texts, and only one of them carries the PO
-  const burst = (await db.get<Batch>(`texted_photos?${emp ? `employee_id=eq.${emp.id}` : `from_phone=eq.${enc(from)}`}&status=in.(held,filed)&created_at=gte.${since(BURST_MS)}&order=created_at.asc&select=*`)).rows;
+  let burst = (await db.get<Batch>(`texted_photos?${emp ? `employee_id=eq.${emp.id}` : `from_phone=eq.${enc(from)}`}&status=in.(held,filed)&created_at=gte.${since(BURST_MS)}&order=created_at.asc&select=*`)).rows;
+  // a text in between (the square feet, a "no") ends a send: pictures after
+  // it are a new send, not the tail of the one before
+  if (emp && burst.length) {
+    const talk = (await db.get<{ created_at?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&status=in.(measure,note,nobody,reply)&created_at=gte.${since(BURST_MS)}&order=created_at.desc&select=created_at&limit=1`)).rows[0];
+    if (talk?.created_at) burst = burst.filter((b) => (b.created_at || "") > talk.created_at!);
+  }
   let pick: ReturnType<typeof pickJob> = { kind: "ask", why: "none" };
   if (emp) {
     const { rows, mine } = await jobsOf(db, emp, today);
@@ -247,13 +318,27 @@ export async function POST(req: Request) {
   const target = pick.kind === "ask" ? null : pick;
   const batchId = randomUUID();
   const dir = target ? folderOf(target) : inboxOf(batchId);
-  const put = await store(dir, photoKind(body));
+  // which pile: on a PACT job, where the job is in its thread decides (the
+  // first pictures are the before pictures; a split send stays together);
+  // elsewhere the worker's own word, else after
+  let kind: PhotoKind = photoKind(body);
+  let thread: ThreadJob | null = null;
+  if (target && target.kind === "pact") {
+    thread = await threadJob(db, target.id);
+    if (thread) {
+      const last = [...burst].reverse().find((b) => b.status === "filed" && b.pact_job_id === target.id && (b.photos || []).length);
+      kind = photoKindFor(body, stageOfJob(thread), last ? kindOfName(last.photos![0].name) : null);
+    }
+  }
+  const put = await store(dir, kind);
   if (put.length === 0) return say({ k: "failed" }, lang);
 
   const row = { id: batchId, employee_id: emp?.id || null, from_phone: from, body, photos: put, msg_sid: sid || null };
   // one answer per burst: the first text gets it, the rest go quietly — unless
-  // a later one carries a number, and then it says where they all went
-  const quiet = burst.length > 0 && refsIn(body).length === 0;
+  // a later one carries a number, and then it says where they all went; or
+  // changes pile ("before" after after pictures), and then it says so
+  const lastKind = (() => { const last = [...burst].reverse().find((b) => b.status === "filed" && (b.photos || []).length); return last ? kindOfName(last.photos![0].name) : null; })();
+  const quiet = burst.length > 0 && refsIn(body).length === 0 && (!thread || !lastKind || lastKind === kind);
   if (target) {
     if (!(await db.attach(target, put, []))) {
       // the job went away between the lookup and now — keep them for the office
@@ -267,6 +352,17 @@ export async function POST(req: Request) {
     // this one named the job: the ones before it that were waiting go there too
     let moved = 0;
     if (how === "number") for (const b of burst) if (b.status === "held") moved += await fileBatch(db, b, target, "number");
+    if (thread) {
+      // the square feet, when they came with the pictures ("plaster 120 sf" + a photo)
+      const lines = measureLines(itemsOf(thread));
+      const parsed = emp ? parseMeasures(body, lines, lines.some((l) => !l.has)) : { kind: "none" as const };
+      const measured = parsed.kind === "ok" ? await measureOnJob(db, thread, parsed.hits, { emp: emp!, body, from, sid: "", now }) : null;
+      if (quiet && !moved && !measured) return answer();
+      // the thread's next step: the square feet after the before pictures, the after pictures after that
+      const n = put.length + moved;
+      if (measured) return answer(gotBothText(kind, n, target.label, measured.changes, measured.stillBlank, lang));
+      return answer(kind === "before" ? gotBeforeText(n, target.label, lines, lang) : gotAfterText(n, target.label, lines.filter((l) => !l.has), lang));
+    }
     if (quiet && !moved) return answer();
     return say({ k: "filed", n: put.length + moved, label: target.label }, lang);
   }

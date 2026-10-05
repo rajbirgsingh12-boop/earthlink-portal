@@ -89,8 +89,18 @@ export function crewText(t: CrewTextInput): string {
 // back to it go on the job (/api/sms-in) — added by the server, which is the
 // only one that sends from that number. Language by the text's own greeting.
 export const PHOTO_INVITE = { en: "Reply to this text with photos of the work.", es: "Responda a este mensaje con fotos del trabajo." };
+// a PACT job's text carries the whole thread instead (lib/jobFlow's jobAsk:
+// before photos, the square feet, after photos) — never both
+const hasAsk = (b: string) => b.includes(PHOTO_INVITE.en) || b.includes(PHOTO_INVITE.es) || /reply with BEFORE photos|responda con fotos de ANTES/.test(b);
 export function withPhotoInvite(body: string): string {
   const b = (body || "").trimEnd();
-  if (!b || b.includes(PHOTO_INVITE.en) || b.includes(PHOTO_INVITE.es)) return b;
+  if (!b || hasAsk(b)) return b;
   return `${b}\n\n${/^hola\b/i.test(b.trimStart()) ? PHOTO_INVITE.es : PHOTO_INVITE.en}`;
+}
+// the same, with the PACT thread's ask (the words come from lib/jobFlow, so
+// this file stays free of it: the browser's preview and the server both call this)
+export function withJobAsk(body: string, ask: string): string {
+  const b = (body || "").trimEnd();
+  if (!b || !ask || hasAsk(b)) return b;
+  return `${b}\n\n${ask}`;
 }

@@ -120,10 +120,29 @@ export default function PactCalendar() {
   // jobs a worker texted "nobody home" about, waiting for a new day (RUN_ME
   // section 21 clears the mark once the job's day changes)
   const [nobody, setNobody] = useState<Map<string, string>>(new Map());
+  // and each job's thread by text (lib/jobFlow): before photos in, the square
+  // feet texted, after photos in — the marks on the card
+  type Thread = { beforeN: number; afterN: number; measured: string };
+  const [thread, setThread] = useState<Map<string, Thread>>(new Map());
   const loadNobody = async () => {
-    const { data, error } = await sb().from("texted_photos").select("pact_job_id,created_at").eq("status", "nobody").not("pact_job_id", "is", null).limit(200);
-    if (error) return; // before section 20
-    setNobody(new Map(((data || []) as { pact_job_id: string; created_at: string }[]).map((n) => [n.pact_job_id, n.created_at])));
+    type Row = { pact_job_id: string; status: string; created_at: string; photos?: { name: string }[] | null; note?: string | null };
+    const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
+    const read = (cols: string) => sb().from("texted_photos").select(cols).in("status", ["nobody", "filed", "measure"]).not("pact_job_id", "is", null).gte("created_at", since).order("created_at", { ascending: true }).limit(500);
+    let got = await read("pact_job_id,status,created_at,photos,note");
+    if (got.error) got = await read("pact_job_id,status,created_at,photos"); // before section 21
+    if (got.error) return; // before section 20
+    const rows = (got.data || []) as unknown as Row[];
+    setNobody(new Map(rows.filter((n) => n.status === "nobody").map((n) => [n.pact_job_id, n.created_at])));
+    const t = new Map<string, Thread>();
+    for (const r of rows) {
+      if (r.status === "nobody") continue;
+      const cur = t.get(r.pact_job_id) || { beforeN: 0, afterN: 0, measured: "" };
+      if (r.status === "filed") (r.photos || []).forEach((p) => { if (/^before/i.test(p?.name || "")) cur.beforeN += 1; else if (/^after/i.test(p?.name || "")) cur.afterN += 1; });
+      // "📏 Tue Sep 29 9:14 AM · Plaster 120 sq ft · texted by Jose" → the middle, latest wins
+      if (r.status === "measure") cur.measured = ((r.note || "").split(" · ")[1] || "").trim() || cur.measured || "texted";
+      t.set(r.pact_job_id, cur);
+    }
+    setThread(t);
   };
   // admin and office only — the notices are theirs (the database says so too)
   useEffect(() => { if (canEdit) loadNobody(); }, [canEdit]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -345,6 +364,11 @@ export default function PactCalendar() {
         {/* who's going — the one line, and the panel behind it */}
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <span className={`text-[12px] ${state === "not_told" ? "text-alert" : "text-inksoft"}`}>📱 {crewLine(crew, j, emps)}</span>
+          {thread.has(j.id) && (() => {
+            const t = thread.get(j.id)!;
+            const parts = [t.beforeN ? `📷 before ${t.beforeN}` : "", t.measured ? `📏 ${t.measured}` : "", t.afterN ? `📷 after ${t.afterN}` : ""].filter(Boolean);
+            return parts.length ? <span className="text-[12px] text-ok" data-thread={j.id}>{parts.join(" · ")}</span> : null;
+          })()}
           {(canEdit || crew.length > 0) && (
             <button type="button" className={`btn min-h-[44px] px-3 py-1.5 text-[13px] ${crewOpen === j.id ? "border-work" : ""}`} onClick={() => setCrewOpen(crewOpen === j.id ? null : j.id)}
               title="Pick who's going, and text them the address, the apartment, the day and the work">

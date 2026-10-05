@@ -847,3 +847,14 @@ drop trigger if exists schedule_days_nobody_rebooked on schedule_days;
 create trigger schedule_days_nobody_rebooked
   after insert on schedule_days
   for each row execute function public.texted_nobody_rebooked();
+
+-- 22) A PACT job's thread by text. The crew text asks for BEFORE photos; the
+--     worker's first pictures land on the job as before photos; the square
+--     feet they text ("plaster 120 sf") go onto the job's lines, so the
+--     proposal and the invoice carry them from then on; then AFTER photos.
+--     Each texted measurement is kept in texted_photos (status 'measure', the
+--     words in note) for the office's card, and the job's own notes get the
+--     same line. No new column: the job's photos and lines say where it is.
+--     Needs section 20 (and 21 for the note). This index serves the PACT
+--     Schedule's before / sq ft / after marks, read per job.
+create index if not exists texted_photos_job on texted_photos (pact_job_id, created_at desc) where pact_job_id is not null;

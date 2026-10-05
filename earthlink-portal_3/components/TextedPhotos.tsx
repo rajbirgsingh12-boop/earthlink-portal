@@ -47,11 +47,11 @@ export default function TextedPhotos({ canEdit, flash, onShow }: { canEdit: bool
     const [h, f, n0] = await Promise.all([
       sb().from("texted_photos").select(cols).eq("status", "held").order("created_at", { ascending: false }).limit(200),
       sb().from("texted_photos").select(cols).eq("status", "filed").gte("created_at", since).order("created_at", { ascending: false }).limit(40),
-      sb().from("texted_photos").select(`${cols},note`).in("status", ["nobody", "reply"]).order("created_at", { ascending: false }).limit(100),
+      sb().from("texted_photos").select(`${cols},note`).in("status", ["nobody", "reply", "measure"]).order("created_at", { ascending: false }).limit(100),
     ]);
     if (h.error) { setRows([]); return; } // before RUN_ME section 20 — nothing to show
     // before section 21 there's no note to read — the notices come without it
-    const n = n0.error ? await sb().from("texted_photos").select(cols).in("status", ["nobody", "reply"]).order("created_at", { ascending: false }).limit(100) : n0;
+    const n = n0.error ? await sb().from("texted_photos").select(cols).in("status", ["nobody", "reply", "measure"]).order("created_at", { ascending: false }).limit(100) : n0;
     const list = [
       ...([...(h.data || []), ...(f.data || [])] as Batch[]).filter((b) => Array.isArray(b.photos) && b.photos.length > 0),
       ...((n.data || []) as Batch[]),
@@ -102,6 +102,10 @@ export default function TextedPhotos({ canEdit, flash, onShow }: { canEdit: bool
   const filed = rows.filter((b) => b.status === "filed");
   const nobody = rows.filter((b) => b.status === "nobody");
   const replies = rows.filter((b) => b.status === "reply");
+  // the square feet a worker texted, already on the job's lines (lib/jobFlow)
+  const measures = rows.filter((b) => b.status === "measure");
+  // "📏 Tue Sep 29 9:14 AM · Plaster 120 sq ft · texted by Jose" → the middle
+  const measured = (b: Batch) => ((b.note || "").split(" · ")[1] || (b.body || "")).trim();
   if (!canEdit || rows.length === 0) return null;
   const who = (b: Batch) => (b.employee_id && names[b.employee_id]) || (b.employee_id ? "A worker" : `${prettyPhone(b.from_phone || "")} (not on the crew list)`);
   // a fresh link every time; the window opens on the tap itself, so a phone doesn't block it
@@ -131,7 +135,19 @@ export default function TextedPhotos({ canEdit, flash, onShow }: { canEdit: bool
         <div className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">📱 From the crew</div>
         {nobody.length > 0 && <span className="stamp border-alert text-alert" data-nobody-count>⚠ {nobody.length} nobody home</span>}
         {held.length > 0 && <span className="stamp border-alert text-alert" data-texted-waiting>{held.length} need a job</span>}
+        {measures.length > 0 && <span className="stamp border-ok text-ok" data-measure-count>📏 {measures.length} measured</span>}
       </div>
+      {measures.map((b) => {
+        const at = spots[b.pact_job_id || ""];
+        return (
+          <div key={b.id} className="border-t border-rulesoft py-2.5" data-measure={b.id}>
+            <div className="text-[14px]"><b>📏 {who(b)}</b> texted the square feet → <b>{at ? at.label : "a job"}</b>{at?.sub ? <span className="text-inksoft"> · {at.sub}</span> : null} · {when(b.created_at)}</div>
+            <div className="text-[13px]" data-measure-note>{measured(b)} <span className="text-inksoft">— on the job&apos;s lines, the proposal and the invoice</span></div>
+            {(b.body || "").trim() && measured(b) !== (b.body || "").trim() && <div className="text-[12px] text-inksoft [overflow-wrap:anywhere]">“{(b.body || "").trim()}”</div>}
+            <button className="btn btn-ghost mt-1.5 min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
+          </div>
+        );
+      })}
       {nobody.map((b) => {
         const at = spots[b.pact_job_id || b.release_id || ""];
         const words = (b.body || "").trim();

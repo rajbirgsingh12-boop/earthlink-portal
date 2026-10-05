@@ -15,7 +15,8 @@
 //   • The portal itself calls it while someone has it open, with their own
 //     sign-in. That is the catch-up when the cron isn't set up yet.
 import { NextResponse } from "next/server";
-import { langOf, withPhotoInvite } from "@/lib/crewText";
+import { langOf, withJobAsk, withPhotoInvite } from "@/lib/crewText";
+import { jobAsk, needSf } from "@/lib/jobFlow";
 import { dueBody, dueSkip, dueWork } from "@/lib/dueText";
 import { spanishWorkServer } from "@/lib/smartTranslate";
 import { sendTexts, twilioConfigured } from "@/lib/twilio";
@@ -32,7 +33,7 @@ const cleanPhone = (s: string): string => {
 };
 interface Row { id: string; day: string; employee_id: string; description?: string | null; address?: string | null; texted?: boolean; send_at?: string | null; release_id?: string | null; pact_job_id?: string | null }
 interface Emp { id: string; name?: string | null; phone?: string | null; lang?: string | null }
-interface Job { id: string; po_number?: string | null; job_number?: string | null; address?: string | null; development?: string | null; property_unit?: string | null; description?: string | null; start_date?: string | null; canceled?: boolean; work_done?: boolean }
+interface Job { id: string; po_number?: string | null; job_number?: string | null; address?: string | null; development?: string | null; property_unit?: string | null; description?: string | null; start_date?: string | null; canceled?: boolean; work_done?: boolean; items?: unknown }
 interface Rel { id: string; rel_number?: string | null; location?: string | null; address?: string | null; canceled?: boolean }
 
 // who is asking: Vercel's cron (and then the service key does the reading), or
@@ -120,7 +121,7 @@ async function sweep(req: Request) {
     // before RUN_ME section 18 there is no language column — then everyone reads English
     get<Emp>(`${empQ},lang`).then((e) => e ?? get<Emp>(empQ)),
     ids(due.map((r) => r.pact_job_id)).length
-      ? get<Job>(`pact_jobs?id=in.(${ids(due.map((r) => r.pact_job_id)).join(",")})&select=id,po_number,job_number,address,development,property_unit,description,start_date,canceled,work_done`)
+      ? get<Job>(`pact_jobs?id=in.(${ids(due.map((r) => r.pact_job_id)).join(",")})&select=id,po_number,job_number,address,development,property_unit,description,start_date,canceled,work_done,items`)
       : Promise.resolve([] as Job[]),
     ids(due.map((r) => r.release_id)).length
       ? get<Rel>(`releases?id=in.(${ids(due.map((r) => r.release_id)).join(",")})&select=id,rel_number,location,address,canceled`)
@@ -150,7 +151,9 @@ async function sweep(req: Request) {
     const raw = dueWork(row, job);
     const work = langOf(emp!.lang) === "es" && raw ? await spanishWorkServer(raw) : raw;
     const body = dueBody(row, { emp: emp!, job, rel, work });
-    return { to: phone, body: invite ? withPhotoInvite(body) : body, id: row.id, sendAt: row.send_at || null };
+    // a PACT job's text asks for the whole thread; a release's just for photos
+    const asked = !invite ? body : job ? withJobAsk(body, jobAsk(emp!.lang, needSf(Array.isArray(job.items) ? job.items : []))) : withPhotoInvite(body);
+    return { to: phone, body: asked, id: row.id, sendAt: row.send_at || null };
   }));
   const out = built.filter((m): m is NonNullable<typeof m> => !!m);
   await clear(missed);

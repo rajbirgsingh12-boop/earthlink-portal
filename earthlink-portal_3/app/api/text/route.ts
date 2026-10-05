@@ -10,8 +10,9 @@
 //   (or TWILIO_MESSAGING_SERVICE_SID instead of TWILIO_FROM)
 import { NextResponse } from "next/server";
 import { sendTexts, twilioConfigured, twilioProblem } from "@/lib/twilio";
-import { photosBackOn } from "@/lib/photoStore";
-import { withPhotoInvite } from "@/lib/crewText";
+import { photosBackOn, serviceDb } from "@/lib/photoStore";
+import { withJobAsk, withPhotoInvite } from "@/lib/crewText";
+import { jobAsk, needSf } from "@/lib/jobFlow";
 
 // a full 100-message batch takes ~30s of sequential Twilio calls — don't let
 // the platform kill the function mid-loop
@@ -89,8 +90,35 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Texting limit reached for this hour — try again later" }, { status: 429 });
   }
 
-  // once pictures texted back go on the job, the text asks for them
-  if (await photosBackOn()) messages = messages.map((m) => ({ ...m, body: withPhotoInvite(m.body) }));
+  // once pictures texted back go on the job, the text asks for them — a PACT
+  // job's text asks for the whole thread (before photos, the square feet when
+  // a line is waiting for them, after photos); a release's just for photos
+  if (await photosBackOn()) {
+    const ids = messages.map((m) => m.id).filter(Boolean);
+    const jobOfRow = new Map<string, string>();
+    const sfOfJob = new Map<string, boolean>();
+    if (ids.length) {
+      // read as the portal itself when it can (the caller is already a checked
+      // admin/office sign-in; nothing read here goes back to them), else as them
+      const svc = serviceDb();
+      const read = async <T>(path: string): Promise<T[]> => {
+        if (svc) return (await svc.get<T>(path)).rows;
+        const r = await fetch(`${supaUrl}/rest/v1/${path}`, { headers: supaHeaders, cache: "no-store" }).catch(() => null);
+        return r && r.ok ? ((await r.json().catch(() => [])) as T[]) : [];
+      };
+      const rows = await read<{ id: string; pact_job_id?: string | null }>(`schedule_days?id=in.(${ids.join(",")})&select=id,pact_job_id`);
+      rows.forEach((r) => { if (r.pact_job_id) jobOfRow.set(r.id, r.pact_job_id); });
+      const jobIds = [...new Set(jobOfRow.values())];
+      if (jobIds.length) {
+        const jobs = await read<{ id: string; items?: unknown }>(`pact_jobs?id=in.(${jobIds.join(",")})&select=id,items`);
+        jobs.forEach((j) => sfOfJob.set(j.id, needSf(Array.isArray(j.items) ? j.items : [])));
+      }
+    }
+    messages = messages.map((m) => {
+      const job = m.id ? jobOfRow.get(m.id) : undefined;
+      return { ...m, body: job ? withJobAsk(m.body, jobAsk(/^hola\b/i.test(m.body) ? "es" : "en", sfOfJob.get(job) ?? true)) : withPhotoInvite(m.body) };
+    });
+  }
   // the send itself, and the TEXTED mark the moment Twilio takes each one —
   // even if the phone never sees this response, a retry knows who was texted
   const { sent, failed } = await sendTexts(messages, async (m) => {

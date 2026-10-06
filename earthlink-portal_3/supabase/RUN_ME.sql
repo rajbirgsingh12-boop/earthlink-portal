@@ -855,6 +855,9 @@ create trigger schedule_days_nobody_rebooked
 --     Each texted measurement is kept in texted_photos (status 'measure', the
 --     words in note) for the office's card, and the job's own notes get the
 --     same line. No new column: the job's photos and lines say where it is.
---     Needs section 20 (and 21 for the note). This index serves the PACT
---     Schedule's before / sq ft / after marks, read per job.
+--     Needs section 20 (and 21 for the note). This index serves the reads
+--     by job: the webhook's "has this worker sent before photos of this job",
+--     the work-done rows cleared when a worker texts NOT DONE, and the
+--     office's per-job card. (The PACT Schedule reads its marks for all jobs
+--     at once by created_at, which the table's own order serves.)
 create index if not exists texted_photos_job on texted_photos (pact_job_id, created_at desc) where pact_job_id is not null;

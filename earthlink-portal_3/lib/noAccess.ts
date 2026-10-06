@@ -173,23 +173,24 @@ export function ackText(label: string, lang0?: string | null): string {
 // it rides under the "got it" in the same text
 const noGreeting = (crew: string) => crew.replace(/^(Hi|Hola)\b[^.]*?, (this is|le habla) Earth Link\.\s*/, "");
 // …ending with how to say that one's a no too — the number makes it certain
-export function nextText(crew: string, lang0?: string | null, invite = true, label = ""): string {
+// `ask`: a PACT job's own three steps (lib/jobFlow jobAsk) in place of the plain photo line
+export function nextText(crew: string, lang0?: string | null, invite = true, label = "", ask = ""): string {
   const lang = langOf(lang0);
   const body = noGreeting(crew);
   const num = (label.match(/\d[\w-]*$/) || [""])[0];
   const again = num ? (lang === "es" ? `¿Tampoco hay nadie allí? Responda NO ${num}.` : `Nobody home there either? Reply NO ${num}.`) : "";
-  return `${lang === "es" ? "Su próximo trabajo" : "Your next job"}: ${body}${invite ? `\n\n${PHOTO_INVITE[lang]}` : ""}${again ? `\n${again}` : ""}`;
+  return `${lang === "es" ? "Su próximo trabajo" : "Your next job"}: ${body}${invite ? `\n\n${ask || PHOTO_INVITE[lang]}` : ""}${again ? `\n${again}` : ""}`;
 }
 export function noNextText(lang0?: string | null): string {
   return langOf(lang0) === "es" ? "No tiene otro trabajo en el horario. Llame a la oficina." : "You have no other job on the schedule. Call the office.";
 }
 // the other worker at the same door, told by the portal
-export function coworkerText(first: string, reporter: string, missedLabel: string, crew: string, lang0?: string | null, invite = true, nextLabel = ""): string {
+export function coworkerText(first: string, reporter: string, missedLabel: string, crew: string, lang0?: string | null, invite = true, nextLabel = "", ask = ""): string {
   const lang = langOf(lang0);
   const hi = lang === "es"
     ? `Hola${first ? ` ${first}` : ""}, le habla Earth Link. ${reporter ? `${reporter} avisó que no` : "No"} había nadie en ${said(missedLabel, lang)}; la oficina le dará otro día.`
     : `Hi${first ? ` ${first}` : ""}, this is Earth Link. ${reporter ? `${reporter} let us know nobody` : "Nobody"} was home at ${missedLabel}; the office will give it a new day.`;
-  return `${hi}\n\n${nextText(crew, lang, invite, nextLabel)}`;
+  return `${hi}\n\n${nextText(crew, lang, invite, nextLabel, ask)}`;
 }
 // two jobs still open today: which one?
 export function askWhichText(options: DayJob[], lang0?: string | null): string {

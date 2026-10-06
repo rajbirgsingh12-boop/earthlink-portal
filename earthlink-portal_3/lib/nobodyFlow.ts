@@ -21,10 +21,14 @@ import { askClaudeSpanish, spanishWorkServer } from "./smartTranslate";
 import { sendTexts, twilioConfigured } from "./twilio";
 import { langOf } from "./crewText";
 import { folderOf, type Db, type Photo } from "./photoStore";
+import { jobAsk, needSf } from "./jobFlow";
+import type { SfLine } from "./measure";
 
 export interface FlowEmp { id: string; name?: string | null; phone?: string | null; lang?: string | null; active?: boolean | null }
 interface Row { id: string; day: string; employee_id: string; pact_job_id?: string | null; release_id?: string | null; texted?: boolean | null; texted_at?: string | null; description?: string | null; address?: string | null }
-interface PJob extends DueJob { id: string; notes?: string | null }
+interface PJob extends DueJob { id: string; notes?: string | null; items?: SfLine[] | null }
+// a PACT job's next-job text ends with its own three steps (before photos, the square feet, after photos)
+const askFor = (j: PJob | undefined, lang?: string | null) => (j ? jobAsk(lang, needSf(Array.isArray(j.items) ? j.items : [])) : "");
 interface Rel { id: string; rel_number?: string | null; location?: string | null; address?: string | null; canceled?: boolean; notes?: string | null }
 interface Mark { id: string; pact_job_id?: string | null; release_id?: string | null; created_at?: string | null; status?: string | null; note?: string | null; employee_id?: string | null; how?: string | null }
 
@@ -74,7 +78,7 @@ export async function nobodyFlow(db: Db, o: {
     const pIds = ids(rows.map((r) => r.pact_job_id)).filter((id) => !jobOf.has(id));
     const rIds = ids(rows.map((r) => r.release_id)).filter((id) => !relOf.has(id));
     const [pj, rl] = await Promise.all([
-      pIds.length ? db.get<PJob>(`pact_jobs?id=in.(${pIds.join(",")})&select=id,po_number,job_number,address,development,property_unit,description,start_date,canceled,work_done,notes`) : Promise.resolve({ ok: true, rows: [] as PJob[] }),
+      pIds.length ? db.get<PJob>(`pact_jobs?id=in.(${pIds.join(",")})&select=id,po_number,job_number,address,development,property_unit,description,start_date,canceled,work_done,notes,items`) : Promise.resolve({ ok: true, rows: [] as PJob[] }),
       rIds.length ? db.get<Rel>(`releases?id=in.(${rIds.join(",")})&select=id,rel_number,location,address,canceled,notes`) : Promise.resolve({ ok: true, rows: [] as Rel[] }),
     ]);
     pj.rows.forEach((j) => jobOf.set(j.id, j));
@@ -226,7 +230,7 @@ export async function nobodyFlow(db: Db, o: {
   if (nj && (next.kind === "today" || movedOk)) {
     const row = rowOf.get(nj.rowIds[0])!;
     const crew = dueBody({ ...row, day: today }, { emp, job: job ? { ...job, start_date: today } : null, rel, work: await workFor(dueWork(row, job), lang), moved });
-    nextMsg = nextText(crew, lang, true, nj.label);
+    nextMsg = nextText(crew, lang, true, nj.label, askFor(job, lang));
     summary = next.kind === "today"
       ? `Sent ${first(emp)} on to ${nj.label}, their other job today`
       : `Moved ${nj.label} up from ${shortDay(from)} and sent ${first(emp)}`;
@@ -280,7 +284,7 @@ export async function nobodyFlow(db: Db, o: {
         if (!r || !to) continue;
         if (nj.kind === "rel" && !(await db.patch(`schedule_days?id=eq.${r.id}&day=eq.${from}`, { day: today, texted: false }))) continue;
         const crew = dueBody({ ...r, day: today }, { emp: e, job: job ? { ...job, start_date: today } : null, rel, work: await workFor(dueWork(r, job), e.lang), moved });
-        out.push({ to, id: r.id, body: coworkerText(first(e), first(emp), missed.label, crew, e.lang, true, nj.label) });
+        out.push({ to, id: r.id, body: coworkerText(first(e), first(emp), missed.label, crew, e.lang, true, nj.label, askFor(job, e.lang)) });
       }
       if (out.length && twilioConfigured()) {
         await sendTexts(out, async (msg) => {

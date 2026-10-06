@@ -6,6 +6,8 @@
 import { NextResponse } from "next/server";
 import { pactKey, relKey } from "@/lib/smsIn";
 import { dropBatch, fileBatch, serviceDb, type Batch } from "@/lib/photoStore";
+import { countKinds, measureLines, photoKindFor, stageOf, type PhotoKind } from "@/lib/jobFlow";
+import type { SfLine } from "@/lib/measure";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -47,15 +49,25 @@ export async function POST(req: Request) {
   if (body.action !== "file") return NextResponse.json({ error: "Bad request" }, { status: 400 });
   if (b.status !== "held" && b.status !== "filed") return NextResponse.json({ error: "Those photos were thrown away" }, { status: 409 });
   let target;
+  // onto a PACT job, the pile is where the job's thread is (lib/jobFlow): its
+  // first pictures are before pictures, whatever they were called while they waited
+  let kind: PhotoKind | undefined;
   if (body.pact_job_id && uuid.test(body.pact_job_id)) {
-    const j = (await db.get<{ id: string; po_number?: string; job_number?: string }>(`pact_jobs?id=eq.${body.pact_job_id}&select=id,po_number,job_number`)).rows[0];
-    if (j) target = pactKey(j);
+    type J = { id: string; po_number?: string; job_number?: string; items?: SfLine[] | null; attachments?: { name?: string }[] | null };
+    let got = await db.get<J>(`pact_jobs?id=eq.${body.pact_job_id}&select=id,po_number,job_number,items,attachments`);
+    if (!got.ok) got = await db.get<J>(`pact_jobs?id=eq.${body.pact_job_id}&select=id,po_number,job_number`);
+    const j = got.rows[0];
+    if (j) {
+      target = pactKey(j);
+      const stage = stageOf({ ...countKinds((j.attachments || []).map((a) => a?.name || "")), needSf: measureLines(Array.isArray(j.items) ? j.items : []).some((l) => !l.has) });
+      kind = photoKindFor(b.body || "", stage, null);
+    }
   } else if (body.release_id && uuid.test(body.release_id)) {
     const r = (await db.get<{ id: string; rel_number?: string }>(`releases?id=eq.${body.release_id}&select=id,rel_number`)).rows[0];
     if (r) target = relKey(r);
   }
   if (!target) return NextResponse.json({ error: "That job isn't in the portal" }, { status: 404 });
-  const n = await fileBatch(db, b, target, "office");
+  const n = await fileBatch(db, b, target, "office", kind);
   if (!n) return NextResponse.json({ error: "Couldn't move the photos — try again" }, { status: 500 });
   return NextResponse.json({ ok: true, n, label: target.label });
 }

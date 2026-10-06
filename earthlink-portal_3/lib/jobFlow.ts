@@ -56,11 +56,11 @@ const isLf = (u: string) => /^(LF|LIN\.? ?FT|LINEAR ?(FT|FEET)|L\.?F\.?)$/.test(
 const KEY_WORDS: Record<string, string[]> = {
   plaster: ["plaster", "plastering", "plastered", "yeso", "plastr"],
   wall_repair: ["scrape", "scraping", "wall repair", "repair", "raspar", "raspado"],
-  popcorn: ["popcorn", "ceiling", "techo", "textured"],
+  popcorn: ["popcorn", "textured", "texturizado"],
   sheetrock: ["sheetrock", "sheet rock", "drywall", "dry wall", "rock", "gypsum", "tabla", "tablaroca"],
 };
 // plain words that carry no meaning of their own in a measurement text
-const FILLER = new Set(["the", "a", "an", "of", "for", "is", "are", "was", "about", "approx", "approximately", "around", "total", "totals", "all", "in", "on", "at", "to", "it", "its", "ok", "okay", "measurements", "measurement", "measure", "measured", "medidas", "medida", "mide", "son", "es", "de", "del", "la", "el", "los", "las", "en", "por", "para", "un", "una", "unos", "unas", "y", "and", "sq", "ft", "feet", "foot", "sf", "sqft", "square", "pies", "cuadrados", "cuadrado", "lf", "linear", "lin", "p2", "ft2", "area", "areas", "job", "po", "here", "aqui", "whole", "entire", "throughout", "apartment", "apt", "room", "rooms", "cuarto", "cuartos", "wall", "walls", "pared", "paredes", "with", "con", "sin", "no", "yes", "si", "thanks", "gracias", "please", "porfavor", "favor"]);
+const FILLER = new Set(["the", "a", "an", "of", "for", "is", "are", "was", "about", "approx", "approximately", "around", "total", "totals", "all", "in", "on", "at", "to", "it", "its", "ok", "okay", "measurements", "measurement", "measure", "measured", "medidas", "medida", "mide", "son", "es", "de", "del", "la", "el", "los", "las", "en", "por", "para", "un", "una", "unos", "unas", "y", "and", "sq", "ft", "feet", "foot", "sf", "sqft", "square", "pies", "cuadrados", "cuadrado", "lf", "linear", "lin", "p2", "ft2", "area", "areas", "job", "po", "here", "aqui", "whole", "entire", "throughout", "apartment", "apt", "room", "rooms", "cuarto", "cuartos", "wall", "walls", "pared", "paredes", "ceiling", "ceilings", "techo", "techos", "bedroom", "bedrooms", "bathroom", "bathrooms", "bath", "kitchen", "living", "livingroom", "hallway", "hall", "closet", "foyer", "recamara", "recamaras", "dormitorio", "bano", "banos", "cocina", "sala", "pasillo", "with", "con", "sin", "no", "yes", "si", "thanks", "gracias", "please", "porfavor", "favor"]);
 const STOP = new Set([...FILLER, "existing", "new", "repairs", "repair", "throughout", "damaged", "areas", "area", "and", "or", "per", "each", "with", "small", "large", "removal", "remove", "install", "replace", "work", "labor", "material", "materials"]);
 const shortName = (d: string): string => {
   const words = (d || "").replace(/\(.*?\)/g, " ").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
@@ -87,52 +87,93 @@ export function measureLines(items: SfLine[]): MeasureLine[] {
 export const needSf = (items: SfLine[]): boolean => measureLines(items).some((l) => !l.has);
 
 // ---- reading a measurement text ----
+// A number is believed only when it is clearly a measurement of a line this
+// job has: "plaster 120 sf", "yeso 10x12", "2 walls 10 x 8 sheetrock". A
+// number that is a job number, an apartment, a time, a count of pictures, or
+// talk ("see you at 8") is passed over, never written on a line. Anything
+// in between is asked about, not guessed — a wrong number is a wrong bill.
 export type MeasureHit = { index: number; qty: number } | { index: -1; qty: number; plaster: true };
 export type Parsed =
   | { kind: "none" }
   | { kind: "ok"; hits: MeasureHit[] }
-  | { kind: "ask"; why: "which" | "unknown" | "noline"; word?: string; qty?: number };
-const UNIT = String.raw`(?:sq\.?\s*ft\.?|sqft|sf|sq\.?|square\s*(?:ft|feet)|ft2|pies\s*cuadrados|pies2|p2|lf|lin\.?\s*ft\.?|linear\s*(?:ft|feet))`;
-// "120", "120 sf", "1,200 sq ft", "10x12" (feet by feet), "120.5". The
-// character before the number is caught, not looked behind for — this file
-// is read by the browser too, and Safari before 16.4 won't load a lookbehind.
-const NUM = new RegExp(String.raw`(^|[^\d.])(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(?:\s*(?:x|by|por)\s*(\d+(?:\.\d+)?))?\s*(${UNIT})?(?![a-z\d])`, "g");
+  | { kind: "ask"; why: "which" | "unknown" | "noline" | "unit" | "big"; word?: string; qty?: number; line?: string; was?: number };
+export interface ParseOptions { ignore?: string[] }   // numbers that are job numbers to this worker — never square feet
+const SQ_UNIT = String.raw`sqft|sq\s*ft|sq\s*feet|sf|square\s*(?:ft|feet|foot)|ft2|pies\s*cuadrados|pies2|p2`;
+const LF_UNIT = String.raw`lf|lin\s*ft|linear\s*(?:ft|feet|foot)|pies\s*lineales`;
+const M2_UNIT = String.raw`m2|sqm|sq\s*m|square\s*met(?:er|re)s?|metros\s*cuadrados|mts2`;
+const UNIT = `(?:${SQ_UNIT}|${LF_UNIT}|${M2_UNIT})`;
+const SQFT_PER_M2 = 10.7639;
+const N = String.raw`(\d+(?:\.\d+)?)`;
+// "10x12", "10 by 12 ft", "10' x 8'", with an optional count in front: "2 walls 10x8"
+// every number is read from its own start: "4b", "2nd", "x8" inside a word are not numbers
+const EDGE = String.raw`(^|[^\d.a-z])`;
+const DIMS = new RegExp(String.raw`${EDGE}(?:(\d{1,2})\s*(?:walls?|paredes?|sides?|lados?|ceilings?|techos?|rooms?|cuartos?|areas?|spots?|pieces?|pcs?|x|times|veces)\s*(?:of|de|at|a|@)?\s*)?${N}\s*(?:ft|feet|pies|')?\s*(?:x|by|por)\s*${N}\s*(?:ft|feet|pies|')?(?:\s*(${UNIT}))?(?![a-z\d])`, "g");
+const NUM_UNIT = new RegExp(String.raw`${EDGE}${N}\s*(${UNIT})(?![a-z\d])`, "g");
+const BARE = new RegExp(String.raw`${EDGE}(\d+(?:\.\d+)?)(?![a-z\d.])`, "g");
+// a count or an address number stays one when a measurement follows it ("2 walls 10x8", "floor 120 sf")
+const NOT_TAIL = String.raw`(?!\s*(?:of|de|at|a|@)?\s*(?:${UNIT}\b|\d+(?:\.\d+)?\s*(?:ft|feet|pies|')?\s*(?:x|by|por)\s*\d))`;
+// a number that is something else, taken out before any reading:
+//   a job number said out loud, a time, a price, a date, a percentage,
+//   "apt 302" / "unit 4" / "#12", "3 pics", "2 coats", "8 hours"
 const REF = /\b(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:\-]?\s*\d{1,12}\b/g;
-const SPLIT = /\s*(?:,|;|\n|\+|\band\b|\by\b|\bplus\b|\balso\b)\s*/;
-interface Clause { qty: number; unit: string; words: string[] }
-function clausesOf(body: string): { clauses: Clause[]; sawNumber: boolean } {
-  // a job's number said out loud is not a measurement — and neither is any
-  // number long enough to be a PO on its own
-  // ("1,200" is one number, not two clauses)
-  const t = norm(body).replace(REF, " ").replace(/(\d),(\d{3})(?!\d)/g, "$1$2");
-  const clauses: Clause[] = [];
-  let sawNumber = false;
-  for (const part of t.split(SPLIT)) {
-    const nums = [...part.matchAll(NUM)];
-    if (!nums.length) continue;
-    const words = part.replace(NUM, "$1 ").replace(/[^a-z ]/g, " ").split(" ").filter((w) => w && !FILLER.has(w));
-    for (const m of nums) {
-      const whole = m[2].replace(/,/g, "");
-      const unit = (m[5] || "").replace(/\s+|\./g, "");
-      if (!unit && whole.length >= 5) continue; // a PO, a phone, a unit number — not square feet
-      sawNumber = true;
-      let qty = Number(`${whole}${m[3] ? `.${m[3]}` : ""}`);
-      if (m[4]) qty = qty * Number(m[4]);
-      if (!(qty > 0)) continue;
-      clauses.push({ qty, unit, words });
-    }
+const NOT_A_MEASURE: RegExp[] = [
+  /\b\d{1,2}:\d{2}\b(?:\s*(?:am|pm))?/g, /\b\d{1,2}\s*(?:am|pm)\b/g, /\$\s*\d+(?:\.\d+)?/g, /\b\d+(?:\.\d+)?\s*%/g,
+  /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, /\(?\b\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/g,
+  new RegExp(String.raw`\b(?:apt|apartment|unit|apto|apartamento|depto|departamento|room|rm|floor|fl|piso|suite|ste|bldg|building|edificio|house|casa|no|num|number|numero|job|trabajo)\.?\s*#?\s*\d{1,6}[a-z]?\b${NOT_TAIL}`, "g"),
+  new RegExp(String.raw`#\s*\d{1,6}[a-z]?\b${NOT_TAIL}`, "g"),
+  new RegExp(String.raw`\b\d{1,3}\s*(?:pics?|pictures?|photos?|fotos?|imagenes?|imgs?|coats?|capas?|manos?|hours?|hrs?|horas?|days?|dias?|min|mins|minutes?|minutos?|bags?|bolsas?|buckets?|cubetas?|cans?|latas?|boxes?|cajas?|guys?|people|men|hombres|personas?|workers?|trabajadores?|doors?|puertas?|windows?|ventanas?|rooms?|cuartos?|bedrooms?|recamaras?|bathrooms?|banos?|closets?|floors?|pisos?|apts?|apartments?|apartamentos?|units?|outlets?|switches?|lights?|luces?|sheets?|hojas?|boards?|tablas?|tiles?|losas?|pieces?|piezas?|pcs?|each|ea|c\/u|times|veces|trips?|viajes?|holes?|hoyos?|agujeros?|spots?|patches?|parches?)\b${NOT_TAIL}`, "g"),
+];
+// "sq. ft." keeps its dots so a sentence break ". " is just that
+const unDot = (t: string) => t.replace(/\bsq\.\s*ft\.?/g, "sqft").replace(/\blin\.\s*ft\.?/g, "linft").replace(/\bft\./g, "ft");
+const SPLIT = /\s*(?:,|;|\n|\+|\.\s+|\band\b|\by\b|\bplus\b|\balso\b|\bmas\b|\btambien\b)\s*/;
+const MAX_TEXTED_SQFT = 5000;   // no apartment wall is bigger — lib/measure's cap, for texted numbers too
+interface Clause { nums: { qty: number; explicit: boolean }[]; words: string[]; text: string }
+// the text, cleaned and cut into clauses, each with the numbers that could
+// be measurements and the plain words left around them
+export function clausesOf(body: string, ignore: string[] = []): Clause[] {
+  let t = unDot((body || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, ""))
+    .replace(/(\d),(\d{3})(?!\d)/g, "$1$2")   // 1,200 is one number
+    .replace(REF, " ");
+  for (const re of NOT_A_MEASURE) t = t.replace(re, " ");
+  // this worker's job numbers, said bare ("4521" after pictures), are not square feet
+  for (const k of ignore) if (/^\d{3,}$/.test(k)) t = t.replace(new RegExp(String.raw`(^|[^\d.])${k}(?![\d.])`, "g"), "$1 ");
+  const out: Clause[] = [];
+  for (const part0 of t.split(SPLIT)) {
+    const part = part0.replace(/\s+/g, " ").trim();
+    if (!part) continue;
+    const nums: Clause["nums"] = [];
+    let rest = part;
+    const metric = (unit?: string) => !!unit && new RegExp(`^(?:${M2_UNIT})$`).test(unit.replace(/\s+/g, ""));
+    rest = rest.replace(DIMS, (_m, pre, count, a, b, unit) => {
+      const qty = Number(a) * Number(b) * (count ? Number(count) : 1) * (metric(unit) ? SQFT_PER_M2 : 1);
+      if (qty > 0) nums.push({ qty, explicit: true });
+      return `${pre} `;
+    });
+    rest = rest.replace(NUM_UNIT, (_m, pre, n, unit) => {
+      const qty = Number(n) * (metric(unit) ? SQFT_PER_M2 : 1);
+      if (qty > 0) nums.push({ qty, explicit: true });
+      return `${pre} `;
+    });
+    rest = rest.replace(BARE, (_m, pre, n) => {
+      if (n.replace(/\.\d+$/, "").length >= 5) return `${pre} `;   // a PO, a phone number — never square feet on its own
+      const qty = Number(n);
+      if (qty > 0) nums.push({ qty, explicit: false });
+      return `${pre} `;
+    });
+    const words = rest.replace(/[^a-z ]/g, " ").split(" ").filter((w) => w && !FILLER.has(w));
+    out.push({ nums, words, text: part });
   }
-  return { clauses, sawNumber };
+  return out;
 }
 const PLASTER_WORDS = new Set(["plaster", "plastering", "plastered", "yeso"]);
+const stem = (w: string) => w.replace(/(ing|ed|es|s)$/, "");
+// does a texted word name this line — its key's words or its own, by the
+// whole word or its stem; a prefix only when both are real words of about the same length
+const names = (w: string, a: string) =>
+  a === w || a === stem(w) || stem(a) === stem(w) || (a.length >= 4 && w.length >= 4 && (a.startsWith(w) || w.startsWith(a)) && Math.abs(a.length - w.length) <= 2);
 const lineFor = (words: string[], lines: MeasureLine[]): MeasureLine[] => {
   const hits = new Set<MeasureLine>();
-  for (const w of words) {
-    const stem = w.replace(/(ing|ed|es|s)$/, "");
-    for (const l of lines) {
-      if (l.words.some((a) => a === w || a === stem || (a.length >= 4 && (a.startsWith(w) || w.startsWith(a)) && Math.abs(a.length - w.length) <= 3))) hits.add(l);
-    }
-  }
+  for (const w of words) for (const l of lines) if (l.words.some((a) => names(w, a))) hits.add(l);
   // a word that fits two lines picks the one whose own key says it first:
   // "plaster" is the Plaster line, not Scrape and plaster
   if (hits.size > 1) {
@@ -144,43 +185,66 @@ const lineFor = (words: string[], lines: MeasureLine[]): MeasureLine[] => {
 // `expecting`: the job is waiting for its numbers right now — then a text
 // that is nothing but a number is the number ("120"); otherwise a bare
 // number is never taken for square feet (it is a unit, a time, a count of pictures)
-export function parseMeasures(body: string, lines: MeasureLine[], expecting: boolean): Parsed {
-  const { clauses, sawNumber } = clausesOf(body);
-  if (!sawNumber) return { kind: "none" };
-  const hits: MeasureHit[] = [];
+export function parseMeasures(body: string, lines: MeasureLine[], expecting: boolean, opts: ParseOptions = {}): Parsed {
+  const clauses = clausesOf(body, opts.ignore || []);
+  if (!clauses.some((c) => c.nums.length)) return { kind: "none" };
+  const sums = new Map<number, { qty: number; explicit: boolean; line: MeasureLine | null }>();
+  const add = (index: number, line: MeasureLine | null, n: { qty: number; explicit: boolean }) => {
+    const cur = sums.get(index) || { qty: 0, explicit: true, line };
+    sums.set(index, { qty: cur.qty + n.qty, explicit: cur.explicit && n.explicit, line });
+  };
   const bare: Clause[] = [];
   for (const c of clauses) {
+    if (!c.nums.length) continue;   // talk around the numbers ("thanks", "2 pics")
     if (c.words.length === 0) { bare.push(c); continue; }
     const found = lineFor(c.words, lines);
-    if (found.length === 1) { hits.push({ index: found[0].index, qty: c.qty }); continue; }
-    if (found.length > 1) return { kind: "ask", why: "which", qty: c.qty };
     // "plaster 120 sf" on a job with no plaster line: a Plaster line is added
-    if (c.words.some((w) => PLASTER_WORDS.has(w)) && !lines.some((l) => l.words.includes("plaster"))) { hits.push({ index: -1, qty: c.qty, plaster: true }); continue; }
+    const newPlaster = !found.length && c.words.some((w) => PLASTER_WORDS.has(w)) && !lines.some((l) => l.words.includes("plaster"));
+    if (found.length > 1) return { kind: "ask", why: "which", qty: c.nums[0].qty };
+    if (found.length === 1 || newPlaster) {
+      // "plaster 120 140": two numbers for one line in one breath — which?
+      if (c.nums.length > 1) return { kind: "ask", why: "which", qty: c.nums[0].qty, line: found[0]?.name || "Plaster" };
+      add(newPlaster ? -1 : found[0].index, found[0] || null, c.nums[0]);
+      continue;
+    }
     // words that name nothing on this job — unless the clause is only a unit
     // and filler, which reads as a bare number
     const meaningful = c.words.filter((w) => !STOP.has(w));
     if (meaningful.length === 0) { bare.push(c); continue; }
     // "see you at 8", "running 20 min late": a number among words that name
-    // no line, with no unit on it, is talk. With a unit it is a measurement
-    // of something this job doesn't have a line for — and that is asked about.
-    if (!c.unit) return { kind: "none" };
-    return { kind: "ask", why: "unknown", word: meaningful[0], qty: c.qty };
+    // no line, with no unit on it, is talk and skipped. With a unit it is a
+    // measurement of something this job has no line for — and that is asked about.
+    if (c.nums.some((n) => n.explicit)) return { kind: "ask", why: "unknown", word: meaningful[0], qty: c.nums.find((n) => n.explicit)!.qty };
   }
   if (bare.length) {
-    const withUnit = bare.some((c) => !!c.unit);
+    const nums = bare.flatMap((c) => c.nums);
+    const withUnit = nums.some((n) => n.explicit);
     // a plain number with no unit, in a text that says anything else, is not a measurement
-    if (!withUnit && (!expecting || norm(body).replace(REF, " ").replace(NUM, " ").replace(/[^a-z]/g, "").length > 0)) return hits.length ? { kind: "ok", hits } : { kind: "none" };
-    if (lines.length === 0) return { kind: "ask", why: "noline", qty: bare[0].qty };
-    const blank = lines.filter((l) => !l.has && !hits.some((h) => h.index === l.index));
+    const onlyNumbers = clauses.every((c) => c.words.length === 0 || c.words.every((w) => STOP.has(w)));
+    if (!withUnit && (!expecting || !onlyNumbers)) return sums.size ? finish(sums) : { kind: "none" };
+    // a number beside a named line's number ("plaster 120 sf, 300 total"): which line is the loose one for?
+    if (sums.size) return { kind: "ask", why: "which", qty: nums[0].qty };
+    if (lines.length === 0) return { kind: "ask", why: "noline", qty: nums[0].qty };
+    const blank = lines.filter((l) => !l.has);
     const target = blank.length === 1 ? blank[0] : lines.length === 1 ? lines[0] : null;
-    if (!target || bare.length > 1) return { kind: "ask", why: "which", qty: bare[0].qty };
-    hits.push({ index: target.index, qty: bare[0].qty });
+    if (!target || nums.length > 1) return { kind: "ask", why: "which", qty: nums[0].qty };
+    add(target.index, target, nums[0]);
   }
-  if (!hits.length) return { kind: "none" };
-  // the last word on a line wins when it is named twice
-  const byIndex = new Map<number, MeasureHit>();
-  for (const h of hits) byIndex.set(h.index, h);
-  return { kind: "ok", hits: [...byIndex.values()] };
+  if (!sums.size) return { kind: "none" };
+  return finish(sums);
+}
+// the lines named: the same line twice in one text adds up ("plaster 10x8,
+// plaster 12x8"); a line that already carries a number is only changed by a
+// number with its unit on it; nothing bigger than any apartment goes on
+function finish(sums: Map<number, { qty: number; explicit: boolean; line: MeasureLine | null }>): Parsed {
+  const hits: MeasureHit[] = [];
+  for (const [index, s] of sums) {
+    const qty = Math.round(s.qty * 100) / 100;
+    if (qty > MAX_TEXTED_SQFT) return { kind: "ask", why: "big", qty, line: s.line?.name || "Plaster" };
+    if (s.line && s.line.has && !s.explicit) return { kind: "ask", why: "unit", qty, line: s.line.name, was: s.line.qty };
+    hits.push(index === -1 ? { index: -1, qty, plaster: true } : { index, qty });
+  }
+  return { kind: "ok", hits };
 }
 
 // ---- the numbers onto the job's lines ----
@@ -254,6 +318,23 @@ export function askMeasureText(p: Extract<Parsed, { kind: "ask" }>, label: strin
       ? `El ${label} no tiene una línea por pies cuadrados. Mande el número con el trabajo, como: plaster ${roundSf(p.qty || 120)} sf.`
       : `${label} has no square-foot line. Text the number with the work, like: plaster ${roundSf(p.qty || 120)} sf.`;
   }
+  if (p.why === "unit") {
+    const have = `${p.was || 0} ${lang === "es" ? "pies cuadrados" : "sq ft"}`;
+    const ex = `${(p.line || "plaster").toLowerCase().split(" ")[0]} ${roundSf(p.qty || 130)} sf`;
+    return lang === "es"
+      ? `${p.line || "Esa línea"} ya tiene ${have} en el ${label}. Para cambiarlo, mándelo con la unidad, como: ${ex}.`
+      : `${p.line || "That line"} already has ${have} on ${label}. To change it, text it with the unit, like: ${ex}.`;
+  }
+  if (p.why === "big") {
+    return lang === "es"
+      ? `${qty} para ${p.line || "esa línea"} es más que cualquier apartamento. Revise el número y mándelo otra vez.`
+      : `${qty} for ${p.line || "that line"} is more than any apartment. Check the number and text it again.`;
+  }
+  if (p.why === "which" && p.line) {
+    return lang === "es"
+      ? `Dos números para ${p.line}. Mande uno solo, como: ${example(lines)}.`
+      : `Two numbers for ${p.line}. Text just one, like: ${example(lines)}.`;
+  }
   if (p.why === "unknown") {
     return lang === "es"
       ? `No veo "${p.word}" en el ${label}. Las líneas son: ${list(lines)}. Mande como: ${example(lines)}.`
@@ -278,6 +359,18 @@ export function askWhichJobText(lang0?: string | null): string {
   return langOf(lang0) === "es"
     ? "¿Para qué trabajo es esa medida? Mándela con el número de PO, como: PO 116843 plaster 120 sf."
     : "Which job is that measurement for? Text it with the PO number, like: PO 116843 plaster 120 sf.";
+}
+// a measurement for a job the office already billed: the lines are not touched
+export function invoicedText(label: string, lang0?: string | null): string {
+  return langOf(lang0) === "es"
+    ? `El ${label} ya está facturado, así que sus líneas no cambian. La oficina puede cambiarlo desde Billing.`
+    : `${label} is already invoiced, so its lines don't change. The office can change it from Billing.`;
+}
+// square feet for a release: releases are priced by the office, so the words go to them
+export function releaseMeasureText(label: string, lang0?: string | null): string {
+  return langOf(lang0) === "es"
+    ? `Recibido. Los pies cuadrados del ${label} los ve la oficina; verán su mensaje.`
+    : `Got it. Square feet on ${label} go to the office, and they'll see your text.`;
 }
 // the after pictures are on the job: the thread is done — and the job is
 // marked work done, which the worker is told, with the way to take it back

@@ -82,13 +82,16 @@ export const inboxOf = (batchId: string) => `inbox/${batchId}/`;
 // many made it. The new job lists them first, so a failure there leaves
 // everything where it was; a picture that won't move (taken off the old job by
 // hand since) comes back off the new job's list.
-export async function fileBatch(db: Db, b: Batch, t: Target, how = "office"): Promise<number> {
+// `kind`: onto a PACT job, the pile the job's thread puts them on now
+// (before / after) — not the one guessed when they were held with no job.
+export async function fileBatch(db: Db, b: Batch, t: Target, how = "office", kind?: "before" | "after"): Promise<number> {
   const photos = Array.isArray(b.photos) ? b.photos.filter((p) => p && p.name && p.path) : [];
   if (!photos.length) return 0;
   const dir = folderOf(t);
   const was = b.status === "filed" ? (b.pact_job_id ? { kind: "pact" as const, id: b.pact_job_id } : b.release_id ? { kind: "rel" as const, id: b.release_id } : null) : null;
   const same = !!was && was.kind === t.kind && was.id === t.id;
-  const want = photos.map((p) => ({ from: p.path, name: p.name, to: dir + p.name }));
+  const named = (n: string) => (kind ? n.replace(/^(before|after)_/i, `${kind}_`) : n);
+  const want = photos.map((p) => ({ from: p.path, name: named(p.name), to: dir + named(p.name) }));
   const moving = want.filter((w) => w.from !== w.to);
   if (!(same && moving.length === 0)) {
     if (!(await db.attach(t, want.map((w) => ({ name: w.name, path: w.to })), []))) return 0;

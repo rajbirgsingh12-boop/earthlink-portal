@@ -126,20 +126,25 @@ export default function PactCalendar() {
   const [thread, setThread] = useState<Map<string, Thread>>(new Map());
   const loadNobody = async () => {
     type Row = { pact_job_id: string; status: string; created_at: string; photos?: { name: string }[] | null; note?: string | null };
-    const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
-    const read = (cols: string) => sb().from("texted_photos").select(cols).in("status", ["nobody", "filed", "measure"]).not("pact_job_id", "is", null).gte("created_at", since).order("created_at", { ascending: true }).limit(500);
+    // every nobody-home mark still waiting, however old (the mark comes off
+    // with the job's new day, so these stay few)
+    const marks = await sb().from("texted_photos").select("pact_job_id,created_at").eq("status", "nobody").not("pact_job_id", "is", null).order("created_at", { ascending: false }).limit(1000);
+    if (marks.error) return; // before section 20
+    const nb = new Map<string, string>();
+    for (const n of (marks.data || []) as unknown as Row[]) if (!nb.has(n.pact_job_id)) nb.set(n.pact_job_id, n.created_at);
+    setNobody(nb);
+    // and the thread marks: two months of pictures and measurements, newest first
+    const since = new Date(Date.now() - 60 * 86_400_000).toISOString();
+    const read = (cols: string) => sb().from("texted_photos").select(cols).in("status", ["filed", "measure"]).not("pact_job_id", "is", null).gte("created_at", since).order("created_at", { ascending: false }).limit(1000);
     let got = await read("pact_job_id,status,created_at,photos,note");
     if (got.error) got = await read("pact_job_id,status,created_at,photos"); // before section 21
-    if (got.error) return; // before section 20
-    const rows = (got.data || []) as unknown as Row[];
-    setNobody(new Map(rows.filter((n) => n.status === "nobody").map((n) => [n.pact_job_id, n.created_at])));
+    if (got.error) return;
     const t = new Map<string, Thread>();
-    for (const r of rows) {
-      if (r.status === "nobody") continue;
+    for (const r of (got.data || []) as unknown as Row[]) {
       const cur = t.get(r.pact_job_id) || { beforeN: 0, afterN: 0, measured: "" };
       if (r.status === "filed") (r.photos || []).forEach((p) => { if (/^before/i.test(p?.name || "")) cur.beforeN += 1; else if (/^after/i.test(p?.name || "")) cur.afterN += 1; });
-      // "📏 Tue Sep 29 9:14 AM · Plaster 120 sq ft · texted by Jose" → the middle, latest wins
-      if (r.status === "measure") cur.measured = ((r.note || "").split(" · ")[1] || "").trim() || cur.measured || "texted";
+      // "📏 Tue Sep 29 9:14 AM · Plaster 120 sq ft · texted by Jose" → the middle; newest first, so the first seen is the latest
+      if (r.status === "measure" && !cur.measured) cur.measured = ((r.note || "").split(" · ")[1] || "").trim() || "texted";
       t.set(r.pact_job_id, cur);
     }
     setThread(t);

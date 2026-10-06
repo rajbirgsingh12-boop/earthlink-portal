@@ -8,6 +8,7 @@
 // toll-free — and ten people at most. Where a thread can't be made, the
 // callers text one to one, with a copy to the owner (lib/twilio copyTo).
 import { copyTo, twilioConfigured } from "./twilio";
+import { serviceDb } from "./photoStore";
 
 const env = (k: string) => process.env[k] || "";
 export const PORTAL_IDENTITY = "portal";
@@ -18,6 +19,7 @@ const TOLL_FREE = /^\+1(800|833|844|855|866|877|888)\d{7}$/;
 export function groupProblem(): string {
   if (!copyTo()) return "TEXT_COPY_TO (your own cell) isn't set";
   if (!twilioConfigured()) return "the company number isn't set up";
+  if (!serviceDb()) return "SUPABASE_SERVICE_ROLE_KEY isn't in Vercel (the portal reads the crew for a thread with it)";
   const from = env("TWILIO_FROM").trim();
   if (!from) return "TWILIO_FROM (the company number itself) is needed for a group thread, even with a Messaging Service";
   if (TOLL_FREE.test(from)) return "a group thread needs a local (10-digit) company number — Twilio can't group-text from a toll-free number";
@@ -33,7 +35,7 @@ async function api(method: "GET" | "POST" | "DELETE", path: string, form?: Recor
   try {
     const r = await fetch(`${convBase()}${path}`, {
       method, headers: { Authorization: basic, ...(form ? { "Content-Type": "application/x-www-form-urlencoded" } : {}) },
-      body: form ? body.toString() : undefined, cache: "no-store", signal: AbortSignal.timeout(8_000),
+      body: form ? body.toString() : undefined, cache: "no-store", signal: AbortSignal.timeout(6_000),
     });
     const json = ((await r.json().catch(() => ({}))) || {}) as Record<string, unknown>;
     return { ok: r.ok, status: r.status, json };
@@ -65,6 +67,21 @@ export async function groupFor(phones: string[]): Promise<{ group: Group } | { e
   if (had) return { group: had };
   let r = await api("GET", `/v1/Conversations/${encodeURIComponent(key)}`);
   let sid = r.ok ? String(r.json.sid || "") : "";
+  if (sid) {
+    // a thread by that name: everyone in it who should be (one made half-way
+    // through, or a person added to the job since, is completed here)
+    const had = await api("GET", `/v1/Conversations/${sid}/Participants?PageSize=50`);
+    const there = (Array.isArray(had.json.participants) ? (had.json.participants as { identity?: string; messaging_binding?: { address?: string; projected_address?: string } }[]) : []);
+    const missing: Record<string, string>[] = [
+      ...members.filter((m) => !there.some((p) => p.messaging_binding?.address === m)).map((phone) => ({ "MessagingBinding.Address": phone })),
+      ...(there.some((p) => p.identity === PORTAL_IDENTITY) ? [] : [{ Identity: PORTAL_IDENTITY, "MessagingBinding.ProjectedAddress": env("TWILIO_FROM").trim() }]),
+    ];
+    for (const add of had.ok ? missing : []) {
+      const p = await api("POST", `/v1/Conversations/${sid}/Participants`, add);
+      if (!p.ok && p.status !== 409) { lastError = twilioWords(p); return { error: lastError }; }
+    }
+    if (!had.ok) { lastError = twilioWords(had); return { error: lastError }; }
+  }
   if (!sid) {
     const form: Record<string, string> = { UniqueName: key, FriendlyName: "Earth Link crew", Attributes: JSON.stringify({ members }) };
     const msvc = env("TWILIO_MESSAGING_SERVICE_SID").trim();
@@ -98,21 +115,34 @@ export async function groupFor(phones: string[]): Promise<{ group: Group } | { e
 
 // a thread that is gone on Twilio's side (deleted in the console, say) is forgotten, so the next send remakes it
 export const forgetGroup = (key: string) => { known.delete(key); };
-// a message into the thread, from the company number
+// a message into the thread, from the company number. `status` 404 means
+// the thread is gone on Twilio's side; 0 that Twilio didn't answer in time
+// (the message may still have gone — never send it again another way)
 export async function postToGroup(sid: string, body: string): Promise<boolean> {
+  return (await postToGroupStatus(sid, body)).ok;
+}
+export async function postToGroupStatus(sid: string, body: string): Promise<{ ok: boolean; status: number }> {
   const r = await api("POST", `/v1/Conversations/${sid}/Messages`, { Author: PORTAL_IDENTITY, Body: body });
   if (!r.ok) lastError = twilioWords(r);
-  return r.ok;
+  return { ok: r.ok, status: r.status };
 }
-// the people in a thread a message came in on
-export async function groupMembers(sid: string): Promise<string[]> {
+// what a thread is about, kept on the thread itself: its people and the job
+// the last crew text in it was for — so a reply in it with no PO named
+// lands on that job even when the worker has two that day
+export interface GroupInfo { members: string[]; job?: { kind: "pact" | "rel"; id: string } }
+export async function rememberGroupJob(sid: string, members: string[], job?: GroupInfo["job"]): Promise<void> {
+  await api("POST", `/v1/Conversations/${sid}`, { Attributes: JSON.stringify({ members, ...(job ? { job: `${job.kind}:${job.id}` } : {}) }) });
+}
+export async function groupInfo(sid: string): Promise<GroupInfo> {
   const r = await api("GET", `/v1/Conversations/${encodeURIComponent(sid)}`);
-  if (!r.ok) return [];
+  if (!r.ok) return { members: [] };
   try {
-    const a = JSON.parse(String(r.json.attributes || "{}")) as { members?: unknown };
-    return Array.isArray(a.members) ? a.members.map(String) : [];
-  } catch { return []; }
+    const a = JSON.parse(String(r.json.attributes || "{}")) as { members?: unknown; job?: unknown };
+    const m = typeof a.job === "string" ? a.job.match(/^(pact|rel):([0-9a-f-]{36})$/i) : null;
+    return { members: Array.isArray(a.members) ? a.members.map(String) : [], ...(m ? { job: { kind: m[1] as "pact" | "rel", id: m[2] } } : {}) };
+  } catch { return { members: [] }; }
 }
+export const groupMembers = async (sid: string): Promise<string[]> => (await groupInfo(sid)).members;
 // where a thread's media is fetched from (lib/twilio fetchMediaFrom(groupMediaBase()))
 export const groupMediaUrl = (base: string, chatServiceSid: string, mediaSid: string) => `${base}/v1/Services/${chatServiceSid}/Media/${mediaSid}/Content`;
 
@@ -132,6 +162,9 @@ export async function ensureGroupWebhook(origin: string): Promise<boolean> {
 export function publicOrigin(req: Request): string {
   const set = env("TWILIO_WEBHOOK_URL").trim();
   if (set) { try { return new URL(set).origin; } catch { /* a bad value: fall through */ } }
+  // the setting is account-wide: a preview deployment must never point the
+  // real threads at itself (set TWILIO_WEBHOOK_URL to pin the address outright)
+  if (env("VERCEL_ENV") && env("VERCEL_ENV") !== "production") return "";
   const u = new URL(req.url);
   const host = (req.headers.get("x-forwarded-host") || req.headers.get("host") || u.host).split(",")[0].trim();
   const proto = (req.headers.get("x-forwarded-proto") || u.protocol.replace(":", "")).split(",")[0].trim();

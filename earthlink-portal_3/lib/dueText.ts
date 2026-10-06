@@ -12,7 +12,7 @@ export interface DueJob {
 }
 // the same cut lib/pactCrew's workOf makes, kept here so a server route never
 // has to pull in the browser's half of the app
-const WORK_MAX = 400;
+const WORK_MAX = 600;
 const workOf = (j: DueJob): string => {
   const w = (j.description || "").replace(/\s+/g, " ").trim();
   if (w.length <= WORK_MAX) return w;

@@ -10,7 +10,7 @@ import { addressesOf, copyTo, fetchMediaFrom, groupMediaBase } from "@/lib/twili
 import { imageExt, phoneKey, validTwilio, type MediaIn, type Params } from "@/lib/smsIn";
 import { serviceDb } from "@/lib/photoStore";
 import { handleInbound, type Seen } from "@/lib/inbound";
-import { PORTAL_IDENTITY, groupMediaUrl, postToGroup } from "@/lib/groupText";
+import { PORTAL_IDENTITY, groupInfo, groupMediaUrl, postToGroup } from "@/lib/groupText";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -33,10 +33,15 @@ export async function POST(req: Request) {
   if (!db) return heard();
   // the owner talking to the crew is not a worker's report — unless the
   // owner's phone is on the crew list too (trying it out as a worker)
-  if (phoneKey(author) === phoneKey(copyTo())) {
-    const emps = await db.get<{ phone?: string | null; active?: boolean | null }>("employees?select=phone,active");
-    if (!emps.rows.some((e) => phoneKey(e.phone) === phoneKey(author) && e.active !== false)) return heard();
-  }
+  const emps = (await db.get<{ name?: string | null; phone?: string | null; active?: boolean | null }>("employees?select=name,phone,active")).rows;
+  const me = emps.find((e) => phoneKey(e.phone) === phoneKey(author) && e.active !== false);
+  if (phoneKey(author) === phoneKey(copyTo()) && !me) return heard();
+  // what the thread is about: its people (so an answer says who it is for
+  // when more than one worker reads it) and the job its last crew text was for
+  const info = await groupInfo(thread);
+  const workers = info.members.filter((m) => phoneKey(m) !== phoneKey(copyTo()));
+  const first = (me?.name || "").trim().split(/\s+/)[0] || "";
+  const forWho = (body: string) => (workers.length > 1 && first ? `${first}: ${body}` : body);
   // the pictures: Twilio lists them as JSON, kept on its media host by the thread's service
   const svc = (form.get("ChatServiceSid") || "").trim();
   const photos: MediaIn[] = [];
@@ -58,8 +63,9 @@ export async function POST(req: Request) {
     sid: (form.get("MessageSid") || "").trim(),
     photos: photos.slice(0, 10), other,
     fetchMedia: fetchMediaFrom(groupMediaBase()),
-    deliver: async (_to, body) => postToGroup(thread, body),   // a later text goes into the thread, not to one phone
+    deliver: async (_to, body) => postToGroup(thread, forWho(body)),   // a later text goes into the thread, not to one phone
+    jobHint: info.job,
   }, seen);
-  if (reply) await postToGroup(thread, reply);
+  if (reply) await postToGroup(thread, forWho(reply));
   return heard();
 }

@@ -345,7 +345,7 @@ export function parsePactPoText(raw: string, structured?: PoLine[]): PactPoField
     // field ("Description: Court Ordered Repairs" … "bathroom and bedroom
     // scrape plaster paint") — the gap allows for that, and the extra stops
     // keep the access date and anything dated out of the work's words.
-    for (let j = di + 1, took = 0; j < tableAt && took < 3 && descParts.join(" ").length < 220; j++) {
+    for (let j = di + 1, took = 0; j < tableAt && took < 8 && descParts.join(" ").length < 600; j++) {
       const N = src[j];
       if (N.page !== L.page || lastY - N.y > 2.8 * pitch) break;
       if (SITE_LABEL.test(N.text) || BILL_LABEL.test(N.text) || STOP_LABEL.test(N.text)
@@ -536,7 +536,7 @@ export function parsePactPoText(raw: string, structured?: PoLine[]): PactPoField
   const scopeAt = lines.findIndex((l) => SCOPE_LABEL.test(l));
   const scopeLines: string[] = [];
   if (scopeAt >= 0) {
-    for (let i = scopeAt; i < lines.length && scopeLines.join(" ").length < 400; i++) {
+    for (let i = scopeAt; i < lines.length && scopeLines.join(" ").length < 600; i++) {
       const l = i === scopeAt ? lines[i].replace(SCOPE_LABEL, "").replace(/^\s*:?\s*/, "") : lines[i];
       if (!l) continue;
       if (TOTALISH.test(l) || SITE_LABEL.test(l) || BILL_LABEL.test(l)
@@ -544,7 +544,7 @@ export function parsePactPoText(raw: string, structured?: PoLine[]): PactPoField
       scopeLines.push(l);
     }
   }
-  const scope = cleanWork(scopeLines.join(". ")).slice(0, 400);
+  const scope = cleanWork(scopeLines.join(". ")).slice(0, 600);
 
   return {
     po, poDate, desc, scope, partner,

@@ -31,7 +31,7 @@ export async function sendServerTexts(
   messages: { to: string; body: string; id?: string }[],
   token: string | null,
   opts?: { skipTexted?: boolean }
-): Promise<{ ok: boolean; status: number; configured?: boolean; sent?: number; skipped?: number; failed?: { to: string; error: string }[]; error?: string }> {
+): Promise<{ ok: boolean; status: number; configured?: boolean; sent?: number; skipped?: number; failed?: { to: string; error: string }[]; error?: string; grouped?: number; groupProblem?: string }> {
   try {
     const res = await fetch("/api/text", {
       method: "POST",
@@ -84,7 +84,7 @@ export async function textRows(targets: TextTarget[], opts: { skipTexted?: boole
       ? `Sent ${sent}, but ${fails.length} didn't go through — ${prettyPhone(fails[0].to)}: ${fails[0].error}`
       // never a ✓ when nothing went out — that is how a crew ends up never told
       : sent === 0 ? "Everyone here was already texted — nothing new went out"
-      : `Sent ${sent} text${sent === 1 ? "" : "s"} from the company number ✓${skipped ? ` (${skipped} already texted — skipped)` : ""}`;
+      : `Sent ${sent} text${sent === 1 ? "" : "s"} ${res.grouped ? `into the crew's thread${res.grouped === 1 ? "" : "s"}` : "from the company number"} ✓${skipped ? ` (${skipped} already texted — skipped)` : ""}${res.groupProblem ? ` · no thread for this one: ${res.groupProblem}` : ""}`;
     // a text that was set up for later has now gone by hand — drop the stamp
     // (silent before RUN_ME section 19: there is no column to clear)
     if (sent > 0) {

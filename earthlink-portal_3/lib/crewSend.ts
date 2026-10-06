@@ -2,9 +2,13 @@
 // owner, the workers on the job and the company number (lib/groupText) —
 // when the owner is in the threads; one to one (lib/twilio) otherwise, or
 // for any job whose thread can't be made. One message per job per thread,
-// greeting everyone in it; a crew that reads two languages gets both in one
-// message. Each crew row is stamped TEXTED the moment its message goes.
-import { ensureGroupWebhook, forgetGroup, groupFor, groupProblem, groupsOn, postToGroup } from "./groupText";
+// greeting everyone in it; a crew that reads two languages gets both (in
+// one message when it fits Twilio's 1,600, else one each). Each crew row is
+// stamped TEXTED the moment its message goes. A thread that didn't answer
+// (a timeout, a Twilio error) is never followed by the same text one to
+// one — the message may have gone — the rows stay unstamped and the office
+// is told, so nobody gets a text twice.
+import { ensureGroupWebhook, forgetGroup, groupFor, groupLastError, groupProblem, groupsOn, postToGroupStatus, rememberGroupJob } from "./groupText";
 import { sendTexts, type TextOut, type TextReport } from "./twilio";
 import { cleanPhone } from "./notify";
 import type { Db } from "./photoStore";
@@ -13,30 +17,41 @@ export interface CrewOut extends TextOut { id?: string }
 export interface CrewReport extends TextReport { grouped: number; groupProblem: string }
 interface Row { id: string; day: string; employee_id: string; pact_job_id?: string | null; release_id?: string | null }
 interface Emp { id: string; name?: string | null; phone?: string | null; active?: boolean | null }
+const TWILIO_MAX = 1600;
 
 const first = (e?: Emp | null) => (e?.name || "").trim().split(/\s+/)[0] || "";
 const isEs = (body: string) => /^hola\b/i.test(body);
 // "Jose", "Jose and Luis", "Jose, Luis and Sam"
 export const nameList = (names: string[], lang: "en" | "es"): string => {
-  const n = names.filter(Boolean);
+  const n = [...new Set(names.filter(Boolean))];
   if (n.length <= 1) return n[0] || "";
   const and = lang === "es" ? "y" : "and";
   return `${n.slice(0, -1).join(", ")} ${and} ${n[n.length - 1]}`;
 };
-// the greeting names everyone in the thread: "Hi Jose and Luis, this is Earth Link."
+// the greeting names everyone in the thread: "Hi Jose and Luis, this is
+// Earth Link." — and Spanish speaks to all of them ("les habla", "Tienen", "respondan")
 export function groupGreeting(body: string, names: string[]): string {
   const es = isEs(body);
   const list = nameList(names, es ? "es" : "en");
   if (!list) return body;
-  return es
-    ? body.replace(/^Hola\b[^,.]*, le habla Earth Link\./, `Hola ${list}, le habla Earth Link.`)
-    : body.replace(/^Hi\b[^,.]*, this is Earth Link\./, `Hi ${list}, this is Earth Link.`);
+  if (!es) return body.replace(/^Hi\b[^,.]*, this is Earth Link\./, `Hi ${list}, this is Earth Link.`);
+  const many = new Set(names.filter(Boolean)).size > 1;
+  let out = body.replace(/^Hola\b[^,.]*, le habla Earth Link\./, `Hola ${list}, ${many ? "les" : "le"} habla Earth Link.`);
+  if (many) out = out.replace(/\bTiene trabajo\b/, "Tienen trabajo").replace(/\bresponda\b/g, "respondan").replace(/\bResponda\b/g, "Respondan").replace(/\bmande\b/g, "manden").replace(/\bse le avisará\b/g, "se les avisará").replace(/\bse le enviará\b/g, "se les enviará");
+  return out;
 }
-// one message for a crew that may read two languages: English first, Spanish under it
-export function groupBody(bodies: string[], names: string[]): string {
+// what a crew that may read two languages gets: English first, Spanish under
+// it, in one message when that fits — otherwise one message each
+export function groupBodies(bodies: string[], names: string[]): string[] {
   const en = bodies.find((b) => !isEs(b)), es = bodies.find(isEs);
-  return [en, es].filter((b): b is string => !!b).map((b) => groupGreeting(b, names)).join("\n\n");
+  const parts = [en, es].filter((b): b is string => !!b).map((b) => groupGreeting(b, names));
+  const joined = parts.join("\n\n");
+  return parts.length > 1 && joined.length > TWILIO_MAX - 100 ? parts : parts.length ? [joined] : [];
 }
+export const groupBody = (bodies: string[], names: string[]): string => groupBodies(bodies, names).join("\n\n");
+
+interface Batch { row: Row; msgs: CrewOut[] }
+interface Outcome { sent: number; grouped: boolean; failed: TextReport["failed"]; loose: CrewOut[]; problem: string }
 
 export async function sendCrew(db: Db | null, messages: CrewOut[], onSent: (m: CrewOut) => Promise<void>, origin: string): Promise<CrewReport> {
   const plain = async (ms: CrewOut[]): Promise<TextReport> => (ms.length ? sendTexts(ms, onSent) : { sent: 0, failed: [] });
@@ -46,47 +61,65 @@ export async function sendCrew(db: Db | null, messages: CrewOut[], onSent: (m: C
   const rows = ids.length ? (await db.get<Row>(`schedule_days?id=in.(${ids.join(",")})&select=id,day,employee_id,pact_job_id,release_id`)).rows : [];
   const rowOf = new Map(rows.map((r) => [r.id, r]));
   const jobOfRow = (r: Row) => (r.pact_job_id ? `pact:${r.pact_job_id}` : r.release_id ? `rel:${r.release_id}` : "");
-  const batches = new Map<string, { row: Row; msgs: CrewOut[] }>();
+  const batches = new Map<string, Batch>();
   const loose: CrewOut[] = [];
   for (const m of messages) {
     const r = m.id ? rowOf.get(m.id) : undefined;
-    const key = r ? jobOfRow(r) : "";
-    if (!r || !key) { loose.push(m); continue; }
-    const b = batches.get(`${key}@${r.day}`) || { row: r, msgs: [] };
+    const k = r ? jobOfRow(r) : "";
+    if (!r || !k) { loose.push(m); continue; }
+    const b = batches.get(`${k}@${r.day}`) || { row: r, msgs: [] };
     b.msgs.push(m);
-    batches.set(`${key}@${r.day}`, b);
+    batches.set(`${k}@${r.day}`, b);
+  }
+  // the threads must be able to report back before anything goes into one
+  if (batches.size && !(await ensureGroupWebhook(origin))) {
+    return { ...(await plain(messages)), grouped: 0, groupProblem: groupLastError() || "Twilio couldn't be told where the threads report, so the texts went one to one" };
   }
   const emps = (await db.get<Emp>("employees?select=id,name,phone,active")).rows;
   const empOf = new Map(emps.map((e) => [e.id, e]));
-  let sent = 0, grouped = 0;
-  const failed: TextReport["failed"] = [];
-  let problem = "";
-  if (batches.size) await ensureGroupWebhook(origin);
-  for (const { row, msgs } of batches.values()) {
+  const one = async ({ row, msgs }: Batch): Promise<Outcome> => {
+    const none: Outcome = { sent: 0, grouped: false, failed: [], loose: [], problem: "" };
     const where = row.pact_job_id ? `pact_job_id=eq.${row.pact_job_id}` : `release_id=eq.${row.release_id}`;
     const crewRows = (await db.get<{ employee_id: string }>(`schedule_days?${where}&day=eq.${row.day}&select=employee_id&limit=50`)).rows;
     const crewIds = [...new Set([...crewRows.map((r) => r.employee_id), ...msgs.map((m) => rowOf.get(m.id!)!.employee_id)])];
-    const crew = crewIds.map((id) => empOf.get(id)).filter((e): e is Emp => !!e);
-    const phones = [...new Set(crew.map((e) => cleanPhone(e.phone || "")).filter(Boolean))];
+    // the people in the thread: on the crew list, still with us, with a phone
+    const crew = crewIds.map((id) => empOf.get(id)).filter((e): e is Emp => !!e && e.active !== false && !!cleanPhone(e.phone || ""));
+    const phones = [...new Set(crew.map((e) => cleanPhone(e.phone || "")))];
     let made = await groupFor(phones);
-    if ("error" in made) { problem = made.error; loose.push(...msgs); continue; }
-    const body = groupBody(msgs.map((m) => m.body), crew.map(first));
-    let took = await postToGroup(made.group.sid, body);
-    if (!took) {
+    if ("error" in made) return { ...none, loose: msgs, problem: made.error };
+    const bodies = groupBodies(msgs.map((m) => m.body), crew.map(first));
+    const postAll = async (sid: string) => {
+      for (const b of bodies) { const r = await postToGroupStatus(sid, b); if (!r.ok) return r; }
+      return { ok: true, status: 201 };
+    };
+    let r = await postAll(made.group.sid);
+    if (!r.ok && r.status === 404) {
       // a thread remembered here but gone on Twilio's side: made again, once
       forgetGroup(made.group.key);
       made = await groupFor(phones);
-      if ("error" in made) { problem = made.error; loose.push(...msgs); continue; }
-      took = await postToGroup(made.group.sid, body);
+      if ("error" in made) return { ...none, loose: msgs, problem: made.error };
+      r = await postAll(made.group.sid);
     }
-    if (took) {
-      grouped += 1;
-      for (const m of msgs) { sent += 1; await onSent(m).catch(() => {}); }
-    } else {
-      problem = `the thread didn't take the text — sent one to one instead`;
-      loose.push(...msgs);
+    if (!r.ok) {
+      const why = `the thread didn't take the text (${groupLastError() || `Twilio ${r.status || "didn't answer"}`}) — not sent again another way, so nobody gets it twice; try again in a minute`;
+      return { ...none, failed: msgs.map((m) => ({ to: m.to, id: m.id, error: why })), problem: why };
     }
-  }
+    const job = row.pact_job_id ? { kind: "pact" as const, id: row.pact_job_id } : row.release_id ? { kind: "rel" as const, id: row.release_id } : undefined;
+    await rememberGroupJob(made.group.sid, made.group.members, job);
+    for (const m of msgs) await onSent(m).catch(() => {});
+    return { ...none, sent: msgs.length, grouped: true };
+  };
+  // a few threads at a time: a long crew list stays well inside the route's minute
+  const outcomes: Outcome[] = [];
+  const work = [...batches.values()];
+  for (let i = 0; i < work.length; i += 4) outcomes.push(...(await Promise.all(work.slice(i, i + 4).map(one))));
+  let problem = "";
+  for (const o of outcomes) { loose.push(...o.loose); if (o.problem) problem = o.problem; }
   const rest = await plain(loose);
-  return { sent: sent + rest.sent, failed: [...failed, ...rest.failed], grouped, groupProblem: problem };
+  return {
+    sent: outcomes.reduce((n, o) => n + o.sent, 0) + rest.sent,
+    failed: [...outcomes.flatMap((o) => o.failed), ...rest.failed],
+    grouped: outcomes.filter((o) => o.grouped).length,
+    groupProblem: problem,
+  };
 }

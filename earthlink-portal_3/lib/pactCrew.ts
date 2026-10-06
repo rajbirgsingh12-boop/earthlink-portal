@@ -41,7 +41,7 @@ export const siteOf = (j: CrewJob): string => {
 // what the crew is going there to do — the PO's own words, whole: the rooms
 // and the where are usually at the end, so nothing is cut short of a very long
 // one (and then at a word, not mid-word)
-export const WORK_MAX = 400;
+export const WORK_MAX = 600;
 export const workOf = (j: CrewJob): string => {
   const w = (j.description || "").replace(/\s+/g, " ").trim();
   if (w.length <= WORK_MAX) return w;

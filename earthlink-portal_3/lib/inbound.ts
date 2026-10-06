@@ -36,7 +36,17 @@ export interface Inbound {
   from: string; body: string; sid: string; photos: MediaIn[]; other: number;
   fetchMedia: (url: string) => Promise<{ bytes: ArrayBuffer; type: string } | null>;
   deliver: Deliver;
+  // the job the thread this came in on was last about: with two jobs that
+  // day and no PO in the text, that is the one (a text to the number has none)
+  jobHint?: { kind: "pact" | "rel"; id: string };
 }
+type Hint = Inbound["jobHint"];
+// two jobs that day and nothing said: the thread's own job, when it is one of theirs
+const withHint = (p: ReturnType<typeof pickJob>, mine: JobKey[], hint?: Hint): ReturnType<typeof pickJob> => {
+  if (p.kind !== "ask" || p.why !== "many" || !hint) return p;
+  const j = mine.find((x) => x.kind === hint.kind && x.id === hint.id);
+  return j ? { kind: j.kind, id: j.id, label: j.label, why: "today" } : p;
+};
 // what came in and who from, for the owner's copy (app/api/sms-in)
 export interface Seen { from: string; who: string; body: string; photos: number; other: number }
 const nyDay = (d: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
@@ -46,7 +56,8 @@ interface Emp { id: string; name?: string | null; phone?: string | null; lang?: 
 // the jobs this worker is on, two weeks either side of today
 async function jobsOf(db: Db, emp: Emp, today: string): Promise<{ rows: MineRow[]; mine: JobKey[] }> {
   const win = `employee_id=eq.${emp.id}&day=gte.${dayMinus(today, 14)}&day=lte.${dayMinus(today, -14)}`;
-  let got = await db.get<MineRow>(`schedule_days?${win}&select=day,pact_job_id,release_id&limit=500`);
+  let got = await db.get<MineRow>(`schedule_days?${win}&select=day,pact_job_id,release_id,texted_at&limit=500`);
+  if (!got.ok) got = await db.get<MineRow>(`schedule_days?${win}&select=day,pact_job_id,release_id&limit=500`); // before section 21: no texted_at
   if (!got.ok) got = await db.get<MineRow>(`schedule_days?${win}&select=day,release_id&limit=500`); // before PACT crews were on the schedule
   const rows = got.rows;
   const ids = (xs: (string | null | undefined)[]) => [...new Set(xs.filter(Boolean) as string[])];
@@ -165,11 +176,11 @@ async function markDone(db: Db, job: ThreadJob, emp: Emp, from: string, now: Dat
   return true;
 }
 // "not done": the mark comes off again, and the office's card forgets it
-async function unmarkDone(db: Db, o: { emp: Emp; body: string; now: Date; today: string }): Promise<string> {
+async function unmarkDone(db: Db, o: { emp: Emp; body: string; now: Date; today: string; hint?: Hint }): Promise<string> {
   const lang = o.emp.lang;
   const { rows, mine } = await jobsOf(db, o.emp, o.today);
   const refs = jobRefsOnly(o.body);
-  const pick = pickJob(refs, rows, mine, o.today, await anyPoOf(db, refs, mine));
+  const pick = withHint(pickJob(refs, rows, mine, o.today, await anyPoOf(db, refs, mine)), mine, o.hint);
   const job = pick.kind === "pact" ? await threadJob(db, pick.id) : null;
   if (!job || !job.work_done) return nothingToUndoText(lang);
   const who = (o.emp.name || "").trim().split(/\s+/)[0] || "";
@@ -199,12 +210,12 @@ const nyWhen = (d: Date) => new Intl.DateTimeFormat("en-US", { timeZone: "Americ
 // "plaster 120 sf": onto the job's lines, so the proposal and the invoice
 // carry it; a note on the job and a line for the office. The reply, or
 // nothing when the text wasn't a measurement.
-async function measureIn(db: Db, o: { emp: Emp; body: string; from: string; sid: string; now: Date; today: string }): Promise<string | null> {
+async function measureIn(db: Db, o: { emp: Emp; body: string; from: string; sid: string; now: Date; today: string; hint?: Hint }): Promise<string | null> {
   const lang = o.emp.lang;
   const { rows, mine } = await jobsOf(db, o.emp, o.today);
   const refs = jobRefsOnly(o.body);
   const anyPo = await anyPoOf(db, refs, mine);
-  const pick = pickJob(refs, rows, mine, o.today, anyPo);
+  const pick = withHint(pickJob(refs, rows, mine, o.today, anyPo), mine, o.hint);
   // this worker's job numbers are never read as square feet ("4521" after pictures)
   const ignore = [...mine, ...anyPo].flatMap((j) => j.keys);
   if (pick.kind === "rel") {
@@ -265,7 +276,8 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
   if (!emps.ok) emps = await db.get<Emp>("employees?select=id,name,phone,active"); // before the language column
   const key = phoneKey(from);
   const same = key ? emps.rows.filter((e) => phoneKey(e.phone) === key) : [];
-  const emp = same.find((e) => e.active !== false) || same[0] || null;
+  // a phone on the crew list — a worker taken off the list is a stranger to the inbox
+  const emp = same.find((e) => e.active !== false) || null;
   const lang = emp?.lang;
   seen.who = (emp?.name || "").trim();
 
@@ -289,12 +301,12 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
     const firstEver = !(await db.get<{ id: string }>("texted_photos?select=id&limit=1")).rows.length;
     if (firstEver) await db.insert("texted_photos", { employee_id: emp.id, from_phone: from, body, status: "note", msg_sid: sid || null });
     // "not done": the work-done mark the after pictures put on comes off
-    if (notDone(body)) return answer(await unmarkDone(db, { emp, body, now, today }));
+    if (notDone(body)) return answer(await unmarkDone(db, { emp, body, now, today, hint: inb.jobHint }));
     // the square feet, texted: onto the job's lines (lib/jobFlow) — unless the
     // text is just a number and pictures of theirs are waiting for one: then
     // it is the job those pictures go on
     const heldWaiting = justANumber(body) && (await db.get<{ id: string }>(`texted_photos?employee_id=eq.${emp.id}&status=eq.held&created_at=gte.${since(2 * 86_400_000)}&select=id&limit=1`)).rows.length > 0;
-    const measured = heldWaiting ? null : await measureIn(db, { emp, body, from, sid, now, today });
+    const measured = heldWaiting ? null : await measureIn(db, { emp, body, from, sid, now, today, hint: inb.jobHint });
     if (measured) return answer(measured);
     // a job's number: the pictures they just sent go there — ones still
     // waiting (two days), or ones put on the wrong job (the last two hours;
@@ -309,7 +321,7 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
     const lastAt = Date.parse(recent[0].created_at || "") || now.getTime();
     const group = recent.filter((b) => (Date.parse(b.created_at || "") || 0) >= lastAt - BURST_MS);
     const { rows, mine } = await jobsOf(db, emp, today);
-    const pick = pickJob(body, rows, mine, today, await anyPoOf(db, body, mine));
+    const pick = withHint(pickJob(body, rows, mine, today, await anyPoOf(db, body, mine)), mine, inb.jobHint);
     if (pick.kind !== "ask" && pick.why === "number") {
       // pictures already on the job they name stay as they are (the PO said
       // twice is not a move); the rest go onto it — on a PACT job, onto the
@@ -376,7 +388,7 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
   if (emp) {
     const { rows, mine } = await jobsOf(db, emp, today);
     const anyPo = await anyPoOf(db, body, mine);
-    pick = pickJob(body, rows, mine, today, anyPo);
+    pick = withHint(pickJob(body, rows, mine, today, anyPo), mine, inb.jobHint);
     ignore = [...mine, ...anyPo].flatMap((j) => j.keys);
   }
   // no number in this one, but the one before it named the job: same job

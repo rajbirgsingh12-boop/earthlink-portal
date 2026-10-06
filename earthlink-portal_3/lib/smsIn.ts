@@ -92,10 +92,10 @@ export function refsIn(body: string): Ref[] {
   return out;
 }
 
-export interface MineRow { day: string; pact_job_id?: string | null; release_id?: string | null }
+export interface MineRow { day: string; pact_job_id?: string | null; release_id?: string | null; texted_at?: string | null }
 export interface JobKey { kind: "pact" | "rel"; id: string; label: string; keys: string[] }
 export type Pick =
-  | { kind: "pact" | "rel"; id: string; label: string; why: "number" | "today" | "recent" }
+  | { kind: "pact" | "rel"; id: string; label: string; why: "number" | "today" | "recent" | "told" }
   | { kind: "ask"; why: "none" | "many" | "unknown"; number?: string };
 
 // A PACT job's numbers (PO, job number) and a release's number, stripped the
@@ -116,6 +116,8 @@ export const dayMinus = (iso: string, n: number): string => {
   return d.toISOString().slice(0, 10);
 };
 export const RECENT_DAYS = 3;
+// how far apart two crew texts must be before the later one says which job pictures are for
+export const TOLD_APART_MS = 10 * 60_000;
 
 // Which job the pictures go on:
 //  1. a number in the text — one of the jobs this worker is on (a release
@@ -151,9 +153,18 @@ export function pickJob(body: string, rows: MineRow[], mine: JobKey[], today: st
     return [...ids].map((id) => byId.get(id)!);
   };
   for (let back = 0; back <= RECENT_DAYS; back++) {
-    const js = jobsOn(dayMinus(today, back));
+    const day = dayMinus(today, back);
+    const js = jobsOn(day);
     if (js.length === 1) return { kind: js[0].kind, id: js[0].id, label: js[0].label, why: back === 0 ? "today" : "recent" };
-    if (js.length > 1) return { kind: "ask", why: "many" };
+    if (js.length > 1) {
+      // two jobs that day: the one they were texted about last — a PO that came
+      // in during the day is texted later than the morning's, and the pictures
+      // after that text are its. Texts that went out together say nothing.
+      const toldAt = (j: JobKey) => Math.max(0, ...rows.filter((r) => r.day === day && (r.pact_job_id || r.release_id) === j.id).map((r) => Date.parse(r.texted_at || "") || 0));
+      const told = js.map((j) => ({ j, at: toldAt(j) })).sort((a, b) => b.at - a.at);
+      if (back === 0 && told[0].at > 0 && told[0].at - told[1].at >= TOLD_APART_MS) return { kind: told[0].j.kind, id: told[0].j.id, label: told[0].j.label, why: "told" };
+      return { kind: "ask", why: "many" };
+    }
   }
   return { kind: "ask", why: "none" };
 }

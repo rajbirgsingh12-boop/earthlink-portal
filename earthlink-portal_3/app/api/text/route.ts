@@ -14,7 +14,8 @@ import { sendCrew } from "@/lib/crewSend";
 import { groupLastError, groupProblem, groupsOn, publicOrigin } from "@/lib/groupText";
 import { photosBackOn, serviceDb } from "@/lib/photoStore";
 import { withJobAsk, withPhotoInvite } from "@/lib/crewText";
-import { jobAsk, needSf } from "@/lib/jobFlow";
+import { jobAsk } from "@/lib/jobFlow";
+import type { SfLine } from "@/lib/measure";
 
 // a full 100-message batch takes ~30s of sequential Twilio calls — don't let
 // the platform kill the function mid-loop
@@ -67,7 +68,7 @@ export async function POST(req: Request) {
   let body: { messages?: { to?: string; body?: string; id?: string }[]; skipTexted?: boolean };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Bad request" }, { status: 400 }); }
   let messages = (body.messages || [])
-    .map((m) => ({ to: String(m.to || "").trim(), body: String(m.body || "").trim().slice(0, 1600), id: String(m.id || "").trim() }))
+    .map((m) => ({ to: String(m.to || "").trim(), body: String(m.body || "").trim().slice(0, 1400), id: String(m.id || "").trim() }))
     .filter((m) => /^\+\d{10,15}$/.test(m.to) && m.body);
   if (messages.length === 0 || messages.length > 100) {
     return NextResponse.json({ error: "Nothing to send (check the phone numbers)" }, { status: 400 });
@@ -98,7 +99,7 @@ export async function POST(req: Request) {
   if (await photosBackOn()) {
     const ids = messages.map((m) => m.id).filter(Boolean);
     const jobOfRow = new Map<string, string>();
-    const sfOfJob = new Map<string, boolean>();
+    const linesOfJob = new Map<string, SfLine[]>();
     if (ids.length) {
       // read as the portal itself when it can (the caller is already a checked
       // admin/office sign-in; nothing read here goes back to them), else as them
@@ -113,12 +114,12 @@ export async function POST(req: Request) {
       const jobIds = [...new Set(jobOfRow.values())];
       if (jobIds.length) {
         const jobs = await read<{ id: string; items?: unknown }>(`pact_jobs?id=in.(${jobIds.join(",")})&select=id,items`);
-        jobs.forEach((j) => sfOfJob.set(j.id, needSf(Array.isArray(j.items) ? j.items : [])));
+        jobs.forEach((j) => linesOfJob.set(j.id, Array.isArray(j.items) ? (j.items as SfLine[]) : []));
       }
     }
     messages = messages.map((m) => {
       const job = m.id ? jobOfRow.get(m.id) : undefined;
-      return { ...m, body: job ? withJobAsk(m.body, jobAsk(/^hola\b/i.test(m.body) ? "es" : "en", sfOfJob.get(job) ?? true)) : withPhotoInvite(m.body) };
+      return { ...m, body: job ? withJobAsk(m.body, jobAsk(/^hola\b/i.test(m.body) ? "es" : "en", linesOfJob.get(job) ?? true)) : withPhotoInvite(m.body) };
     });
   }
   // the send itself, and the TEXTED mark the moment Twilio takes each one —

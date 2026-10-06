@@ -161,7 +161,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
         <LangToggle value={shownLang} onChange={setPreviewLang} full name="Preview language" />
       </div>
       <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 whitespace-pre-line text-[12px] text-inksoft [overflow-wrap:anywhere]" data-preview-lang={shownLang}>{(() => { const t = crewPreview(job, (emps.find((e) => rows[0] && e.id === rows[0].employee_id)?.name || "Name").split(" ")[0], work.trim(), undefined, shownLang); // the thread's ask goes on the end once photos texted back land on the job; the server leaves the square-feet sentence off a job with nothing to measure
-        return machine && photosIn ? withJobAsk(t, jobAsk(shownLang, true)) : t; })()}<span className="mt-1 block text-[11px]">Each worker gets it in the language beside their name.</span></div>
+        return machine && photosIn ? withJobAsk(t, jobAsk(shownLang, true)) : t; })()}<span className="mt-1 block text-[11px]">Each worker gets it in the language beside their name.{machine && photosIn ? " The square-feet step is left off a job with nothing to measure." : ""}</span></div>
       {rows.map((r) => {
         const e = emps.find((x) => x.id === r.employee_id);
         const name = e?.name || "?";

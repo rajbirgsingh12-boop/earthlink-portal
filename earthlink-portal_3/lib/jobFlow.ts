@@ -50,7 +50,8 @@ export function photoKindFor(body: string, stage: Stage, burstKind?: PhotoKind |
 }
 
 // ---- the lines a worker can measure ----
-export interface MeasureLine { index: number; key: string; name: string; unit: "SF" | "LF"; qty: number; has: boolean; words: string[] }
+export type LineUnit = "SF" | "LF" | "ROOM";
+export interface MeasureLine { index: number; key: string; name: string; unit: LineUnit; qty: number; has: boolean; words: string[] }
 const isLf = (u: string) => /^(LF|LIN\.? ?FT|LINEAR ?(FT|FEET)|L\.?F\.?)$/.test(normUnit(u || ""));
 // what a line is called in a text, by its price-book key, then by its own words
 const KEY_WORDS: Record<string, string[]> = {
@@ -58,6 +59,8 @@ const KEY_WORDS: Record<string, string[]> = {
   wall_repair: ["scrape", "scraping", "wall repair", "repair", "raspar", "raspado"],
   popcorn: ["popcorn", "textured", "texturizado"],
   sheetrock: ["sheetrock", "sheet rock", "drywall", "dry wall", "rock", "gypsum", "tabla", "tablaroca"],
+  paint_sf: ["paint", "painting", "painted", "pintura", "pintar", "pintamos", "pintado"],
+  primer: ["primer", "prime", "priming", "primed", "imprimar", "imprimador", "sellador"],
 };
 // plain words that carry no meaning of their own in a measurement text
 const FILLER = new Set(["the", "a", "an", "of", "for", "is", "are", "was", "about", "approx", "approximately", "around", "total", "totals", "all", "in", "on", "at", "to", "it", "its", "ok", "okay", "measurements", "measurement", "measure", "measured", "medidas", "medida", "mide", "son", "es", "de", "del", "la", "el", "los", "las", "en", "por", "para", "un", "una", "unos", "unas", "y", "and", "sq", "ft", "feet", "foot", "sf", "sqft", "square", "pies", "cuadrados", "cuadrado", "lf", "linear", "lin", "p2", "ft2", "area", "areas", "job", "po", "here", "aqui", "whole", "entire", "throughout", "apartment", "apt", "room", "rooms", "cuarto", "cuartos", "wall", "walls", "pared", "paredes", "ceiling", "ceilings", "techo", "techos", "bedroom", "bedrooms", "bathroom", "bathrooms", "bath", "kitchen", "living", "livingroom", "hallway", "hall", "closet", "foyer", "recamara", "recamaras", "dormitorio", "bano", "banos", "cocina", "sala", "pasillo", "with", "con", "sin", "no", "yes", "si", "thanks", "gracias", "please", "porfavor", "favor"]);
@@ -67,17 +70,20 @@ const shortName = (d: string): string => {
   const name = words.slice(0, 3).join(" ");
   return name.length > 40 ? name.slice(0, 40).trimEnd() : name;
 };
-const NAME_BY_KEY: Record<string, string> = { plaster: "Plaster", wall_repair: "Scrape and plaster", popcorn: "Popcorn ceiling", sheetrock: "Sheetrock" };
+const NAME_BY_KEY: Record<string, string> = { plaster: "Plaster", wall_repair: "Scrape and plaster", popcorn: "Popcorn ceiling", sheetrock: "Sheetrock", paint_sf: "Paint", primer: "Primer" };
+// priming and painting are by the room: a worker texts how many ("paint 3 rooms")
+const isRoom = (it: SfLine) => normUnit(it.unit || "") === "ROOM" || it.key === "paint_sf" || it.key === "primer";
 const ownWords = (d: string): string[] =>
   [...new Set(norm(d).replace(/\(.*?\)/g, " ").replace(/[^a-z0-9 ]/g, " ").split(" ").filter((w) => w.length >= 4 && !STOP.has(w)))];
 export function measureLines(items: SfLine[]): MeasureLine[] {
   return items.map((it, index) => {
     const sf = isSfLine(it);
-    if (!sf && !isLf(it.unit || "")) return null;
+    const room = !sf && isRoom(it);
+    if (!sf && !room && !isLf(it.unit || "")) return null;
     const key = it.key || "";
     const qty = Number(it.qty) || 0;
     return {
-      index, key, unit: (sf ? "SF" : "LF") as "SF" | "LF", qty,
+      index, key, unit: (sf ? "SF" : room ? "ROOM" : "LF") as LineUnit, qty,
       has: qty > 1,   // the list's own lines start at 1 — that is the blank
       name: NAME_BY_KEY[key] || shortName(it.description),
       words: [...(KEY_WORDS[key] || []), ...ownWords(it.description)],
@@ -96,7 +102,7 @@ export type MeasureHit = { index: number; qty: number } | { index: -1; qty: numb
 export type Parsed =
   | { kind: "none" }
   | { kind: "ok"; hits: MeasureHit[] }
-  | { kind: "ask"; why: "which" | "unknown" | "noline" | "unit" | "big"; word?: string; qty?: number; line?: string; was?: number };
+  | { kind: "ask"; why: "which" | "unknown" | "noline" | "unit" | "big" | "kind"; word?: string; qty?: number; line?: string; was?: number; rooms?: boolean; want?: LineUnit };
 export interface ParseOptions { ignore?: string[] }   // numbers that are job numbers to this worker — never square feet
 const SQ_UNIT = String.raw`sqft|sq\s*ft|sq\s*feet|sf|square\s*(?:ft|feet|foot)|ft2|pies\s*cuadrados|pies2|p2`;
 const LF_UNIT = String.raw`lf|lin\s*ft|linear\s*(?:ft|feet|foot)|pies\s*lineales`;
@@ -110,6 +116,9 @@ const EDGE = String.raw`(^|[^\d.a-z])`;
 const DIMS = new RegExp(String.raw`${EDGE}(?:(\d{1,2})\s*(?:walls?|paredes?|sides?|lados?|ceilings?|techos?|rooms?|cuartos?|areas?|spots?|pieces?|pcs?|x|times|veces)\s*(?:of|de|at|a|@)?\s*)?${N}\s*(?:ft|feet|pies|')?\s*(?:x|by|por)\s*${N}\s*(?:ft|feet|pies|')?(?:\s*(${UNIT}))?(?![a-z\d])`, "g");
 const NUM_UNIT = new RegExp(String.raw`${EDGE}${N}\s*(${UNIT})(?![a-z\d])`, "g");
 const BARE = new RegExp(String.raw`${EDGE}(\d+(?:\.\d+)?)(?![a-z\d.])`, "g");
+// "3 rooms", "2 cuartos": how many rooms, for the lines priced by the room
+const ROOM_UNIT = String.raw`rooms?|rms?|cuartos?|habitaci(?:on|ones)|recamaras?|dormitorios?|bedrooms?|bathrooms?|banos?`;
+const ROOM_NUM = new RegExp(String.raw`${EDGE}(\d{1,2})\s*(?:${ROOM_UNIT})\b(?!\s*(?:apartment|apt|unit)\b)`, "g");
 // a count or an address number stays one when a measurement follows it ("2 walls 10x8", "floor 120 sf")
 const NOT_TAIL = String.raw`(?!\s*(?:of|de|at|a|@)?\s*(?:${UNIT}\b|\d+(?:\.\d+)?\s*(?:ft|feet|pies|')?\s*(?:x|by|por)\s*\d))`;
 // a number that is something else, taken out before any reading:
@@ -121,13 +130,13 @@ const NOT_A_MEASURE: RegExp[] = [
   /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, /\(?\b\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/g,
   new RegExp(String.raw`\b(?:apt|apartment|unit|apto|apartamento|depto|departamento|room|rm|floor|fl|piso|suite|ste|bldg|building|edificio|house|casa|no|num|number|numero|job|trabajo)\.?\s*#?\s*\d{1,6}[a-z]?\b${NOT_TAIL}`, "g"),
   new RegExp(String.raw`#\s*\d{1,6}[a-z]?\b${NOT_TAIL}`, "g"),
-  new RegExp(String.raw`\b\d{1,3}\s*(?:pics?|pictures?|photos?|fotos?|imagenes?|imgs?|coats?|capas?|manos?|hours?|hrs?|horas?|days?|dias?|min|mins|minutes?|minutos?|bags?|bolsas?|buckets?|cubetas?|cans?|latas?|boxes?|cajas?|guys?|people|men|hombres|personas?|workers?|trabajadores?|doors?|puertas?|windows?|ventanas?|rooms?|cuartos?|bedrooms?|recamaras?|bathrooms?|banos?|closets?|floors?|pisos?|apts?|apartments?|apartamentos?|units?|outlets?|switches?|lights?|luces?|sheets?|hojas?|boards?|tablas?|tiles?|losas?|pieces?|piezas?|pcs?|each|ea|c\/u|times|veces|trips?|viajes?|holes?|hoyos?|agujeros?|spots?|patches?|parches?)\b${NOT_TAIL}`, "g"),
+  new RegExp(String.raw`\b\d{1,3}\s*(?:pics?|pictures?|photos?|fotos?|imagenes?|imgs?|coats?|capas?|manos?|hours?|hrs?|horas?|days?|dias?|min|mins|minutes?|minutos?|bags?|bolsas?|buckets?|cubetas?|cans?|latas?|boxes?|cajas?|guys?|people|men|hombres|personas?|workers?|trabajadores?|doors?|puertas?|windows?|ventanas?|closets?|floors?|pisos?|apts?|apartments?|apartamentos?|units?|outlets?|switches?|lights?|luces?|sheets?|hojas?|boards?|tablas?|tiles?|losas?|pieces?|piezas?|pcs?|each|ea|c\/u|times|veces|trips?|viajes?|holes?|hoyos?|agujeros?|spots?|patches?|parches?)\b${NOT_TAIL}`, "g"),
 ];
 // "sq. ft." keeps its dots so a sentence break ". " is just that
 const unDot = (t: string) => t.replace(/\bsq\.\s*ft\.?/g, "sqft").replace(/\blin\.\s*ft\.?/g, "linft").replace(/\bft\./g, "ft");
 const SPLIT = /\s*(?:,|;|\n|\+|\.\s+|\band\b|\by\b|\bplus\b|\balso\b|\bmas\b|\btambien\b)\s*/;
 const MAX_TEXTED_SQFT = 5000;   // no apartment wall is bigger — lib/measure's cap, for texted numbers too
-interface Clause { nums: { qty: number; explicit: boolean }[]; words: string[]; text: string }
+interface Clause { nums: { qty: number; explicit: boolean; rooms?: boolean }[]; words: string[]; text: string }
 // the text, cleaned and cut into clauses, each with the numbers that could
 // be measurements and the plain words left around them
 export function clausesOf(body: string, ignore: string[] = []): Clause[] {
@@ -152,6 +161,11 @@ export function clausesOf(body: string, ignore: string[] = []): Clause[] {
     rest = rest.replace(NUM_UNIT, (_m, pre, n, unit) => {
       const qty = Number(n) * (metric(unit) ? SQFT_PER_M2 : 1);
       if (qty > 0) nums.push({ qty, explicit: true });
+      return `${pre} `;
+    });
+    rest = rest.replace(ROOM_NUM, (_m, pre, n) => {
+      const qty = Number(n);
+      if (qty > 0) nums.push({ qty, explicit: true, rooms: true });
       return `${pre} `;
     });
     rest = rest.replace(BARE, (_m, pre, n) => {
@@ -187,11 +201,19 @@ const lineFor = (words: string[], lines: MeasureLine[]): MeasureLine[] => {
 // number is never taken for square feet (it is a unit, a time, a count of pictures)
 export function parseMeasures(body: string, lines: MeasureLine[], expecting: boolean, opts: ParseOptions = {}): Parsed {
   const clauses = clausesOf(body, opts.ignore || []);
+  // a count of rooms means nothing on a job with no line by the room
+  if (!lines.some((l) => l.unit === "ROOM")) for (const c of clauses) c.nums = c.nums.filter((n) => !n.rooms);
   if (!clauses.some((c) => c.nums.length)) return { kind: "none" };
   const sums = new Map<number, { qty: number; explicit: boolean; line: MeasureLine | null }>();
   const add = (index: number, line: MeasureLine | null, n: { qty: number; explicit: boolean }) => {
     const cur = sums.get(index) || { qty: 0, explicit: true, line };
     sums.set(index, { qty: cur.qty + n.qty, explicit: cur.explicit && n.explicit, line });
+  };
+  // square feet on a line by the room, rooms on a line by the foot: asked, never written
+  const wrongKind = (l: MeasureLine, n: Clause["nums"][number]): Parsed | null => {
+    if (n.rooms && l.unit !== "ROOM") return { kind: "ask", why: "kind", line: l.name, want: l.unit, qty: n.qty, rooms: true };
+    if (!n.rooms && n.explicit && l.unit === "ROOM") return { kind: "ask", why: "kind", line: l.name, want: "ROOM", qty: n.qty };
+    return null;
   };
   const bare: Clause[] = [];
   for (const c of clauses) {
@@ -200,10 +222,12 @@ export function parseMeasures(body: string, lines: MeasureLine[], expecting: boo
     const found = lineFor(c.words, lines);
     // "plaster 120 sf" on a job with no plaster line: a Plaster line is added
     const newPlaster = !found.length && c.words.some((w) => PLASTER_WORDS.has(w)) && !lines.some((l) => l.words.includes("plaster"));
-    if (found.length > 1) return { kind: "ask", why: "which", qty: c.nums[0].qty };
+    if (found.length > 1) return { kind: "ask", why: "which", qty: c.nums[0].qty, ...(c.nums[0].rooms ? { rooms: true } : {}) };
     if (found.length === 1 || newPlaster) {
       // "plaster 120 140": two numbers for one line in one breath — which?
       if (c.nums.length > 1) return { kind: "ask", why: "which", qty: c.nums[0].qty, line: found[0]?.name || "Plaster" };
+      if (found[0]) { const bad = wrongKind(found[0], c.nums[0]); if (bad) return bad; }
+      if (newPlaster && c.nums[0].rooms) return { kind: "ask", why: "kind", line: "Plaster", want: "SF", qty: c.nums[0].qty, rooms: true };
       add(newPlaster ? -1 : found[0].index, found[0] || null, c.nums[0]);
       continue;
     }
@@ -218,43 +242,64 @@ export function parseMeasures(body: string, lines: MeasureLine[], expecting: boo
   }
   if (bare.length) {
     const nums = bare.flatMap((c) => c.nums);
+    // "3 rooms" on its own: every line by the room — the ones still blank, else all of them
+    const roomNums = nums.filter((n) => n.rooms);
+    if (roomNums.length) {
+      if (roomNums.length > 1 || nums.length > 1) return { kind: "ask", why: "which", qty: roomNums[0].qty, rooms: true };
+      const roomLines = lines.filter((l) => l.unit === "ROOM" && !sums.has(l.index));
+      const take = roomLines.filter((l) => !l.has).length ? roomLines.filter((l) => !l.has) : roomLines;
+      for (const l of take) add(l.index, l, roomNums[0]);
+      return sums.size ? finish(sums, lines) : { kind: "none" };
+    }
     const withUnit = nums.some((n) => n.explicit);
     // a plain number with no unit, in a text that says anything else, is not a measurement
     const onlyNumbers = clauses.every((c) => c.words.length === 0 || c.words.every((w) => STOP.has(w)));
-    if (!withUnit && (!expecting || !onlyNumbers)) return sums.size ? finish(sums) : { kind: "none" };
+    if (!withUnit && (!expecting || !onlyNumbers)) return sums.size ? finish(sums, lines) : { kind: "none" };
     // a number beside a named line's number ("plaster 120 sf, 300 total"): which line is the loose one for?
     if (sums.size) return { kind: "ask", why: "which", qty: nums[0].qty };
     if (lines.length === 0) return { kind: "ask", why: "noline", qty: nums[0].qty };
     const blank = lines.filter((l) => !l.has);
     const target = blank.length === 1 ? blank[0] : lines.length === 1 ? lines[0] : null;
     if (!target || nums.length > 1) return { kind: "ask", why: "which", qty: nums[0].qty };
+    const bad = wrongKind(target, nums[0]);
+    if (bad) return bad;
     add(target.index, target, nums[0]);
   }
   if (!sums.size) return { kind: "none" };
-  return finish(sums);
+  return finish(sums, lines);
 }
 // the lines named: the same line twice in one text adds up ("plaster 10x8,
 // plaster 12x8"); a line that already carries a number is only changed by a
 // number with its unit on it; nothing bigger than any apartment goes on
-function finish(sums: Map<number, { qty: number; explicit: boolean; line: MeasureLine | null }>): Parsed {
+const MAX_ROOMS = 20;
+function finish(sums: Map<number, { qty: number; explicit: boolean; line: MeasureLine | null }>, lines: MeasureLine[] = []): Parsed {
   const hits: MeasureHit[] = [];
   for (const [index, s] of sums) {
     const qty = Math.round(s.qty * 100) / 100;
-    if (qty > MAX_TEXTED_SQFT) return { kind: "ask", why: "big", qty, line: s.line?.name || "Plaster" };
-    if (s.line && s.line.has && !s.explicit) return { kind: "ask", why: "unit", qty, line: s.line.name, was: s.line.qty };
+    const byRoom = s.line?.unit === "ROOM" ? { rooms: true as const } : {};
+    if (s.line?.unit === "ROOM" ? qty > MAX_ROOMS : qty > MAX_TEXTED_SQFT) return { kind: "ask", why: "big", qty, line: s.line?.name || "Plaster", ...byRoom };
+    if (s.line && s.line.has && !s.explicit) return { kind: "ask", why: "unit", qty, line: s.line.name, was: s.line.qty, ...byRoom };
     hits.push(index === -1 ? { index: -1, qty, plaster: true } : { index, qty });
+  }
+  // paint and primer go together by the room: the rooms said for one are the other's too, while it is blank
+  for (const [index, s] of [...sums]) {
+    if (s.line?.unit !== "ROOM") continue;
+    for (const l of lines) {
+      if (l.unit === "ROOM" && l.index !== index && !l.has && !sums.has(l.index) && !hits.some((h) => h.index === l.index)) hits.push({ index: l.index, qty: Math.round(s.qty * 100) / 100 });
+    }
   }
   return { kind: "ok", hits };
 }
 
 // ---- the numbers onto the job's lines ----
-export interface Change { name: string; qty: number; was: number; unit: "SF" | "LF" }
+export interface Change { name: string; qty: number; was: number; unit: LineUnit }
 export function applyMeasures(items: SfLine[], hits: MeasureHit[], plasterPrice = 0): { items: SfLine[]; changes: Change[] } {
   const next = items.map((it) => ({ ...it }));
   const changes: Change[] = [];
   const lines = measureLines(items);
   for (const h of hits) {
-    const qty = roundSf(h.qty);
+    const line0 = h.index >= 0 ? lines.find((x) => x.index === h.index) : undefined;
+    const qty = line0?.unit === "ROOM" ? Math.max(1, Math.round(h.qty)) : roundSf(h.qty);
     if (h.index === -1) {
       next.push({ description: "Plaster", qty, unit: "SF", unit_price: plasterPrice, key: "plaster" });
       changes.push({ name: "Plaster", qty, was: 0, unit: "SF" });
@@ -263,29 +308,48 @@ export function applyMeasures(items: SfLine[], hits: MeasureHit[], plasterPrice 
     const l = lines.find((x) => x.index === h.index);
     if (!l || !next[h.index]) continue;
     const was = Number(next[h.index].qty) || 0;
-    next[h.index] = { ...next[h.index], qty, unit: l.unit === "SF" && normUnit(next[h.index].unit || "") !== "SF" ? "SF" : next[h.index].unit };
+    next[h.index] = { ...next[h.index], qty, unit: l.unit === "SF" && normUnit(next[h.index].unit || "") !== "SF" ? "SF" : l.unit === "ROOM" && normUnit(next[h.index].unit || "") !== "ROOM" ? "ROOM" : next[h.index].unit };
     changes.push({ name: l.name, qty, was, unit: l.unit });
   }
   return { items: next, changes };
 }
 
 // ---- the words ----
-const unitWord = (u: "SF" | "LF", lang: "en" | "es") => (u === "LF" ? (lang === "es" ? "pies lineales" : "linear ft") : lang === "es" ? "pies cuadrados" : "sq ft");
+const unitWord = (u: LineUnit, lang: "en" | "es") => (u === "LF" ? (lang === "es" ? "pies lineales" : "linear ft") : u === "ROOM" ? (lang === "es" ? "cuartos" : "rooms") : lang === "es" ? "pies cuadrados" : "sq ft");
+// the example reads off the job's own lines: "plaster 120 sf", "baseboard 200 lf", "paint 3 rooms"
+const exampleName = (l: MeasureLine) => (KEY_WORDS[l.key] || [])[0] || l.words.find((w) => !STOP.has(w)) || l.name.toLowerCase().split(" ")[0];
+const exampleOf = (l: MeasureLine, i: number) => `${exampleName(l)} ${l.unit === "ROOM" ? 3 : l.unit === "LF" ? 200 : i === 0 ? 120 : 40} ${l.unit === "ROOM" ? "rooms" : l.unit === "LF" ? "lf" : "sf"}`;
 const example = (lines: MeasureLine[]): string => {
   const pick = (lines.filter((l) => !l.has).length ? lines.filter((l) => !l.has) : lines).slice(0, 2);
   if (!pick.length) return "plaster 120 sf";
-  return pick.map((l, i) => `${l.name.toLowerCase().split(" ")[0]} ${i === 0 ? 120 : 40} ${l.unit === "LF" ? "lf" : "sf"}`).join(", ");
+  return pick.map(exampleOf).join(", ");
+};
+// what the blank lines are measured in: "the square feet", "how many rooms", or "the measurements"
+type Asked = "sqft" | "rooms" | "measure";
+const askedOf = (lines: MeasureLine[]): Asked => (lines.length && lines.every((l) => l.unit === "ROOM") ? "rooms" : lines.every((l) => l.unit === "SF") ? "sqft" : "measure");
+const WHAT = {
+  en: { sqft: "the square feet", rooms: "how many rooms", measure: "the measurements" },
+  es: { sqft: "los pies cuadrados", rooms: "cuántos cuartos", measure: "las medidas" },
 };
 const list = (lines: MeasureLine[]) => lines.map((l) => l.name).join(", ");
 // "3 BEFORE photos" / "3 fotos de ANTES"
 const kindN = (n: number, kind: PhotoKind, lang: "en" | "es") =>
   lang === "es" ? `${n} foto${n === 1 ? "" : "s"} de ${kind === "before" ? "ANTES" : "DESPUES"}` : `${n} ${kind === "before" ? "BEFORE" : "AFTER"} photo${n === 1 ? "" : "s"}`;
 
-// the line at the foot of the crew text: the three steps, in one breath
-export function jobAsk(lang0: string | null | undefined, needsSf: boolean): string {
+// the line at the foot of the crew text: the three steps, in one breath. The
+// middle step reads off the job's own lines — square feet for plaster,
+// linear feet for baseboard, how many rooms for paint; nothing at all on a
+// job with nothing to measure (an apartment painted at the apartment price).
+// `needs` as a yes/no is the plain form, for a preview with no job in hand.
+export function jobAsk(lang0: string | null | undefined, needs: boolean | SfLine[] | MeasureLine[]): string {
   const lang = langOf(lang0);
-  if (lang === "es") return `Al llegar, responda con fotos de ANTES.${needsSf ? " Luego mande los pies cuadrados, como: plaster 120 sf." : ""} Al terminar, responda con fotos de DESPUES.`;
-  return `When you get there, reply with BEFORE photos.${needsSf ? " Then text the square feet, like: plaster 120 sf." : ""} When you finish, reply with AFTER photos.`;
+  const lines: MeasureLine[] = typeof needs === "boolean"
+    ? (needs ? [{ index: 0, key: "plaster", name: "Plaster", unit: "SF", qty: 1, has: false, words: [] }] : [])
+    : (needs.length && "words" in needs[0] ? (needs as MeasureLine[]) : measureLines(needs as SfLine[]));
+  const blank = lines.filter((l) => !l.has);
+  const mid = blank.length ? (lang === "es" ? ` Luego mande ${WHAT.es[askedOf(blank)]}, como: ${example(blank)}.` : ` Then text ${WHAT.en[askedOf(blank)]}, like: ${example(blank)}.`) : "";
+  if (lang === "es") return `Al llegar, responda con fotos de ANTES.${mid} Al terminar, responda con fotos de DESPUES.`;
+  return `When you get there, reply with BEFORE photos.${mid} When you finish, reply with AFTER photos.`;
 }
 export const JOB_ASK_MARK = { en: "reply with BEFORE photos", es: "responda con fotos de ANTES" };
 // the before pictures are on the job: what comes next
@@ -294,11 +358,11 @@ export function gotBeforeText(n: number, label: string, lines: MeasureLine[], la
   const blank = lines.filter((l) => !l.has);
   if (lang === "es") {
     return blank.length
-      ? `Recibido: ${kindN(n, "before", lang)} en el ${label}. Ahora mande los pies cuadrados de: ${list(blank)}. Como: ${example(lines)}.`
+      ? `Recibido: ${kindN(n, "before", lang)} en el ${label}. Ahora mande ${WHAT.es[askedOf(blank)]} de: ${list(blank)}. Como: ${example(lines)}.`
       : `Recibido: ${kindN(n, "before", lang)} en el ${label}. Al terminar, responda con fotos de DESPUES.`;
   }
   return blank.length
-    ? `Got ${kindN(n, "before", lang)} on ${label}. Now text the square feet for: ${list(blank)}. Like: ${example(lines)}.`
+    ? `Got ${kindN(n, "before", lang)} on ${label}. Now text ${WHAT.en[askedOf(blank)]} for: ${list(blank)}. Like: ${example(lines)}.`
     : `Got ${kindN(n, "before", lang)} on ${label}. When you finish, reply with AFTER photos.`;
 }
 // the numbers are on the job's lines — and so on the proposal and the invoice
@@ -312,15 +376,20 @@ export function gotMeasureText(changes: Change[], label: string, stillBlank: Mea
 }
 export function askMeasureText(p: Extract<Parsed, { kind: "ask" }>, label: string, lines: MeasureLine[], lang0?: string | null): string {
   const lang = langOf(lang0);
-  const qty = p.qty ? `${roundSf(p.qty)} ${lang === "es" ? "pies cuadrados" : "sq ft"}` : "";
+  const qty = p.qty ? `${roundSf(p.qty)} ${p.rooms ? (lang === "es" ? "cuartos" : "rooms") : lang === "es" ? "pies cuadrados" : "sq ft"}` : "";
+  if (p.why === "kind") {
+    const by = p.want === "ROOM" ? (lang === "es" ? "por cuarto" : "by the room") : p.want === "LF" ? (lang === "es" ? "por pie lineal" : "by the linear foot") : lang === "es" ? "por pie cuadrado" : "by the square foot";
+    const ex = exampleOf({ index: 0, key: "", name: p.line || "Plaster", unit: p.want || "SF", qty: 1, has: false, words: [] }, 0);
+    return lang === "es" ? `${p.line || "Esa línea"} va ${by}. Mande como: ${ex}.` : `${p.line || "That line"} is ${by}. Text it like: ${ex}.`;
+  }
   if (p.why === "noline") {
     return lang === "es"
       ? `El ${label} no tiene una línea por pies cuadrados. Mande el número con el trabajo, como: plaster ${roundSf(p.qty || 120)} sf.`
       : `${label} has no square-foot line. Text the number with the work, like: plaster ${roundSf(p.qty || 120)} sf.`;
   }
   if (p.why === "unit") {
-    const have = `${p.was || 0} ${lang === "es" ? "pies cuadrados" : "sq ft"}`;
-    const ex = `${(p.line || "plaster").toLowerCase().split(" ")[0]} ${roundSf(p.qty || 130)} sf`;
+    const have = `${p.was || 0} ${p.rooms ? (lang === "es" ? "cuartos" : "rooms") : lang === "es" ? "pies cuadrados" : "sq ft"}`;
+    const ex = `${(p.line || "plaster").toLowerCase().split(" ")[0]} ${roundSf(p.qty || 130)} ${p.rooms ? "rooms" : "sf"}`;
     return lang === "es"
       ? `${p.line || "Esa línea"} ya tiene ${have} en el ${label}. Para cambiarlo, mándelo con la unidad, como: ${ex}.`
       : `${p.line || "That line"} already has ${have} on ${label}. To change it, text it with the unit, like: ${ex}.`;
@@ -381,8 +450,8 @@ export function gotAfterText(n: number, label: string, stillBlank: MeasureLine[]
   const lang = langOf(lang0);
   const tail = marked ? ` ${MARKED_DONE[lang]}` : "";
   const thanks = lost ? "" : lang === "es" ? " ¡Gracias, todo listo!" : " Thanks, all set!";
-  if (lang === "es") return `Recibido: ${kindN(n, "after", lang)} en el ${label}.${thanks}${stillBlank.length ? ` No olvide los pies cuadrados de: ${list(stillBlank)} (como: ${example(stillBlank)}).` : ""}${tail}`;
-  return `Got ${kindN(n, "after", lang)} on ${label}.${thanks}${stillBlank.length ? ` Don't forget the square feet for: ${list(stillBlank)} (like: ${example(stillBlank)}).` : ""}${tail}`;
+  if (lang === "es") return `Recibido: ${kindN(n, "after", lang)} en el ${label}.${thanks}${stillBlank.length ? ` No olvide ${WHAT.es[askedOf(stillBlank)]} de: ${list(stillBlank)} (como: ${example(stillBlank)}).` : ""}${tail}`;
+  return `Got ${kindN(n, "after", lang)} on ${label}.${thanks}${stillBlank.length ? ` Don't forget ${WHAT.en[askedOf(stillBlank)]} for: ${list(stillBlank)} (like: ${example(stillBlank)}).` : ""}${tail}`;
 }
 // "not done", "no terminado": the worker takes the work-done mark back
 export const notDone = (body: string): boolean =>
@@ -400,4 +469,4 @@ export const doneNoteLine = (who: string, when: string): string => `✅ ${when} 
 export const undoneNoteLine = (who: string, when: string): string => `↩ ${when} · back in progress, ${who || "the crew"} texted NOT DONE`;
 // the line on the job's notes and on the office's card
 export const measureNoteLine = (changes: Change[], who: string, when: string): string =>
-  `📏 ${when} · ${changes.map((c) => `${c.name} ${c.qty} ${c.unit === "LF" ? "lin ft" : "sq ft"}${c.was > 1 ? ` (was ${c.was})` : ""}`).join(", ")} · texted by ${who || "the crew"}`;
+  `📏 ${when} · ${changes.map((c) => `${c.name} ${c.qty} ${c.unit === "LF" ? "lin ft" : c.unit === "ROOM" ? (c.qty === 1 ? "room" : "rooms") : "sq ft"}${c.was > 1 ? ` (was ${c.was})` : ""}`).join(", ")} · texted by ${who || "the crew"}`;

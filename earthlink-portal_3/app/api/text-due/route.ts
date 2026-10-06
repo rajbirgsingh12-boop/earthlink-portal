@@ -18,7 +18,8 @@ import { NextResponse } from "next/server";
 import { sendCrew } from "@/lib/crewSend";
 import { publicOrigin } from "@/lib/groupText";
 import { langOf, withJobAsk, withPhotoInvite } from "@/lib/crewText";
-import { jobAsk, needSf } from "@/lib/jobFlow";
+import { jobAsk } from "@/lib/jobFlow";
+import type { SfLine } from "@/lib/measure";
 import { dueBody, dueSkip, dueWork } from "@/lib/dueText";
 import { spanishWorkServer } from "@/lib/smartTranslate";
 import { twilioConfigured } from "@/lib/twilio";
@@ -154,7 +155,7 @@ async function sweep(req: Request) {
     const work = langOf(emp!.lang) === "es" && raw ? await spanishWorkServer(raw) : raw;
     const body = dueBody(row, { emp: emp!, job, rel, work });
     // a PACT job's text asks for the whole thread; a release's just for photos
-    const asked = !invite ? body : job ? withJobAsk(body, jobAsk(emp!.lang, needSf(Array.isArray(job.items) ? job.items : []))) : withPhotoInvite(body);
+    const asked = !invite ? body : job ? withJobAsk(body, jobAsk(emp!.lang, Array.isArray(job.items) ? (job.items as SfLine[]) : [])) : withPhotoInvite(body);
     return { to: phone, body: asked, id: row.id, sendAt: row.send_at || null };
   }));
   const out = built.filter((m): m is NonNullable<typeof m> => !!m);
@@ -171,7 +172,7 @@ async function sweep(req: Request) {
   // one Twilio said no to gets its time back, so the next sweep tries again
   // (until it is a day late — then it is dropped and the crew shows as not told)
   for (const f of failed) {
-    const m = mine.find((x) => x.to === f.to);
+    const m = (f.id ? mine.find((x) => x.id === f.id) : undefined) || mine.find((x) => x.to === f.to);
     if (m?.sendAt) await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}&texted=is.false`, { method: "PATCH", headers: H, body: JSON.stringify({ send_at: m.sendAt }) }).catch(() => {});
   }
   return NextResponse.json({ sent, missed: missed.length, failed: failed.length, due: due.length, ...(failed.length ? { errors: failed.slice(0, 5) } : {}) });

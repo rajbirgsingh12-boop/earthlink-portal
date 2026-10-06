@@ -40,7 +40,7 @@ export async function sendCopy(body: string): Promise<void> {
 }
 
 export interface TextOut { to: string; body: string; id?: string; who?: string }   // `who`: the worker's name, for the owner's copy
-export interface TextReport { sent: number; failed: { to: string; error: string }[] }
+export interface TextReport { sent: number; failed: { to: string; error: string; id?: string }[] }
 
 // Sends each message, five at a time — a 20-worker crew goes out in ~2s
 // instead of ~8s, still gentle enough for Twilio's per-number rate limits.
@@ -51,7 +51,7 @@ export async function sendTexts(messages: TextOut[], onSent?: (m: TextOut) => Pr
   const basic = Buffer.from(`${sid}:${env("TWILIO_AUTH_TOKEN")}`).toString("base64");
   const from = env("TWILIO_FROM").trim();
   const msvc = env("TWILIO_MESSAGING_SERVICE_SID").trim();
-  const failed: { to: string; error: string }[] = [];
+  const failed: TextReport["failed"] = [];
   let sent = 0;
   const post = (to: string, body: string) => {
     const form = new URLSearchParams({ To: to, Body: body });
@@ -75,10 +75,10 @@ export async function sendTexts(messages: TextOut[], onSent?: (m: TextOut) => Pr
         // (number not registered), 21610 (they texted STOP) are what the
         // office needs to see, not "check the number"
         const j = (await r.json().catch(() => ({}))) as { message?: string; code?: number };
-        failed.push({ to: m.to, error: `${j.message || `Twilio error ${r.status}`}${j.code ? ` (Twilio ${j.code})` : ""}` });
+        failed.push({ to: m.to, id: m.id, error: `${j.message || `Twilio error ${r.status}`}${j.code ? ` (Twilio ${j.code})` : ""}` });
       }
     } catch (e) {
-      failed.push({ to: m.to, error: e instanceof Error ? e.message : "network error" });
+      failed.push({ to: m.to, id: m.id, error: e instanceof Error ? e.message : "network error" });
     }
   };
   for (let i = 0; i < messages.length; i += 5) {

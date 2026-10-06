@@ -116,6 +116,17 @@ export default function Pact() {
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
     myProfile().then((p) => setRole(p?.role || ""));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // ?job=<id> (the "Open on Billing" button on a From-the-crew notice): that job, open and in view
+  const jobParamDone = useRef(false);
+  useEffect(() => {
+    if (jobParamDone.current || jobs.length === 0 || !role) return;
+    jobParamDone.current = true;
+    const id = new URLSearchParams(window.location.search).get("job") || "";
+    if (!id || !jobs.some((j) => j.id === id)) return;
+    setOpenId(id);
+    showDetailsFor(id);
+    setTimeout(() => document.querySelector(`[data-job-card="${id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 250);
+  }, [jobs, role]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // live: PACT jobs changing anywhere refresh the list without a reload
   useLive(["pact_jobs"], () => load(), { skipWhileTyping: true });
@@ -1413,7 +1424,7 @@ export default function Pact() {
 
       <div className="card divide-y divide-rulesoft">
         {list.map((j) => (
-          <div key={j.id} className={`p-3.5 ${j.canceled ? "opacity-50" : ""}`}>
+          <div key={j.id} className={`p-3.5 ${j.canceled ? "opacity-50" : ""}`} data-job-card={j.id}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <button className="min-w-0 text-left" onClick={() => setOpenId(openId === j.id ? null : j.id)}>
                 <div className={`text-[14px] font-semibold ${j.canceled ? "line-through" : ""}`}>
@@ -1430,6 +1441,7 @@ export default function Pact() {
                         <span key={l} className={`chip rounded-[2px] border px-1 py-px font-semibold ${done ? "border-ok bg-ok/10 text-ok" : i === current ? "border-work text-work" : "border-rulesoft text-rule"}`}>{l}</span>
                       ))}
                       {j.proposal_sent && !j.approved && <span className="chip ml-1 text-work">{days(j.proposal_sent)}d waiting</span>}
+                      {canInvoice && j.work_done && !j.invoice_sent && <span className="chip ml-1 text-work" data-ready-to-invoice>ready to invoice</span>}
                       {canInvoice && j.invoice_sent && !j.received && <span className="chip ml-1 text-inksoft">{days(j.invoice_sent)}d out</span>}
                     </div>
                   );

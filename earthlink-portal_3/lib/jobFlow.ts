@@ -264,13 +264,14 @@ export function askMeasureText(p: Extract<Parsed, { kind: "ask" }>, label: strin
     : `Which line ${qty ? `is the ${qty} for` : "is it for"}? Text it like: ${example(lines)}.`;
 }
 // pictures and the square feet in one text: both landed
-export function gotBothText(kind: PhotoKind, n: number, label: string, changes: Change[], stillBlank: MeasureLine[], lang0?: string | null): string {
+export function gotBothText(kind: PhotoKind, n: number, label: string, changes: Change[], stillBlank: MeasureLine[], lang0?: string | null, marked = false): string {
   const lang = langOf(lang0);
   const got = changes.map((c) => `${c.name} ${c.qty} ${unitWord(c.unit, lang)}`).join(", ");
+  const tail = marked ? ` ${MARKED_DONE[lang]}` : "";
   if (lang === "es") {
-    return `Recibido: ${kindN(n, kind, lang)} en el ${label}. Anotado: ${got}. Ya está en la propuesta y la factura.${stillBlank.length ? ` Falta: ${list(stillBlank)}.` : kind === "before" ? " Al terminar, responda con fotos de DESPUES." : " ¡Gracias, todo listo!"}`;
+    return `Recibido: ${kindN(n, kind, lang)} en el ${label}. Anotado: ${got}. Ya está en la propuesta y la factura.${stillBlank.length ? ` Falta: ${list(stillBlank)}.` : kind === "before" ? " Al terminar, responda con fotos de DESPUES." : " ¡Gracias, todo listo!"}${tail}`;
   }
-  return `Got ${kindN(n, kind, lang)} on ${label}. Got it: ${got}. It's on the proposal and the invoice.${stillBlank.length ? ` Still need: ${list(stillBlank)}.` : kind === "before" ? " When you finish, reply with AFTER photos." : " Thanks, all set!"}`;
+  return `Got ${kindN(n, kind, lang)} on ${label}. Got it: ${got}. It's on the proposal and the invoice.${stillBlank.length ? ` Still need: ${list(stillBlank)}.` : kind === "before" ? " When you finish, reply with AFTER photos." : " Thanks, all set!"}${tail}`;
 }
 // a measurement with no one PACT job to put it on
 export function askWhichJobText(lang0?: string | null): string {
@@ -278,12 +279,29 @@ export function askWhichJobText(lang0?: string | null): string {
     ? "¿Para qué trabajo es esa medida? Mándela con el número de PO, como: PO 116843 plaster 120 sf."
     : "Which job is that measurement for? Text it with the PO number, like: PO 116843 plaster 120 sf.";
 }
-// the after pictures are on the job: the thread is done
-export function gotAfterText(n: number, label: string, stillBlank: MeasureLine[], lang0?: string | null): string {
+// the after pictures are on the job: the thread is done — and the job is
+// marked work done, which the worker is told, with the way to take it back
+export const MARKED_DONE = { en: "Marked work done. Not finished? Reply NOT DONE.", es: "Marcado como terminado. ¿No terminó? Responda NO TERMINADO." };
+export function gotAfterText(n: number, label: string, stillBlank: MeasureLine[], lang0?: string | null, marked = false): string {
   const lang = langOf(lang0);
-  if (lang === "es") return `Recibido: ${kindN(n, "after", lang)} en el ${label}. ¡Gracias, todo listo!${stillBlank.length ? ` No olvide los pies cuadrados de: ${list(stillBlank)} (como: ${example(stillBlank)}).` : ""}`;
-  return `Got ${kindN(n, "after", lang)} on ${label}. Thanks, all set!${stillBlank.length ? ` Don't forget the square feet for: ${list(stillBlank)} (like: ${example(stillBlank)}).` : ""}`;
+  const tail = marked ? ` ${MARKED_DONE[lang]}` : "";
+  if (lang === "es") return `Recibido: ${kindN(n, "after", lang)} en el ${label}. ¡Gracias, todo listo!${stillBlank.length ? ` No olvide los pies cuadrados de: ${list(stillBlank)} (como: ${example(stillBlank)}).` : ""}${tail}`;
+  return `Got ${kindN(n, "after", lang)} on ${label}. Thanks, all set!${stillBlank.length ? ` Don't forget the square feet for: ${list(stillBlank)} (like: ${example(stillBlank)}).` : ""}${tail}`;
 }
+// "not done", "no terminado": the worker takes the work-done mark back
+export const notDone = (body: string): boolean =>
+  /\b(not done|not finished|not complete|not completed|still working|still going|no terminado|no termine|no terminamos|no hemos terminado|no esta terminado|no esta listo|todavia no|aun no)\b/.test(norm(body));
+export function backInProgressText(label: string, lang0?: string | null): string {
+  return langOf(lang0) === "es"
+    ? `OK, el ${label} sigue en proceso. Responda con fotos de DESPUES al terminar.`
+    : `OK, ${label} is back in progress. Reply with AFTER photos when it's finished.`;
+}
+export function nothingToUndoText(lang0?: string | null): string {
+  return langOf(lang0) === "es" ? "Ningún trabajo suyo está marcado como terminado ahora." : "No job of yours is marked done right now.";
+}
+// the lines on the job's notes
+export const doneNoteLine = (who: string, when: string): string => `✅ ${when} · work done, after photos texted by ${who || "the crew"} · ready to invoice`;
+export const undoneNoteLine = (who: string, when: string): string => `↩ ${when} · back in progress, ${who || "the crew"} texted NOT DONE`;
 // the line on the job's notes and on the office's card
 export const measureNoteLine = (changes: Change[], who: string, when: string): string =>
   `📏 ${when} · ${changes.map((c) => `${c.name} ${c.qty} ${c.unit === "LF" ? "lin ft" : "sq ft"}${c.was > 1 ? ` (was ${c.was})` : ""}`).join(", ")} · texted by ${who || "the crew"}`;

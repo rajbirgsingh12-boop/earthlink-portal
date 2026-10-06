@@ -449,6 +449,17 @@ export default function PactCalendar() {
       <TextedPhotos canEdit={canEdit} flash={flash} onShow={(b) => {
         if (b.pact_job_id) showJob(b.pact_job_id);
         else if (b.release_id) window.location.href = `/schedule?day=${nyDayOf(b.created_at)}&release=${b.release_id}`;
+      }} onReschedule={async (b, iso) => {
+        // nobody home → a new day from the notice itself: the job moves (its
+        // crew rows follow and the ⚠ clears, RUN_ME 14 and 21), the crew is texted the change
+        const j = jobsRef.current.find((x) => x.id === b.pact_job_id);
+        if (!j) { flash("That PO isn't on the calendar any more"); return; }
+        const was = (j.start_date || "").trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(iso) || iso === was) { flash("Pick a different day"); return; }
+        if (!(await save(j, { start_date: iso, notes: appendNote(j.notes, `📅 Moved to ${prettyDate(iso)} after nobody home${was ? ` (was ${prettyDate(was)})` : ""}`) }))) return;
+        if (rowsOfJob(dayRows, j).length) await textMove({ ...j, start_date: iso }, was, iso);
+        else flash(`${poLabel(j)} moved to ${prettyDate(iso)} — now pick who's going`);
+        loadNobody();
       }} />
       {handOpen && canEdit && (
         <div className="card mb-3 border-work p-4">

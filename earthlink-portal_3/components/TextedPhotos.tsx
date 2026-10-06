@@ -31,7 +31,12 @@ const dayOf = (iso: string, back: number) => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
 
-export default function TextedPhotos({ canEdit, flash, onShow }: { canEdit: boolean; flash: (m: string) => void; onShow?: (b: Batch) => void }) {
+// the day after today, for the "nobody home" notice's new-day box
+const tomorrow = () => { const d = new Date(); d.setDate(d.getDate() + 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+
+export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: { canEdit: boolean; flash: (m: string) => void; onShow?: (b: Batch) => void; onReschedule?: (b: Batch, iso: string) => Promise<void> }) {
+  // the new day typed on a nobody-home notice, per notice
+  const [newDay, setNewDay] = useState<Record<string, string>>({});
   const [rows, setRows] = useState<Batch[]>([]);
   const [names, setNames] = useState<Record<string, string>>({});
   const [spots, setSpots] = useState<Record<string, Spot>>({});
@@ -47,11 +52,11 @@ export default function TextedPhotos({ canEdit, flash, onShow }: { canEdit: bool
     const [h, f, n0] = await Promise.all([
       sb().from("texted_photos").select(cols).eq("status", "held").order("created_at", { ascending: false }).limit(200),
       sb().from("texted_photos").select(cols).eq("status", "filed").gte("created_at", since).order("created_at", { ascending: false }).limit(40),
-      sb().from("texted_photos").select(`${cols},note`).in("status", ["nobody", "reply", "measure"]).order("created_at", { ascending: false }).limit(100),
+      sb().from("texted_photos").select(`${cols},note`).in("status", ["nobody", "reply", "measure", "done"]).order("created_at", { ascending: false }).limit(100),
     ]);
     if (h.error) { setRows([]); return; } // before RUN_ME section 20 — nothing to show
     // before section 21 there's no note to read — the notices come without it
-    const n = n0.error ? await sb().from("texted_photos").select(cols).in("status", ["nobody", "reply", "measure"]).order("created_at", { ascending: false }).limit(100) : n0;
+    const n = n0.error ? await sb().from("texted_photos").select(cols).in("status", ["nobody", "reply", "measure", "done"]).order("created_at", { ascending: false }).limit(100) : n0;
     const list = [
       ...([...(h.data || []), ...(f.data || [])] as Batch[]).filter((b) => Array.isArray(b.photos) && b.photos.length > 0),
       ...((n.data || []) as Batch[]),
@@ -104,6 +109,8 @@ export default function TextedPhotos({ canEdit, flash, onShow }: { canEdit: bool
   const replies = rows.filter((b) => b.status === "reply");
   // the square feet a worker texted, already on the job's lines (lib/jobFlow)
   const measures = rows.filter((b) => b.status === "measure");
+  // jobs whose after photos came in: marked work done, ready to invoice
+  const done = rows.filter((b) => b.status === "done");
   // "📏 Tue Sep 29 9:14 AM · Plaster 120 sq ft · texted by Jose" → the middle
   const measured = (b: Batch) => ((b.note || "").split(" · ")[1] || (b.body || "")).trim();
   if (!canEdit || rows.length === 0) return null;
@@ -136,7 +143,21 @@ export default function TextedPhotos({ canEdit, flash, onShow }: { canEdit: bool
         {nobody.length > 0 && <span className="stamp border-alert text-alert" data-nobody-count>⚠ {nobody.length} nobody home</span>}
         {held.length > 0 && <span className="stamp border-alert text-alert" data-texted-waiting>{held.length} need a job</span>}
         {measures.length > 0 && <span className="stamp border-ok text-ok" data-measure-count>📏 {measures.length} measured</span>}
+        {done.length > 0 && <span className="stamp border-ok text-ok" data-done-count>✅ {done.length} ready to invoice</span>}
       </div>
+      {done.map((b) => {
+        const at = spots[b.pact_job_id || ""];
+        return (
+          <div key={b.id} className="border-t border-rulesoft py-2.5" data-done={b.id}>
+            <div className="text-[14px]"><b className="text-ok">✅ Work done</b> · <b>{at ? at.label : "a job"}</b>{at?.sub ? <span className="text-inksoft"> · {at.sub}</span> : null}</div>
+            <div className="text-[12px] text-inksoft">{who(b)} sent the after photos · {when(b.created_at)} · ready to invoice</div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {b.pact_job_id && <a className="btn btn-primary min-h-[44px] px-3 py-1.5 text-[13px]" href={`/pact?job=${b.pact_job_id}`} data-open-billing>Open on Billing</a>}
+              <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
+            </div>
+          </div>
+        );
+      })}
       {measures.map((b) => {
         const at = spots[b.pact_job_id || ""];
         return (
@@ -157,9 +178,19 @@ export default function TextedPhotos({ canEdit, flash, onShow }: { canEdit: bool
             <div className="text-[12px] text-inksoft">{who(b)} · {when(b.created_at)}{words && !/^no+\.?$/i.test(words) ? <> · “{words}”</> : null}</div>
             {(b.note || "").trim() && <div className="mt-0.5 text-[13px]" data-nobody-note>{(b.note || "").trim()}</div>}
             {(b.photos || []).length > 0 && strip(b)}
+            {/* a PACT job is given its new day right here: the crew rows follow
+                and the crew is texted the change (the Schedule page does both) */}
+            {onReschedule && b.pact_job_id && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <label htmlFor={`newday-${b.id}`} className="text-[11px] uppercase tracking-widest text-inksoft">New day</label>
+                <input id={`newday-${b.id}`} type="date" className="field min-h-[44px] w-auto font-mono text-[13px]" value={newDay[b.id] ?? tomorrow()} onChange={(e) => setNewDay((p) => ({ ...p, [b.id]: e.target.value }))} data-reschedule-day />
+                <button className="btn btn-primary min-h-[44px] px-3 py-1.5 text-[13px]" disabled={busy || !(newDay[b.id] ?? tomorrow())} data-reschedule
+                  onClick={async () => { setBusy(true); try { await onReschedule(b, newDay[b.id] ?? tomorrow()); await load(); } finally { setBusy(false); } }}>Move it and text the crew</button>
+              </div>
+            )}
             <div className="mt-2 flex flex-wrap gap-2">
               {onShow && (b.pact_job_id || b.release_id)
-                ? <button className="btn btn-primary min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => onShow(b)} data-show-job>Give it a new day…</button>
+                ? <button className={`btn ${onReschedule && b.pact_job_id ? "btn-ghost" : "btn-primary"} min-h-[44px] px-3 py-1.5 text-[13px]`} onClick={() => onShow(b)} data-show-job>{onReschedule && b.pact_job_id ? "Open on the calendar" : "Give it a new day…"}</button>
                 : <span className="self-center text-[12px] text-inksoft" data-job-gone>That job isn&apos;t in the portal any more.</span>}
               <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
             </div>

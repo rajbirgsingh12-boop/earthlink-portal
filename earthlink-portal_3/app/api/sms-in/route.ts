@@ -32,7 +32,7 @@ import { fileBatch, folderOf, inboxOf, photosBackReady, serviceDb, type Batch, t
 import { bareNo, nobodyHome } from "@/lib/noAccess";
 import { nobodyFlow } from "@/lib/nobodyFlow";
 import {
-  applyMeasures, askMeasureText, askWhichJobText, countKinds, gotAfterText, gotBeforeText, gotBothText, gotMeasureText, kindOfName, measureLines, measureNoteLine, parseMeasures, photoKindFor, stageOf,
+  applyMeasures, askMeasureText, askWhichJobText, backInProgressText, countKinds, doneNoteLine, gotAfterText, gotBeforeText, gotBothText, gotMeasureText, kindOfName, measureLines, measureNoteLine, notDone, nothingToUndoText, parseMeasures, photoKindFor, stageOf, undoneNoteLine,
   type Change, type MeasureLine, type PhotoKind,
 } from "@/lib/jobFlow";
 import { bookPrice } from "@/lib/priceServer";
@@ -122,9 +122,37 @@ async function targetOf(db: Db, b: Batch): Promise<Target | null> {
 }
 
 // ---- a PACT job's thread (lib/jobFlow): where the job is, and a measurement texted in ----
-interface ThreadJob { id: string; po_number?: string | null; job_number?: string | null; items?: SfLine[] | null; attachments?: { name: string; path: string }[] | null; notes?: string | null; tax_pct?: number | null }
+interface ThreadJob { id: string; po_number?: string | null; job_number?: string | null; items?: SfLine[] | null; attachments?: { name: string; path: string }[] | null; notes?: string | null; tax_pct?: number | null; work_done?: boolean | null; canceled?: boolean | null }
 const threadJob = async (db: Db, id: string): Promise<ThreadJob | null> =>
-  (await db.get<ThreadJob>(`pact_jobs?id=eq.${id}&select=id,po_number,job_number,items,attachments,notes,tax_pct`)).rows[0] || null;
+  (await db.get<ThreadJob>(`pact_jobs?id=eq.${id}&select=id,po_number,job_number,items,attachments,notes,tax_pct,work_done,canceled`)).rows[0] || null;
+const withNote = (notes: string | null | undefined, line: string) => `${(notes || "").trim()}${(notes || "").trim() ? "\n" : ""}${line}`;
+// the after pictures are in: the job is work done (the section 15 trigger
+// prices it and section 17 gives it its invoice number) and the office's
+// card says it is ready to invoice. True when the mark was put on just now.
+async function markDone(db: Db, job: ThreadJob, emp: Emp, from: string, now: Date, today: string): Promise<boolean> {
+  if (job.work_done || job.canceled) return false;
+  const who = (emp.name || "").trim().split(/\s+/)[0] || "";
+  const line = doneNoteLine(who, nyWhen(now));
+  const patch = { work_done: true, notes: withNote(job.notes, line) };
+  // finish_date is upgrade_schedule's column — without it the mark still goes on
+  if (!(await db.patch(`pact_jobs?id=eq.${job.id}`, { ...patch, finish_date: today })) && !(await db.patch(`pact_jobs?id=eq.${job.id}`, patch))) return false;
+  const row = { employee_id: emp.id, from_phone: from, body: "", status: "done", how: "done", pact_job_id: job.id, photos: [] };
+  if (!(await db.insert("texted_photos", { ...row, note: line }))) await db.insert("texted_photos", row); // before section 21
+  return true;
+}
+// "not done": the mark comes off again, and the office's card forgets it
+async function unmarkDone(db: Db, o: { emp: Emp; body: string; now: Date; today: string }): Promise<string> {
+  const lang = o.emp.lang;
+  const { rows, mine } = await jobsOf(db, o.emp, o.today);
+  const refs = jobRefsOnly(o.body);
+  const pick = pickJob(refs, rows, mine, o.today, await anyPoOf(db, refs, mine));
+  const job = pick.kind === "pact" ? await threadJob(db, pick.id) : null;
+  if (!job || !job.work_done) return nothingToUndoText(lang);
+  const who = (o.emp.name || "").trim().split(/\s+/)[0] || "";
+  if (!(await db.patch(`pact_jobs?id=eq.${job.id}`, { work_done: false, notes: withNote(job.notes, undoneNoteLine(who, nyWhen(o.now))) }))) return nothingToUndoText(lang);
+  await db.patch(`texted_photos?pact_job_id=eq.${job.id}&status=eq.done`, { status: "seen" });
+  return backInProgressText(pick.kind === "pact" ? pick.label : "", lang);
+}
 const itemsOf = (j: ThreadJob): SfLine[] => (Array.isArray(j.items) ? j.items : []);
 const stageOfJob = (j: ThreadJob) => stageOf({ ...countKinds((j.attachments || []).map((a) => a?.name || "")), needSf: measureLines(itemsOf(j)).some((l) => !l.has) });
 // the job a measurement is for: the PO said in the text, else the one job
@@ -239,6 +267,8 @@ export async function POST(req: Request) {
     // switches it on — and hears back that it worked, that once
     const firstEver = !(await db.get<{ id: string }>("texted_photos?select=id&limit=1")).rows.length;
     if (firstEver) await db.insert("texted_photos", { employee_id: emp.id, from_phone: from, body, status: "note", msg_sid: sid || null });
+    // "not done": the work-done mark the after pictures put on comes off
+    if (notDone(body)) return answer(await unmarkDone(db, { emp, body, now, today }));
     // the square feet, texted: onto the job's lines (lib/jobFlow)
     const measured = await measureIn(db, { emp, body, from, sid, now, today });
     if (measured) return answer(measured);
@@ -357,11 +387,13 @@ export async function POST(req: Request) {
       const lines = measureLines(itemsOf(thread));
       const parsed = emp ? parseMeasures(body, lines, lines.some((l) => !l.has)) : { kind: "none" as const };
       const measured = parsed.kind === "ok" ? await measureOnJob(db, thread, parsed.hits, { emp: emp!, body, from, sid: "", now }) : null;
-      if (quiet && !moved && !measured) return answer();
+      // after pictures: the job is work done, ready to invoice
+      const marked = kind === "after" && emp ? await markDone(db, thread, emp, from, now, today) : false;
+      if (quiet && !moved && !measured && !marked) return answer();
       // the thread's next step: the square feet after the before pictures, the after pictures after that
       const n = put.length + moved;
-      if (measured) return answer(gotBothText(kind, n, target.label, measured.changes, measured.stillBlank, lang));
-      return answer(kind === "before" ? gotBeforeText(n, target.label, lines, lang) : gotAfterText(n, target.label, lines.filter((l) => !l.has), lang));
+      if (measured) return answer(gotBothText(kind, n, target.label, measured.changes, measured.stillBlank, lang, marked));
+      return answer(kind === "before" ? gotBeforeText(n, target.label, lines, lang) : gotAfterText(n, target.label, lines.filter((l) => !l.has), lang, marked));
     }
     if (quiet && !moved) return answer();
     return say({ k: "filed", n: put.length + moved, label: target.label }, lang);

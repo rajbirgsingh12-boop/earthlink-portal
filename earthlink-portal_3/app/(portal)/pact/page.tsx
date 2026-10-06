@@ -883,9 +883,8 @@ export default function Pact() {
   // done, is not pricing the job: every line still carries the list's own
   // price. Such a save moves the list's baseline along with it, so the job
   // does not flip to PRICED and spend an invoice number nobody asked for.
-  const roomCountFix = (j: Job, items: Item[]): boolean => {
+  const roomCountFix = (j: Job, was: Item[], items: Item[]): boolean => {
     if (j.work_done || j.list_subtotal === null || j.list_subtotal === undefined) return false;
-    const was = itemsOf(j);
     if (was.length !== items.length) return false;
     const bk = book?.items || PRICE_BOOK;
     let moved = false;
@@ -899,10 +898,20 @@ export default function Pact() {
     }
     return moved;
   };
+  // The Qty box writes every keystroke into the page's copy of the job, so by
+  // the time the save comes that copy already carries the new count. The lines
+  // from before the first keystroke are kept here, per job, and that is what
+  // the save compares against; the save clears it.
+  const beforeEdit = useRef<Record<string, Item[]>>({});
   const setItems = (j: Job, items: Item[], persist = false, baseline = false) => {
+    if (!persist && !beforeEdit.current[j.id]) beforeEdit.current[j.id] = itemsOf(j);
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, items } : x)));
     setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, items } : prev));
-    if (persist && !baseline && roomCountFix(j, items)) baseline = true;
+    if (persist) {
+      const was = beforeEdit.current[j.id] ?? itemsOf(j);
+      delete beforeEdit.current[j.id];
+      if (!baseline && roomCountFix(j, was, items)) baseline = true;
+    }
     if (persist) {
       const sub = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
       const amount = sub * (1 + taxRate(j) / 100); // billed total includes tax

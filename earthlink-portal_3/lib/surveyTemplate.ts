@@ -33,7 +33,7 @@ export type Bill = { codes: string[] } | { hours: number; book?: boolean } | { s
 // when the book has one: every `req` word must be in the description ("a|b"
 // = either), `opt` words add to the score, a `not` word rules the line out
 // (a toilet is not a toilet paper holder); `per` is the count per unit
-export interface FindSpec { req: string[]; opt?: string[]; not?: string[]; per?: number }
+export interface FindSpec { req: string[]; opt?: string[]; not?: string[]; per?: number; uom?: string }
 export interface SurveyItem {
   key: string;            // stable id — the survey form's box names ride on it
   label: string;          // what the survey says
@@ -74,7 +74,7 @@ export const SEED_ITEMS: SurveyItem[] = [
   S("lock_entrance", "Doors", "Entrance lock / deadbolt", ["entrance lock", "entry lock", "deadbolt", "dead bolt", "front door lock", "apartment lock"], H(1), [{ req: ["deadbolt|lock|lockset"], opt: ["entrance", "entry", "dead", "bolt", "apartment", "door"], not: ["passage", "privacy", "window", "mailbox", "cylinder", "sash"] }]),
   S("cylinder", "Doors", "Lock cylinder / re-key", ["cylinder", "rekey", "re key", "change cylinder", "keys"], H(0.5), [{ req: ["cylinder|rekey|key"], opt: ["change", "replace", "lock"] }]),
   S("door_interior", "Doors", "Interior door", ["interior door", "room door", "bedroom door", "door", "doors"], B(2), [{ req: ["door"], opt: ["interior", "hollow", "core", "replace", "install", "room"] }]),
-  S("door_closet", "Doors", "Closet door", ["closet door", "closet doors", "bifold"], B(1.5), [{ req: ["door"], opt: ["closet", "bifold", "bi-fold"] }]),
+  S("door_closet", "Doors", "Closet door", ["closet door", "closet doors", "bifold", "sliding closet door", "sliding closet doors", "door sliding closet", "sliding closet", "closet sliding door", "sliding door", "bypass door", "bypass closet door"], B(1.5), [{ req: ["door"], opt: ["closet", "bifold", "bi-fold", "sliding", "bypass"] }]),
   S("door_entrance", "Doors", "Entrance door", ["entrance door", "entry door", "front door", "apartment door", "metal door"], B(3), [{ req: ["door"], opt: ["entrance", "entry", "apartment", "metal", "steel", "fire"] }]),
   S("door_stop", "Doors", "Door stop", ["door stop", "doorstop", "stops", "door stops"], H(0.25), [{ req: ["stop"], opt: ["door", "wall", "floor"] }]),
   S("door_hinge", "Doors", "Door hinge", ["hinge", "hinges", "door hinge"], H(0.5), [{ req: ["hinge"], opt: ["door", "butt"] }]),
@@ -133,11 +133,15 @@ export const SEED_ITEMS: SurveyItem[] = [
   S("reglaze_both", "Bathroom", "Reglaze tub and sink", ["reglaze tub and sink", "reglaze sink and tub", "reglaze", "reglazing", "tub and sink reglaze", "reglaze tub sink", "glaze tub and sink", "glaze sink and tub", "tub and sink"], L(CODE.tub, CODE.sink), [{ req: ["reglaz|glaz|refinish"], opt: ["tub", "bathtub", "bath"], not: ["sink", "lavatory", "basin", "tile", "wall"] }, { req: ["reglaz|glaz|refinish"], opt: ["sink", "lavatory", "basin", "lav"], not: ["tub", "bathtub", "tile", "wall"] }]),
   S("reglaze_tub", "Bathroom", "Reglaze tub", ["reglaze tub", "tub reglaze", "glaze tub", "tub glaze", "reglaze bathtub", "tub"], L(CODE.tub), [{ req: ["reglaz|glaz|refinish"], opt: ["tub", "bathtub", "bath"], not: ["sink", "lavatory", "basin", "tile", "wall"] }]),
   S("reglaze_sink", "Bathroom", "Reglaze sink", ["reglaze sink", "sink reglaze", "glaze sink", "reglaze lavatory"], L(CODE.sink), [{ req: ["reglaz|glaz|refinish"], opt: ["sink", "lavatory", "basin", "lav"], not: ["tub", "bathtub", "tile", "wall"] }]),
+  S("tub_enclosure", "Bathroom", "Tub enclosure / shower door", ["tub enclosure", "tub enclosures", "shower door", "shower doors", "tub door", "tub doors", "enclosure", "sliding tub door", "bathtub door", "glass tub door", "tub glass door"], B(2), [{ req: ["enclosure|shower door|tub door|bathtub door"], opt: ["tub", "bath", "bathtub", "sliding", "glass", "bypass"], not: ["curtain", "rod"] }]),
   S("lav_sink", "Bathroom", "Bathroom sink (lavatory)", ["bathroom sink", "lavatory", "lav", "lav sink", "basin", "new sink", "sink"], B(2), [{ req: ["lavatory|sink|basin"], opt: ["bathroom", "bath", "wall", "hung", "replace"] }]),
   S("bath_tile_wall", "Bathroom", "Bathroom wall tile", ["wall tile", "bathroom tile", "bath tile", "ceramic tile"], B(0.5), [{ req: ["tile"], opt: ["wall", "ceramic", "bathroom", "bath"] }]),
   S("bath_tile_floor", "Bathroom", "Bathroom floor tile", ["bathroom floor tile", "bath floor", "floor tile bathroom"], B(0.5), [{ req: ["tile"], opt: ["floor", "ceramic", "bathroom", "bath"] }]),
   // walls, ceilings, floors
   S("plaster", "Walls & floors", "Plaster patch", ["plaster", "plaster patch", "patch", "skim", "skim coat", "plastering"], H(1), [{ req: ["plaster"], opt: ["patch", "repair", "skim", "wall", "ceiling"] }]),
+  // "25 SF plaster": square feet, not patches — the book's line measured that
+  // way when it has one, else an hour for every 25 square feet
+  S("plaster_sf", "Walls & floors", "Plaster (square feet)", ["sf plaster", "plaster sf", "sq ft plaster", "plaster sq ft", "sqft plaster", "plaster sqft", "square feet plaster", "plaster square feet", "square foot plaster", "sf plastering", "sf plaster wall", "sf plaster ceiling", "sf skim coat", "sf sheetrock"], B(0.04), [{ req: ["plaster|skim|sheetrock|drywall"], opt: ["sf", "square", "foot", "feet", "sq", "repair", "patch", "wall", "ceiling"], uom: "SF" }]),
   S("sheetrock", "Walls & floors", "Sheetrock patch", ["sheetrock", "drywall", "sheetrock patch", "gypsum"], H(1), [{ req: ["sheetrock|drywall|gypsum"], opt: ["patch", "repair", "replace"] }]),
   S("paint_room", "Walls & floors", "Paint room", ["paint room", "paint", "painting", "room paint"], H(3), [{ req: ["paint"], opt: ["room", "walls", "ceiling", "per"], not: ["apartment", "apt", "bedroom", "studio", "door", "radiator", "cabinet"] }]),
   S("door_paint", "Walls & floors", "Paint door", ["door paint", "paint door", "paint doors", "door painting", "doors paint"], H(1), [{ req: ["paint"], opt: ["door", "interior", "both", "sides"], not: ["entire", "apartment", "bedroom", "studio", "room", "entrance", "metal", "radiator", "cabinet", "window"] }]),
@@ -211,10 +215,19 @@ const isWord = (w: string, kw: string) => w === kw || (w.length >= 4 && kw.lengt
 // a `not` guard is the one place a piece counts too: "bath" in the book is the
 // "bathroom" the guard names, "mail box" its "mailbox" — a guard errs on the side of ruling out
 const hasWord = (desc: string[], kw: string, guard = false) => kw.split("|").some((k) => { const ks = tokens(k); return ks.length > 0 && ks.every((kk) => desc.some((w) => (guard ? sameWord(w, kk) : isWord(w, kk)))); });
+// "SF", "sq ft", "square feet" are one way of measuring, "EACH" and "EA" another
+const uomOf = (u: string): string => {
+  const t = (u || "").toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim();
+  if (/^(SF|SQ ?FT|SQFT|SQUARE (FT|FEET|FOOT)|FT2)$/.test(t)) return "SF";
+  if (/^(LF|LIN ?FT|LINEAR (FT|FEET|FOOT))$/.test(t)) return "LF";
+  if (/^(HR|HRS|HOUR|HOURS)$/.test(t)) return "HOUR";
+  return t === "" ? "EACH" : /^(EA|EACH|UNIT|UNITS|PC|PCS|PIECE|PIECES)$/.test(t) ? "EACH" : t;
+};
 export function proposeLine(spec: FindSpec, catalog: CatalogLine[]): { line: CatalogLine; score: number }[] {
   const out: { line: CatalogLine; score: number }[] = [];
   for (const c of catalog) {
     const desc = tokens(`${c.description} ${c.category}`);
+    if (spec.uom && uomOf(c.uom) !== spec.uom) continue;
     if (!spec.req.every((k) => hasWord(desc, k))) continue;
     if ((spec.not || []).some((k) => hasWord(desc, k, true))) continue;
     const opt = (spec.opt || []).filter((k) => hasWord(desc, k)).length;
@@ -224,18 +237,28 @@ export function proposeLine(spec: FindSpec, catalog: CatalogLine[]): { line: Cat
   return out.sort((a, b) => b.score - a.score).slice(0, 5);
 }
 // the book's lines for an item — one per find spec that lands, in the book
-export const bookLines = (item: SurveyItem, catalog: CatalogLine[]): { line: CatalogLine; per: number }[] =>
-  item.find.map((f) => { const p = proposeLine(f, catalog)[0]; return p ? { line: p.line, per: f.per ?? 1 } : null; }).filter((x): x is { line: CatalogLine; per: number } => !!x);
+// `size`: the width the item was written with ("24" for a 24 inch door) — the
+// book's line of that width is the one, when the book has widths; a book
+// that prices the thing one way for every width still answers
+export const bookLines = (item: SurveyItem, catalog: CatalogLine[], size?: string | null): { line: CatalogLine; per: number }[] =>
+  item.find.map((f) => {
+    const sized = size ? proposeLine({ ...f, req: [...f.req, size] }, catalog)[0] : undefined;
+    const p = sized || proposeLine(f, catalog)[0];
+    return p ? { line: p.line, per: f.per ?? 1 } : null;
+  }).filter((x): x is { line: CatalogLine; per: number } => !!x);
 
 // ---- the survey text ----
 // `implied`: the line carried no count — "Bathroom light" is one, and the same
 // thing written again with a count is a restatement, not a second one
-export interface ParsedLine { raw: string; label: string; qty: number; itemKey?: string; score: number; note?: string; implied?: boolean; at?: number }
+export interface ParsedLine { raw: string; label: string; qty: number; itemKey?: string; score: number; note?: string; implied?: boolean; at?: number; size?: string }
 export interface ParsedSurvey { address: string; apt: string; kind: string; bedrooms?: number; lines: ParsedLine[] }
 
 const NUM = "(\\d+(?:\\.\\d+)?)";
 const APT = /^(?:apt\.?\s*)?(\d{1,3}[a-z]{0,2}|[a-z]\d{1,3}[a-z]?|ph\d*)$/i;
 const KIND = /^(mo|mi|m\.o\.|m\.i\.|move ?-?out|move ?-?in|vacant|vacancy)$/i;
+// a building and an apartment on one line, the way a note for a development
+// lists them: "Building 3 11K", "B1 5K", "6 14C"
+const BLDG_APT = /^(?:(?:bldg\.?|building|bld|b)\s*)?(\d{1,3})\s*[-:.]?\s+(?:(?:apt\.?|apartment|unit)\s*)?#?(\d{1,3}[a-z]{1,2}|[a-z]{1,2}\d{1,3}[a-z]?|ph\d*)$/i;
 const kindName = (k: string) => (/^(mi|m\.i\.|move ?-?in)$/i.test(k) ? "Move-in" : /^(mo|m\.o\.|move ?-?out|vacant|vacancy)$/i.test(k) ? "Move-out" : k);
 
 // "390 sutter 11A MO" → address, apt, kind. Anything that isn't that shape is not a header.
@@ -296,21 +319,28 @@ export function parseSurvey(text: string, items: SurveyItem[] = SEED_ITEMS): Par
   const out: ParsedSurvey = { address: "", apt: "", kind: "", lines: [] };
   const raw = (text || "").split(/\r?\n/).map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean);
   let at = 0; // which line of the page a piece came from
-  const push = (rawLine: string, label: string, qty: number, prefix = "", implied = false) => {
+  const push = (rawLine: string, label0: string, qty: number, prefix = "", implied = false) => {
+    // a width in front of a sized thing ("24 inch door privacy", "24s door sliding
+    // closet", '30" door') rides along as the size, and the words are read without it
+    const sz = /^(\d{2,3})\s*(?:"|''|”|in\.?|inch(?:es)?|s)?\s+(.+)$/i.exec(label0);
+    const size = sz && /\b(?:door|doors|closet|shade|shades|blind|blinds|screen|screens|guard|guards|window|sill|cabinet|rod|bar)\b/i.test(sz[2]) ? sz[1] : "";
+    const label = size ? sz![2] : label0;
     // with a prefix ("Outlet:" — or the noun before it on the same line, "3 switch 1 double")
     // the prefixed wording is tried too, and wins a tie
     const tries = prefix ? [`${prefix} ${label}`, label] : [label];
     let best: { item?: SurveyItem; score: number } = { score: 0 };
     for (const t of tries) { const m = matchItem(t, items); if (m.score > best.score) best = m; }
     if (best.score >= SURE || tries.length > 1) {
-      out.lines.push({ raw: rawLine, label: prefix ? `${prefix} ${label}` : label, qty, itemKey: best.score >= OK ? best.item?.key : undefined, score: best.score, at, ...(implied ? { implied } : {}) });
+      out.lines.push({ raw: rawLine, label: prefix ? `${prefix} ${label}` : label, qty, itemKey: best.score >= OK ? best.item?.key : undefined, score: best.score, at, ...(implied ? { implied } : {}), ...(size ? { size } : {}) });
       return;
     }
-    // nothing read the line whole — maybe it is more than one thing
-    const pieces = splitMulti(label, items);
+    // nothing read the line whole — maybe it is more than one thing; when no
+    // piece reads either, it is one line, as written ("42 + 24 B and W")
+    const pieces0 = splitMulti(label, items);
+    const pieces = pieces0.some((piece) => matchItem(piece, items).score >= OK) ? pieces0 : [label];
     for (const piece of pieces) {
       const m = matchItem(piece, items);
-      out.lines.push({ raw: rawLine, label: piece, qty, itemKey: m.score >= OK ? m.item?.key : undefined, score: m.score, at, ...(implied ? { implied } : {}) });
+      out.lines.push({ raw: rawLine, label: piece, qty, itemKey: m.score >= OK ? m.item?.key : undefined, score: m.score, at, ...(implied ? { implied } : {}), ...(size ? { size } : {}) });
     }
   };
   // a run of "n words n words" — the noun of the pair before is context for a
@@ -327,7 +357,12 @@ export function parseSurvey(text: string, items: SurveyItem[] = SEED_ITEMS): Par
   raw.forEach((line, i) => {
     at = i;
     if (/^#/.test(line) || /<[^>]*>/.test(line)) return; // a group heading or an unfilled placeholder from the blank survey
-    if (i === 0) { const h = parseHeader(line); if (h) { Object.assign(out, h); return; } }
+    if (i === 0) {
+      // "390 sutter 11A MO", or a building and an apartment ("Building 3 11K", "B1 5K") off a pasted note
+      const ba = BLDG_APT.exec(line);
+      const h = ba ? { address: `Building ${ba[1]}`, apt: ba[2].toUpperCase(), kind: "" } : parseHeader(line);
+      if (h) { Object.assign(out, h); return; }
+    }
     // "2 bedroom" — the size, and an item when the book prices whole apartments
     const br = /^(\d)\s*(?:bed ?rooms?|br|bd)\b/i.exec(line) || /^(studio)$/i.exec(line);
     if (br) { out.bedrooms = br[1].toLowerCase() === "studio" ? 0 : parseInt(br[1], 10); push(line, line, 1); return; }
@@ -341,6 +376,10 @@ export function parseSurvey(text: string, items: SurveyItem[] = SEED_ITEMS): Par
       if (pairs) { pushPairs(line, pairs, prefix); return; }
       push(line, `${prefix} ${rest}`, 1, "", true); return;
     }
+    // "42 + 24 B and W" — widths with a plus between them and the thing's name:
+    // one line, as many as there are widths, read by its name
+    const widths = /^(\d{2,3}(?:\s*\+\s*\d{2,3})+)\s+([A-Za-z].*)$/.exec(line);
+    if (widths) { push(line, widths[2], widths[1].split("+").length, "", false); return; }
     const pairs = pairsOf(line);
     if (pairs) { pushPairs(line, pairs); return; }
     let m = new RegExp(`^${NUM}\\s+(.+)$`).exec(line);
@@ -359,7 +398,7 @@ export function parseSurvey(text: string, items: SurveyItem[] = SEED_ITEMS): Par
 export interface SheetLine { code: string; qty: number; unit_price: number; description: string; itemKey: string; label: string; uom: string; line: number; category?: string; alsoHours?: boolean }
 // one written item, read: what it is (its key on the list — "" when nothing on
 // the list is it), the count, and the reader's note
-export interface ReadItem { written: string; qty: number; key: string; note?: string | null; implied?: boolean }
+export interface ReadItem { written: string; qty: number; key: string; note?: string | null; implied?: boolean; size?: string | null }
 // `also`: the book prices this job too — that line is on the sheet as well, one of the two comes off
 export interface HourPart { key: string; label: string; written: string; qty: number; hours: number; also?: string }
 export interface Billed {
@@ -379,15 +418,16 @@ export const LABOR_KEY = "labor";
 // and counts once.
 function mergeTwice(items: ReadItem[]): { items: ReadItem[]; twice: string[] } {
   const byKey = new Map<string, ReadItem[]>();
-  for (const it of items) if (it.key) byKey.set(it.key, [...(byKey.get(it.key) || []), it]);
+  const sig = (it: ReadItem) => `${it.key}@${it.size || ""}`;
+  for (const it of items) if (it.key) byKey.set(sig(it), [...(byKey.get(sig(it)) || []), it]);
   const twice: string[] = [];
   const out: ReadItem[] = [];
   const done = new Set<string>();
   for (const it of items) {
-    const group = it.key ? byKey.get(it.key) || [it] : [it];
+    const group = it.key ? byKey.get(sig(it)) || [it] : [it];
     if (group.length === 1) { out.push(it); continue; }
-    if (done.has(it.key)) continue; // merged into its first mention
-    done.add(it.key);
+    if (done.has(sig(it))) continue; // merged into its first mention
+    done.add(sig(it));
     const label = itemByKey(it.key)?.label || it.written;
     // the counted mentions add up; a bare mention restates — it counts only
     // when nothing else counted more ("Bathroom light" + "1 bathroom light" is 1;
@@ -397,7 +437,7 @@ function mergeTwice(items: ReadItem[]): { items: ReadItem[]; twice: string[] } {
     const qty = Math.max(counted, bare);
     const restated = group.some((g) => g.implied) && bare >= counted;
     twice.push(`${label} (${restated ? "counted once" : "counts added up"})`);
-    out.push({ written: [...new Set(group.map((g) => g.written))].join(" + "), qty, key: it.key, note: group.find((g) => g.note)?.note ?? null });
+    out.push({ written: [...new Set(group.map((g) => g.written))].join(" + "), qty, key: it.key, note: group.find((g) => g.note)?.note ?? null, ...(it.size ? { size: it.size } : {}) });
   }
   return { items: out, twice };
 }
@@ -442,7 +482,7 @@ export function billSurvey(read: ReadItem[], catalog: CatalogLine[]): Billed {
   // small jobs the book prices: placed after every material item has its line
   const paired: { part: HourPart; it: ReadItem; line: CatalogLine; per: number }[] = [];
   for (const it of items) {
-    const seed = it.key ? itemByKey(it.key) : undefined;
+    const seed = it.key === "plaster" && /\b(?:sf|sq\.?\s*ft|square\s*f(?:ee|oo)t|sqft)\b/i.test(it.written) ? itemByKey("plaster_sf") : it.key ? itemByKey(it.key) : undefined;
     if (!seed) { unmatched.push(it); continue; }
     const b = seed.bill;
     if ("codes" in b) {
@@ -462,7 +502,7 @@ export function billSurvey(read: ReadItem[], catalog: CatalogLine[]): Billed {
     // find), the book's line as well, marked as a pair for the owner to tick
     // one off; a job that is three lines in the book (the accessories) stays hours.
     if (b.book) {
-      const own = bookLines(seed, rest);
+      const own = bookLines(seed, rest, it.size);
       for (const { line, per } of own) {
         const c = other.get(line.code) || { qty: 0, labels: [], pair: false };
         c.qty += it.qty * per; if (!c.labels.includes(it.written)) c.labels.push(it.written);
@@ -473,8 +513,9 @@ export function billSurvey(read: ReadItem[], catalog: CatalogLine[]): Billed {
     const part: HourPart = { key: seed.key, label: seed.label, written: it.written, qty: it.qty, hours: Math.round(it.qty * b.hours * 100) / 100 };
     hours.push(part);
     if (!b.book && seed.find.length === 1) {
-      const own = bookLines(seed, rest);
-      if (own.length) paired.push({ part, it, line: own[0].line, per: own[0].per });
+      const own = bookLines(seed, rest, it.size);
+      // a job counted by the piece is never offered a line measured by the foot or the hour
+      if (own.length && !["SF", "LF", "HOUR"].includes(uomOf(own[0].line.uom))) paired.push({ part, it, line: own[0].line, per: own[0].per });
     }
   }
   // a small job's book line — unless a material item already bills on that
@@ -520,3 +561,56 @@ export function billSurvey(read: ReadItem[], catalog: CatalogLine[]): Billed {
 export const hoursNote = (hours: HourPart[]) => hours.map((h) => `${h.written} ${h.hours}h`).join("; ");
 export const sheetTotal = (lines: { qty: number; unit_price: number }[]) =>
   Math.round(lines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.unit_price) || 0), 0) * 100) / 100;
+
+// ---- a list of apartments, pasted ----
+// The foreman's note for a whole development, the way it comes off the phone:
+//
+//   Grant houses Moveout
+//   Building 3 11K
+//   42 + 24 B and W
+//   2 24s door sliding closet
+//
+//   B1 5K
+//   1 24 inch door privacy
+//
+// A line that is a building and an apartment ("Building 3 11K", "B1 5K",
+// "6 14C") starts the next apartment; the lines under it are its survey. A
+// first line that is neither ("Grant houses Moveout") names the development
+// and the kind of job. The old shape ("390 sutter 11A MO") starts an
+// apartment too.
+export interface NotesApartment { building: string; apt: string; address: string; kind: string; text: string }
+export interface NotesList { development: string; kind: string; apartments: NotesApartment[]; stray: string[] }
+const titleCase = (s: string) => s.replace(/\S+/g, (w) => (/^[A-Z0-9]+$/.test(w) && w.length <= 3 ? w : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()));
+export function splitSurveyNotes(text: string): NotesList {
+  const out: NotesList = { development: "", kind: "", apartments: [], stray: [] };
+  const lines = (text || "").split(/\r?\n/).map((l) => l.replace(/\s+/g, " ").trim());
+  let cur: NotesApartment | null = null;
+  let first = true;
+  for (const line of lines) {
+    if (!line) continue;
+    const ba = BLDG_APT.exec(line);
+    const h0 = ba ? null : parseHeader(line);
+    // "1 tub enclosure" has the old header's shape (a number, then words) but
+    // no apartment and no MO on it: an item, not a header
+    const h = h0 && (h0.apt || h0.kind) ? h0 : null;
+    if (ba || h) {
+      const building = ba ? `Building ${ba[1]}` : "";
+      const apt = (ba ? ba[2] : h!.apt).toUpperCase();
+      cur = { building, apt, address: ba ? building : h!.address, kind: h?.kind || "", text: "" };
+      out.apartments.push(cur);
+      first = false;
+      continue;
+    }
+    if (first) {
+      // the title: the development, and the kind of job when it says so
+      first = false;
+      const kind = /\b(move\s*-?\s*outs?|mo|vacanc(?:y|ies)|vacant)\b/i.test(line) ? "Move-out" : /\b(move\s*-?\s*ins?|mi)\b/i.test(line) ? "Move-in" : "";
+      const name = line.replace(/\b(move\s*-?\s*(?:outs?|ins?)|mo|mi|vacanc(?:y|ies)|vacant|surveys?|notes?|list)\b/gi, "").replace(/[\s:,-]+$/, "").replace(/\s{2,}/g, " ").trim();
+      if (name && !/^\d/.test(name)) { out.development = titleCase(name); out.kind = kind; continue; }
+    }
+    if (cur) cur.text += `${line}\n`;
+    else out.stray.push(line);
+  }
+  for (const a of out.apartments) { a.text = a.text.trim(); if (!a.kind) a.kind = out.kind; }
+  return out;
+}

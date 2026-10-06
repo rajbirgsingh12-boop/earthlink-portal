@@ -1,4 +1,5 @@
-// Server-side survey reader: the phone sends the survey PDF and gets back the
+// Server-side survey reader: the phone sends the survey PDF (or, as JSON, the
+// survey as text: `text`, or `texts` for several apartments) and gets back the
 // survey as items off the move-out list (what each line is, and its count —
 // the page bills them). Same gate, same PDF engine and the same
 // smart-reader-then-rules shape as the PO reader.
@@ -30,6 +31,18 @@ export async function POST(req: Request) {
   const role = (pRes.ok ? ((await pRes.json()) as { role?: string }[]) : [])[0]?.role || "";
   if (role !== "admin" && role !== "office") return NextResponse.json({ error: "Not allowed" }, { status: 403 });
 
+  // the survey as text — a note pasted on the phone — one apartment per
+  // text, read side by side (each read is its own wait, and six of them one
+  // after another would run the function out of time)
+  if (/application\/json/i.test(req.headers.get("content-type") || "")) {
+    let body: { text?: unknown; texts?: unknown };
+    try { body = (await req.json()) as { text?: unknown; texts?: unknown }; } catch { return NextResponse.json({ error: "Bad request" }, { status: 400 }); }
+    const texts = (Array.isArray(body.texts) ? body.texts : body.text !== undefined ? [body.text] : []).map((t) => String(t ?? "").slice(0, 12_000));
+    if (texts.length === 0 || texts.length > 12 || texts.some((t) => !t.trim())) return NextResponse.json({ error: "Send the survey as text (1 to 12 apartments)" }, { status: 400 });
+    const reads = await Promise.all(texts.map((t) => readSurveySmart(new Uint8Array(0), t, undefined, undefined, t)));
+    if (body.texts === undefined) { const one = reads[0]; return NextResponse.json({ ok: true, survey: one.survey, readBy: one.readBy, ...(one.note ? { note: one.note } : {}), text: texts[0] }); }
+    return NextResponse.json({ ok: true, surveys: reads.map((r, i) => ({ survey: r.survey, readBy: r.readBy, ...(r.note ? { note: r.note } : {}), text: texts[i] })) });
+  }
   // the PDF travels as a form
   let file: File | null = null;
   try {

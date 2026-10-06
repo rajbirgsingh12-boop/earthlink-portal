@@ -19,6 +19,7 @@ export const SurveySchema = z.object({
     qty: z.number().describe("the count written on that line; 1 when there is none"),
     key: z.string().describe("the key of the thing on the list this line is — only a key from the list, never one that isn't there; empty when nothing on the list is it"),
     note: z.string().nullable().describe("anything a person should know: not on the list, written twice, a guess"),
+    size: z.string().nullable().describe("the width the item is written with, in inches, digits only: '24' for '24 inch door' or '2 24s door'; null when none"),
   })),
 });
 export type SmartSurvey = { address: string; apt: string; kind: string; bedrooms: number | null; items: ReadItem[] };
@@ -39,6 +40,9 @@ Rules:
 - pick the thing that IS the item: a toilet is not a toilet seat, a single outlet is not a switch, a wall light is not a cover plate;
 - when nothing on the list is the item, leave the key empty and say so in the note;
 - when the same item is written twice and one mention has no count ("Bathroom light" in the bathroom list, "1 bathroom light" in the electrical list), it is the same thing once — give it once and note it; with a count both times, give both;
+- a door written with a width ("1 24 inch door", "2 24s door sliding closet", '30" door') is that door with its width as the size ("24"); "privacy" or "privacy lock" written with it is a privacy lock on that door: two items, the door and the lock; "door sliding closet", "sliding closet door" and "bifold" are the closet door; "Tub enclosure" (a shower door on the tub) is the tub enclosure item;
+- "25 SF plaster" (or "plaster 25 sf") is plaster by the square foot: the plaster_sf item with the square feet as its count, never 25 patches;
+- a first line that is a building and an apartment ("Building 3 11K", "B1 5K", "6 14C") gives the building as the address ("Building 3") and the apartment ("11K"); a line of widths and letters that is nothing on the list ("42 + 24 B and W") gets an empty key and a note;
 - keep the survey's order; the count is what is written, 1 when there is none.`;
 
 // the list Claude picks from: key — what it is — how it gets written
@@ -66,7 +70,7 @@ export async function askClaudeSurvey(source: SurveySource, timeoutMs: number = 
   });
   if (res.stop_reason === "refusal") return null;
   const o = res.parsed_output;
-  return o ? { address: o.address, apt: o.apt, kind: o.kind, bedrooms: o.bedrooms ?? null, items: o.items.map((it) => ({ written: it.written, qty: it.qty, key: it.key, note: it.note ?? null })) } : null;
+  return o ? { address: o.address, apt: o.apt, kind: o.kind, bedrooms: o.bedrooms ?? null, items: o.items.map((it) => ({ written: it.written, qty: it.qty, key: it.key, note: it.note ?? null, size: it.size ?? null })) } : null;
 }
 
 // the rules read: the page's text as shorthand lines, matched by keywords to the list
@@ -77,7 +81,7 @@ export function rulesSurvey(text: string): SmartSurvey {
   return {
     address: p.address, apt: p.apt, kind: p.kind, bedrooms: p.bedrooms ?? null,
     // a line that read as several things ("Outlet: 1 single 7 double") is several items, each in its own words
-    items: p.lines.map((l) => ({ written: (pieces.get(l.at ?? -1) || 0) > 1 ? l.label : l.raw, qty: l.qty, key: l.itemKey || "", note: l.itemKey ? null : "nothing on the list reads like this", ...(l.implied ? { implied: true } : {}) })),
+    items: p.lines.map((l) => ({ written: (pieces.get(l.at ?? -1) || 0) > 1 ? l.label : l.raw, qty: l.qty, key: l.itemKey || "", note: l.itemKey ? null : "nothing on the list reads like this", ...(l.implied ? { implied: true } : {}), ...(l.size ? { size: l.size } : {}) })),
   };
 }
 
@@ -92,7 +96,8 @@ export function cleanSmart(s: SmartSurvey): { survey: SmartSurvey; dropped: numb
     const qty = Number(it.qty) || 0;
     // no count in the wording and one of it: written bare — a second mention restates it
     const implied = qty === 1 && !/\d/.test(written);
-    return { written, qty, key: known ? key : "", note: known ? (it.note ?? null) : `the reader named "${key}", which isn't on the list${it.note ? ` — ${it.note}` : ""}`, ...(implied ? { implied } : {}) };
+    const size = String(it.size || "").replace(/\D/g, "").slice(0, 3);
+    return { written, qty, key: known ? key : "", note: known ? (it.note ?? null) : `the reader named "${key}", which isn't on the list${it.note ? ` — ${it.note}` : ""}`, ...(implied ? { implied } : {}), ...(size ? { size } : {}) };
   }).filter((it) => it.qty > 0);
   return { survey: { address: s.address || "", apt: s.apt || "", kind: s.kind || "", bedrooms: s.bedrooms ?? null, items }, dropped };
 }

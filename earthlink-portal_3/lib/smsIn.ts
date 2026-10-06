@@ -50,6 +50,8 @@ export const MAX_MEDIA = 10;
 export interface MediaIn { url: string; type: string; ext: string }
 // Twilio lists them as MediaUrl0…, MediaContentType0…; a phone sends ten at
 // most. Pictures only — a video or a contact card is counted, not kept.
+// the file ending for a picture's type, or "" for anything that isn't a picture
+export const imageExt = (type: string): string => EXT[(type || "").trim().toLowerCase().split(";")[0]] || "";
 export function mediaIn(get: (k: string) => string | null): { photos: MediaIn[]; other: number } {
   const n = Math.min(MAX_MEDIA, Math.max(0, parseInt(get("NumMedia") || "0", 10) || 0));
   const photos: MediaIn[] = [];

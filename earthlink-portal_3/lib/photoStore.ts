@@ -125,11 +125,12 @@ export async function dropBatch(db: Db, b: Batch): Promise<boolean> {
 // Is a photo texted back going anywhere? The company number sends texts, the
 // portal can write without anyone signed in, and a text has come in through
 // Twilio at least once (so the number is pointed here). Until all three, a
-// crew text doesn't ask for photos. A yes is remembered for ten minutes, a
-// no for twenty seconds — so the first text in switches it on right away.
+// crew text doesn't ask for photos. A yes is remembered for ten minutes; a
+// no is looked up again every time, so the first text in switches it on
+// for the very next send.
 let onCache: { at: number; on: boolean } | null = null;
 export async function photosBackOn(): Promise<boolean> {
-  if (onCache && Date.now() - onCache.at < (onCache.on ? 10 * 60_000 : 20_000)) return onCache.on;
+  if (onCache && onCache.on && Date.now() - onCache.at < 10 * 60_000) return true;
   const db = serviceDb();
   let on = false;
   if (db && twilioConfigured() && env("TWILIO_AUTH_TOKEN")) {

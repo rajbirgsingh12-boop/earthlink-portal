@@ -215,7 +215,7 @@ export async function intakePoFile(file: File, priceBook: () => Promise<PriceIte
   const flags = [...(f.warnings || [])];
   const { items: priced, amount: amountOut } = linesFromPoRead(f, unreadable, amount, await priceBook()) as { items: JobLine[]; amount: number };
   const newRow: Record<string, unknown> = {
-    partner: f.partner, development: "", job_number: f.po, description: (f.desc || f.scope).slice(0, 120), amount: amountOut,
+    partner: f.partner, development: "", job_number: f.po, description: (f.desc || f.scope).slice(0, 600), amount: amountOut,
     po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,
     contact: f.contact, bill_to: f.billBlock, items: priced,
     ...(taxFromDoc !== undefined ? { tax_pct: taxFromDoc } : {}),

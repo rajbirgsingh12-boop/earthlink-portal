@@ -9,7 +9,9 @@
 //   TWILIO_FROM          — the purchased number, e.g. +18885551234
 //   (or TWILIO_MESSAGING_SERVICE_SID instead of TWILIO_FROM)
 import { NextResponse } from "next/server";
-import { copyProblem, copyTo, sendTexts, twilioConfigured, twilioProblem } from "@/lib/twilio";
+import { copyProblem, copyTo, twilioConfigured, twilioProblem } from "@/lib/twilio";
+import { sendCrew } from "@/lib/crewSend";
+import { groupLastError, groupProblem, groupsOn, publicOrigin } from "@/lib/groupText";
 import { photosBackOn, serviceDb } from "@/lib/photoStore";
 import { withJobAsk, withPhotoInvite } from "@/lib/crewText";
 import { jobAsk, needSf } from "@/lib/jobFlow";
@@ -38,7 +40,7 @@ const overLimit = (userId: string, count: number) => {
 // (/api/sms-in), so the texts end by asking for them. problem: a key that is
 // there but typed wrong (Settings → System check shows it)
 export async function GET() {
-  return NextResponse.json({ configured: configured(), photosIn: configured() && (await photosBackOn()), problem: twilioProblem() || copyProblem(), copy: !!copyTo() });
+  return NextResponse.json({ configured: configured(), photosIn: configured() && (await photosBackOn()), problem: twilioProblem() || copyProblem(), copy: !!copyTo(), group: groupsOn(), groupProblem: groupProblem() || groupLastError() });
 }
 
 export async function POST(req: Request) {
@@ -65,7 +67,7 @@ export async function POST(req: Request) {
   let body: { messages?: { to?: string; body?: string; id?: string }[]; skipTexted?: boolean };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Bad request" }, { status: 400 }); }
   let messages = (body.messages || [])
-    .map((m) => ({ to: String(m.to || "").trim(), body: String(m.body || "").trim().slice(0, 1000), id: String(m.id || "").trim() }))
+    .map((m) => ({ to: String(m.to || "").trim(), body: String(m.body || "").trim().slice(0, 1600), id: String(m.id || "").trim() }))
     .filter((m) => /^\+\d{10,15}$/.test(m.to) && m.body);
   if (messages.length === 0 || messages.length > 100) {
     return NextResponse.json({ error: "Nothing to send (check the phone numbers)" }, { status: 400 });
@@ -121,7 +123,7 @@ export async function POST(req: Request) {
   }
   // the send itself, and the TEXTED mark the moment Twilio takes each one —
   // even if the phone never sees this response, a retry knows who was texted
-  const { sent, failed } = await sendTexts(messages, async (m) => {
+  const { sent, failed, grouped, groupProblem: gp } = await sendCrew(serviceDb(), messages, async (m) => {
     if (!m.id) return;
     await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, {
       method: "PATCH", headers: supaHeaders, body: JSON.stringify({ texted: true }),
@@ -130,6 +132,6 @@ export async function POST(req: Request) {
     await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, {
       method: "PATCH", headers: supaHeaders, body: JSON.stringify({ texted_at: new Date().toISOString() }),
     }).catch(() => {});
-  });
-  return NextResponse.json({ configured: true, sent, skipped, failed });
+  }, publicOrigin(req));
+  return NextResponse.json({ configured: true, sent, skipped, failed, grouped, ...(gp ? { groupProblem: gp } : {}) });
 }

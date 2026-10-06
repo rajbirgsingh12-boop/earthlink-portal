@@ -15,12 +15,14 @@
 //   • The portal itself calls it while someone has it open, with their own
 //     sign-in. That is the catch-up when the cron isn't set up yet.
 import { NextResponse } from "next/server";
+import { sendCrew } from "@/lib/crewSend";
+import { publicOrigin } from "@/lib/groupText";
 import { langOf, withJobAsk, withPhotoInvite } from "@/lib/crewText";
 import { jobAsk, needSf } from "@/lib/jobFlow";
 import { dueBody, dueSkip, dueWork } from "@/lib/dueText";
 import { spanishWorkServer } from "@/lib/smartTranslate";
-import { sendTexts, twilioConfigured } from "@/lib/twilio";
-import { photosBackOn } from "@/lib/photoStore";
+import { twilioConfigured } from "@/lib/twilio";
+import { photosBackOn, serviceDb } from "@/lib/photoStore";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -162,10 +164,10 @@ async function sweep(req: Request) {
   const mine = out.filter((m) => held.has(m.id));
   if (mine.length === 0) return NextResponse.json({ sent: 0, missed: missed.length, failed: 0, due: due.length });
 
-  const { sent, failed } = await sendTexts(mine, async (m) => {
+  const { sent, failed } = await sendCrew(serviceDb(), mine, async (m) => {
     await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ texted: true }) }).catch(() => {});
     await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ texted_at: new Date().toISOString() }) }).catch(() => {});
-  });
+  }, publicOrigin(req));
   // one Twilio said no to gets its time back, so the next sweep tries again
   // (until it is a day late — then it is dropped and the crew shows as not told)
   for (const f of failed) {

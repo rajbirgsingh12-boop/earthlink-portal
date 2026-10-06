@@ -63,6 +63,7 @@ async function rowsFor(db: Db, empIds: string[], from: string, to: string): Prom
 export async function nobodyFlow(db: Db, o: {
   emp: FlowEmp; emps: FlowEmp[]; body: string; from: string; sid: string; now: Date;
   proof?: (dir: string) => Promise<Photo[]>;   // the pictures that came with the text (the door, say), stored in that folder
+  say?: (to: string, body: string, who?: string) => Promise<boolean>;   // how the answer goes back (into the thread it came from, say); a plain text to them otherwise
 }): Promise<FlowResult> {
   const { emp, now } = o;
   const today = nyDay(now);
@@ -242,7 +243,7 @@ export async function nobodyFlow(db: Db, o: {
   // ---- the worker's answer, now — before anything that could run long ----
   const reply = `${ackText(missed.label, lang)}\n\n${nextMsg}`;
   let replied = false;
-  if (twilioConfigured() && cleanPhone(o.from)) replied = (await sendTexts([{ to: cleanPhone(o.from), who: (emp.name || "").trim() || undefined, body: reply }])).sent > 0;
+  if (twilioConfigured() && cleanPhone(o.from)) replied = o.say ? await o.say(cleanPhone(o.from), reply, first(emp)) : (await sendTexts([{ to: cleanPhone(o.from), who: (emp.name || "").trim() || undefined, body: reply }])).sent > 0;
   // they've been told: the row says so (and a text set for later is off)
   if (nj && (next.kind === "today" || movedOk)) {
     const told = job && next.kind === "move_up"

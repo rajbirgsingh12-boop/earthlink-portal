@@ -86,3 +86,44 @@ export async function sendTexts(messages: TextOut[], onSent?: (m: TextOut) => Pr
   }
   return { sent, failed };
 }
+
+// ---- pictures from Twilio's own storage ----
+// A text's MediaUrl (api.twilio.com) or a group thread's media (the Media
+// Content Service): fetched with the account's key, and only from that
+// host; the picture itself sits behind a redirect on a storage host that
+// gets no key. (The *_BASE overrides are for trying it against a stand-in.)
+export const messageMediaBase = () => (env("TWILIO_API_BASE") || "https://api.twilio.com").replace(/\/+$/, "");
+export const groupMediaBase = () => (env("TWILIO_MCS_BASE") || "https://mcs.us1.twilio.com").replace(/\/+$/, "");
+export function fetchMediaFrom(base: string): (url: string) => Promise<{ bytes: ArrayBuffer; type: string } | null> {
+  return async (url: string) => {
+    if (!url.startsWith(`${base}/`)) return null;
+    const auth = `Basic ${Buffer.from(`${env("TWILIO_ACCOUNT_SID")}:${env("TWILIO_AUTH_TOKEN")}`).toString("base64")}`;
+    const signal = AbortSignal.timeout(11_000);
+    try {
+      let at = url;
+      let r = await fetch(at, { headers: { Authorization: auth }, redirect: "manual", signal, cache: "no-store" });
+      for (let hop = 0; hop < 4 && r.status >= 300 && r.status < 400; hop++) {
+        const loc = r.headers.get("location");
+        if (!loc) return null;
+        const next = new URL(loc, at);
+        if (next.protocol !== "https:" && !base.startsWith("http://")) return null;
+        at = next.toString();
+        r = await fetch(at, { headers: next.origin === new URL(base).origin ? { Authorization: auth } : {}, redirect: "manual", signal, cache: "no-store" });
+      }
+      if (!r.ok) return null;
+      const bytes = await r.arrayBuffer();
+      if (bytes.byteLength === 0 || bytes.byteLength > 25 * 1024 * 1024) return null;
+      return { bytes, type: (r.headers.get("content-type") || "").split(";")[0].trim() };
+    } catch { return null; }
+  };
+}
+
+// every address Twilio may have signed for this request
+export function addressesOf(req: Request): string[] {
+  const u = new URL(req.url);
+  const host = (req.headers.get("x-forwarded-host") || req.headers.get("host") || u.host).split(",")[0].trim();
+  const proto = (req.headers.get("x-forwarded-proto") || u.protocol.replace(":", "")).split(",")[0].trim();
+  const path = u.pathname + u.search;
+  const bare = host.replace(/:(443|80)$/, "");
+  return [...new Set([env("TWILIO_WEBHOOK_URL"), `${proto}://${host}${path}`, `${proto}://${bare}${path}`, `${proto}://${bare}:${proto === "https" ? 443 : 80}${path}`, req.url].filter(Boolean))];
+}

@@ -123,10 +123,12 @@ export const keywordsRe = (words: string): string =>
     .map((w) => `${/^[a-z0-9]/i.test(w) ? "\\b" : ""}${w}${/[a-z0-9]$/i.test(w) ? "\\b" : ""}`)
     .join("|");
 
-// the unit follows the work: doors are counted, plaster is measured
+// the unit follows the work: doors are counted, plaster is measured, and
+// priming and painting are by the room — never by the square foot
 export const unitFor = (desc: string): string => {
   const d = desc.toLowerCase();
-  if (/(plaster|paint|primer|prime\b|sheetrock|drywall|skim|tile|floor|wall|ceiling|demo|popcorn)/.test(d)) return "SF";
+  if (/(paint|primer|prime\b|priming)/.test(d) && !/(plaster|sheetrock|drywall|skim|popcorn)/.test(d)) return "ROOM";
+  if (/(plaster|sheetrock|drywall|skim|tile|floor|wall|ceiling|demo|popcorn)/.test(d)) return "SF";
   if (/(molding|baseboard|cove|trim|pipe|caulk)/.test(d)) return "LF";
   if (/(hour|labor)/.test(d)) return "HOUR";
   return "EACH";
@@ -293,6 +295,12 @@ const roomsNamed = (t: string): number => {
     kinds.set(kind, Math.max(kinds.get(kind) || 0, count));
   }
   return [...kinds.values()].reduce((a, b) => a + b, 0);
+};
+// how many rooms a PO's words cover: "3 rooms" said outright, else the rooms
+// it names, else one
+export const roomsIn = (text: string): number => {
+  const raw = flatten(text || "");
+  return n([...raw.matchAll(ROOMS)][0]?.[1] || "") || Math.max(1, roomsNamed(raw));
 };
 // a count right before the work, with room for one adjective
 const COUNT_BEFORE = /(?:^|[^\d])(\d{1,2})\s+(?:[A-Za-z.'-]+\s+){0,3}$/;
@@ -615,6 +623,54 @@ export function mergePricedLines(text: string, existing: JobLine[], bk: PriceIte
   return out.filter((it) => it.description.trim());
 }
 
+// ---- the lines on a job, held to the way the work is billed ----
+// Paint and primer are by the room, plaster and sheetrock by the square
+// foot, a door by the door — whatever unit a PO's row printed. A line that
+// changes unit takes the list's price (a square-foot price by the room is
+// nonsense); a line that keeps its unit keeps a real price it carries. The
+// wet trades bring their primer and paint, by the room; an apartment-size
+// paint price covers the painting, so the by-the-room paint line goes.
+// Invoice numbers and the money already billed are not this file's business.
+export function normalizeJobLines(items: JobLine[], text: string, bk: PriceItem[]): { items: JobLine[]; changed: boolean } {
+  const byKey = new Map(bk.map((p) => [p.key, p]));
+  const sameText = (a: string, b: string) => a.toLowerCase().replace(/[^a-z0-9]/g, "") === b.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const keyOf = (it: JobLine): string | null =>
+    it.key || bk.find((p) => sameText(p.description, it.description))?.key || soleKey(it.description, bk) || (it.base ? soleKey(it.base, bk) : null);
+  const rooms = roomsIn([text, ...items.map((it) => it.description)].join(". "));
+  let changed = false;
+  let out: JobLine[] = items.map((it) => {
+    const k = keyOf(it);
+    const p = k ? byKey.get(k) : undefined;
+    if (!k || !p || p.unit === "HOUR") return it;
+    const u = normUnit(it.unit || "");
+    const want = p.unit === "SF" ? "SF" : p.unit === "ROOM" ? "ROOM" : "EACH";
+    if (u === want || (want === "SF" && u === "LF")) {
+      // the right unit already; a line at no price takes the list's
+      if (!realPrice(it.unit_price) && p.price > 0) { changed = true; return { ...it, key: k, unit_price: p.price }; }
+      return it.key ? it : { ...it, key: k };
+    }
+    changed = true;
+    const qty = Number(it.qty) || 0;
+    // square feet on a by-the-room line is not a room count: the rooms the PO names are
+    const fixedQty = want === "ROOM" ? (qty > 0 && qty <= 20 && u !== "SF" ? qty : rooms) : qty > 0 ? qty : 1;
+    return { ...it, key: k, unit: want, qty: fixedQty, unit_price: p.price > 0 ? p.price : it.unit_price };
+  });
+  const keys = new Set(out.map(keyOf).filter((k): k is string => !!k));
+  const wet = ["plaster", "wall_repair", "popcorn", "sheetrock"].some((k) => keys.has(k));
+  const sized = [...keys].some((k) => /^paint_\d/.test(k));
+  if (wet) {
+    for (const add of ["primer", "paint_sf"]) {
+      const p = byKey.get(add);
+      if (!p || keys.has(add) || (add === "paint_sf" && sized)) continue;
+      out.push({ description: p.description, qty: rooms, unit: "ROOM", unit_price: p.price, key: add });
+      keys.add(add);
+      changed = true;
+    }
+  }
+  if (sized && keys.has("paint_sf")) { out = out.filter((it) => keyOf(it) !== "paint_sf"); changed = true; }
+  return { items: out, changed };
+}
+
 // The lines a PO's read turns into: its rows as lines, and whatever the price
 // list already answers — plaster brings its primer and paint with it — filled
 // in, priced. A price the PO itself states is never touched: that one is the
@@ -643,7 +699,7 @@ export function linesFromPoRead(f: { desc: string; scope: string; rows: { descri
   // the same words must only be priced once — a PO often repeats its
   // description as its scope, and counting both doubles every quantity
   const said = [...new Set([f.desc, f.scope, f.rows.map((r) => r.description).join(" ")].map((x) => (x || "").trim()).filter(Boolean))];
-  const priced = mergePricedLines(said.join(". "), seed, bk, { fillOnly: poPriced, prepOnly: poPriced })
+  const priced = normalizeJobLines(mergePricedLines(said.join(". "), seed, bk, { fillOnly: poPriced, prepOnly: poPriced }), said.join(". "), bk).items
     // a placeholder the list had no answer for is work still to be priced —
     // showing it as a dollar would put "$1.00" on a proposal
     .map((it) => (Number(it.unit_price) === PLACEHOLDER ? { ...it, unit_price: 0 } : it));

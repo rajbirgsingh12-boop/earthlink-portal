@@ -23,7 +23,7 @@ import { COMPANY } from "@/lib/company";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { parsePactPoText, type PactPoFields, type PoItem } from "@/lib/parsePactPo";
-import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, attnFrom, DEFAULT_ATTN, type PriceItem, cleanLineWording, unitFor, mergePricedLines, linesFromPoRead } from "@/lib/priceBook";
+import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, attnFrom, DEFAULT_ATTN, type PriceItem, cleanLineWording, unitFor, mergePricedLines, linesFromPoRead, normalizeJobLines } from "@/lib/priceBook";
 
 // `base` is a PO row's wording before its wrapped line was added — a wrap can
 // name a second trade ("…and paint"), and then the row no longer reads as the
@@ -253,7 +253,7 @@ export default function Pact() {
         .filter((it) => !it.key && it.description.trim())
         .map((it) => it.description);
       const text = [live.description || "", ...typed].filter(Boolean).join(". ");
-      const next = await priceFromList(text, before, { refresh: true });
+      const next = normalizeJobLines(await priceFromList(text, before, { refresh: true }), text, await priceBook()).items as Item[];
       const added = next.length - before.length;
       const changed = next.filter((n, i) => i < before.length && (n.unit_price !== before[i].unit_price || n.description !== before[i].description)).length;
       if (added === 0 && changed === 0) {
@@ -299,6 +299,70 @@ export default function Pact() {
     })();
     return () => { closed = true; };
   }, [openId, role]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---------- every open job, re-priced the way the work is billed ----------
+  // Paint and primer by the room, plaster by the square foot, a door by the
+  // door, the prep that rides with plaster — on every job not yet invoiced.
+  // Each job is priced against the database's own row, never this page's
+  // copy. Invoiced, paid and canceled jobs are never touched.
+  const [repriceReport, setRepriceReport] = useState<{ checked: number; changed: string[]; skipped: number } | null>(null);
+  const repriceAll = async () => {
+    if (!canPrice) return;
+    if (!window.confirm("Re-price every open job from the price list? Paint and primer go by the room, plaster brings its primer and paint, and the list's prices fill in. Invoiced and paid jobs are left alone.")) return;
+    setBusy(true);
+    const report = { checked: 0, changed: [] as string[], skipped: 0 };
+    try {
+      const bk = await priceBook();
+      const { data } = await sb().from("pact_jobs").select("id,po_number,job_number,description,items,tax_pct,invoice_sent,received,canceled").eq("canceled", false).is("invoice_sent", null).order("created_at", { ascending: false }).limit(1000);
+      for (const row of ((data || []) as Job[])) {
+        if (row.invoice_sent || row.received || row.canceled) { report.skipped += 1; continue; }
+        report.checked += 1;
+        const before = itemsOf(row);
+        const typed = before.filter((it) => !it.key && it.description.trim()).map((it) => it.description);
+        const text = [row.description || "", ...typed].filter(Boolean).join(". ");
+        const merged = mergePricedLines(text, before, bk, { refresh: true }) as Item[];
+        const { items: next } = normalizeJobLines(merged, text, bk);
+        const same = JSON.stringify(next.map((it) => [it.description, Number(it.qty), it.unit, Number(it.unit_price), it.key || ""])) === JSON.stringify(before.map((it) => [it.description, Number(it.qty), it.unit, Number(it.unit_price), it.key || ""]));
+        if (same) continue;
+        setItems(row, next as Item[], true, true);
+        report.changed.push(`PO ${row.po_number || row.job_number || ""}`.trim());
+      }
+      setRepriceReport({ ...report });
+      flash(report.changed.length ? `${report.changed.length} of ${report.checked} open jobs re-priced — check them before invoicing` : `All ${report.checked} open jobs already match the price list`);
+    } catch (err) {
+      flash(`Couldn't re-price (${err instanceof Error ? err.message.slice(0, 80) : "unknown"})`);
+    } finally { setBusy(false); }
+  };
+
+  // ---------- the job's photos as one PDF to send ----------
+  const makePhotoPdf = async (j: Job) => {
+    const imgs = (j.attachments || []).filter((a) => isImg(a.name));
+    if (imgs.length === 0) { flash("No photos on this job yet"); return; }
+    setBusy(true);
+    try {
+      const { data, error } = await sb().storage.from("docs").createSignedUrls(imgs.map((a) => a.path), 600);
+      if (error || !data) throw new Error(error?.message || "couldn't reach the photos");
+      const photos: { name: string; bytes: Uint8Array; type?: string }[] = [];
+      let missed = 0;
+      for (const a of imgs) {
+        const url = data.find((d) => d.path === a.path)?.signedUrl;
+        const res = url ? await fetch(url).catch(() => null) : null;
+        if (!res || !res.ok) { missed += 1; continue; }
+        photos.push({ name: a.name, bytes: new Uint8Array(await res.arrayBuffer()), type: res.headers.get("content-type") || undefined });
+      }
+      if (photos.length === 0) throw new Error("none of the photos would download");
+      const { buildPhotoPdf, photoPdfName } = await import("@/lib/photoPdf");
+      const job = { po: j.po_number || j.job_number || "", partner: j.partner || "", address: j.address || "", apt: j.property_unit || "", description: j.description || "", date: prettyDate(today()) };
+      const made = await buildPhotoPdf(job, photos, await logoBytes());
+      const name = photoPdfName(job);
+      saveBytes(made.bytes, name, "application/pdf");
+      await keepOnJob(j, made.bytes, name, "application/pdf");
+      const left = missed + made.skipped.length;
+      flash(`Photos PDF saved (${made.pages} page${made.pages === 1 ? "" : "s"}) — a copy is kept on the job${left ? ` · ${left} picture${left === 1 ? "" : "s"} couldn't go in` : ""}`);
+    } catch (err) {
+      flash(`Couldn't build the photos PDF (${err instanceof Error ? err.message.slice(0, 80) : "unknown"})`);
+    } finally { setBusy(false); }
+  };
 
   // ---------- the proposal letter ----------
   const logoBytes = async (): Promise<Uint8Array | undefined> => {
@@ -1299,8 +1363,16 @@ export default function Pact() {
   return (
     <div>
       <PageHeader title="Billing" sub="PACT — POs, proposals, invoices">
+        {canPrice && <button className="btn btn-ghost" onClick={repriceAll} disabled={busy} title="Every open job priced the way the work is billed: paint and primer by the room, plaster with its primer and paint, doors at the set price" data-reprice-all>Re-price open jobs</button>}
         <Link className="btn btn-ghost" href="/pact/schedule">📅 Schedule</Link>
       </PageHeader>
+      {repriceReport && (
+        <div className="card mb-3 p-3 text-sm" data-reprice-report>
+          <div className="font-semibold">{repriceReport.changed.length ? `${repriceReport.changed.length} of ${repriceReport.checked} open jobs re-priced` : `All ${repriceReport.checked} open jobs already match the price list`}{repriceReport.skipped ? ` · ${repriceReport.skipped} invoiced or paid left alone` : ""}</div>
+          {repriceReport.changed.length > 0 && <div className="mt-1 text-xs text-inksoft">{repriceReport.changed.join(" · ")}</div>}
+          <button className="btn btn-ghost mt-2 min-h-[44px] px-3 text-[13px]" onClick={() => setRepriceReport(null)}>OK</button>
+        </div>
+      )}
       <input ref={poRef} type="file" accept="application/pdf,.pdf,.docx" className="hidden" onChange={handlePo} />
       {/* a folder (or multi-select) of proposal letters, read in one go */}
       {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
@@ -1453,6 +1525,7 @@ export default function Pact() {
                 <RowActions items={[
                   { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },
                   { label: "Download photos", glyph: "⬇", hidden: !(j.attachments || []).some((a) => isImg(a.name)), disabled: busy, title: "Just the pictures — no PO, no invoice", onSelect: () => downloadPhotos(j) },
+                  { label: "Photos PDF", glyph: "⬇", hidden: !(j.attachments || []).some((a) => isImg(a.name)), disabled: busy, title: "Before and after pictures on one PDF, with the job on top — to send out", onSelect: () => makePhotoPdf(j) },
                   { label: "Restore", glyph: "↺", hidden: !canEdit || !j.canceled, onSelect: () => patch(j, { canceled: false }) },
                   // deleteJob asks its own window.confirm — no second prompt here
                   { label: "Delete job…", hidden: !canEdit, destructive: true, onSelect: () => deleteJob(j) },
@@ -1470,6 +1543,7 @@ export default function Pact() {
                   {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "after")} disabled={busy}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}
                   {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => setMeasureJob(j)} disabled={busy} title="Claude works out the square feet from the photos — a door or an outlet cover in the shot is the ruler">Sq ft from photos</button>}
                   {photoN > 0 && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => downloadPhotos(j)} disabled={busy} title="Just the pictures — no PO, no invoice">⬇ Photos · {photoN}</button>}
+                  {photoN > 0 && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => makePhotoPdf(j)} disabled={busy} title="Before and after pictures on one PDF, with the job on top — to send out" data-photo-pdf>Photos PDF</button>}
                   <RowActions items={[
                     { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },
                     { label: "Re-read the PO", glyph: "🔁", hidden: !canPrice || !(j.attachments || []).some((a) => /\.pdf$/i.test(a.name)), disabled: busy, title: "Rebuild this job from its PDF — the reader, then the price list. Photos and documents stay.", confirm: "Re-read this PO? The partner, address, description, work lines and amount are replaced with what the PDF says. Photos and documents stay.", onSelect: async () => { setBusy(true); await rereadJob(j); setBusy(false); } },
@@ -1767,6 +1841,7 @@ export default function Pact() {
                 {canEdit && <button className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy} title="Pictures, a photos zip, or a document — several at once">Upload files</button>}
                 {canEdit && <button className="btn btn-ghost" onClick={() => { setMeasureJob(attachJob); setAttachJob(null); }} disabled={busy} title="Claude works out the square feet from the photos">Sq ft from photos</button>}
                 {photoN > 0 && <button className="btn btn-ghost" onClick={() => downloadPhotos(attachJob)} disabled={busy} title="Just the pictures — no PO, no invoice">⬇ Photos · {photoN}</button>}
+                {photoN > 0 && <button className="btn btn-ghost" onClick={() => makePhotoPdf(attachJob)} disabled={busy} title="Before and after pictures on one PDF, with the job on top — to send out">Photos PDF</button>}
               </div>
             ) : undefined;
           })()}>

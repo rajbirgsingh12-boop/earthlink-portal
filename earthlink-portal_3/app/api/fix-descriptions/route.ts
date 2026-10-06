@@ -37,7 +37,11 @@ export async function POST(req: Request) {
   const done = new Set(Array.isArray(body.done) ? body.done.map(String) : []);
   const limit = Math.max(1, Math.min(10, Number(body.limit) || 4));
   const jobs = (await db.get<Job>("pact_jobs?canceled=not.is.true&select=id,po_number,job_number,description,attachments&order=created_at.desc&limit=1000")).rows;
-  const pdfOf = (j: Job) => (j.attachments || []).find((a) => /\.pdf$/i.test(a?.name || "") && (a?.path || "").startsWith("pact/"))?.path || "";
+  // the PO's own PDF: never a paper the portal made (pact/<id>/made/…), and by name when it says so
+  const pdfOf = (j: Job) => {
+    const pdfs = (j.attachments || []).filter((a) => /\.pdf$/i.test(a?.name || "") && (a?.path || "").startsWith("pact/") && !/\/made\//.test(a?.path || ""));
+    return (pdfs.find((a) => /\b(?:po|purchase)\b/i.test(a.name || "")) || pdfs[0])?.path || "";
+  };
   const todo = jobs.filter((j) => !done.has(j.id) && looksCut(j.description || "") && pdfOf(j));
   const batch = todo.slice(0, limit);
   const label = (j: Job) => `PO ${(j.po_number || j.job_number || "").replace(/^PO#?\s*/i, "").trim() || j.id.slice(0, 8)}`;

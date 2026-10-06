@@ -242,7 +242,7 @@ export async function nobodyFlow(db: Db, o: {
   // ---- the worker's answer, now — before anything that could run long ----
   const reply = `${ackText(missed.label, lang)}\n\n${nextMsg}`;
   let replied = false;
-  if (twilioConfigured() && cleanPhone(o.from)) replied = (await sendTexts([{ to: cleanPhone(o.from), body: reply }])).sent > 0;
+  if (twilioConfigured() && cleanPhone(o.from)) replied = (await sendTexts([{ to: cleanPhone(o.from), who: (emp.name || "").trim() || undefined, body: reply }])).sent > 0;
   // they've been told: the row says so (and a text set for later is off)
   if (nj && (next.kind === "today" || movedOk)) {
     const told = job && next.kind === "move_up"
@@ -267,7 +267,7 @@ export async function nobodyFlow(db: Db, o: {
       const theirMarks = (await db.get<Mark>(`texted_photos?how=eq.nobody&employee_id=in.(${others.join(",")})&created_at=gte.${since}&select=employee_id,created_at`)).rows.filter(todays);
       const theirRows = await rowsFor(db, others, today, lastDay);
       await loadJobs(theirRows);
-      const out: { to: string; id: string; body: string }[] = [];
+      const out: { to: string; id: string; body: string; who?: string }[] = [];
       for (const cid of others) {
         const e = o.emps.find((x) => x.id === cid);
         if (!e || theirMarks.some((n) => n.employee_id === cid)) continue;
@@ -284,7 +284,7 @@ export async function nobodyFlow(db: Db, o: {
         if (!r || !to) continue;
         if (nj.kind === "rel" && !(await db.patch(`schedule_days?id=eq.${r.id}&day=eq.${from}`, { day: today, texted: false }))) continue;
         const crew = dueBody({ ...r, day: today }, { emp: e, job: job ? { ...job, start_date: today } : null, rel, work: await workFor(dueWork(r, job), e.lang), moved });
-        out.push({ to, id: r.id, body: coworkerText(first(e), first(emp), missed.label, crew, e.lang, true, nj.label, askFor(job, e.lang)) });
+        out.push({ to, id: r.id, who: (e.name || "").trim() || undefined, body: coworkerText(first(e), first(emp), missed.label, crew, e.lang, true, nj.label, askFor(job, e.lang)) });
       }
       if (out.length && twilioConfigured()) {
         await sendTexts(out, async (msg) => {

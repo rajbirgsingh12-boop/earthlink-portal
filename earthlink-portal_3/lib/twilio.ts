@@ -20,7 +20,26 @@ export function twilioProblem(): string {
   return "";
 }
 
-export interface TextOut { to: string; body: string; id?: string }
+// The owner's own phone, when TEXT_COPY_TO is set: a copy of every text the
+// portal sends a worker ("Sent to Jose: …"), so the office has the whole
+// thread in one place and can follow up. Never a copy of a text to that
+// phone itself.
+const cleanPhone = (s: string): string => {
+  const d = (s || "").replace(/\D/g, "");
+  if (d.length === 10) return `+1${d}`;
+  if (d.length === 11 && d.startsWith("1")) return `+${d}`;
+  return d.length > 11 && d.length <= 15 && (s || "").trim().startsWith("+") ? `+${d}` : "";
+};
+export const copyTo = (): string => cleanPhone(env("TEXT_COPY_TO"));
+export const copyProblem = (): string => (env("TEXT_COPY_TO") && !copyTo() ? `TEXT_COPY_TO must be a phone number with +1 in front, like +19175550123 (it is "${env("TEXT_COPY_TO")}")` : "");
+// a line to the owner's phone, on its own (a worker's text coming in, the portal's answer)
+export async function sendCopy(body: string): Promise<void> {
+  const to = copyTo();
+  if (!to || !twilioConfigured()) return;
+  await sendTexts([{ to, body }]).catch(() => {});
+}
+
+export interface TextOut { to: string; body: string; id?: string; who?: string }   // `who`: the worker's name, for the owner's copy
 export interface TextReport { sent: number; failed: { to: string; error: string }[] }
 
 // Sends each message, five at a time — a 20-worker crew goes out in ~2s
@@ -34,18 +53,23 @@ export async function sendTexts(messages: TextOut[], onSent?: (m: TextOut) => Pr
   const msvc = env("TWILIO_MESSAGING_SERVICE_SID").trim();
   const failed: { to: string; error: string }[] = [];
   let sent = 0;
-  const sendOne = async (m: TextOut) => {
-    const form = new URLSearchParams({ To: m.to, Body: m.body });
+  const post = (to: string, body: string) => {
+    const form = new URLSearchParams({ To: to, Body: body });
     if (msvc) form.set("MessagingServiceSid", msvc); else form.set("From", from);
+    return fetch(`${(env("TWILIO_API_BASE") || "https://api.twilio.com").replace(/\/+$/, "")}/2010-04-01/Accounts/${sid}/Messages.json`, {
+      method: "POST",
+      headers: { Authorization: `Basic ${basic}`, "Content-Type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
+    });
+  };
+  const sendOne = async (m: TextOut) => {
     try {
-      const r = await fetch(`${(env("TWILIO_API_BASE") || "https://api.twilio.com").replace(/\/+$/, "")}/2010-04-01/Accounts/${sid}/Messages.json`, {
-        method: "POST",
-        headers: { Authorization: `Basic ${basic}`, "Content-Type": "application/x-www-form-urlencoded" },
-        body: form.toString(),
-      });
+      const r = await post(m.to, m.body);
       if (r.ok) {
         sent += 1;
         if (onSent) await onSent(m).catch(() => {});
+        const copy = copyTo();
+        if (copy && m.to !== copy) await post(copy, `Sent to ${m.who || m.to}:\n${m.body}`).catch(() => {});
       } else {
         // Twilio's own words and its error code — 21608 (trial account), 30034
         // (number not registered), 21610 (they texted STOP) are what the

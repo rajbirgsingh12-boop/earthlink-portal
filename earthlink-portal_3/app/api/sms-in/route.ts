@@ -25,7 +25,7 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "crypto";
 import { waitUntil } from "@vercel/functions";
-import { sendTexts, twilioConfigured } from "@/lib/twilio";
+import { copyTo, sendCopy, sendTexts, twilioConfigured } from "@/lib/twilio";
 import {
   mediaIn, pickJob, pactKey, relKey, photoKind, photoName, phoneKey, refsIn, justANumber, replyText, twiml, validTwilio, dayMinus,
   type JobKey, type MineRow, type Params, type Reply,
@@ -160,7 +160,7 @@ async function settleBurst(db: Db, o: { emp: Emp; batchId: string; target: Targe
       && (!o.kind || kindOfName(b.photos![0].name) === o.kind));
     const total = same.reduce((n, b) => n + (b.photos || []).length, 0);
     if (same.length < 2 || total < 2 || total === o.said) return; // one text, or its own answer already said the count
-    await sendTexts([{ to, body: replyText({ k: "inall", n: total, label: o.target.label, kind: o.kind }, o.lang) }]);
+    await sendTexts([{ to, who: (o.emp.name || "").trim() || undefined, body: replyText({ k: "inall", n: total, label: o.target.label, kind: o.kind }, o.lang) }]);
   } catch { /* a count that didn't go out loses nothing: the pictures are on the job */ }
 }
 // the job a batch is on, named the way the worker says it
@@ -303,7 +303,26 @@ export async function GET() {
   return NextResponse.json({ ready, on, why });
 }
 
+// what came in and what went back, for the owner's copy (lib/twilio copyTo)
+interface Seen { from: string; who: string; body: string; photos: number; other: number }
 export async function POST(req: Request) {
+  const seen: Seen = { from: "", who: "", body: "", photos: 0, other: 0 };
+  const res = await handle(req, seen);
+  const copy = copyTo();
+  if (!copy || !seen.from || cleanPhone(seen.from) === copy) return res;
+  // the answer is inside the TwiML; the owner gets the text in and the answer, in two short texts
+  const xml = await res.text();
+  const m = xml.match(/<Message>([\s\S]*?)<\/Message>/);
+  const reply = m ? m[1].replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&") : "";
+  const what = `${seen.body.trim()}${seen.photos ? `${seen.body.trim() ? " " : ""}(${seen.photos} photo${seen.photos === 1 ? "" : "s"})` : ""}${seen.other ? ` (${seen.other} file${seen.other === 1 ? "" : "s"})` : ""}`.trim();
+  const who = seen.who || seen.from;
+  waitUntil((async () => {
+    if (what) await sendCopy(`From ${who}: ${what}`);
+    if (reply) await sendCopy(`Reply to ${who}: ${reply}`);
+  })());
+  return new NextResponse(xml, { status: res.status, headers: res.headers });
+}
+async function handle(req: Request, seen: Seen) {
   const raw = await req.text().catch(() => "");
   const form = new URLSearchParams(raw);
   const params: Params = [...form.entries()];
@@ -323,6 +342,7 @@ export async function POST(req: Request) {
 
   // the same text twice (Twilio trying again) is not filed twice
   if (sid && (await db.get<{ id: string }>(`texted_photos?msg_sid=eq.${enc(sid)}&select=id&limit=1`)).rows.length) return answer();
+  Object.assign(seen, { from, body, photos: photos.length, other }); // (a retry is not copied twice)
 
   // who sent it — by the whole phone number, country code and all
   let emps = await db.get<Emp>("employees?select=id,name,phone,lang,active");
@@ -331,6 +351,7 @@ export async function POST(req: Request) {
   const same = key ? emps.rows.filter((e) => phoneKey(e.phone) === key) : [];
   const emp = same.find((e) => e.active !== false) || same[0] || null;
   const lang = emp?.lang;
+  seen.who = (emp?.name || "").trim();
 
   // a text with no pictures
   if (photos.length === 0) {

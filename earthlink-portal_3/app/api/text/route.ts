@@ -9,7 +9,7 @@
 //   TWILIO_FROM          — the purchased number, e.g. +18885551234
 //   (or TWILIO_MESSAGING_SERVICE_SID instead of TWILIO_FROM)
 import { NextResponse } from "next/server";
-import { sendTexts, twilioConfigured, twilioProblem } from "@/lib/twilio";
+import { copyProblem, copyTo, sendTexts, twilioConfigured, twilioProblem } from "@/lib/twilio";
 import { photosBackOn, serviceDb } from "@/lib/photoStore";
 import { withJobAsk, withPhotoInvite } from "@/lib/crewText";
 import { jobAsk, needSf } from "@/lib/jobFlow";
@@ -38,7 +38,7 @@ const overLimit = (userId: string, count: number) => {
 // (/api/sms-in), so the texts end by asking for them. problem: a key that is
 // there but typed wrong (Settings → System check shows it)
 export async function GET() {
-  return NextResponse.json({ configured: configured(), photosIn: configured() && (await photosBackOn()), problem: twilioProblem() });
+  return NextResponse.json({ configured: configured(), photosIn: configured() && (await photosBackOn()), problem: twilioProblem() || copyProblem(), copy: !!copyTo() });
 }
 
 export async function POST(req: Request) {

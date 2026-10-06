@@ -2,9 +2,8 @@
 // Reading happens in Node with pdfjs's legacy build — identical results on
 // every device, no reliance on the phone browser's PDF support.
 import { NextResponse } from "next/server";
-import { type PoItem } from "@/lib/parsePactPo";
-import { readPoOrProposalPages } from "@/lib/parsePactProposal";
-import { readPoSmart, smartConfigured } from "@/lib/smartPo";
+import { smartConfigured } from "@/lib/smartPo";
+import { readPoBytes } from "@/lib/poReadServer";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -35,27 +34,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Send the PDF file itself (max 4 MB — bigger files are read on the phone)" }, { status: 400 });
   }
   try {
-    // unpdf bundles a serverless-safe pdf engine (no worker files to resolve);
     // the page's own lines are rebuilt from where the words sit, exactly like
-    // the browser fallback, so both paths read the same table
-    const { getResolvedPDFJS } = await import("unpdf");
-    const pdfjs = await getResolvedPDFJS();
-    // pdfjs takes the buffer it is handed and detaches it — it gets a copy,
-    // so the bytes still exist for the smart reader afterwards
-    const bytes = new Uint8Array(buf);
-    const doc = await pdfjs.getDocument({ data: bytes.slice() }).promise;
-    const pages: PoItem[][] = [];
-    for (let pg = 1; pg <= doc.numPages; pg++) {
-      const tc = await (await doc.getPage(pg)).getTextContent();
-      pages.push(tc.items as PoItem[]);
-    }
-    await (doc as unknown as { destroy?: () => Promise<void> }).destroy?.().catch(() => null);
-    const rules = readPoOrProposalPages(pages);
-    // our own proposal letters read perfectly by the rules — Claude reads the partners' POs
-    const text = pages.map((it) => it.map((x) => x.str || "").join(" ")).join("\n");
-    // readPoSmart only ever shows Claude a partner PO — releases, payroll,
-    // statements and anything else stay with the rules
-    const smart = await readPoSmart(bytes, text, rules);
+    // the browser fallback, so both paths read the same table (lib/poReadServer)
+    const smart = await readPoBytes(buf);
     return NextResponse.json({ ok: true, fields: smart.fields, readBy: smart.readBy, ...(smart.note ? { note: smart.note } : {}) });
   } catch (e) {
     return NextResponse.json({ error: `Couldn't open the PDF: ${e instanceof Error ? e.message.slice(0, 120) : "unknown"}` }, { status: 422 });

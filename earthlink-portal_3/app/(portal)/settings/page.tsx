@@ -465,6 +465,27 @@ export default function Settings() {
     setStorage({ bytes: Number(d?.bytes) || 0, files: Number(d?.files) || 0 });
   };
   const [checking, setChecking] = useState(false);
+  // the PO descriptions the first intake cut at 120 characters, read again from the PDFs on the jobs
+  const [fixingDesc, setFixingDesc] = useState(false);
+  const [descReport, setDescReport] = useState<{ checked: number; fixed: { po: string; after: string }[]; kept: { po: string; why: string }[] } | null>(null);
+  const fixDescriptions = async () => {
+    setFixingDesc(true); setDescReport(null);
+    const all = { checked: 0, fixed: [] as { po: string; after: string }[], kept: [] as { po: string; why: string }[] };
+    try {
+      const { data: { session } } = await sb().auth.getSession();
+      let done: string[] = [];
+      for (let round = 0; round < 60; round++) {
+        const r = await fetch("/api/fix-descriptions", { method: "POST", headers: { "Content-Type": "application/json", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) }, body: JSON.stringify({ done }) });
+        const j = (await r.json().catch(() => ({}))) as { error?: string; checked?: number; fixed?: { po: string; after: string }[]; kept?: { po: string; why: string }[]; remaining?: number; done?: string[] };
+        if (!r.ok) { flash(j.error || `The server said ${r.status}`); break; }
+        all.checked += j.checked || 0; all.fixed.push(...(j.fixed || [])); all.kept.push(...(j.kept || []));
+        done = j.done || done;
+        setDescReport({ ...all });
+        if (!j.remaining || !j.checked) break;
+      }
+    } catch { flash("No signal — try again in a moment"); }
+    setFixingDesc(false);
+  };
   const runSystemCheck = async () => {
     setChecking(true); setChecks(null);
     const probes: { label: string; fix: string | (() => string); probe: () => Promise<boolean> }[] = [
@@ -851,6 +872,22 @@ export default function Settings() {
           </div>
           <button className="btn btn-ghost min-h-[44px] whitespace-nowrap px-3 text-[13px]" onClick={runSystemCheck} disabled={checking}>{checking ? "Checking…" : "Run system check"}</button>
         </div>
+        {me?.role === "admin" && (
+          <div className="mt-3 flex items-center justify-between gap-3 border-t border-rulesoft pt-3">
+            <div>
+              <div className="text-sm font-semibold">PO descriptions</div>
+              <div className="text-xs text-inksoft">Jobs whose description was cut short when the PO was read (120 characters) get it read again from the PDF on the job. Nothing else on the job changes.</div>
+            </div>
+            <button className="btn btn-ghost min-h-[44px] whitespace-nowrap px-3 text-[13px]" onClick={fixDescriptions} disabled={fixingDesc} data-fix-descriptions>{fixingDesc ? "Reading…" : "Re-read cut descriptions"}</button>
+          </div>
+        )}
+        {descReport && (
+          <div className="mt-2 text-sm" data-desc-report>
+            <div className="font-semibold">{descReport.checked === 0 ? "No cut descriptions found." : `${descReport.fixed.length} of ${descReport.checked} fixed.`}</div>
+            {descReport.fixed.map((f) => <div key={f.po} className="mt-1 text-xs"><b>{f.po}</b> · {f.after}</div>)}
+            {descReport.kept.map((k) => <div key={k.po} className="mt-1 text-xs text-inksoft"><b>{k.po}</b> · {k.why}</div>)}
+          </div>
+        )}
         {checks === null && !checking && <div className="mt-2 text-xs text-inksoft">If something&apos;s missing it names the exact SQL file to paste into Supabase — or just run <span className="font-mono">supabase/RUN_ME.sql</span> to apply everything at once.</div>}
         {checking && <div className="mt-2 text-sm text-inksoft">Checking…</div>}
         {checks !== null && (

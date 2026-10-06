@@ -31,6 +31,7 @@ const SECTIONS: { icon?: string; title: string; lines: string[] }[] = [
     icon: "📋", title: "Proposals (walk sheets)",
     lines: [
       "For pricing a job during a walk-through. Start a sheet, pick the contract, and type quantities next to the work items — it saves as you go.",
+      "📝 Paste notes takes the whole note for a development off the phone (a line with the building and apartment, then one item per line) and makes one walk sheet per apartment, read against the move-out contract's price book; a line nothing on the list reads is shown before the sheet is made, to add by hand.",
       "Search for any item by name (“cabinet”, “paint”). View PDF shows the finished sheet; ⬇ Walk sheet (Excel) downloads it in the NYCHA layout.",
       "“Add to release…” (in a sheet's ⋯ menu) turns the walk sheet into a release when the work is approved.",
     ],

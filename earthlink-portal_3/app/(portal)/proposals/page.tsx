@@ -13,7 +13,7 @@ import { LineItem, Org, nextNumber, grandTotal, localISO } from "@/lib/docs";
 import type { Contract } from "@/lib/types";
 import ContractPicker, { contractLabel } from "@/components/ContractPicker";
 import Modal from "@/components/Modal";
-import { DEFAULT_CAP, billSurvey, hoursNote, sheetTotal, LABOR_KEY, type SheetLine, type HourPart } from "@/lib/surveyTemplate";
+import { DEFAULT_CAP, billSurvey, hoursNote, sheetTotal, splitSurveyNotes, LABOR_KEY, type SheetLine, type HourPart } from "@/lib/surveyTemplate";
 import { MOVEOUT_CONTRACT, MOVEOUT_RELEASE, RELEASE_LINES } from "@/lib/moveoutRelease";
 import { contractKey } from "@/lib/matchRelease";
 import type { SmartSurvey } from "@/lib/smartSurvey";
@@ -66,6 +66,10 @@ export default function Proposals() {
   // the survey PDF: one tap, the sheet builds itself from the contract's lines
   const surveyRef = useRef<HTMLInputElement>(null);
   const [surveyBusy, setSurveyBusy] = useState(false);
+  // the whole note for a development, pasted off the phone: one walk sheet per apartment
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const [pasteBusy, setPasteBusy] = useState(false);
   const CONTRACT_KEY = "proposals.contract";
   const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
   const [showHead, setShowHead] = useState(false); // walk-sheet header fields tucked away until needed
@@ -202,16 +206,42 @@ export default function Proposals() {
       flash("Blank survey saved — fill the boxes on site, then upload it here");
     } catch (err) { flash(`Couldn't build the form (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`); }
   };
-  const uploadSurvey = () => {
-    if (contracts.length === 0) { flash("No contracts yet — upload a release sheet or release PDF first"); return; }
-    if (!surveyContract()) { flash(`The portal has no contract ${MOVEOUT_CONTRACT} (the move-out contract) yet — upload one of its releases on the NYCHA tab first`); return; }
-    surveyRef.current?.click();
+  // what a survey needs before it can be read, PDF or pasted note alike: a
+  // contract to bill, and the move-out one among them
+  const moveoutReady = () => {
+    if (contracts.length === 0) { flash("No contracts yet — upload a release sheet or release PDF first"); return false; }
+    if (!surveyContract()) { flash(`The portal has no contract ${MOVEOUT_CONTRACT} (the move-out contract) yet — upload one of its releases on the NYCHA tab first`); return false; }
+    return true;
   };
+  const uploadSurvey = () => { if (moveoutReady()) surveyRef.current?.click(); };
   // what a survey read into, waiting to become the sheet
-  type SurveyPlan = { cid: string; file: string; who: string; sv: SmartSurvey; lines: SheetLine[]; labor: SheetLine | null; hours: HourPart[]; unmatched: string[]; twice: string[]; note?: string; bookNote?: string; catalog: ContractItem[] };
+  // `development`: the development the sheet is for, when the note named it;
+  // `pasted`: read off a pasted note, not a PDF (the notes say which)
+  type SurveyPlan = { cid: string; file: string; who: string; sv: SmartSurvey; lines: SheetLine[]; labor: SheetLine | null; hours: HourPart[]; unmatched: string[]; twice: string[]; note?: string; bookNote?: string; catalog: ContractItem[]; development: string; pasted?: boolean };
   // the check box: every line the survey read, each with a tick to take it off
   // — the release's lines, the book's, and each small job in the hours
   const [trim, setTrim] = useState<{ plan: SurveyPlan; off: Set<string> } | null>(null);
+  // a pasted note's apartments, one check box after another: which one is
+  // up, how many sheets are made and skipped so far, and the lines written
+  // before the first apartment (they go in the notes of the first sheet made)
+  type PasteQueue = { plans: SurveyPlan[]; at: number; made: number; skipped: number; stray: string[] };
+  const [pasteQueue, setPasteQueue] = useState<PasteQueue | null>(null);
+  // on to the next apartment in the note, or the end of it: the list shows the sheets, nothing opens
+  const nextInQueue = (q: PasteQueue, made: boolean) => {
+    const next = { ...q, at: q.at + 1, made: q.made + (made ? 1 : 0), skipped: q.skipped + (made ? 0 : 1) };
+    if (next.at < q.plans.length) { setPasteQueue(next); setTrim({ plan: q.plans[next.at], off: new Set() }); return; }
+    setPasteQueue(null); setTrim(null);
+    const strayNote = q.stray.length ? ` · ${q.stray.length} line${q.stray.length === 1 ? "" : "s"} before the first apartment${next.made ? " (in the first sheet's notes)" : ""}: ${q.stray.join("; ")}` : "";
+    flash(`${next.made} walk sheet${next.made === 1 ? "" : "s"} made from the note (${next.skipped} skipped)${strayNote}`);
+  };
+  // the check box closed by hand: a note's queue stops where it is
+  const closeCheck = () => {
+    setTrim(null);
+    if (!pasteQueue) return;
+    const left = pasteQueue.plans.length - pasteQueue.at;
+    setPasteQueue(null);
+    flash(`Stopped: ${pasteQueue.made} walk sheet${pasteQueue.made === 1 ? "" : "s"} made from the note, ${left} apartment${left === 1 ? "" : "s"} not made`);
+  };
   const HOUR_KEY = (i: number) => `h:${i}`;
   const planWhere = (sv: SmartSurvey) => [sv.address, sv.apt && `Apt ${sv.apt}`].filter(Boolean).join(" ");
   // what stays and what comes off; the laborer line is the hours kept, rounded up
@@ -229,8 +259,11 @@ export default function Proposals() {
     const { keep, offLines, hoursKept, hoursOff, hourTotal } = applyOff(plan, off);
     const total = sheetTotal(keep);
     const byCode = new Map(plan.catalog.map((c) => [c.code, c]));
+    // the lines written before the first apartment of a pasted note ride on the first sheet made from it
+    const stray = pasteQueue && pasteQueue.made === 0 ? pasteQueue.stray : [];
     const noteLines = [
-      `✓ ${plan.who} from the survey PDF (${plan.file})`,
+      `✓ ${plan.who} from ${plan.pasted ? plan.file : `the survey PDF (${plan.file})`}`,
+      ...(stray.length ? [`⚠ Lines before the first apartment: ${stray.join("; ")}`] : []),
       ...(hoursKept.length ? [`→ ${hourTotal} hour${hourTotal === 1 ? "" : "s"} General Laborer: ${hoursNote(hoursKept)}`] : []),
       ...(plan.twice.length ? [`↺ Written twice: ${plan.twice.join("; ")}`] : []),
       ...(plan.unmatched.length ? [`⚠ Not on the move-out list: ${plan.unmatched.join("; ")}`] : []),
@@ -243,6 +276,7 @@ export default function Proposals() {
     const { data, error: pe } = await sb().from("proposals").insert({
       number, client_name: "New York City Housing Authority", contract_id: plan.cid,
       job: plan.sv.kind || "Move-out", address: plan.sv.address, apt: plan.sv.apt, walk_date: localISO(), qty_map, total, notes: noteLines.join("\n"),
+      ...(plan.development ? { development: plan.development } : {}),
     }).select().single();
     if (pe || !data) { flash(upgradeHint(pe?.message || "Couldn't make the walk sheet")); return; }
     const pid = (data as Proposal).id;
@@ -252,10 +286,43 @@ export default function Proposals() {
     if (ie) flash(ie.message);
     await load();
     pickListContract(plan.cid);
-    setTrim(null);
     const offCount = offLines.length + hoursOff.length;
+    if (pasteQueue) {
+      // one apartment of a pasted note: on to the next check box, no editor,
+      // the list shows the sheets once the note is done
+      flash(`Walk sheet ${number} made · ${fmt(total)}${offCount ? ` · ${offCount} left off (in the notes)` : ""}`);
+      nextInQueue(pasteQueue, true);
+      return;
+    }
+    setTrim(null);
     flash(`Walk sheet ${number} made — ${fmt(total)}${offCount ? ` · ${offCount} left off (in the notes)` : ""} — check the counts`);
     openEditor(data as Proposal); // straight onto the sheet, counts in view
+  };
+  // the contract's price book, with the release's lines in it — the sheet,
+  // its PDF and the release it becomes all read lines out of the book, so
+  // the lines the survey bills have to be there. Added once, if missing.
+  // Null when the book can't be read or added to (the snag is flashed).
+  const moveoutCatalog = async (cid: string): Promise<{ catalog: ContractItem[]; bookNote: string } | null> => {
+    const { data: cat, error } = await sb().from("contract_items").select("*").eq("contract_id", cid).order("line");
+    if (error) { flash(upgradeHint(error.message)); return null; }
+    let catalog = (cat || []) as ContractItem[];
+    const have = new Set(catalog.map((c) => c.code));
+    const missing = RELEASE_LINES.filter((r) => !have.has(r.code));
+    let bookNote = "";
+    if (missing.length) {
+      const rows = missing.map((r) => ({ contract_id: cid, line: r.line, code: r.code, category: r.category, description: r.description, uom: r.uom, unit_price: r.unit_price }));
+      const { data: added, error: ae } = await sb().from("contract_items").insert(rows).select();
+      if (ae && /duplicate|unique/i.test(ae.message)) {
+        // another phone got there first (the book holds each code once — RUN_ME section 16): take the book as it is now
+        const { data: again } = await sb().from("contract_items").select("*").eq("contract_id", cid).order("line");
+        catalog = (again || []) as ContractItem[];
+      } else if (ae) { flash(`Couldn't add release ${MOVEOUT_RELEASE}'s lines to this contract's price book (${upgradeHint(ae.message)})`); return null; }
+      else {
+        catalog = [...catalog, ...((added && added.length ? added : rows) as ContractItem[])];
+        bookNote = `${missing.length} line${missing.length === 1 ? "" : "s"} from release ${MOVEOUT_RELEASE} added to this contract's price book`;
+      }
+    }
+    return { catalog, bookNote };
   };
   const handleSurveyPdf = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -264,28 +331,9 @@ export default function Proposals() {
     if (!file || !cid) return;
     setSurveyBusy(true);
     try {
-      // the contract's price book, with the release's lines in it — the sheet,
-      // its PDF and the release it becomes all read lines out of the book, so
-      // the lines the survey bills have to be there. Added once, if missing.
-      const { data: cat, error } = await sb().from("contract_items").select("*").eq("contract_id", cid).order("line");
-      if (error) { flash(upgradeHint(error.message)); return; }
-      let catalog = (cat || []) as ContractItem[];
-      const have = new Set(catalog.map((c) => c.code));
-      const missing = RELEASE_LINES.filter((r) => !have.has(r.code));
-      let bookNote = "";
-      if (missing.length) {
-        const rows = missing.map((r) => ({ contract_id: cid, line: r.line, code: r.code, category: r.category, description: r.description, uom: r.uom, unit_price: r.unit_price }));
-        const { data: added, error: ae } = await sb().from("contract_items").insert(rows).select();
-        if (ae && /duplicate|unique/i.test(ae.message)) {
-          // another phone got there first (the book holds each code once — RUN_ME section 16): take the book as it is now
-          const { data: again } = await sb().from("contract_items").select("*").eq("contract_id", cid).order("line");
-          catalog = (again || []) as ContractItem[];
-        } else if (ae) { flash(`Couldn't add release ${MOVEOUT_RELEASE}'s lines to this contract's price book (${upgradeHint(ae.message)})`); return; }
-        else {
-          catalog = [...catalog, ...((added && added.length ? added : rows) as ContractItem[])];
-          bookNote = `${missing.length} line${missing.length === 1 ? "" : "s"} from release ${MOVEOUT_RELEASE} added to this contract's price book`;
-        }
-      }
+      const book = await moveoutCatalog(cid);
+      if (!book) return;
+      const { catalog, bookNote } = book;
       const form = new FormData();
       form.append("file", file);
       const token = (await sb().auth.getSession()).data.session?.access_token || "";
@@ -299,13 +347,80 @@ export default function Proposals() {
       const lines = billed.lines;
       const unmatched = billed.unmatched.map((it) => `${it.written}${it.note ? ` (${it.note})` : ""}`);
       if (lines.length === 0) { flash(`${who} — nothing on that survey is on the move-out list${out.note ? ` (${out.note})` : sv.items.length === 0 ? " (no lines read off the page)" : ""}`); return; }
-      const plan: SurveyPlan = { cid, file: file.name, who, sv, lines, labor: lines.find((l) => l.itemKey === LABOR_KEY) || null, hours: billed.hours, unmatched, twice: billed.twice, note: out.note, bookNote, catalog };
+      const plan: SurveyPlan = { cid, file: file.name, who, sv, lines, labor: lines.find((l) => l.itemKey === LABOR_KEY) || null, hours: billed.hours, unmatched, twice: billed.twice, note: out.note, bookNote, catalog, development: "" };
       // the check box: every line read, each with a tick to take it off — and
       // over what a super will sign, the sheet waits until enough comes off
       setTrim({ plan, off: new Set() });
     } catch (err) {
       flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
     } finally { setSurveyBusy(false); }
+  };
+
+  // ---------- the pasted note ----------
+  // The whole note for a development, pasted off the phone's Notes app:
+  //
+  //   Grant houses Moveout
+  //   Building 3 11K
+  //   42 + 24 B and W
+  //   2 24s door sliding closet
+  //
+  //   B1 5K
+  //   1 24 inch door privacy
+  //
+  // A line with the building and apartment starts each apartment; the lines
+  // under it are its survey (lib/surveyTemplate.ts splits it). Every apartment
+  // is read on the server the way a PDF is (Claude, or the rules), billed
+  // against the move-out book, and queued: one check box after another, one
+  // walk sheet each. An apartment nothing on the list reads still gets its
+  // check box, so its lines show before it is skipped.
+  const openPasteNotes = () => { if (moveoutReady()) setPasteOpen(true); };
+  type PastedRead = { survey: SmartSurvey; readBy: "claude" | "rules"; note?: string; text: string };
+  const readPastedNotes = async () => {
+    const cid = surveyContract();
+    if (!cid) return;
+    const split = splitSurveyNotes(pasteText);
+    if (split.apartments.length === 0) { flash("No apartment found. Start each one with its building and apartment, like Building 3 11K"); return; }
+    setPasteBusy(true);
+    try {
+      const book = await moveoutCatalog(cid);
+      if (!book) return;
+      // each apartment travels as its own survey: the building and apartment line, then its lines
+      const headers = split.apartments.map((a) => `${a.address} ${a.apt}`.trim());
+      const texts = split.apartments.map((a, i) => [headers[i], a.text].filter(Boolean).join("\n"));
+      const token = (await sb().auth.getSession()).data.session?.access_token || "";
+      const reads: PastedRead[] = [];
+      for (let i = 0; i < texts.length; i += 12) { // the server reads up to 12 apartments at a time
+        const res = await fetch("/api/parse-survey", {
+          method: "POST", headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify({ texts: texts.slice(i, i + 12) }),
+        });
+        const out = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; surveys?: PastedRead[] };
+        if (!res.ok || !out.ok || !out.surveys) { flash(out.error || `The note couldn't be read (server said ${res.status})`); return; }
+        reads.push(...out.surveys);
+      }
+      if (reads.length !== texts.length) { flash("The note couldn't be read (the server sent back the wrong number of apartments)"); return; }
+      const file = `pasted notes${split.development ? ` (${split.development})` : ""}`;
+      const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+      const plans = split.apartments.map((a, i): SurveyPlan => {
+        const { survey: sv, readBy, note } = reads[i];
+        // the header is the split's: this building, this apartment, the note's kind of job
+        if (a.address && norm(sv.address) !== norm(a.address)) sv.address = a.address;
+        sv.apt = a.apt;
+        sv.kind = a.kind || sv.kind || "Move-out";
+        // a reader that hands the building line back as an item (nothing on the list is it) is handing back the header: not an item
+        sv.items = sv.items.filter((it) => it.key || norm(it.written) !== norm(headers[i]));
+        const who = readBy === "claude" ? "Read by Claude" : "Read by the rules";
+        const billed = billSurvey(sv.items, book.catalog);
+        const unmatched = billed.unmatched.map((it) => `${it.written}${it.note ? ` (${it.note})` : ""}`);
+        // the book note is one event, said once; an apartment with no lines keeps its (empty) plan for the check box to show what wasn't read
+        return { cid, file, who, sv, lines: billed.lines, labor: billed.lines.find((l) => l.itemKey === LABOR_KEY) || null, hours: billed.hours, unmatched, twice: billed.twice, note, bookNote: i === 0 ? book.bookNote : "", catalog: book.catalog, development: split.development, pasted: true };
+      });
+      setPasteOpen(false); setPasteText("");
+      setPasteQueue({ plans, at: 0, made: 0, skipped: 0, stray: split.stray });
+      setTrim({ plan: plans[0], off: new Set() });
+    } catch (err) {
+      flash(`Reading hit a snag, try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
+    } finally { setPasteBusy(false); }
   };
 
   // ---------- saving ----------
@@ -902,6 +1017,7 @@ export default function Proposals() {
         <div className="font-display text-2xl font-bold uppercase">Proposals</div>
         <div className="flex flex-wrap gap-2">
           <button className="btn" onClick={uploadSurvey} disabled={surveyBusy} title="The survey written on site, as a PDF — the walk sheet builds itself the way our move-out releases bill, kept under what a super will sign">{surveyBusy ? "Reading the survey…" : "📄 Upload a survey (PDF)"}</button>
+          <button className="btn min-h-[44px]" data-paste-notes onClick={openPasteNotes} disabled={surveyBusy || pasteBusy} title="The whole note for a development, pasted off the phone: one walk sheet per apartment, billed the way our move-out releases bill">📝 Paste notes</button>
           <button className="btn btn-primary" onClick={newWalkSheet}>+ New NYCHA walk sheet</button>
           <ActionMenu label="⋯" items={[
             { label: "⬇ Blank survey (PDF)", title: "The survey form, organized by what gets checked — fill the boxes on the phone or print it", onSelect: downloadSurveyForm },
@@ -909,6 +1025,18 @@ export default function Proposals() {
         </div>
       </div>
       <input ref={surveyRef} type="file" accept="application/pdf,.pdf" className="hidden" onChange={handleSurveyPdf} />
+      {pasteOpen && (
+        <Modal title="Paste the note" onClose={() => { if (!pasteBusy) setPasteOpen(false); }}
+          footer={<div className="flex justify-end gap-2">
+            <button className="btn btn-ghost min-h-[44px]" onClick={() => setPasteOpen(false)} disabled={pasteBusy}>Cancel</button>
+            <button className="btn btn-primary min-h-[44px]" data-paste-read onClick={readPastedNotes} disabled={pasteBusy || !pasteText.trim()}>{pasteBusy ? "Reading…" : "Read"}</button>
+          </div>}>
+          <div className="mb-2 text-[13px] text-inksoft">One apartment per block: a line with the building and apartment (Building 3 11K, B1 5K), then one item per line: 1 24 inch door privacy · Tub enclosure · 25 SF plaster. The first line can name the development.</div>
+          {/* 16px type: iOS zooms in on anything smaller when it gets the focus */}
+          <textarea data-paste-text className="field text-[16px]" rows={12} value={pasteText} onChange={(e) => setPasteText(e.target.value)} disabled={pasteBusy} autoFocus
+            placeholder={"Grant houses Moveout\nBuilding 3 11K\n42 + 24 B and W\n2 24s door sliding closet\n\nB1 5K\n1 24 inch door privacy"} />
+        </Modal>
+      )}
       {trim && (() => {
         const { plan, off } = trim;
         const a = applyOff(plan, off);
@@ -928,17 +1056,19 @@ export default function Proposals() {
           </label>
         );
         return (
-          <Modal wide title={over > 0 ? `Over ${fmt(DEFAULT_CAP)}` : "Check the walk sheet"} onClose={() => setTrim(null)}
+          <Modal wide title={over > 0 ? `Over ${fmt(DEFAULT_CAP)}` : pasteQueue ? `${[plan.sv.address, plan.sv.apt && `Apt ${plan.sv.apt}`].filter(Boolean).join(" · ") || "This apartment"} (${pasteQueue.at + 1} of ${pasteQueue.plans.length})` : "Check the walk sheet"} onClose={closeCheck}
             footer={<div className="flex flex-wrap items-center justify-between gap-2">
               <span className={`font-mono text-base font-semibold ${over > 0 ? "text-alert" : "text-ok"}`}>{fmt(now)} {over > 0 ? `· still ${fmt(over)} over` : "· under ✓"}</span>
-              <div className="flex gap-2">
-                <button className="btn btn-ghost" onClick={() => setTrim(null)}>Cancel</button>
+              <div className="flex flex-wrap gap-2">
+                {pasteQueue && <button className="btn btn-ghost min-h-[44px]" data-skip-apartment disabled={surveyBusy} onClick={() => nextInQueue(pasteQueue, false)}>Skip this apartment</button>}
+                <button className="btn btn-ghost" onClick={closeCheck}>Cancel</button>
                 <button className="btn btn-primary" disabled={over > 0 || nothing || surveyBusy} title={over > 0 ? "Take more off first" : nothing ? "Nothing left on the sheet" : ""}
                   onClick={async () => { setSurveyBusy(true); try { await makeSheet(plan, off); } finally { setSurveyBusy(false); } }}>
                   {surveyBusy ? "Making…" : "Make the walk sheet"}
                 </button>
               </div>
             </div>}>
+            {pasteQueue && <div className="mb-1 text-[12px] text-inksoft">📝 From the note{plan.development ? `: ${plan.development}` : ""} · apartment {pasteQueue.at + 1} of {pasteQueue.plans.length}</div>}
             <div className="mb-2 text-[13px] text-inksoft">
               <b className="text-ink">{planWhere(plan.sv) || "This survey"}</b> — {plan.who}, {plan.sv.items.length} line{plan.sv.items.length === 1 ? "" : "s"} read, <b className="text-ink">{fmt(sheetTotal(plan.lines))}</b>{over > 0 ? <> — <b className="text-alert">{fmt(sheetTotal(plan.lines) - DEFAULT_CAP)} over</b> what a super will sign</> : null}.
               Tick anything that comes off; it's written in the sheet's notes so it isn't forgotten.
@@ -959,7 +1089,11 @@ export default function Proposals() {
               )}
             </div>
             {plan.twice.length > 0 && <div className="mt-2 text-[12px] text-inksoft">↺ Written twice: {plan.twice.join("; ")}</div>}
-            {plan.unmatched.length > 0 && <div className="mt-2 text-[12px] text-alert">⚠ Not on the move-out list: {plan.unmatched.join("; ")} — add those by hand on the sheet.</div>}
+            {plan.unmatched.length > 0 && (
+              <div data-unmatched className="mt-2 rounded-sm border border-alert/40 bg-alert/5 px-3 py-2 text-[12px] text-alert">
+                <span className="font-semibold">⚠ Not on the move-out list, add by hand on the sheet:</span> {plan.unmatched.join("; ")}
+              </div>
+            )}
             {plan.note && <div className="mt-1 text-[12px] text-alert">⚠ {plan.note}</div>}
             {plan.bookNote && <div className="mt-1 text-[12px] text-inksoft">{plan.bookNote}.</div>}
           </Modal>

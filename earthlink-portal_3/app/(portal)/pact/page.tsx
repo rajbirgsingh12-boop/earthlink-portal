@@ -300,40 +300,6 @@ export default function Pact() {
     return () => { closed = true; };
   }, [openId, role]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ---------- every open job, re-priced the way the work is billed ----------
-  // Paint and primer by the room, plaster by the square foot, a door by the
-  // door, the prep that rides with plaster — on every job not yet invoiced.
-  // Each job is priced against the database's own row, never this page's
-  // copy. Invoiced, paid and canceled jobs are never touched.
-  const [repriceReport, setRepriceReport] = useState<{ checked: number; changed: string[]; skipped: number } | null>(null);
-  const repriceAll = async () => {
-    if (!canPrice) return;
-    if (!window.confirm("Re-price every open job from the price list? Paint and primer go by the room, plaster brings its primer and paint, and the list's prices fill in. Invoiced and paid jobs are left alone.")) return;
-    setBusy(true);
-    const report = { checked: 0, changed: [] as string[], skipped: 0 };
-    try {
-      const bk = await priceBook();
-      const { data } = await sb().from("pact_jobs").select("id,po_number,job_number,description,items,tax_pct,invoice_sent,received,canceled").eq("canceled", false).is("invoice_sent", null).order("created_at", { ascending: false }).limit(1000);
-      for (const row of ((data || []) as Job[])) {
-        if (row.invoice_sent || row.received || row.canceled) { report.skipped += 1; continue; }
-        report.checked += 1;
-        const before = itemsOf(row);
-        const typed = before.filter((it) => !it.key && it.description.trim()).map((it) => it.description);
-        const text = [row.description || "", ...typed].filter(Boolean).join(". ");
-        const merged = mergePricedLines(text, before, bk, { refresh: true }) as Item[];
-        const { items: next } = normalizeJobLines(merged, text, bk);
-        const same = JSON.stringify(next.map((it) => [it.description, Number(it.qty), it.unit, Number(it.unit_price), it.key || ""])) === JSON.stringify(before.map((it) => [it.description, Number(it.qty), it.unit, Number(it.unit_price), it.key || ""]));
-        if (same) continue;
-        setItems(row, next as Item[], true, true);
-        report.changed.push(`PO ${row.po_number || row.job_number || ""}`.trim());
-      }
-      setRepriceReport({ ...report });
-      flash(report.changed.length ? `${report.changed.length} of ${report.checked} open jobs re-priced — check them before invoicing` : `All ${report.checked} open jobs already match the price list`);
-    } catch (err) {
-      flash(`Couldn't re-price (${err instanceof Error ? err.message.slice(0, 80) : "unknown"})`);
-    } finally { setBusy(false); }
-  };
-
   // ---------- the job's photos as one PDF to send ----------
   const makePhotoPdf = async (j: Job) => {
     const imgs = (j.attachments || []).filter((a) => isImg(a.name));
@@ -1363,16 +1329,8 @@ export default function Pact() {
   return (
     <div>
       <PageHeader title="Billing" sub="PACT — POs, proposals, invoices">
-        {canPrice && <button className="btn btn-ghost" onClick={repriceAll} disabled={busy} title="Every open job priced the way the work is billed: paint and primer by the room, plaster with its primer and paint, doors at the set price" data-reprice-all>Re-price open jobs</button>}
         <Link className="btn btn-ghost" href="/pact/schedule">📅 Schedule</Link>
       </PageHeader>
-      {repriceReport && (
-        <div className="card mb-3 p-3 text-sm" data-reprice-report>
-          <div className="font-semibold">{repriceReport.changed.length ? `${repriceReport.changed.length} of ${repriceReport.checked} open jobs re-priced` : `All ${repriceReport.checked} open jobs already match the price list`}{repriceReport.skipped ? ` · ${repriceReport.skipped} invoiced or paid left alone` : ""}</div>
-          {repriceReport.changed.length > 0 && <div className="mt-1 text-xs text-inksoft">{repriceReport.changed.join(" · ")}</div>}
-          <button className="btn btn-ghost mt-2 min-h-[44px] px-3 text-[13px]" onClick={() => setRepriceReport(null)}>OK</button>
-        </div>
-      )}
       <input ref={poRef} type="file" accept="application/pdf,.pdf,.docx" className="hidden" onChange={handlePo} />
       {/* a folder (or multi-select) of proposal letters, read in one go */}
       {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}

@@ -101,7 +101,7 @@ export async function sendCrew(db: Db | null, messages: CrewOut[], onSent: (m: C
       r = await postAll(made.group.sid);
     }
     if (!r.ok) {
-      const why = `the thread didn't take the text (${groupLastError() || `Twilio ${r.status || "didn't answer"}`}) — not sent again another way, so nobody gets it twice; try again in a minute`;
+      const why = `the thread didn't take the text (${groupLastError() || `Twilio ${r.status || "didn't answer"}`}). Not sent again another way, so nobody gets it twice; try again in a minute`;
       return { ...none, failed: msgs.map((m) => ({ to: m.to, id: m.id, error: why })), problem: why };
     }
     const job = row.pact_job_id ? { kind: "pact" as const, id: row.pact_job_id } : row.release_id ? { kind: "rel" as const, id: row.release_id } : undefined;

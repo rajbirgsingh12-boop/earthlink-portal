@@ -692,7 +692,7 @@ export function linesFromPoRead(f: { desc: string; scope: string; rows: { descri
         // paint") is dropped: keeping it would leave a dollar line sitting
         // beside the three real lines it stands for
         .filter((it) => realPrice(it.unit_price) || keysIn(it.description, bk).length < 2)
-      : (f.desc || f.scope) ? [{ description: (f.desc || f.scope).slice(0, 120), qty: 1, unit: unitFor(f.desc || f.scope), unit_price: 0 }] : [];
+      : (f.desc || f.scope) ? [{ description: (f.desc || f.scope).slice(0, 300), qty: 1, unit: unitFor(f.desc || f.scope), unit_price: 0 }] : [];
   // when the PO priced its own lines, that IS the deal — fill the gaps but
   // never add prep work it didn't ask for
   const poPriced = seed.some((it) => realPrice(it.unit_price));

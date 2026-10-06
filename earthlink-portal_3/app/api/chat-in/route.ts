@@ -41,7 +41,8 @@ export async function POST(req: Request) {
   const info = await groupInfo(thread);
   const workers = info.members.filter((m) => phoneKey(m) !== phoneKey(copyTo()));
   const first = (me?.name || "").trim().split(/\s+/)[0] || "";
-  const forWho = (body: string) => (workers.length > 1 && first ? `${first}: ${body}` : body);
+  // "Jose: …" when more than one worker reads the thread — the one it is for
+  const forWho = (body: string, who?: string) => { const name = (who || first).trim().split(/\s+/)[0]; return workers.length > 1 && name ? `${name}: ${body}` : body; };
   // the pictures: Twilio lists them as JSON, kept on its media host by the thread's service
   const svc = (form.get("ChatServiceSid") || "").trim();
   const photos: MediaIn[] = [];
@@ -63,7 +64,7 @@ export async function POST(req: Request) {
     sid: (form.get("MessageSid") || "").trim(),
     photos: photos.slice(0, 10), other,
     fetchMedia: fetchMediaFrom(groupMediaBase()),
-    deliver: async (_to, body) => postToGroup(thread, forWho(body)),   // a later text goes into the thread, not to one phone
+    deliver: async (_to, body, who) => postToGroup(thread, forWho(body, who)),   // a later text goes into the thread, not to one phone
     jobHint: info.job,
   }, seen);
   if (reply) await postToGroup(thread, forWho(reply));

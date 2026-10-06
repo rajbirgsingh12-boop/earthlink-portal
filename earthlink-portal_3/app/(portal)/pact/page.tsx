@@ -666,6 +666,10 @@ export default function Pact() {
       ({ error } = await sb().from("pact_jobs").update(patchRow).eq("id", j.id));
     }
     if (error) { if (!quiet) flash(upgradeHint(error.message)); return "none"; }
+    // a crew row that carried the old wording (the crew text reads the row's copy first) follows the job
+    if (patchRow.description && patchRow.description !== (j.description || "")) {
+      await sb().from("schedule_days").update({ description: patchRow.description }).eq("pact_job_id", j.id).eq("description", j.description || "").then(() => null, () => null);
+    }
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, ...patchRow } : x)));
     if (!quiet) flash(`PO ${f.po || ""} re-read ${out.readBy === "claude" ? "by Claude" : "by the rules"} — ${items.length} line${items.length === 1 ? "" : "s"}`);
     return out.readBy === "claude" ? "claude" : "rules";

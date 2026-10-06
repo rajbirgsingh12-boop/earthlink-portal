@@ -33,6 +33,13 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   const [machine, setMachine] = useState(true); // company number set up? (else a group text opens on this phone)
   const [photosIn, setPhotosIn] = useState(false); // photos texted back go on the job — the text asks for them
   useEffect(() => { textMachine().then((m) => { setMachine(m.configured); setPhotosIn(m.photosIn); }); }, []);
+  // the three-step ask exactly as this job's text will carry it (the server
+  // reads it off the job's lines; the plain form stands in until it answers)
+  const [askFor, setAskFor] = useState<{ en: string; es: string } | null>(null);
+  useEffect(() => {
+    if (!machine || !photosIn || !job.id) return;
+    fetch(`/api/text?job=${encodeURIComponent(job.id)}`).then((r) => r.json()).then((j: { ask?: { en: string; es: string } }) => { if (j.ask) setAskFor(j.ask); }).catch(() => null);
+  }, [machine, photosIn, job.id]);
   const addingNow = useRef<Set<string>>(new Set()); // guards a double-tap on the same name
   const day = (job.start_date || "").trim();
   // the work the crew is told — the rows' saved wording, else the PO's own
@@ -161,7 +168,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
         <LangToggle value={shownLang} onChange={setPreviewLang} full name="Preview language" />
       </div>
       <div className="mb-2 rounded-sm border border-rulesoft bg-white px-3 py-2 whitespace-pre-line text-[12px] text-inksoft [overflow-wrap:anywhere]" data-preview-lang={shownLang}>{(() => { const t = crewPreview(job, (emps.find((e) => rows[0] && e.id === rows[0].employee_id)?.name || "Name").split(" ")[0], work.trim(), undefined, shownLang); // the thread's ask goes on the end once photos texted back land on the job; the server leaves the square-feet sentence off a job with nothing to measure
-        return machine && photosIn ? withJobAsk(t, jobAsk(shownLang, true)) : t; })()}<span className="mt-1 block text-[11px]">Each worker gets it in the language beside their name.{machine && photosIn ? " The square-feet step is left off a job with nothing to measure." : ""}</span></div>
+        return machine && photosIn ? withJobAsk(t, askFor ? askFor[shownLang === "es" ? "es" : "en"] : jobAsk(shownLang, true)) : t; })()}<span className="mt-1 block text-[11px]">Each worker gets it in the language beside their name.</span></div>
       {rows.map((r) => {
         const e = emps.find((x) => x.id === r.employee_id);
         const name = e?.name || "?";

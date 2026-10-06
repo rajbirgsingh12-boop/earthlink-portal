@@ -40,8 +40,19 @@ const overLimit = (userId: string, count: number) => {
 // photosIn: a picture texted back to the company number lands on the job
 // (/api/sms-in), so the texts end by asking for them. problem: a key that is
 // there but typed wrong (Settings → System check shows it)
-export async function GET() {
-  return NextResponse.json({ configured: configured(), photosIn: configured() && (await photosBackOn()), problem: twilioProblem() || copyProblem(), copy: !!copyTo(), group: groupsOn(), groupProblem: groupProblem() || groupLastError() });
+export async function GET(req: Request) {
+  const photosIn = configured() && (await photosBackOn());
+  // ?job=<id>: the three-step ask as that job's crew text will carry it, in
+  // both languages — read as the portal itself, so only the words leave here
+  const job = (new URL(req.url).searchParams.get("job") || "").trim();
+  let ask: { en: string; es: string } | undefined;
+  if (job && /^[0-9a-f-]{36}$/i.test(job)) {
+    const svc = serviceDb();
+    const row = svc ? (await svc.get<{ items?: unknown }>(`pact_jobs?id=eq.${job}&select=items`)).rows[0] : undefined;
+    const items = row && Array.isArray(row.items) ? (row.items as SfLine[]) : null;
+    ask = { en: jobAsk("en", items ?? true), es: jobAsk("es", items ?? true) };
+  }
+  return NextResponse.json({ configured: configured(), photosIn, problem: twilioProblem() || copyProblem(), copy: !!copyTo(), group: groupsOn(), groupProblem: groupProblem() || groupLastError(), ...(ask ? { ask } : {}) });
 }
 
 export async function POST(req: Request) {

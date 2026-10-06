@@ -22,7 +22,7 @@ export function groupProblem(): string {
   if (!serviceDb()) return "SUPABASE_SERVICE_ROLE_KEY isn't in Vercel (the portal reads the crew for a thread with it)";
   const from = env("TWILIO_FROM").trim();
   if (!from) return "TWILIO_FROM (the company number itself) is needed for a group thread, even with a Messaging Service";
-  if (TOLL_FREE.test(from)) return "a group thread needs a local (10-digit) company number — Twilio can't group-text from a toll-free number";
+  if (TOLL_FREE.test(from)) return "a group thread needs a local (10-digit) company number: Twilio can't group-text from a toll-free number";
   return "";
 }
 export const groupsOn = (): boolean => !groupProblem();
@@ -61,7 +61,7 @@ export async function groupFor(phones: string[]): Promise<{ group: Group } | { e
   if (problem) return { error: problem };
   const members = [...new Set([copyTo(), ...phones.filter(Boolean)])];
   if (members.length < 2) return { error: "nobody to text" };
-  if (members.length > 9) return { error: "more than nine people on one job — Twilio allows ten in a thread, counting the company number" };
+  if (members.length > 9) return { error: "more than nine people on one job; Twilio allows ten in a thread, counting the company number" };
   const key = groupKey(members);
   const had = known.get(key);
   if (had) return { group: had };
@@ -165,6 +165,7 @@ export function publicOrigin(req: Request): string {
   // the setting is account-wide: a preview deployment must never point the
   // real threads at itself (set TWILIO_WEBHOOK_URL to pin the address outright)
   if (env("VERCEL_ENV") && env("VERCEL_ENV") !== "production") return "";
+  if (env("VERCEL_PROJECT_PRODUCTION_URL").trim()) return `https://${env("VERCEL_PROJECT_PRODUCTION_URL").trim()}`;
   const u = new URL(req.url);
   const host = (req.headers.get("x-forwarded-host") || req.headers.get("host") || u.host).split(",")[0].trim();
   const proto = (req.headers.get("x-forwarded-proto") || u.protocol.replace(":", "")).split(",")[0].trim();

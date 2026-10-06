@@ -18,7 +18,7 @@ import {
 import { dayMinus, pactKey, relKey } from "./smsIn";
 import { dueBody, dueWork, type DueJob } from "./dueText";
 import { askClaudeSpanish, spanishWorkServer } from "./smartTranslate";
-import { sendTexts, twilioConfigured } from "./twilio";
+import { sendTexts, twilioConfigured, type TextOut } from "./twilio";
 import { langOf } from "./crewText";
 import { folderOf, type Db, type Photo } from "./photoStore";
 import { jobAsk } from "./jobFlow";
@@ -288,14 +288,18 @@ export async function nobodyFlow(db: Db, o: {
         out.push({ to, id: r.id, who: (e.name || "").trim() || undefined, body: coworkerText(first(e), first(emp), missed.label, crew, e.lang, true, nj.label, askFor(job, e.lang)) });
       }
       if (out.length && twilioConfigured()) {
-        await sendTexts(out, async (msg) => {
+        const told = async (msg: TextOut) => {
+          if (!msg.id) return;
           const e = o.emps.find((x) => cleanPhone(x.phone) === msg.to);
           sentTo.push(first(e));
           await db.patch(`schedule_days?id=eq.${msg.id}`, { texted: true });
           await db.patch(`schedule_days?id=eq.${msg.id}`, { texted_at: now.toISOString() });
           // on their record: their next "no" is about the job they were just sent to
           if (e) await db.insert("texted_photos", { employee_id: e.id, from_phone: msg.to, body: "", status: "note", how: "nobody", photos: [] });
-        });
+        };
+        // the way the worker's own answer went (into the thread, say), or a text to each
+        if (o.say) { for (const msg of out) if (await o.say(msg.to, msg.body, msg.who)) await told(msg); }
+        else await sendTexts(out, told);
       }
     }
   }

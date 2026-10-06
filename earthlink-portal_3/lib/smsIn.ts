@@ -180,7 +180,9 @@ export type Reply =
   | { k: "failed" }
   | { k: "resend" }
   | { k: "stranger"; n: number }
-  | { k: "connected" };
+  | { k: "connected" }
+  | { k: "inall"; n: number; label: string; kind?: "before" | "after" | null }   // the phone split one send: the whole count, once it has settled
+  | { k: "lost"; n: number };                                                   // pictures in the text that didn't come through
 const photos = (n: number, lang: Lang) => (lang === "es" ? (n === 1 ? "1 foto" : `${n} fotos`) : (n === 1 ? "1 photo" : `${n} photos`));
 export function replyText(r: Reply, lang0?: string | null): string {
   const lang = langOf(lang0);
@@ -208,6 +210,14 @@ export function replyText(r: Reply, lang0?: string | null): string {
       return es ? "No supimos de qué trabajo son sus fotos. Por favor envíelas otra vez con el número de PO en el mensaje." : "We couldn't tell which job your photos are for. Please send them again with the PO number in the text.";
     case "failed":
       return es ? "Sus fotos no llegaron bien. Por favor envíelas otra vez." : "Your photos didn't come through. Please send them again.";
+    case "inall": {
+      const pile = r.kind === "before" ? (es ? " de ANTES" : " BEFORE") : r.kind === "after" ? (es ? " de DESPUES" : " AFTER") : "";
+      return es ? `En total, ${r.n} fotos${pile} en el ${r.label}.` : `${r.n}${pile} photos on ${r.label} in all.`;
+    }
+    case "lost":
+      return es
+        ? `${r.n === 1 ? "1 foto no llegó" : `${r.n} fotos no llegaron`}; por favor ${r.n === 1 ? "mándela" : "mándelas"} otra vez.`
+        : `${photos(r.n, lang)} didn't come through; please send ${r.n === 1 ? "it" : "them"} again.`;
     case "connected":
       // the very first text the number ever gets, from a phone on the crew
       // list — the owner trying it. Silence would look like it didn't work.

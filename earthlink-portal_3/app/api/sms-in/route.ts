@@ -24,6 +24,8 @@
 // to exactly what is typed in the Twilio console.
 import { NextResponse } from "next/server";
 import { randomUUID } from "crypto";
+import { waitUntil } from "@vercel/functions";
+import { sendTexts, twilioConfigured } from "@/lib/twilio";
 import {
   mediaIn, pickJob, pactKey, relKey, photoKind, photoName, phoneKey, refsIn, justANumber, replyText, twiml, validTwilio, dayMinus,
   type JobKey, type MineRow, type Params, type Reply,
@@ -108,6 +110,35 @@ async function anyPoOf(db: Db, body: string, mine: JobKey[]): Promise<JobKey[]> 
 
 // a phone often splits one send into several texts: ten minutes together is one burst
 const BURST_MS = 10 * 60_000;
+// …and only the first piece is answered, so a worker who sent five pictures
+// reads "Got 1 BEFORE photo". When the send has settled (no more pieces for
+// a while), the last piece texts the whole count, once: "5 BEFORE photos on
+// PO 116843 in all." Vercel keeps the function alive for this after the
+// answer has gone back to Twilio (waitUntil); on a plain machine the promise
+// simply runs on.
+const SETTLE_MS = Math.max(500, Number(env("BURST_SETTLE_MS")) || 20_000);
+const cleanPhone = (s?: string | null): string => {
+  const d = (s || "").replace(/\D/g, "");
+  if (d.length === 10) return `+1${d}`;
+  if (d.length === 11 && d.startsWith("1")) return `+${d}`;
+  return d.length > 11 && d.length <= 15 && (s || "").trim().startsWith("+") ? `+${d}` : ""; // as lib/notify's
+};
+async function settleBurst(db: Db, o: { emp: Emp; batchId: string; target: Target; kind: PhotoKind | null; lang?: string | null; from: string; now: Date }): Promise<void> {
+  try {
+    await new Promise((r) => setTimeout(r, SETTLE_MS));
+    const since = enc(new Date(o.now.getTime() - BURST_MS).toISOString());
+    const rows = (await db.get<Batch>(`texted_photos?employee_id=eq.${o.emp.id}&status=in.(held,filed)&created_at=gte.${since}&order=created_at.desc&select=id,status,photos,pact_job_id,release_id&limit=50`)).rows;
+    if (!rows.length || rows[0].id !== o.batchId) return; // a later piece came: it speaks, or it was answered itself
+    const same = rows.filter((b) => b.status === "filed" && (b.photos || []).length
+      && (o.target.kind === "pact" ? b.pact_job_id === o.target.id : b.release_id === o.target.id)
+      && (!o.kind || kindOfName(b.photos![0].name) === o.kind));
+    const total = same.reduce((n, b) => n + (b.photos || []).length, 0);
+    if (same.length < 2 || total < 2) return; // one text: its own answer said the count
+    const to = cleanPhone(o.from);
+    if (!to || !twilioConfigured()) return;
+    await sendTexts([{ to, body: replyText({ k: "inall", n: total, label: o.target.label, kind: o.kind }, o.lang) }]);
+  } catch { /* a count that didn't go out loses nothing: the pictures are on the job */ }
+}
 // the job a batch is on, named the way the worker says it
 async function targetOf(db: Db, b: Batch): Promise<Target | null> {
   if (b.pact_job_id) {
@@ -406,6 +437,10 @@ export async function POST(req: Request) {
   }
   const put = await store(dir, kind);
   if (put.length === 0) return say({ k: "failed" }, lang);
+  // a picture that didn't come through is said, with whatever did — even in a quiet piece
+  const lostNote = put.length < photos.length ? replyText({ k: "lost", n: photos.length - put.length }, lang) : "";
+  const said = (msg: string) => answer(lostNote ? `${msg} ${lostNote}` : msg);
+  const hush = () => answer(lostNote || undefined);
 
   const row = { id: batchId, employee_id: emp?.id || null, from_phone: from, body, photos: put, msg_sid: sid || null };
   // one answer per burst: the first text gets it, the rest go quietly — unless
@@ -420,12 +455,14 @@ export async function POST(req: Request) {
       const kept: Photo[] = [];
       for (const p of put) if (await db.move(p.path, inbox + p.name)) kept.push({ name: p.name, path: inbox + p.name });
       if (!(await db.insert("texted_photos", { ...row, photos: kept, status: "held" }))) await db.remove(kept.map((p) => p.path));
-      return quiet ? answer() : say({ k: "held", n: put.length }, lang);
+      return quiet ? hush() : said(replyText({ k: "held", n: put.length }, lang));
     }
     await db.insert("texted_photos", { ...row, status: "filed", how, pact_job_id: target.kind === "pact" ? target.id : null, release_id: target.kind === "rel" ? target.id : null });
     // this one named the job: the ones before it that were waiting go there too
     let moved = 0;
     if (how === "number") for (const b of burst) if (b.status === "held") moved += await fileBatch(db, b, target, "number", thread ? kind : undefined);
+    // a quiet piece of a split send: when the send settles, the whole count, once
+    const settle = () => { if (emp) waitUntil(settleBurst(db, { emp, batchId, target, kind: thread ? kind : null, lang, from, now })); };
     if (thread) {
       // the square feet, when they came with the pictures ("plaster 120 sf" +
       // a photo). A bare number with pictures is how many pictures, never square feet.
@@ -435,15 +472,15 @@ export async function POST(req: Request) {
       const asked = parsed.kind === "ask" ? askMeasureText(parsed, target.label, lines, lang) : parsed.kind === "ok" && billed(thread) ? invoicedText(target.label, lang) : "";
       // after pictures: the job is work done, ready to invoice
       const marked = kind === "after" && emp ? await markDone(db, thread, emp, from, now, today) : false;
-      if (quiet && !moved && !measured && !marked && !asked) return answer();
+      if (quiet && !moved && !measured && !marked && !asked) { settle(); return hush(); }
       // the thread's next step: the square feet after the before pictures, the after pictures after that
       const n = put.length + moved;
-      if (measured) return answer(gotBothText(kind, n, target.label, measured.changes, measured.stillBlank, lang, marked));
+      if (measured) return said(gotBothText(kind, n, target.label, measured.changes, measured.stillBlank, lang, marked));
       const next = kind === "before" ? gotBeforeText(n, target.label, lines, lang) : gotAfterText(n, target.label, lines.filter((l) => !l.has), lang, marked);
-      return answer(asked ? `${next}\n${asked}` : next);
+      return said(asked ? `${next}\n${asked}` : next);
     }
-    if (quiet && !moved) return answer();
-    return say({ k: "filed", n: put.length + moved, label: target.label }, lang);
+    if (quiet && !moved) { settle(); return hush(); }
+    return said(replyText({ k: "filed", n: put.length + moved, label: target.label }, lang));
   }
   // nowhere to put them yet: they wait for the office — unless there's no
   // place to keep them waiting (RUN_ME section 20 not run), and then the
@@ -452,7 +489,7 @@ export async function POST(req: Request) {
     await db.remove(put.map((p) => p.path));
     return say({ k: "resend" }, lang);
   }
-  if (quiet) return answer();
-  if (!emp) return say({ k: "stranger", n: put.length });
-  return pick.kind === "ask" && pick.why === "unknown" ? say({ k: "unknown", number: pick.number || "" }, lang) : say({ k: "held", n: put.length }, lang);
+  if (quiet) return hush();
+  if (!emp) return said(replyText({ k: "stranger", n: put.length }));
+  return said(replyText(pick.kind === "ask" && pick.why === "unknown" ? { k: "unknown", number: pick.number || "" } : { k: "held", n: put.length }, lang));
 }

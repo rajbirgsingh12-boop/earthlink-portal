@@ -23,7 +23,7 @@ import { COMPANY } from "@/lib/company";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { parsePactPoText, type PactPoFields, type PoItem } from "@/lib/parsePactPo";
-import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, attnFrom, DEFAULT_ATTN, type PriceItem, cleanLineWording, unitFor, mergePricedLines, linesFromPoRead, normalizeJobLines } from "@/lib/priceBook";
+import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, attnFrom, DEFAULT_ATTN, type PriceItem, cleanLineWording, unitFor, mergePricedLines, linesFromPoRead } from "@/lib/priceBook";
 
 // `base` is a PO row's wording before its wrapped line was added — a wrap can
 // name a second trade ("…and paint"), and then the row no longer reads as the
@@ -253,7 +253,10 @@ export default function Pact() {
         .filter((it) => !it.key && it.description.trim())
         .map((it) => it.description);
       const text = [live.description || "", ...typed].filter(Boolean).join(". ");
-      const next = normalizeJobLines(await priceFromList(text, before, { refresh: true }), text, await priceBook()).items as Item[];
+      // the lines as they are, priced — never a line's unit or quantity changed
+      // here: a job someone entered by hand stays the way they entered it (the
+      // by-the-room rules run when a PO is first read in, lib/priceBook linesFromPoRead)
+      const next = await priceFromList(text, before, { refresh: true });
       const added = next.length - before.length;
       const changed = next.filter((n, i) => i < before.length && (n.unit_price !== before[i].unit_price || n.description !== before[i].description)).length;
       if (added === 0 && changed === 0) {

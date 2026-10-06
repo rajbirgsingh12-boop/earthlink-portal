@@ -59,4 +59,4 @@ export function dueBody(row: DueRow, ctx: { emp: DueEmp; job?: DueJob | null; re
   });
 }
 // what the crew is going there to do: the wording saved on the row, else the job's own
-export const dueWork = (row: DueRow, job?: DueJob | null): string => (row.description || "").trim() || (job ? workOf(job) : "");
+export const dueWork = (row: DueRow, job?: DueJob | null): string => ((row.description || "").trim() ? workOf({ description: row.description }) : job ? workOf(job) : "");

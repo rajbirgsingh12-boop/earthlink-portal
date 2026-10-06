@@ -467,23 +467,34 @@ export default function Settings() {
   const [checking, setChecking] = useState(false);
   // the PO descriptions the first intake cut at 120 characters, read again from the PDFs on the jobs
   const [fixingDesc, setFixingDesc] = useState(false);
-  const [descReport, setDescReport] = useState<{ checked: number; fixed: { po: string; after: string }[]; kept: { po: string; why: string }[] } | null>(null);
+  type DescFixed = { id: string; po: string; after: string; crewRows?: number };
+  type DescKept = { id: string; po: string; why: string };
+  type DescReport = { checked: number; fixed: DescFixed[]; kept: DescKept[]; billed: number; readBefore: number };
+  const [descReport, setDescReport] = useState<DescReport | null>(null);
+  // what the rounds so far have done, kept across taps: a round the server
+  // couldn't answer (it ran out of time) loses nothing, the next tap carries on
+  const descAll = useRef<DescReport>({ checked: 0, fixed: [], kept: [], billed: 0, readBefore: 0 });
+  const descDone = useRef<string[]>([]);
   const fixDescriptions = async () => {
-    setFixingDesc(true); setDescReport(null);
-    const all = { checked: 0, fixed: [] as { po: string; after: string }[], kept: [] as { po: string; why: string }[] };
+    setFixingDesc(true);
+    const all = descAll.current;
     try {
       const { data: { session } } = await sb().auth.getSession();
-      let done: string[] = [];
       for (let round = 0; round < 60; round++) {
-        const r = await fetch("/api/fix-descriptions", { method: "POST", headers: { "Content-Type": "application/json", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) }, body: JSON.stringify({ done }) });
-        const j = (await r.json().catch(() => ({}))) as { error?: string; checked?: number; fixed?: { po: string; after: string }[]; kept?: { po: string; why: string }[]; remaining?: number; done?: string[] };
+        const r = await fetch("/api/fix-descriptions", { method: "POST", headers: { "Content-Type": "application/json", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) }, body: JSON.stringify({ done: descDone.current }) }).catch(() => null);
+        const j = r ? ((await r.json().catch(() => null)) as { error?: string; checked?: number; fixed?: DescFixed[]; kept?: DescKept[]; remaining?: number; done?: string[]; skipped?: { billed?: number; readBefore?: number } } | null) : null;
+        if (!r || !j) { flash("The server didn't answer in time. Tap the button again to carry on where it left off"); break; }
         if (!r.ok) { flash(j.error || `The server said ${r.status}`); break; }
-        all.checked += j.checked || 0; all.fixed.push(...(j.fixed || [])); all.kept.push(...(j.kept || []));
-        done = j.done || done;
+        all.checked += j.checked || 0; all.fixed.push(...(j.fixed || []));
+        // a job kept again on a later tap shows its newest reason once
+        const keptNow = j.kept || [];
+        all.kept = [...all.kept.filter((k) => !keptNow.some((n) => n.id === k.id)), ...keptNow];
+        all.billed = Math.max(all.billed, j.skipped?.billed || 0); all.readBefore = Math.max(all.readBefore, j.skipped?.readBefore || 0);
+        descDone.current = j.done || descDone.current;
         setDescReport({ ...all });
         if (!j.remaining || !j.checked) break;
       }
-    } catch { flash("No signal — try again in a moment"); }
+    } catch { flash("No signal, try again in a moment"); }
     setFixingDesc(false);
   };
   const runSystemCheck = async () => {
@@ -500,7 +511,7 @@ export default function Settings() {
       { label: "Worker phone numbers (tap-to-text)", fix: "upgrade_worker_phone.sql", probe: async () => !(await sb().from("employees").select("phone").limit(1)).error },
       { label: "Day schedule (Schedule tab)", fix: "upgrade_day_schedule.sql", probe: async () => !(await sb().from("schedule_days").select("id,address").limit(1)).error },
       { label: "Company texting number (Twilio)", fix: () => found.twilio || "add TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_FROM (the number as +1 and ten digits) in Vercel → Settings → Environment Variables, then Redeploy (texts fall back to your phone until then)", probe: async () => { try { const r = await fetch("/api/text"); const j = (await r.json()) as { configured?: boolean; problem?: string }; found.twilio = j.problem || ""; return !!j.configured && !j.problem; } catch { return false; } } },
-      { label: "You're in a group thread with each crew", fix: () => found.group || "add TEXT_COPY_TO (your cell, +1 and ten digits) and TWILIO_FROM (the company number, a local 10-digit one — Twilio can't group-text from a toll-free number) in Vercel → Settings → Environment Variables, then Redeploy. Each crew text then goes into one thread with you, the workers on that job and the company number; their photos, square feet and the portal's answers land there too. Until then every text is copied to your phone instead", probe: async () => { try { const r = await fetch("/api/text"); const j = (await r.json()) as { group?: boolean; groupProblem?: string }; found.group = j.groupProblem || ""; return !!j.group && !j.groupProblem; } catch { return false; } } },
+      { label: "You're in a group thread with each crew", fix: () => found.group || "add TEXT_COPY_TO (your cell, +1 and ten digits) and TWILIO_FROM (the company number, a local 10-digit one: Twilio can't group-text from a toll-free number) in Vercel → Settings → Environment Variables, then Redeploy. Each crew text then goes into one thread with you, the workers on that job and the company number; their photos, square feet and the portal's answers land there too. Until then every text is copied to your phone instead (once TEXT_COPY_TO is there)", probe: async () => { try { const r = await fetch("/api/text"); const j = (await r.json()) as { group?: boolean; groupProblem?: string }; found.group = j.groupProblem || ""; return !!j.group && !j.groupProblem; } catch { return false; } } },
       { label: "Each worker's language (Spanish texts)", fix: "RUN_ME.sql (section 18) — until then every crew text is in English", probe: async () => !(await sb().from("employees").select("lang").limit(1)).error },
       { label: "A crew text set up for later", fix: "RUN_ME.sql (section 19) — until then a text can only be sent right now", probe: async () => !(await sb().from("schedule_days").select("send_at").limit(1)).error },
       { label: "Set-up texts go out on their own", fix: "add CRON_SECRET (any long random string) and SUPABASE_SERVICE_ROLE_KEY (Supabase → Settings → API → service_role) in Vercel → Settings → Environment Variables, then Redeploy. Even then, a free Vercel plan only lets the timer run once a day (it refuses to deploy anything more often), so a text set for a particular hour really goes out the next time somebody has the portal open — which the office usually does each morning. On a paid plan, change the schedule in vercel.json to */15 * * * * and they go out on their own, on the quarter hour", probe: async () => { try { const r = await fetch("/api/text-due"); return !!((await r.json()) as { onItsOwn?: boolean }).onItsOwn; } catch { return false; } } },
@@ -884,8 +895,10 @@ export default function Settings() {
         {descReport && (
           <div className="mt-2 text-sm" data-desc-report>
             <div className="font-semibold">{descReport.checked === 0 ? "No cut descriptions found." : `${descReport.fixed.length} of ${descReport.checked} fixed.`}</div>
-            {descReport.fixed.map((f) => <div key={f.po} className="mt-1 text-xs"><b>{f.po}</b> · {f.after}</div>)}
-            {descReport.kept.map((k) => <div key={k.po} className="mt-1 text-xs text-inksoft"><b>{k.po}</b> · {k.why}</div>)}
+            {descReport.billed > 0 && <div className="mt-1 text-xs text-inksoft">{descReport.billed === 1 ? "1 job that is already invoiced or paid has a cut description; it was left alone." : `${descReport.billed} jobs that are already invoiced or paid have a cut description; they were left alone.`}</div>}
+            {descReport.readBefore > 0 && <div className="mt-1 text-xs text-inksoft">{descReport.readBefore === 1 ? "1 job was read once already since the portal last started and was left as it is." : `${descReport.readBefore} jobs were read once already since the portal last started and were left as they are.`}</div>}
+            {descReport.fixed.map((f) => <div key={f.id} className="mt-1 text-xs"><b>{f.po}</b> · {f.after}{f.crewRows ? ` · ${f.crewRows === 1 ? "1 crew row" : `${f.crewRows} crew rows`} updated` : ""}</div>)}
+            {descReport.kept.map((k) => <div key={k.id} className="mt-1 text-xs text-inksoft"><b>{k.po}</b> · {k.why}</div>)}
           </div>
         )}
         {checks === null && !checking && <div className="mt-2 text-xs text-inksoft">If something&apos;s missing it names the exact SQL file to paste into Supabase — or just run <span className="font-mono">supabase/RUN_ME.sql</span> to apply everything at once.</div>}

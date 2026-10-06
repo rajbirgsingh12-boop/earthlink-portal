@@ -24,6 +24,7 @@ import {
   type Change, type MeasureLine, type PhotoKind, type Stage,
 } from "@/lib/jobFlow";
 import { bookPrice } from "@/lib/priceServer";
+import { roomsIn } from "@/lib/priceBook";
 import type { SfLine } from "@/lib/measure";
 
 const env = (k: string) => process.env[k] || "";
@@ -147,9 +148,9 @@ async function targetOf(db: Db, b: Batch): Promise<Target | null> {
 }
 
 // ---- a PACT job's thread (lib/jobFlow): where the job is, and a measurement texted in ----
-interface ThreadJob { id: string; po_number?: string | null; job_number?: string | null; items?: SfLine[] | null; attachments?: { name: string; path: string }[] | null; notes?: string | null; tax_pct?: number | null; work_done?: boolean | null; canceled?: boolean | null; invoice_sent?: string | null; received?: boolean | null }
+interface ThreadJob { id: string; po_number?: string | null; job_number?: string | null; description?: string | null; items?: SfLine[] | null; attachments?: { name: string; path: string }[] | null; notes?: string | null; tax_pct?: number | null; work_done?: boolean | null; canceled?: boolean | null; invoice_sent?: string | null; received?: boolean | null }
 const threadJob = async (db: Db, id: string): Promise<ThreadJob | null> =>
-  (await db.get<ThreadJob>(`pact_jobs?id=eq.${id}&select=id,po_number,job_number,items,attachments,notes,tax_pct,work_done,canceled,invoice_sent,received`)).rows[0] || null;
+  (await db.get<ThreadJob>(`pact_jobs?id=eq.${id}&select=id,po_number,job_number,description,items,attachments,notes,tax_pct,work_done,canceled,invoice_sent,received`)).rows[0] || null;
 // a job the office has billed: a texted number never rewrites its lines
 const billed = (j: ThreadJob) => !!j.invoice_sent || !!j.received;
 const withNote = (notes: string | null | undefined, line: string) => `${(notes || "").trim()}${(notes || "").trim() ? "\n" : ""}${line}`;
@@ -245,8 +246,11 @@ async function measureIn(db: Db, o: { emp: Emp; body: string; from: string; sid:
 // under that id — one row per Twilio message id. Null when the save failed.
 async function measureOnJob(db: Db, job: ThreadJob, hits: Parameters<typeof applyMeasures>[1], o: { emp: Emp; body: string; from: string; sid: string; now: Date }): Promise<{ changes: Change[]; stillBlank: MeasureLine[] } | null> {
   // a Plaster line the job never had: at the price Settings saved, not the built-in list's
-  const plasterPrice = hits.some((h) => h.index === -1) ? await bookPrice("plaster") : 0;
-  const { items, changes } = applyMeasures(itemsOf(job), hits, plasterPrice);
+  const newPlaster = hits.some((h) => h.index === -1);
+  const plasterPrice = newPlaster ? await bookPrice("plaster") : 0;
+  // …and the primer and paint that go with it, by the room the job's words name
+  const prep = newPlaster ? { primer: await bookPrice("primer"), paint: await bookPrice("paint_sf"), rooms: roomsIn(job.description || "") } : undefined;
+  const { items, changes } = applyMeasures(itemsOf(job), hits, plasterPrice, prep);
   if (!changes.length) return null;
   const sub = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
   const tax = job.tax_pct === null || job.tax_pct === undefined ? 8.875 : Number(job.tax_pct);

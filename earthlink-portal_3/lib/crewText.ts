@@ -92,6 +92,27 @@ export const PHOTO_INVITE = { en: "Reply to this text with photos of the work.",
 // a PACT job's text carries the whole thread instead (lib/jobFlow's jobAsk:
 // before photos, the square feet, after photos) — never both
 const hasAsk = (b: string) => b.includes(PHOTO_INVITE.en) || b.includes(PHOTO_INVITE.es) || /reply with BEFORE photos|responda con fotos de ANTES/.test(b);
+// Twilio takes 1,600 characters. A text over a limit gives up words from its
+// LONGEST paragraph (the work line), cut at a word with "…" — the greeting,
+// the map link and the ask at the end all stay whole. (A paragraph that is
+// one unbroken run of characters is cut where it must be.)
+export function fitText(body: string, max: number): string {
+  let b = (body || "").trimEnd();
+  for (let guard = 0; b.length > max && guard < 12; guard++) {
+    const paras = b.split("\n\n");
+    let i = 0;
+    paras.forEach((p, k) => { if (p.length > paras[i].length) i = k; });
+    const over = b.length - max;
+    const p = paras[i].replace(/…$/, "");
+    const keep = Math.max(0, p.length - over - 1);
+    if (keep < 20) { b = b.slice(0, max - 1).replace(/\s+\S*$/, "").trimEnd() + "…"; break; }
+    const cut = p.slice(0, keep);
+    const atWord = cut.lastIndexOf(" ") > keep - 60 ? cut.slice(0, cut.lastIndexOf(" ")) : cut;
+    paras[i] = `${atWord.replace(/[\s,;:]+$/, "")}…`;
+    b = paras.join("\n\n");
+  }
+  return b;
+}
 export function withPhotoInvite(body: string): string {
   const b = (body || "").trimEnd();
   if (!b || hasAsk(b)) return b;

@@ -34,9 +34,9 @@ export function groupGreeting(body: string, names: string[]): string {
   const es = isEs(body);
   const list = nameList(names, es ? "es" : "en");
   if (!list) return body;
-  if (!es) return body.replace(/^Hi\b[^,.]*, this is Earth Link\./, `Hi ${list}, this is Earth Link.`);
+  if (!es) return body.replace(/^Hi\b[^,]*?, this is Earth Link\./, `Hi ${list}, this is Earth Link.`);
   const many = new Set(names.filter(Boolean)).size > 1;
-  let out = body.replace(/^Hola\b[^,.]*, le habla Earth Link\./, `Hola ${list}, ${many ? "les" : "le"} habla Earth Link.`);
+  let out = body.replace(/^Hola\b[^,]*?, le habla Earth Link\./, `Hola ${list}, ${many ? "les" : "le"} habla Earth Link.`);
   if (many) out = out.replace(/\bTiene trabajo\b/, "Tienen trabajo").replace(/\bresponda\b/g, "respondan").replace(/\bResponda\b/g, "Respondan").replace(/\bmande\b/g, "manden").replace(/\bse le avisará\b/g, "se les avisará").replace(/\bse le enviará\b/g, "se les enviará");
   return out;
 }
@@ -84,10 +84,16 @@ export async function sendCrew(db: Db | null, messages: CrewOut[], onSent: (m: C
     const crewIds = [...new Set([...crewRows.map((r) => r.employee_id), ...msgs.map((m) => rowOf.get(m.id!)!.employee_id)])];
     // the people in the thread: on the crew list, still with us, with a phone
     const crew = crewIds.map((id) => empOf.get(id)).filter((e): e is Emp => !!e && e.active !== false && !!cleanPhone(e.phone || ""));
+    // a worker whose message is here but who can't be in the thread (off the
+    // crew list, no usable number) is never marked texted by the thread: their
+    // text goes one to one and is stamped only when Twilio takes it
+    const inThread = msgs.filter((m) => crew.some((e) => e.id === rowOf.get(m.id!)!.employee_id));
+    const dropped = msgs.filter((m) => !inThread.includes(m));
+    if (!inThread.length) return { ...none, loose: msgs };
     const phones = [...new Set(crew.map((e) => cleanPhone(e.phone || "")))];
     let made = await groupFor(phones);
     if ("error" in made) return { ...none, loose: msgs, problem: made.error };
-    const bodies = groupBodies(msgs.map((m) => m.body), crew.map(first));
+    const bodies = groupBodies(inThread.map((m) => m.body), crew.map(first));
     const postAll = async (sid: string) => {
       for (const b of bodies) { const r = await postToGroupStatus(sid, b); if (!r.ok) return r; }
       return { ok: true, status: 201 };
@@ -102,12 +108,12 @@ export async function sendCrew(db: Db | null, messages: CrewOut[], onSent: (m: C
     }
     if (!r.ok) {
       const why = `the thread didn't take the text (${groupLastError() || `Twilio ${r.status || "didn't answer"}`}). Not sent again another way, so nobody gets it twice; try again in a minute`;
-      return { ...none, failed: msgs.map((m) => ({ to: m.to, id: m.id, error: why })), problem: why };
+      return { ...none, failed: inThread.map((m) => ({ to: m.to, id: m.id, error: why })), loose: dropped, problem: why };
     }
     const job = row.pact_job_id ? { kind: "pact" as const, id: row.pact_job_id } : row.release_id ? { kind: "rel" as const, id: row.release_id } : undefined;
     await rememberGroupJob(made.group.sid, made.group.members, job);
-    for (const m of msgs) await onSent(m).catch(() => {});
-    return { ...none, sent: msgs.length, grouped: true };
+    for (const m of inThread) await onSent(m).catch(() => {});
+    return { ...none, sent: inThread.length, grouped: true, loose: dropped };
   };
   // a few threads at a time: a long crew list stays well inside the route's minute
   const outcomes: Outcome[] = [];

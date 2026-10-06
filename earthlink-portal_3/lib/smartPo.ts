@@ -60,8 +60,8 @@ export function smartNotes(s: SmartPo): string[] {
   const out: string[] = [];
   const rowSum = s.rows.reduce((a, r) => a + cents(cents(r.unit_price) * (Number(r.qty) || 0)), 0);
   const near = (a: number, b: number) => Math.abs(a - b) <= 0.05;
-  if (s.rows.length > 0 && s.total > 1 && !near(rowSum, s.total) && !near(cents(rowSum * 1.08875), s.total)) out.push(`The rows add to $${rowSum.toFixed(2)} but the PO's total says $${s.total.toFixed(2)} — check the money`);
-  if (s.rows.some((r) => r.qty < 0 || r.unit_price < 0)) out.push("A row has a negative quantity or price — check it");
+  if (s.rows.length > 0 && s.total > 1 && !near(rowSum, s.total) && !near(cents(rowSum * 1.08875), s.total)) out.push("The rows don't add up to the PO's printed total: check the money on Billing");
+  if (s.rows.some((r) => r.qty < 0 || r.unit_price < 0)) out.push("A row has a negative quantity or price: check it");
   return out;
 }
 

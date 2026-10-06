@@ -41,7 +41,7 @@ export const PRICE_BOOK: PriceItem[] = [
   // agreed to.
   { key: "plaster", description: "Plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "\\bscrap(?:e|es|ed|ing)\\b(?=[^.]{0,30}\\b(?:walls?|ceilings?|plaster|skim|sheet\\s*rock|sheetrock|dry\\s*wall|drywall)\\b)|\\b(?:walls?|c(?:ei|ie|e|i)l+ings?)\\b|\\bplaster(?:ing)?\\b|\\bskim(?:\\s*coat)?\\b|\\bspackl(?:e|ing)\\b|\\bpatch(?:ing|es)?\\b|\\btape\\s*(?:and|&)\\s*spackle\\b|\\bscratch\\s*coat\\b" },
   { key: "popcorn", description: "Popcorn ceiling removal", unit: "SF", price: 5, group: "Plaster & walls", words: "popcorn|textured?\\s*ceilings?|stipple" },
-  { key: "wall_repair", description: "Scrape and plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "wall\\s*repair|repair[^.\\n]{0,12}walls?|hole[s]?\\s*in\\s*the\\s*walls?" },
+  { key: "wall_repair", description: "Scrape and plaster", unit: "SF", price: 6, group: "Plaster & walls", words: "wall\\s*repair|repair[^.:\\n]{0,12}walls?|hole[s]?\\s*in\\s*the\\s*walls?" },
   { key: "sheetrock", description: "Sheet rock", unit: "SF", price: 12, group: "Plaster & walls", words: "sheet\\s*rock|sheetrock|dry\\s*wall|drywall|gypsum|blue\\s*board|rock\\s*the\\s*walls?" },
   { key: "hourly", description: "Additional services", unit: "HOUR", price: 12, group: "Plaster & walls", words: "additional\\s*services?|time\\s*(?:and|&)\\s*materials?\\b|\\bt\\s*&\\s*m\\b|labou?r\\s*only|\\bhourly\\s*(?:work|labou?r|rate\\s*work)\\b" },
   // ---- painting (per apartment: 1 coat / 2 coat) ----
@@ -127,10 +127,12 @@ export const keywordsRe = (words: string): string =>
 // priming and painting are by the room — never by the square foot
 export const unitFor = (desc: string): string => {
   const d = desc.toLowerCase();
-  if (/(paint|primer|prime\b|priming)/.test(d) && !/(plaster|sheetrock|drywall|skim|popcorn)/.test(d)) return "ROOM";
-  if (/(plaster|sheetrock|drywall|skim|tile|floor|wall|ceiling|demo|popcorn)/.test(d)) return "SF";
+  // "paint 2 bedroom 1 bath apartment" is an apartment at the apartment price, counted
+  if (/paint/.test(d) && /\d\s*(?:bed\s*rooms?|br|bdrm)\b/.test(d) && /\b(?:apartments?|apt\b|units?|bath)/.test(d)) return "EACH";
+  if (/(paint|primer|prime\b|priming)/.test(d) && !/(plaster|sheet\s*rock|dry\s*wall|skim|popcorn)/.test(d)) return "ROOM";
+  if (/(plaster|sheet\s*rock|dry\s*wall|skim|tile|floor|wall|ceiling|demo|popcorn)/.test(d)) return "SF";
   if (/(molding|baseboard|cove|trim|pipe|caulk)/.test(d)) return "LF";
-  if (/(hour|labor)/.test(d)) return "HOUR";
+  if (/(hour|labor|additional\s*services?)/.test(d)) return "HOUR";
   return "EACH";
 };
 
@@ -276,12 +278,18 @@ const ROOMS = /(\d[\d,]*(?:\.\d+)?)\s*rooms?\b/gi;
 const ROOM_WORDS = /\b(kitchens?|bath\s*rooms?|bed\s*rooms?|living\s*rooms?|dining\s*rooms?|hall\s*ways?|foyers?|vestibules?|dens?|laundry\s*rooms?|utility\s*rooms?|pantr(?:y|ies)|nurser(?:y|ies)|entry\s*ways?)\b/gi;
 const STREETY = /\b(?:ave|avenue|st|street|blvd|boulevard|rd|road|dr|drive|ln|lane|pl|place|ct|court|ter|terrace|pkwy|parkway|houses?|towers?)\b/i;
 const NOT_A_ROOM_COUNT = /(?:apt\.?|apartment|unit|#|no\.?|bldg|building|floor|fl\.?|suite|ste\.?|p\.?o\.?)\s*$/i;
+// "except the kitchen", "not the bathroom": the rooms after these words in a
+// sentence are the ones being left alone
+const EXCEPT = /\b(?:except(?:ing)?|excluding|excluded|not|minus|other\s+than|without|but)\b/i;
 const roomsNamed = (t: string): number => {
   const kinds = new Map<string, number>();
   for (const m of t.matchAll(ROOM_WORDS)) {
     const at = m.index as number;
     // "1465 Bedford Avenue" and "Kitchen Lane" name a place, not a room
     if (STREETY.test(t.slice(at, at + m[1].length + 14))) continue;
+    // a room named after "except" in its sentence is the one NOT being done
+    const sentAt = Math.max(t.lastIndexOf(".", at), t.lastIndexOf(";", at), t.lastIndexOf("\n", at)) + 1;
+    if (EXCEPT.test(t.slice(sentAt, at))) continue;
     const lead = t.slice(Math.max(0, at - 14), at);
     const kind = m[1].toLowerCase().replace(/\s+/g, "").replace(/(?:es|s)$/, "");
     // "hall bath" and "master bedroom" are one room, not two
@@ -338,7 +346,8 @@ interface Hit { key: string; qty: number; said: boolean; at: number; scrape?: bo
 export function priceLinesFor(text: string, opts: PriceMatchOpts = {}): PriceLineOut[] {
   const book = opts.book || PRICE_BOOK;
   const bundle = opts.bundle ?? true;
-  const raw = flatten(text || "").trim();
+  // "Court Ordered Repairs:" is a heading on the partner's POs, not repair work
+  const raw = flatten(text || "").replace(/\bcourt\s*ordered\s*(?:repairs?|work)\s*[:\-]\s*/gi, "").trim();
   if (!raw) return [];
   // they don't do two coats — one is what an apartment is quoted at, unless the
   // PO itself asks for two and is paying for two
@@ -548,6 +557,24 @@ export const cleanLineWording = <T extends { description: string }>(items: T[]):
   return { items: changed ? out : items, changed };
 };
 
+// A PO says its work more than once: the description, the scope, the rows.
+// Each is priced on its own and the biggest count per line wins, so a
+// description that repeats the rows with a heading in front ("Court ordered
+// repairs: paint 3 rooms" over a "Paint 3 rooms" row) never doubles anything.
+// Within ONE text the counts still add ("plaster 200 sq ft and 150 sq ft").
+export function priceLinesForTexts(texts: string[], opts: PriceMatchOpts = {}): PriceLineOut[] {
+  const merged = new Map<string, PriceLineOut>();
+  for (const t of texts) {
+    for (const l of priceLinesFor(t, opts)) {
+      const had = merged.get(l.key);
+      if (!had) { merged.set(l.key, { ...l }); continue; }
+      had.qty = Math.max(had.qty, l.qty);
+      if (/^Scrape and /.test(l.description)) had.description = l.description;
+    }
+  }
+  return [...merged.values()];
+}
+
 // which price-list lines a description already stands for — so work a PO
 // priced in its own words never gets a second, list-priced copy beside it
 export const keysIn = (description: string, book?: PriceItem[]): string[] =>
@@ -568,10 +595,24 @@ export const soleKey = (description: string, book?: PriceItem[]): string | null 
 export interface JobLine { description: string; qty: number; unit: string; unit_price: number; key?: string; base?: string }
 export const PLACEHOLDER = 1;                       // "$1.00" on a PO means "price me", not a price
 export const realPrice = (n: unknown) => Number(n) > PLACEHOLDER;
-export function mergePricedLines(text: string, existing: JobLine[], bk: PriceItem[],
+const WET = ["plaster", "wall_repair", "popcorn", "sheetrock"];
+export function mergePricedLines(text: string | string[], existing: JobLine[], bk: PriceItem[],
   opts: { bundle?: boolean; refresh?: boolean; fillOnly?: boolean; prepOnly?: boolean } = {}): JobLine[] {
-  const lines = priceLinesFor(text, { book: bk, bundle: opts.bundle ?? true });
+  const lines = Array.isArray(text) ? priceLinesForTexts(text, { book: bk, bundle: opts.bundle ?? true }) : priceLinesFor(text, { book: bk, bundle: opts.bundle ?? true });
   if (lines.length === 0) return existing;
+  // on a PO that priced its own rows, the work a priced row NAMES is paid for
+  // in that row: "bedroom wall scrape plaster paint $800" already has its
+  // painting (and the primer under it), so no prep goes beside it
+  const paidFor = new Set<string>();
+  let allIn = false;
+  if (opts.fillOnly) {
+    for (const it of existing) {
+      if (!realPrice(it.unit_price)) continue;
+      const ks = keysIn(it.description, bk);
+      ks.forEach((k) => paidFor.add(k));
+      if (ks.includes("paint_sf") && ks.some((k) => WET.includes(k))) allIn = true;
+    }
+  }
   // what each line already on the job stands for. A line the portal wrote
   // remembers its own price-list line; one typed by hand or read off a PO is
   // matched only when it reads as exactly one line and nothing else, so
@@ -597,6 +638,7 @@ export function mergePricedLines(text: string, existing: JobLine[], bk: PriceIte
       // never billed without its primer and paint.
       const isPrep = l.key === "primer" || l.key === "paint_sf";
       if (opts.fillOnly && !(opts.prepOnly && isPrep)) continue;
+      if (opts.fillOnly && isPrep && (allIn || paidFor.has(l.key))) continue;
       out.push({ description: l.description, qty: l.qty, unit: l.unit, unit_price: l.unit_price, key: l.key });
       covered.set(l.key, out.length - 1);
       continue;
@@ -611,8 +653,10 @@ export function mergePricedLines(text: string, existing: JobLine[], bk: PriceIte
     // stays the PO's, because that one is the agreement
     if (realPrice(it.unit_price)) {
       // a line that already carries a price of its own is the PO's or theirs
-      // — re-pricing only touches lines the portal itself wrote
-      if (opts.refresh && it.key) out[at] = { ...it, description: l.description, unit: l.unit, unit_price: l.unit_price, qty: Number(it.qty) > 1 ? it.qty : l.qty };
+      // — re-pricing only touches lines the portal itself wrote, and only
+      // their wording and price: the unit and the count on a job already in
+      // the portal are never changed from here
+      if (opts.refresh && it.key) out[at] = { ...it, description: l.description, unit_price: l.unit_price };
       // a hand-typed "Plaster" that someone also priced by hand still takes
       // the list's wording ("Scrape and plaster") — the typed price stays
       else if (opts.refresh && takesName) out[at] = { ...it, description: l.description, key: it.key || l.key };
@@ -642,6 +686,10 @@ export function normalizeJobLines(items: JobLine[], text: string, bk: PriceItem[
     const k = keyOf(it);
     const p = k ? byKey.get(k) : undefined;
     if (!k || !p || p.unit === "HOUR") return it;
+    // a price the PO itself states (a row with no key of the list's own) is
+    // the agreement, whatever it is measured in: "Paint 450 SF at $1.50"
+    // stays that, never one room at the list's price
+    if (realPrice(it.unit_price) && !it.key) return { ...it, key: k };
     const u = normUnit(it.unit || "");
     const want = p.unit === "SF" ? "SF" : p.unit === "ROOM" ? "ROOM" : "EACH";
     if (u === want || (want === "SF" && u === "LF")) {
@@ -656,18 +704,34 @@ export function normalizeJobLines(items: JobLine[], text: string, bk: PriceItem[
     return { ...it, key: k, unit: want, qty: fixedQty, unit_price: p.price > 0 ? p.price : it.unit_price };
   });
   const keys = new Set(out.map(keyOf).filter((k): k is string => !!k));
-  const wet = ["plaster", "wall_repair", "popcorn", "sheetrock"].some((k) => keys.has(k));
-  const sized = [...keys].some((k) => /^paint_\d/.test(k));
-  if (wet) {
+  // what every line NAMES, priced rows included: a row reading "scrape
+  // plaster paint" at the PO's price has its painting in that price
+  const named = new Set<string>();
+  let allIn = false;
+  for (const it of out) {
+    const ks = keysIn(it.description, bk);
+    ks.forEach((k) => named.add(k));
+    if (realPrice(it.unit_price) && ks.includes("paint_sf") && ks.some((k) => WET.includes(k))) allIn = true;
+  }
+  const wet = WET.some((k) => keys.has(k) || named.has(k));
+  const sized = [...keys, ...named].some((k) => /^paint_\d/.test(k));
+  if (wet && !allIn) {
     for (const add of ["primer", "paint_sf"]) {
       const p = byKey.get(add);
-      if (!p || keys.has(add) || (add === "paint_sf" && sized)) continue;
+      if (!p || keys.has(add) || named.has(add) || (add === "paint_sf" && sized)) continue;
       out.push({ description: p.description, qty: rooms, unit: "ROOM", unit_price: p.price, key: add });
       keys.add(add);
       changed = true;
     }
   }
-  if (sized && keys.has("paint_sf")) { out = out.filter((it) => keyOf(it) !== "paint_sf"); changed = true; }
+  // an apartment price covers the painting: the by-the-room paint line the
+  // list put there goes; a document's own priced row (as it came in, before
+  // a key was put on it above) was asked for and stays
+  const asked = new Set(items.map((it, i) => (realPrice(it.unit_price) && !it.key ? i : -1)).filter((i) => i >= 0));
+  if (sized && out.some((it, i) => keyOf(it) === "paint_sf" && !asked.has(i))) {
+    out = out.filter((it, i) => keyOf(it) !== "paint_sf" || asked.has(i));
+    changed = true;
+  }
   return { items: out, changed };
 }
 
@@ -677,11 +741,13 @@ export function normalizeJobLines(items: JobLine[], text: string, bk: PriceItem[
 // agreement. A PO that totals a dollar hasn't told us the money — the priced
 // lines have.
 export function linesFromPoRead(f: { desc: string; scope: string; rows: { description: string; qty: number; unit_price: number; uom?: string; base?: string }[] },
-  unreadable: boolean, amount: number, bk: PriceItem[]): { items: JobLine[]; amount: number } {
+  unreadable: boolean, amount: number, bk: PriceItem[]): { items: JobLine[]; amount: number; warnings: string[] } {
   // a PO whose printed total is the $1 placeholder has priced nothing — any
   // row that arrives with a price on it there is a misread (a date, a line
-  // number), never an agreement
-  const placeholderPo = amount > 0 && amount <= PLACEHOLDER;
+  // number), never an agreement. Rows that each say $1 are the same
+  // placeholder however they add up ($3 for three rooms is not a price).
+  const rowsPlaceholder = f.rows.length > 0 && f.rows.every((r) => Number(r.unit_price) > 0 && Number(r.unit_price) <= PLACEHOLDER);
+  const placeholderPo = (amount > 0 && amount <= PLACEHOLDER) || rowsPlaceholder;
   // and a "row" that is only a date or a form label is not work at all
   const junkRow = (d: string) => /^\s*(?:access|scheduled?|start|work|due|order(?:ed)?)\s*date\b/i.test(d) || /^\s*date\b/i.test(d) || !/[A-Za-z]{3}/.test(d);
   const seed: JobLine[] = unreadable ? []
@@ -698,11 +764,21 @@ export function linesFromPoRead(f: { desc: string; scope: string; rows: { descri
   const poPriced = seed.some((it) => realPrice(it.unit_price));
   // the same words must only be priced once — a PO often repeats its
   // description as its scope, and counting both doubles every quantity
+  // (each text is priced on its own and the biggest count wins, so a
+  // description that repeats the rows never doubles them)
   const said = [...new Set([f.desc, f.scope, f.rows.map((r) => r.description).join(" ")].map((x) => (x || "").trim()).filter(Boolean))];
-  const priced = normalizeJobLines(mergePricedLines(said.join(". "), seed, bk, { fillOnly: poPriced, prepOnly: poPriced }), said.join(". "), bk).items
+  const priced = normalizeJobLines(mergePricedLines(said, seed, bk, { fillOnly: poPriced, prepOnly: poPriced }), said.join(". "), bk).items
     // a placeholder the list had no answer for is work still to be priced —
     // showing it as a dollar would put "$1.00" on a proposal
     .map((it) => (Number(it.unit_price) === PLACEHOLDER ? { ...it, unit_price: 0 } : it));
-  const lineSub = priced.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
-  return { items: priced, amount: amount > PLACEHOLDER || lineSub <= 0 ? amount : Math.round(lineSub * 1.08875 * 100) / 100 };
+  const sub = (xs: JobLine[]) => xs.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
+  const lineSub = sub(priced);
+  // the PO priced its rows and the list still added to them (the primer and
+  // paint that go with plaster, a row the PO left at nothing): the papers
+  // would bill more than the PO's own figure, so the office is told, in
+  // words without money on them (notes are read by everyone)
+  const warnings: string[] = [];
+  if (poPriced && Math.abs(lineSub - sub(seed)) > 0.5) warnings.push("The price list added to or priced work beyond the PO's own rows: check the lines against the PO before invoicing");
+  const keepPrinted = amount > PLACEHOLDER && !placeholderPo;
+  return { items: priced, amount: keepPrinted || lineSub <= 0 ? amount : Math.round(lineSub * 1.08875 * 100) / 100, warnings };
 }

@@ -293,7 +293,11 @@ function finish(sums: Map<number, { qty: number; explicit: boolean; line: Measur
 
 // ---- the numbers onto the job's lines ----
 export interface Change { name: string; qty: number; was: number; unit: LineUnit }
-export function applyMeasures(items: SfLine[], hits: MeasureHit[], plasterPrice = 0): { items: SfLine[]; changes: Change[] } {
+// the prep a new Plaster line brings with it (the owner's rule: plaster is
+// never billed without its primer and paint, by the room) — the prices as
+// Settings saved them and the rooms the job's words name
+export interface PrepPrices { primer: number; paint: number; rooms: number }
+export function applyMeasures(items: SfLine[], hits: MeasureHit[], plasterPrice = 0, prep?: PrepPrices): { items: SfLine[]; changes: Change[] } {
   const next = items.map((it) => ({ ...it }));
   const changes: Change[] = [];
   const lines = measureLines(items);
@@ -303,6 +307,15 @@ export function applyMeasures(items: SfLine[], hits: MeasureHit[], plasterPrice 
     if (h.index === -1) {
       next.push({ description: "Plaster", qty, unit: "SF", unit_price: plasterPrice, key: "plaster" });
       changes.push({ name: "Plaster", qty, was: 0, unit: "SF" });
+      // the primer and paint go on the job quietly, by the rooms the job's
+      // words name: with no room named they start at the list's blank (1), so
+      // the answer asks the worker how many rooms, the way any blank line does
+      if (prep) {
+        const rooms = Math.max(1, Math.round(prep.rooms) || 1);
+        const has = (key: string, word: RegExp) => next.some((it) => it.key === key || (!it.key && word.test(it.description || "")));
+        if (!has("primer", /\bprim(?:er|e|ing)\b/i)) next.push({ description: "Primer", qty: rooms, unit: "ROOM", unit_price: prep.primer, key: "primer" });
+        if (!has("paint_sf", /\bpaint/i)) next.push({ description: "Paint", qty: rooms, unit: "ROOM", unit_price: prep.paint, key: "paint_sf" });
+      }
       continue;
     }
     const l = lines.find((x) => x.index === h.index);
@@ -368,7 +381,7 @@ export function gotBeforeText(n: number, label: string, lines: MeasureLine[], la
 // the numbers are on the job's lines — and so on the proposal and the invoice
 export function gotMeasureText(changes: Change[], label: string, stillBlank: MeasureLine[], lang0?: string | null): string {
   const lang = langOf(lang0);
-  const got = changes.map((c) => `${c.name} ${c.qty} ${unitWord(c.unit, lang)}`).join(", ");
+  const got = changes.map((c) => `${c.name} ${c.qty} ${c.unit === "ROOM" && c.qty === 1 ? (lang === "es" ? "cuarto" : "room") : unitWord(c.unit, lang)}`).join(", ");
   if (lang === "es") {
     return `Anotado: ${got} en el ${label}. Ya está en la propuesta y la factura.${stillBlank.length ? ` Falta: ${list(stillBlank)}.` : " Al terminar, responda con fotos de DESPUES."}`;
   }
@@ -417,7 +430,7 @@ export function askMeasureText(p: Extract<Parsed, { kind: "ask" }>, label: strin
 // `lost`: pictures in the text that didn't come through — then nothing is "all set"
 export function gotBothText(kind: PhotoKind, n: number, label: string, changes: Change[], stillBlank: MeasureLine[], lang0?: string | null, marked = false, lost = 0): string {
   const lang = langOf(lang0);
-  const got = changes.map((c) => `${c.name} ${c.qty} ${unitWord(c.unit, lang)}`).join(", ");
+  const got = changes.map((c) => `${c.name} ${c.qty} ${c.unit === "ROOM" && c.qty === 1 ? (lang === "es" ? "cuarto" : "room") : unitWord(c.unit, lang)}`).join(", ");
   const tail = marked ? ` ${MARKED_DONE[lang]}` : "";
   const thanks = lost ? "" : lang === "es" ? " ¡Gracias, todo listo!" : " Thanks, all set!";
   if (lang === "es") {

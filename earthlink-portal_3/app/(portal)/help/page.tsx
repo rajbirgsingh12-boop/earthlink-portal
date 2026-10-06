@@ -40,7 +40,9 @@ const SECTIONS: { icon?: string; title: string; lines: string[] }[] = [
     lines: [
       "Private partner work. Tap “📄 Upload PO / proposal” and the job builds itself from the purchase order.",
       "Take 📷 Before photos when you start and 📷 After photos when you finish.",
+      "Photos PDF (next to those buttons, and under Documents) puts a job's before and after pictures on one PDF with the job on top, ready to send out.",
       "Work lines are what gets billed — add a line if the job runs past what the PO listed.",
+      "A PO read in is priced the way the work is billed: plaster and sheetrock by the square foot, and they bring their primer and paint by the room (the rooms the PO names, or one); paint and primer on their own by the room; an apartment-size paint (“paint 2 bedroom 1 bath apartment”) at the apartment price; a door by the door. A price the PO itself prints is kept as printed. These rules run only when a PO is first read in or re-read: a job already in the portal, or one entered by hand, stays the way it was entered, and Price from list never changes a line's unit or count.",
       "⬇ Invoice package (zip) — under the job's Papers menu — makes one PDF with the invoice, the PO, and all photos, ready to send. PACT has its own Schedule under the PACT menu.",
       "Text worker (in the job's ⋯ menu) opens a ready-made text with the job's address and work description — pick the worker and hit send.",
     ],

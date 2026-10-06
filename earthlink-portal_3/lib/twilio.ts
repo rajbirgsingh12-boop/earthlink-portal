@@ -15,7 +15,7 @@ export function twilioProblem(): string {
   const msvc = env("TWILIO_MESSAGING_SERVICE_SID").trim();
   if (msvc && !/^MG[0-9a-f]{32}$/i.test(msvc)) return "TWILIO_MESSAGING_SERVICE_SID should start with MG (34 characters)";
   const from = env("TWILIO_FROM").trim();
-  if (!msvc && !/^\+[1-9]\d{9,14}$/.test(from)) return `TWILIO_FROM must be the company number with +1 in front and nothing else, like +19175550123 (it is "${from}")`;
+  if (!msvc && !/^\+[1-9]\d{9,14}$/.test(from)) return "TWILIO_FROM must be the company number with +1 in front and nothing else, like +19175550123";
   if (env("TWILIO_API_BASE")) return "TWILIO_API_BASE is set in Vercel — that is only for testing; remove it so texts really go to Twilio";
   return "";
 }
@@ -31,7 +31,7 @@ const cleanPhone = (s: string): string => {
   return d.length > 11 && d.length <= 15 && (s || "").trim().startsWith("+") ? `+${d}` : "";
 };
 export const copyTo = (): string => cleanPhone(env("TEXT_COPY_TO"));
-export const copyProblem = (): string => (env("TEXT_COPY_TO") && !copyTo() ? `TEXT_COPY_TO must be a phone number with +1 in front, like +19175550123 (it is "${env("TEXT_COPY_TO")}")` : "");
+export const copyProblem = (): string => (env("TEXT_COPY_TO") && !copyTo() ? "TEXT_COPY_TO must be a phone number with +1 in front, like +19175550123" : "");
 // a line to the owner's phone, on its own (a worker's text coming in, the portal's answer)
 export async function sendCopy(body: string): Promise<void> {
   const to = copyTo();

@@ -17,7 +17,7 @@
 import { NextResponse } from "next/server";
 import { sendCrew } from "@/lib/crewSend";
 import { publicOrigin } from "@/lib/groupText";
-import { langOf, withJobAsk, withPhotoInvite } from "@/lib/crewText";
+import { fitText, langOf, withJobAsk, withPhotoInvite } from "@/lib/crewText";
 import { jobAsk } from "@/lib/jobFlow";
 import type { SfLine } from "@/lib/measure";
 import { dueBody, dueSkip, dueWork } from "@/lib/dueText";
@@ -35,7 +35,7 @@ const cleanPhone = (s: string): string => {
   return d.length > 11 && d.length <= 15 && (s || "").trim().startsWith("+") ? `+${d}` : ""; // as lib/notify's
 };
 interface Row { id: string; day: string; employee_id: string; description?: string | null; address?: string | null; texted?: boolean; send_at?: string | null; release_id?: string | null; pact_job_id?: string | null }
-interface Emp { id: string; name?: string | null; phone?: string | null; lang?: string | null }
+interface Emp { id: string; name?: string | null; phone?: string | null; lang?: string | null; active?: boolean | null }
 interface Job { id: string; po_number?: string | null; job_number?: string | null; address?: string | null; development?: string | null; property_unit?: string | null; description?: string | null; start_date?: string | null; canceled?: boolean; work_done?: boolean; items?: unknown }
 interface Rel { id: string; rel_number?: string | null; location?: string | null; address?: string | null; canceled?: boolean }
 
@@ -119,7 +119,7 @@ async function sweep(req: Request) {
   }
 
   const ids = (xs: (string | null | undefined)[]) => [...new Set(xs.filter(Boolean) as string[])];
-  const empQ = `employees?id=in.(${ids(due.map((r) => r.employee_id)).join(",")})&select=id,name,phone`;
+  const empQ = `employees?id=in.(${ids(due.map((r) => r.employee_id)).join(",")})&select=id,name,phone,active`;
   const [emps, jobs, rels] = await Promise.all([
     // before RUN_ME section 18 there is no language column — then everyone reads English
     get<Emp>(`${empQ},lang`).then((e) => e ?? get<Emp>(empQ)),
@@ -144,7 +144,9 @@ async function sweep(req: Request) {
   // every text written at once — a Spanish work line waits on Claude, and
   // five of them one after another would run the function out of time
   const built = await Promise.all(due.map(async (row) => {
-    const emp = empOf.get(row.employee_id);
+    // a worker taken off the crew list is nobody to text, like one deleted
+    const emp0 = empOf.get(row.employee_id);
+    const emp = emp0 && emp0.active !== false ? emp0 : undefined;
     const job = row.pact_job_id ? jobOf.get(row.pact_job_id) : undefined;
     const rel = row.release_id ? relOf.get(row.release_id) : undefined;
     const phone = cleanPhone(emp?.phone || "");
@@ -156,7 +158,8 @@ async function sweep(req: Request) {
     const body = dueBody(row, { emp: emp!, job, rel, work });
     // a PACT job's text asks for the whole thread; a release's just for photos
     const asked = !invite ? body : job ? withJobAsk(body, jobAsk(emp!.lang, Array.isArray(job.items) ? (job.items as SfLine[]) : [])) : withPhotoInvite(body);
-    return { to: phone, body: asked, id: row.id, sendAt: row.send_at || null };
+    // Twilio's 1,600 holds whatever the row's work line ran to (the work gives, never the ask)
+    return { to: phone, body: fitText(asked, 1600), id: row.id, sendAt: row.send_at || null };
   }));
   const out = built.filter((m): m is NonNullable<typeof m> => !!m);
   await clear(missed);

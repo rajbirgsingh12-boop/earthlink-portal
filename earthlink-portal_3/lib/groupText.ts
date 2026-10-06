@@ -23,6 +23,7 @@ export function groupProblem(): string {
   const from = env("TWILIO_FROM").trim();
   if (!from) return "TWILIO_FROM (the company number itself) is needed for a group thread, even with a Messaging Service";
   if (TOLL_FREE.test(from)) return "a group thread needs a local (10-digit) company number: Twilio can't group-text from a toll-free number";
+  if ((env("VERCEL_ENV") || env("VERCEL")) && !env("TWILIO_WEBHOOK_URL").trim() && !env("VERCEL_PROJECT_PRODUCTION_URL").trim()) return "TWILIO_WEBHOOK_URL (the portal's address, https://earthlink-gc.com) isn't set, so Twilio can't be told where the threads report";
   return "";
 }
 export const groupsOn = (): boolean => !groupProblem();
@@ -44,7 +45,7 @@ async function api(method: "GET" | "POST" | "DELETE", path: string, form?: Recor
   }
 }
 // Twilio's own words for what went wrong, with its code — what Settings shows
-const twilioWords = (r: Api) => `${(r.json.message as string) || `Twilio error ${r.status}`}${r.json.code ? ` (Twilio ${r.json.code})` : ""}`;
+const twilioWords = (r: Api) => `${((r.json.message as string) || `Twilio error ${r.status}`).replace(/\+?\d[\d\s().-]{8,}\d/g, "a number")}${r.json.code ? ` (Twilio ${r.json.code})` : ""}`;
 
 export interface Group { sid: string; key: string; members: string[] }
 // the thread's name is its people, so the same crew always lands in the same one
@@ -64,7 +65,7 @@ export async function groupFor(phones: string[]): Promise<{ group: Group } | { e
   if (members.length > 9) return { error: "more than nine people on one job; Twilio allows ten in a thread, counting the company number" };
   const key = groupKey(members);
   const had = known.get(key);
-  if (had) return { group: had };
+  if (had) { lastError = ""; return { group: had }; }
   let r = await api("GET", `/v1/Conversations/${encodeURIComponent(key)}`);
   let sid = r.ok ? String(r.json.sid || "") : "";
   if (sid) {
@@ -123,7 +124,7 @@ export async function postToGroup(sid: string, body: string): Promise<boolean> {
 }
 export async function postToGroupStatus(sid: string, body: string): Promise<{ ok: boolean; status: number }> {
   const r = await api("POST", `/v1/Conversations/${sid}/Messages`, { Author: PORTAL_IDENTITY, Body: body });
-  if (!r.ok) lastError = twilioWords(r);
+  lastError = r.ok ? "" : twilioWords(r);
   return { ok: r.ok, status: r.status };
 }
 // what a thread is about, kept on the thread itself: its people and the job
@@ -154,7 +155,7 @@ export async function ensureGroupWebhook(origin: string): Promise<boolean> {
   if (!origin) return false;
   if (webhookAt === origin) return true;
   const r = await api("POST", "/v1/Configuration/Webhooks", { Method: "POST", PostWebhookUrl: `${origin}/api/chat-in`, Filters: ["onMessageAdded"] });
-  if (r.ok) webhookAt = origin; else lastError = twilioWords(r);
+  if (r.ok) { webhookAt = origin; lastError = ""; } else lastError = twilioWords(r);
   return r.ok;
 }
 // the portal's public address, for the webhook: what the office's browser or
@@ -166,6 +167,10 @@ export function publicOrigin(req: Request): string {
   // real threads at itself (set TWILIO_WEBHOOK_URL to pin the address outright)
   if (env("VERCEL_ENV") && env("VERCEL_ENV") !== "production") return "";
   if (env("VERCEL_PROJECT_PRODUCTION_URL").trim()) return `https://${env("VERCEL_PROJECT_PRODUCTION_URL").trim()}`;
+  // on Vercel the address is pinned above; a request's own headers are what
+  // the caller sent and never decide where every crew thread reports. Off
+  // Vercel (a laptop, a test run) the request is the only thing that knows.
+  if (env("VERCEL_ENV") || env("VERCEL")) return "";
   const u = new URL(req.url);
   const host = (req.headers.get("x-forwarded-host") || req.headers.get("host") || u.host).split(",")[0].trim();
   const proto = (req.headers.get("x-forwarded-proto") || u.protocol.replace(":", "")).split(",")[0].trim();

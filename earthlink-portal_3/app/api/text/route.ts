@@ -10,10 +10,11 @@
 //   (or TWILIO_MESSAGING_SERVICE_SID instead of TWILIO_FROM)
 import { NextResponse } from "next/server";
 import { copyProblem, copyTo, twilioConfigured, twilioProblem } from "@/lib/twilio";
-import { sendCrew } from "@/lib/crewSend";
+import { sendCrew, type CrewOut } from "@/lib/crewSend";
+import { cleanPhone } from "@/lib/notify";
 import { groupLastError, groupProblem, groupsOn, publicOrigin } from "@/lib/groupText";
 import { photosBackOn, serviceDb } from "@/lib/photoStore";
-import { withJobAsk, withPhotoInvite } from "@/lib/crewText";
+import { fitText, withJobAsk, withPhotoInvite } from "@/lib/crewText";
 import { jobAsk } from "@/lib/jobFlow";
 import type { SfLine } from "@/lib/measure";
 
@@ -79,7 +80,7 @@ export async function POST(req: Request) {
   let body: { messages?: { to?: string; body?: string; id?: string }[]; skipTexted?: boolean };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Bad request" }, { status: 400 }); }
   let messages = (body.messages || [])
-    .map((m) => ({ to: String(m.to || "").trim(), body: String(m.body || "").trim().slice(0, 1400), id: String(m.id || "").trim() }))
+    .map((m) => ({ to: String(m.to || "").trim(), body: fitText(String(m.body || "").trim(), 1400), id: String(m.id || "").trim() }))
     .filter((m) => /^\+\d{10,15}$/.test(m.to) && m.body);
   if (messages.length === 0 || messages.length > 100) {
     return NextResponse.json({ error: "Nothing to send (check the phone numbers)" }, { status: 400 });
@@ -133,9 +134,16 @@ export async function POST(req: Request) {
       return { ...m, body: job ? withJobAsk(m.body, jobAsk(/^hola\b/i.test(m.body) ? "es" : "en", linesOfJob.get(job) ?? true)) : withPhotoInvite(m.body) };
     });
   }
+  // whatever was added, Twilio's 1,600 holds (the work line gives, never the ask)
+  messages = messages.map((m) => ({ ...m, body: fitText(m.body, 1600) }));
+  // the owner's copy says who the text went to, by name
+  const names = copyTo() && serviceDb() ? (await serviceDb()!.get<{ name?: string; phone?: string }>("employees?select=name,phone&active=not.is.false")).rows : [];
+  const nameOf = new Map<string, string>();
+  for (const e of names) { const ph = cleanPhone(e.phone || ""), nm = (e.name || "").trim(); if (ph && nm && !nameOf.has(ph)) nameOf.set(ph, nm); }
+  const outgoing: CrewOut[] = messages.map((m) => { const who = nameOf.get(m.to); return who ? { ...m, who } : m; });
   // the send itself, and the TEXTED mark the moment Twilio takes each one —
   // even if the phone never sees this response, a retry knows who was texted
-  const { sent, failed, grouped, groupProblem: gp } = await sendCrew(serviceDb(), messages, async (m) => {
+  const { sent, failed, grouped, groupProblem: gp } = await sendCrew(serviceDb(), outgoing, async (m) => {
     if (!m.id) return;
     await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, {
       method: "PATCH", headers: supaHeaders, body: JSON.stringify({ texted: true }),

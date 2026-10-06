@@ -38,6 +38,13 @@ export function serviceDb() {
       const r = await fetch(`${url}/rest/v1/${path}`, { method: "PATCH", headers: { ...J, Prefer: "return=minimal" }, body: JSON.stringify(row) }).catch(() => null);
       return !!r && r.ok;
     },
+    // the same, handing back the rows it changed: none with ok means the
+    // filter matched nothing (the row moved on since it was read), which a
+    // plain patch answers 204 to and can't tell from a save that took
+    async patchRows<T>(path: string, row: Record<string, unknown>): Promise<{ ok: boolean; rows: T[] }> {
+      const r = await fetch(`${url}/rest/v1/${path}`, { method: "PATCH", headers: { ...J, Prefer: "return=representation" }, body: JSON.stringify(row) }).catch(() => null);
+      return r && r.ok ? { ok: true, rows: ((await r.json().catch(() => [])) as T[]) || [] } : { ok: false, rows: [] };
+    },
     async upload(path: string, bytes: ArrayBuffer, type: string): Promise<boolean> {
       const r = await fetch(`${url}/storage/v1/object/docs/${seg(path)}`, {
         method: "POST", headers: { ...H, "Content-Type": type || "application/octet-stream", "x-upsert": "true", "cache-control": "3600" }, body: bytes,
@@ -134,7 +141,11 @@ export async function photosBackOn(): Promise<boolean> {
   const db = serviceDb();
   let on = false;
   if (db && twilioConfigured() && env("TWILIO_AUTH_TOKEN")) {
-    on = (await db.get<{ id: string }>("texted_photos?select=id&limit=1")).rows.length > 0;
+    const r = await db.get<{ id: string }>("texted_photos?select=id&limit=1");
+    // a read that failed just now says nothing: the last answer stands (and a
+    // first-ever failure leans to asking, which costs nothing if nobody answers)
+    if (!r.ok) return onCache ? onCache.on : true;
+    on = r.rows.length > 0;
   }
   onCache = { at: Date.now(), on };
   return on;

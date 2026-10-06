@@ -71,6 +71,9 @@ const blankFields = (): PactPoFields => ({ po: "", poDate: "", desc: "", scope: 
 
 // the file, read into a job. `priceBook` is the tab's own copy of the price
 // list (the Billing tab caches it; the Schedule tab loads it fresh).
+// a warning as the notes may carry it: the words, never the money
+export const noMoney = (w: string): string => w.replace(/\$\s?[\d,]+(?:\.\d+)?/g, "the amount").replace(/\s{2,}/g, " ").trim();
+
 export async function intakePoFile(file: File, priceBook: () => Promise<PriceItem[]>): Promise<IntakeOutcome> {
   let fields: PactPoFields | null = null;
   let how = "";
@@ -212,8 +215,9 @@ export async function intakePoFile(file: File, priceBook: () => Promise<PriceIte
   }
   // a "NOT APPROVED" stamp is normal — the partner approves after the
   // work is done — so only real reading calls are flagged
-  const flags = [...(f.warnings || [])];
-  const { items: priced, amount: amountOut } = linesFromPoRead(f, unreadable, amount, await priceBook()) as { items: JobLine[]; amount: number };
+  const { items: priced, amount: amountOut, warnings: listNotes } = linesFromPoRead(f, unreadable, amount, await priceBook()) as { items: JobLine[]; amount: number; warnings: string[] };
+  // the notes are read by everyone with the card open, so no figure goes on them
+  const flags = [...(f.warnings || []), ...(listNotes || [])].map(noMoney);
   const newRow: Record<string, unknown> = {
     partner: f.partner, development: "", job_number: f.po, description: (f.desc || f.scope).slice(0, 600), amount: amountOut,
     po_number: f.po, po_date: f.poDate, address: f.address, property_unit: f.punit,

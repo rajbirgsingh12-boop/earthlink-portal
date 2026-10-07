@@ -12,6 +12,8 @@ import { sb } from "@/lib/supabase";
 import { useLive } from "@/lib/useLive";
 import { prettyPhone } from "@/lib/notify";
 import { useDebounced } from "@/lib/useDebounced";
+import Stamp from "@/components/Stamp";
+import Disclosure from "@/components/Disclosure";
 
 interface Photo { name: string; path: string }
 export interface Batch {
@@ -96,8 +98,8 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
       const token = (await sb().auth.getSession()).data.session?.access_token || "";
       const res = await fetch("/api/texted-photos", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ id: b.id, ...body }) });
       const j = (await res.json().catch(() => ({}))) as { error?: string; n?: number; label?: string };
-      if (!res.ok) { flash(j.error || "Couldn't do that — try again"); return; }
-      flash(body.action === "throw" ? "Thrown away" : body.action === "seen" ? "Cleared ✓" : `${photosN(j.n || 0)} on ${j.label} ✓`);
+      if (!res.ok) { flash(j.error || "Couldn't do that. Try again."); return; }
+      flash(body.action === "throw" ? "Photos thrown away ✓" : body.action === "seen" ? "Cleared from the list ✓" : `${photosN(j.n || 0)} on ${j.label} ✓`);
       setPicking(null);
       await load();
     } finally { setBusy(false); }
@@ -125,11 +127,11 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
   const strip = (b: Batch) => (
     <div className="mt-1.5 flex flex-wrap gap-1.5">
       {(b.photos || []).slice(0, 8).map((p) => (
-        <button key={p.path} className="block h-16 w-16 overflow-hidden rounded-sm border border-rulesoft" onClick={() => open(p.path)} title={p.name}>
+        <button key={p.path} type="button" className="block h-16 w-16 overflow-hidden rounded-sm border border-rulesoft transition-opacity active:opacity-80" onClick={() => open(p.path)} aria-label={`Open ${p.name}`}>
           {thumbs[p.path]
             // eslint-disable-next-line @next/next/no-img-element
             ? <img src={thumbs[p.path]} alt={p.name} className="h-full w-full object-cover" />
-            : <span className="grid h-full w-full place-items-center text-xs text-inksoft">…</span>}
+            : <span className="skeleton block h-full w-full" />}
         </button>
       ))}
       {(b.photos || []).length > 8 && <span className="grid h-16 place-items-center px-1 text-[12px] text-inksoft">+{(b.photos || []).length - 8}</span>}
@@ -139,21 +141,21 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
   return (
     <div className="card mb-3 p-3" data-texted-photos>
       <div className="mb-1 flex flex-wrap items-center gap-2">
-        <div className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">📱 From the crew</div>
-        {nobody.length > 0 && <span className="stamp border-alert text-alert" data-nobody-count>⚠ {nobody.length} nobody home</span>}
-        {held.length > 0 && <span className="stamp border-alert text-alert" data-texted-waiting>{held.length} need a job</span>}
-        {measures.length > 0 && <span className="stamp border-ok text-ok" data-measure-count>📏 {measures.length} measured</span>}
-        {done.length > 0 && <span className="stamp border-ok text-ok" data-done-count>✅ {done.length} ready to invoice</span>}
+        <div className="section-label">📱 From the crew</div>
+        {nobody.length > 0 && <Stamp tone="alert" glyph="⚠" label={`${nobody.length} nobody home`} data-nobody-count />}
+        {held.length > 0 && <Stamp tone="alert" label={`${held.length} need a job`} data-texted-waiting />}
+        {measures.length > 0 && <Stamp tone="ok" label={`${measures.length} measured`} data-measure-count />}
+        {done.length > 0 && <Stamp tone="ok" label={`${done.length} ready to invoice`} data-done-count />}
       </div>
       {done.map((b) => {
         const at = spots[b.pact_job_id || ""];
         return (
-          <div key={b.id} className="border-t border-rulesoft py-2.5" data-done={b.id}>
+          <div key={b.id} className="anim-row border-t border-rulesoft py-2.5" data-done={b.id}>
             <div className="text-[14px]"><b className="text-ok">✅ Work done</b> · <b>{at ? at.label : "a job"}</b>{at?.sub ? <span className="text-inksoft"> · {at.sub}</span> : null}</div>
             <div className="text-[12px] text-inksoft">{who(b)} sent the after photos · {when(b.created_at)} · ready to invoice</div>
             <div className="mt-2 flex flex-wrap gap-2">
-              {b.pact_job_id && <a className="btn btn-primary min-h-[44px] px-3 py-1.5 text-[13px]" href={`/pact?job=${b.pact_job_id}`} data-open-billing>Open on Billing</a>}
-              <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
+              {b.pact_job_id && <a className="btn btn-primary btn-sm" href={`/pact?job=${b.pact_job_id}`} data-open-billing>Open the job</a>}
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
             </div>
           </div>
         );
@@ -161,11 +163,11 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
       {measures.map((b) => {
         const at = spots[b.pact_job_id || ""];
         return (
-          <div key={b.id} className="border-t border-rulesoft py-2.5" data-measure={b.id}>
+          <div key={b.id} className="anim-row border-t border-rulesoft py-2.5" data-measure={b.id}>
             <div className="text-[14px]"><b>📏 {who(b)}</b> texted the square feet → <b>{at ? at.label : "a job"}</b>{at?.sub ? <span className="text-inksoft"> · {at.sub}</span> : null} · {when(b.created_at)}</div>
-            <div className="text-[13px]" data-measure-note>{measured(b)} <span className="text-inksoft">— on the job&apos;s lines, the proposal and the invoice</span></div>
+            <div className="text-[13px]" data-measure-note>{measured(b)}<span className="text-inksoft">: on the job&apos;s lines, the proposal and the invoice</span></div>
             {(b.body || "").trim() && measured(b) !== (b.body || "").trim() && <div className="text-[12px] text-inksoft [overflow-wrap:anywhere]">“{(b.body || "").trim()}”</div>}
-            <button className="btn btn-ghost mt-1.5 min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
+            <button type="button" className="btn btn-ghost btn-sm mt-1.5" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
           </div>
         );
       })}
@@ -173,7 +175,7 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
         const at = spots[b.pact_job_id || b.release_id || ""];
         const words = (b.body || "").trim();
         return (
-          <div key={b.id} className="border-t border-rulesoft py-2.5" data-nobody={b.id}>
+          <div key={b.id} className="anim-row border-t border-rulesoft py-2.5" data-nobody={b.id}>
             <div className="text-[14px]"><b className="text-alert">⚠ Nobody home</b> · <b>{at ? at.label : "a job"}</b>{at?.sub ? <span className="text-inksoft"> · {at.sub}</span> : null}</div>
             <div className="text-[12px] text-inksoft">{who(b)} · {when(b.created_at)}{words && !/^no+\.?$/i.test(words) ? <> · “{words}”</> : null}</div>
             {(b.note || "").trim() && <div className="mt-0.5 text-[13px]" data-nobody-note>{(b.note || "").trim()}</div>}
@@ -182,30 +184,30 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
                 and the crew is texted the change (the Schedule page does both) */}
             {onReschedule && b.pact_job_id && (
               <div className="mt-2 flex flex-wrap items-center gap-2">
-                <label htmlFor={`newday-${b.id}`} className="text-[11px] uppercase tracking-widest text-inksoft">New day</label>
-                <input id={`newday-${b.id}`} type="date" className="field min-h-[44px] w-auto font-mono text-[13px]" value={newDay[b.id] ?? tomorrow()} onChange={(e) => setNewDay((p) => ({ ...p, [b.id]: e.target.value }))} data-reschedule-day />
-                <button className="btn btn-primary min-h-[44px] px-3 py-1.5 text-[13px]" disabled={busy || !(newDay[b.id] ?? tomorrow())} data-reschedule
+                <label htmlFor={`newday-${b.id}`} className="section-label">New day</label>
+                <input id={`newday-${b.id}`} type="date" className="field w-auto font-mono text-[13px]" value={newDay[b.id] ?? tomorrow()} onChange={(e) => setNewDay((p) => ({ ...p, [b.id]: e.target.value }))} data-reschedule-day />
+                <button type="button" className="btn btn-primary btn-sm" disabled={busy || !(newDay[b.id] ?? tomorrow())} data-reschedule
                   onClick={async () => { setBusy(true); try { await onReschedule(b, newDay[b.id] ?? tomorrow()); await load(); } finally { setBusy(false); } }}>Move it and text the crew</button>
               </div>
             )}
             <div className="mt-2 flex flex-wrap gap-2">
               {onShow && (b.pact_job_id || b.release_id)
-                ? <button className={`btn ${onReschedule && b.pact_job_id ? "btn-ghost" : "btn-primary"} min-h-[44px] px-3 py-1.5 text-[13px]`} onClick={() => onShow(b)} data-show-job>{onReschedule && b.pact_job_id ? "Open on the calendar" : "Give it a new day…"}</button>
+                ? <button type="button" className={`btn ${onReschedule && b.pact_job_id ? "btn-ghost" : "btn-primary"} btn-sm`} onClick={() => onShow(b)} data-show-job>{onReschedule && b.pact_job_id ? "Open on the calendar" : "Pick the day on the calendar…"}</button>
                 : <span className="self-center text-[12px] text-inksoft" data-job-gone>That job isn&apos;t in the portal any more.</span>}
-              <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
             </div>
           </div>
         );
       })}
       {replies.map((b) => (
-        <div key={b.id} className="border-t border-rulesoft py-2.5" data-reply={b.id}>
+        <div key={b.id} className="anim-row border-t border-rulesoft py-2.5" data-reply={b.id}>
           <div className="text-[14px]"><b>{who(b)}</b> texted “{(b.body || "").trim()}” · {when(b.created_at)}</div>
           {(b.note || "").trim() && <div className="text-[12px] text-inksoft">{(b.note || "").trim()}</div>}
-          <button className="btn btn-ghost mt-1.5 min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
+          <button type="button" className="btn btn-ghost btn-sm mt-1.5" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
         </div>
       ))}
       {held.map((b) => (
-        <div key={b.id} className="border-t border-rulesoft py-2.5" data-held={b.id}>
+        <div key={b.id} className="anim-row border-t border-rulesoft py-2.5" data-held={b.id}>
           <div className="text-[14px]"><b>{who(b)}</b> texted {photosN((b.photos || []).length)} · {when(b.created_at)}</div>
           {(b.body || "").trim() && <div className="text-[12px] text-inksoft [overflow-wrap:anywhere]">“{(b.body || "").trim()}”</div>}
           {strip(b)}
@@ -213,24 +215,21 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
             ? <JobPick batch={b} busy={busy} onPick={(s) => act(b, { action: "file", ...(s.kind === "pact" ? { pact_job_id: s.id } : { release_id: s.id }) })} onCancel={() => setPicking(null)} />
             : (
               <div className="mt-2 flex flex-wrap gap-2">
-                <button className="btn btn-primary min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => setPicking(b.id)} disabled={busy} data-pick-job>Put them on a job…</button>
-                <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => { if (window.confirm(`Throw away ${photosN((b.photos || []).length)} from ${who(b)}?`)) act(b, { action: "throw" }); }} disabled={busy} data-throw>✕ Throw away</button>
+                <button type="button" className="btn btn-primary btn-sm" onClick={() => setPicking(b.id)} disabled={busy} data-pick-job>Put them on a job…</button>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => { if (window.confirm(`Throw away ${photosN((b.photos || []).length)} from ${who(b)}?`)) act(b, { action: "throw" }); }} disabled={busy} data-throw>Throw away</button>
               </div>
             )}
         </div>
       ))}
       {filed.length > 0 && (
-        <div className="border-t border-rulesoft pt-2">
-          <button className="min-h-[44px] w-full text-left text-[13px] text-inksoft" onClick={() => setLately(!lately)} data-texted-lately>
-            {lately ? "▾" : "▸"} Put on jobs by themselves lately ({filed.length})
-          </button>
-          {lately && filed.map((b) => {
+        <Disclosure className="border-t border-rulesoft pt-1" label={`Placed automatically in the last ${LATELY_DAYS} days`} count={filed.length} open={lately} onToggle={() => setLately(!lately)} data-texted-lately>
+          {filed.map((b) => {
             const at = spots[b.pact_job_id || b.release_id || ""];
             return (
               <div key={b.id} className="border-t border-rulesoft py-2" data-filed={b.id}>
                 <div className="flex flex-wrap items-center gap-x-2 text-[13px]">
                   <span><b>{who(b)}</b> · {photosN((b.photos || []).length)} → <b>{at ? at.label : "a job"}</b> · {when(b.created_at)}</span>
-                  {picking !== b.id && <button className="min-h-[44px] px-1 text-[12px] font-semibold text-work underline" onClick={() => setPicking(b.id)} disabled={busy} data-move>Wrong job?</button>}
+                  {picking !== b.id && <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPicking(b.id)} disabled={busy} data-move>Wrong job?</button>}
                 </div>
                 {picking === b.id && (
                   <>
@@ -241,7 +240,7 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
               </div>
             );
           })}
-        </div>
+        </Disclosure>
       )}
     </div>
   );
@@ -289,18 +288,18 @@ function JobPick({ batch, busy, onPick, onCancel }: { batch: Batch; busy: boolea
     return [...near, ...found].filter((s) => (seen.has(s.id) ? false : (seen.add(s.id), true)));
   }, [near, found]);
   return (
-    <div className="mt-2 rounded-sm border border-rule bg-white p-2" data-job-pick>
-      {near.length > 0 && <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Where they were working</div>}
-      <input className="field mb-2 min-h-[44px] py-2 font-mono" inputMode="text" placeholder="Or type a PO or release number" value={q} onChange={(e) => setQ(e.target.value)} />
+    <div className="anim-open mt-2 rounded-sm border border-rule bg-white p-2" data-job-pick>
+      {near.length > 0 && <div className="section-label mb-1">Where they were working</div>}
+      <input type="search" enterKeyHint="search" autoComplete="off" className="field mb-2 py-2 font-mono" placeholder="PO or release number" aria-label="PO or release number" value={q} onChange={(e) => setQ(e.target.value)} />
       <div className="grid gap-1.5">
         {choices.map((s) => (
-          <button key={s.id} className="min-h-[44px] rounded-sm border border-rulesoft px-3 py-2 text-left text-[14px] hover:border-work" onClick={() => onPick(s)} disabled={busy} data-spot={s.id}>
+          <button key={s.id} type="button" className="row-btn rounded-sm border border-rulesoft px-3 py-2 text-[14px] hover:border-work active:bg-paper" onClick={() => onPick(s)} disabled={busy} data-spot={s.id}>
             <b>{s.label}</b>{s.sub && <span className="text-inksoft"> · {s.sub}</span>}
           </button>
         ))}
-        {choices.length === 0 && <div className="text-[12px] text-inksoft">{dq ? "No job with that number." : "Type the number from the PO or the release."}</div>}
+        {choices.length === 0 && <div className="empty py-3">{dq ? "No job with that number." : "Type the number from the PO or the release."}</div>}
       </div>
-      <button className="btn btn-ghost mt-2 min-h-[44px] px-3 py-1.5 text-[13px]" onClick={onCancel}>Cancel</button>
+      <button type="button" className="btn btn-ghost btn-sm mt-2" onClick={onCancel}>Cancel</button>
     </div>
   );
 }

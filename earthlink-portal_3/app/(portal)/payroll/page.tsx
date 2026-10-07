@@ -20,6 +20,7 @@ import { useNumBuffer } from "@/lib/numBuffer";
 import PageHeader from "@/components/PageHeader";
 import Disclosure from "@/components/Disclosure";
 import { RowActions } from "@/components/ActionMenu";
+import Toast, { useFlash } from "@/components/Toast";
 
 interface Emp { id: string; name: string; trade: string; base_rate: number; active: boolean; phone?: string | null; }
 interface Week { id: string; week_ending: string; paid_map?: Record<string, string> | null; }
@@ -34,6 +35,13 @@ const fridayOf = (iso: string) => {
   const add = (5 - d.getDay() + 7) % 7;
   d.setDate(d.getDate() + add);
   return localISO(d);
+};
+// "Oct 3": the short form of a day, for a range or a paid mark
+const shortDay = (iso: string) => new Date(iso + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
+// the week as people say it: "Oct 3 to Oct 9, 2026", the year once (twice only when the week straddles New Year)
+const weekRange = (we: string) => {
+  const start = addDays(we, -6);
+  return start.slice(0, 4) === we.slice(0, 4) ? `${shortDay(start)} to ${prettyDate(we)}` : `${prettyDate(start)} to ${prettyDate(we)}`;
 };
 
 function summarize(entries: Entry[], emps: Emp[]) {
@@ -54,6 +62,9 @@ function summarize(entries: Entry[], emps: Emp[]) {
   });
 }
 
+// the one line a failed save shows; the real error never reaches the office
+const SIGNAL = "Check your signal and try again.";
+
 export default function Payroll() {
   const [emps, setEmps] = useState<Emp[]>([]);
   const [weeks, setWeeks] = useState<Week[]>([]);
@@ -62,23 +73,24 @@ export default function Payroll() {
   const [rels, setRels] = useState<RelRow[]>([]);
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [linkContract, setLinkContract] = useState("");
-  const [relQ, setRelQ] = useState<Record<string, string>>({});
   const [weekCheck, setWeekCheck] = useState<{ rel: RelRow; result: LaborResult }[]>([]);
-  const [msg, setMsg] = useState("");
+  const { msg, flash } = useFlash();
   const [pickDate, setPickDate] = useState(""); // calendar for opening any week
+  const [loaded, setLoaded] = useState(false); // the first read of the weeks list is back: skeleton rows until then
+  const [loadingWeek, setLoadingWeek] = useState(false); // an opened week's hours are on their way: skeleton cards until then
+  const [making, setMaking] = useState(false); // Make payroll is busy, so the button reads "Opening…" and can't be tapped again
   // release-first entry: the week is organized as one card per release
   const [extraSections, setExtraSections] = useState<{ release_id: string | null; label: string }[]>([]);
   const [relPickQ, setRelPickQ] = useState(""); // the "+ Add a release" search
   const [addFor, setAddFor] = useState<string | null>(null); // section currently adding a worker
   const [addQ, setAddQ] = useState("");
   const checkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const makingWeek = useRef(false); // guards Make payroll against double-taps
+  const makingWeek = useRef(false); // guards Make payroll against double-taps (state alone is a render behind a quick second tap)
   // which week the screen is asking about — a slower answer for a week the user
   // has already navigated away from is thrown away instead of being shown
   const openReq = useRef(0);
   const paidChain = useRef<Promise<void>>(Promise.resolve()); // PAID marks save one at a time
   const weekRef = useRef<Week | null>(null); // the open week as of right now, for queued saves
-  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
   const num = useNumBuffer();
   // the accountant can read everything here but the database won't accept their
   // writes — show a view-only page instead of edits that silently don't save
@@ -117,6 +129,7 @@ export default function Payroll() {
     }
     if (allR) setRels(allR.sort((x, y) => (parseFloat(x.rel_number) || 0) - (parseFloat(y.rel_number) || 0)));
     if (c) setContracts(c as Contract[]);
+    if (!only) setLoaded(true); // a full load has answered: the list can show its rows (or say there are none)
   };
   useEffect(() => { load(); }, []);
   useEffect(() => { weekRef.current = openWeek; }, [openWeek]);
@@ -173,13 +186,21 @@ export default function Payroll() {
     // themselves into the week the user just left
     setEntries([]); setWeekCheck([]);
     setExtraSections([]); setRelPickQ(""); setAddFor(null); setAddQ("");
+    setLoadingWeek(true);
     const { data } = await sb().from("timesheet_entries").select("*").eq("week_id", w.id);
     if (openReq.current !== req) return; // the user moved on — this answer is stale
+    setLoadingWeek(false);
     const ents = ((data || []) as Entry[])
       .filter((en) => en.week_id === w.id)
       .map((en) => ({ ...en, hours: (en.hours || []).map(Number) }));
     setEntries(ents);
     loadWeekCheck(ents);
+  };
+  // back to the weeks list. The focused box saves itself on blur, so blurring
+  // first puts the hours being typed in before the week closes.
+  const closeWeek = () => {
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    openReq.current += 1; setOpenWeek(null); setEntries([]); setWeekCheck([]); setLoadingWeek(false); load();
   };
   // the one button: opens the payroll for the week containing forDate (today by
   // default), creating it first if needed — the latest week's crew comes over
@@ -187,6 +208,7 @@ export default function Payroll() {
   const makePayroll = async (forDate?: string) => {
     if (makingWeek.current) return; // double-taps must not create the week twice
     makingWeek.current = true;
+    setMaking(true);
     try {
     const we = fridayOf(forDate || localISO());
     const existing = weeks.find((w) => w.week_ending === we);
@@ -195,7 +217,7 @@ export default function Payroll() {
     const { data: fresh } = await sb().from("timesheet_weeks").select("*").eq("week_ending", we).limit(1);
     if (fresh && fresh[0]) { await load(); openW(fresh[0] as Week); return; }
     const { data, error } = await sb().from("timesheet_weeks").insert({ week_ending: we }).select().single();
-    if (error || !data) { flash(error?.message || "Failed"); return; }
+    if (error || !data) { flash(`Couldn't open that week. ${SIGNAL}`); return; }
     // if two devices raced past the check, the OLDEST copy wins — only the loser
     // deletes its own; the winner sees itself first and keeps it
     const { data: all } = await sb().from("timesheet_weeks").select("*").eq("week_ending", we).order("created_at");
@@ -209,7 +231,7 @@ export default function Payroll() {
       if (prev?.length) await sb().from("timesheet_entries").insert(prev.map((p: Entry) => ({ week_id: data.id, employee_id: p.employee_id, job_label: p.job_label, rate: p.rate, release_id: p.release_id, trade: p.trade, hours: [0, 0, 0, 0, 0, 0, 0] })));
     }
     await load(); openW(data as Week);
-    } finally { makingWeek.current = false; }
+    } finally { makingWeek.current = false; setMaking(false); }
   };
   const missingTradeCol = /column|schema cache/i;
   const addEntry = async (empId: string, empObj?: Emp, rel?: { id: string | null; label: string }) => {
@@ -221,7 +243,7 @@ export default function Payroll() {
     };
     // classification starts empty — the user types it per release and it's cross-checked live
     const { data, error } = await sb().from("timesheet_entries").insert(base).select().single();
-    if (error) { flash(error.message); return; }
+    if (error) { flash(`Couldn't add that worker. ${SIGNAL}`); return; }
     if (data) setEntries((prev) => (prev.some((x) => x.id === (data as Entry).id) ? prev : [...prev, { ...(data as Entry), hours: ((data as Entry).hours || []).map(Number) }]));
   };
   // picking a template name adds that worker to the crew on the spot, then to the week
@@ -247,7 +269,7 @@ export default function Payroll() {
       return;
     }
     const { data, error } = await sb().from("employees").insert({ name: t.name, trade: t.trade, base_rate: 0 }).select().single();
-    if (error || !data) { flash(error?.message || "Couldn't add worker"); return; }
+    if (error || !data) { flash(`Couldn't add that worker. ${SIGNAL}`); return; }
     const emp = data as Emp;
     setEmps((prev) => (prev.some((e) => e.id === emp.id) ? prev : [...prev, emp].sort((a, b) => a.name.localeCompare(b.name))));
     addEntry(emp.id, emp, rel);
@@ -259,7 +281,7 @@ export default function Payroll() {
     const trade = (en.trade ?? "").trim() || null;
     const { error } = await sb().from("timesheet_entries").update({ trade }).eq("id", en.id!);
     if (!error) return;
-    flash(missingTradeCol.test(error.message) ? "Run supabase/upgrade_payroll_class.sql so classifications save" : error.message);
+    flash(missingTradeCol.test(error.message) ? "Classifications can't be saved until the database update is run (Settings → System check)" : `Couldn't save that classification. ${SIGNAL}`);
   };
   const dayChain = useRef<Promise<void>>(Promise.resolve()); // fallback saves run one at a time
   const saveDay = (en: Entry, i: number, n: number) => {
@@ -282,23 +304,23 @@ export default function Payroll() {
     hours[i] = n;
     setEntries((prev) => prev.map((x) => (x.id === en.id ? { ...x, hours } : x)));
     const { error } = await sb().from("timesheet_entries").update({ hours }).eq("id", en.id!);
-    if (error) flash(error.message);
+    if (error) flash(`Couldn't save those hours. ${SIGNAL}`);
   };
   const delEntry = async (id: string) => {
     const { error } = await sb().from("timesheet_entries").delete().eq("id", id);
-    if (error) { flash(error.message); return; }
+    if (error) { flash(`Couldn't remove that worker. ${SIGNAL}`); return; }
     setEntries((prev) => prev.filter((e) => e.id !== id));
   };
   const deleteWeek = async (w: Week) => {
     if (!window.confirm(`Delete the payroll week ending ${prettyDate(w.week_ending)} and ALL its hours? This can't be undone.`)) return;
     const { error: e1 } = await sb().from("timesheet_entries").delete().eq("week_id", w.id);
-    if (e1) { flash(e1.message); return; }
+    if (e1) { flash(`Couldn't delete that week. ${SIGNAL}`); return; }
     const { error: e2 } = await sb().from("timesheet_weeks").delete().eq("id", w.id);
-    if (e2) { flash(e2.message); return; }
+    if (e2) { flash(`Couldn't delete that week. ${SIGNAL}`); return; }
     // make sure it's really gone — a silently-blocked delete would leave ghost hours
     const { data: still } = await sb().from("timesheet_weeks").select("id").eq("id", w.id).limit(1);
-    if (still && still.length > 0) { flash("That week wouldn't delete — check your account's role"); load(); return; }
-    if (openWeek?.id === w.id) { openReq.current += 1; setOpenWeek(null); setEntries([]); setWeekCheck([]); }
+    if (still && still.length > 0) { flash("That week wouldn't delete. Check your account's role in Settings."); load(); return; }
+    if (openWeek?.id === w.id) { openReq.current += 1; setOpenWeek(null); setEntries([]); setWeekCheck([]); setLoadingWeek(false); }
     load(); flash("Week and its hours deleted");
   };
 
@@ -320,7 +342,7 @@ export default function Payroll() {
       if (map[eid]) delete map[eid]; else map[eid] = localISO();
       setOpenWeek((prev) => (prev && prev.id === wid ? { ...prev, paid_map: map } : prev));
       const { error } = await sb().from("timesheet_weeks").update({ paid_map: map }).eq("id", wid);
-      if (error) { flash(/column/i.test(error.message) ? "Run supabase/upgrade_payroll_paid.sql first" : error.message); load(); }
+      if (error) { flash(/column/i.test(error.message) ? "PAID marks can't be saved until the database update is run (Settings → System check)" : `Couldn't save that PAID mark. ${SIGNAL}`); load(); }
     }).catch(() => {});
   };
 
@@ -329,7 +351,7 @@ export default function Payroll() {
 
   // ---------- weekly sheet in the paper-template layout, one tab per contract ----------
   const exportTemplate = async () => {
-    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine \u2014 check your signal and try again"); return; }
+    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine. Check your signal and try again."); return; }
     if (!openWeek || entries.length === 0) { flash("No hours this week yet"); return; }
     const relById = new Map(rels.map((r) => [r.id, r]));
     const groups = new Map<string, Entry[]>();
@@ -524,54 +546,57 @@ export default function Payroll() {
 
   const relLabel = (r: RelRow) => {
     const c = contracts.find((x) => x.id === r.contract_id);
-    return `#${r.rel_number} — ${r.location}${c ? ` · ${contractLabel(c)}` : ""}`;
+    return `#${r.rel_number} · ${r.location}${c ? ` · ${contractLabel(c)}` : ""}`;
   };
 
   if (openWeek) {
-    const range = `${prettyDate(addDays(openWeek.week_ending, -6))} – ${prettyDate(openWeek.week_ending)}`;
+    const we = openWeek.week_ending;
+    // the releases the "+ Add a release" box is offering right now (Enter takes the first)
+    const relMatches = relPickQ.trim()
+      ? rels
+        .filter((r) => !r.canceled)
+        .filter((r) => !linkContract || r.contract_id === linkContract)
+        .filter((r) => relLabel(r).toLowerCase().includes(relPickQ.trim().toLowerCase()))
+        .slice(0, 40)
+      : [];
+    // a picked release gets its own card, opened on the worker box
+    const pickRel = (r: RelRow) => {
+      setExtraSections((prev) => (prev.some((x) => x.release_id === r.id) ? prev : [...prev, { release_id: r.id, label: `#${r.rel_number} — ${r.location}` }]));
+      setRelPickQ(""); setAddFor(r.id); setAddQ("");
+    };
+    const pickNoRelease = () => {
+      setExtraSections((prev) => (prev.some((x) => x.release_id === null) ? prev : [...prev, { release_id: null, label: "" }]));
+      setRelPickQ(""); setAddFor("none"); setAddQ("");
+    };
     return (
-      <div>
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5">
-            <button className="btn btn-ghost min-h-[44px]" onClick={() => { openReq.current += 1; setOpenWeek(null); setEntries([]); setWeekCheck([]); load(); }}>← Weeks</button>
-            <div>
-              <div className="font-display text-lg font-bold uppercase leading-tight">Week of {range}</div>
-              <div className="text-[11px] text-inksoft">Sat & Sun count as overtime</div>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <button className="btn min-h-[44px]" onClick={exportTemplate}>Weekly sheet (xlsx)</button>
-            <button className="btn btn-primary min-h-[44px]" onClick={() => {
-              // blur fires the focused field's save synchronously, then close right away
-              (document.activeElement as HTMLElement | null)?.blur?.();
-              openReq.current += 1; setOpenWeek(null); setEntries([]); setWeekCheck([]); load();
-            }}>{readOnly ? "Close" : "Save & close"}</button>
-          </div>
-        </div>
+      <div key={openWeek.id} className="page-enter">
+        {loadingWeek && <div className="busy-bar" aria-busy="true" aria-label="Working" />}
+        <PageHeader title={`Week ending ${prettyDate(we)}`} sub={`Sat ${shortDay(addDays(we, -6))} to Fri ${shortDay(we)} · Sat and Sun are overtime`}
+          back={{ label: "Weeks", onClick: closeWeek }}
+          primary={<button type="button" className="btn btn-primary" onClick={exportTemplate}>⬇ Weekly sheet (Excel)</button>} />
 
         {/* one card per release: pick the release, add its workers, punch their days */}
         <div className="mb-3 grid gap-2 md:grid-cols-2">
           <ContractPicker contracts={contracts} value={linkContract} onChange={setLinkContract}
-            extra={[{ id: "", label: "All contracts" }]} placeholder="Filter releases by contract…" />
+            extra={[{ id: "", label: "All contracts" }]} />
           {!readOnly && <div className="relative">
-            <input className="field" placeholder="+ Add a release to this week — type release # or development…"
-              value={relPickQ} onChange={(e) => setRelPickQ(e.target.value)} />
+            <input className="field" placeholder="+ Add a release (number or development)" autoComplete="off" enterKeyHint="done"
+              value={relPickQ} onChange={(e) => setRelPickQ(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); if (relMatches[0]) pickRel(relMatches[0]); }
+                else if (e.key === "Escape") { e.preventDefault(); setRelPickQ(""); }
+              }} />
             {relPickQ.trim() && (
-              <div className="card absolute inset-x-0 top-full z-10 max-h-56 overflow-y-auto shadow-lg">
-                {rels
-                  .filter((r) => !r.canceled)
-                  .filter((r) => !linkContract || r.contract_id === linkContract)
-                  .filter((r) => relLabel(r).toLowerCase().includes(relPickQ.trim().toLowerCase()))
-                  .slice(0, 40)
-                  .map((r) => (
-                    <button key={r.id} className="block w-full border-b border-rulesoft p-2.5 text-left text-sm"
-                      onMouseDown={(ev) => { ev.preventDefault(); setExtraSections((prev) => (prev.some((x) => x.release_id === r.id) ? prev : [...prev, { release_id: r.id, label: `#${r.rel_number} — ${r.location}` }])); setRelPickQ(""); setAddFor(r.id); setAddQ(""); }}>
-                      {relLabel(r)}
-                      {Number(r.labor_hours) > 0 && <span className="ml-1 font-mono text-[11px] text-inksoft">· needs {r.labor_hours}h</span>}
-                    </button>
-                  ))}
-                <button className="block w-full p-2.5 text-left text-sm text-inksoft"
-                  onMouseDown={(ev) => { ev.preventDefault(); setExtraSections((prev) => (prev.some((x) => x.release_id === null) ? prev : [...prev, { release_id: null, label: "" }])); setRelPickQ(""); setAddFor("none"); setAddQ(""); }}>
+              <div className="popover max-h-72 overflow-y-auto">
+                {relMatches.map((r) => (
+                  <button key={r.id} type="button" className="row-btn border-b border-rulesoft px-3 py-2.5 text-[15px]"
+                    onPointerDown={(ev) => { ev.preventDefault(); pickRel(r); }}>
+                    {relLabel(r)}
+                    {Number(r.labor_hours) > 0 && <span className="ml-1 font-mono text-[11px] text-inksoft">· needs {r.labor_hours}h</span>}
+                  </button>
+                ))}
+                <button type="button" className="row-btn px-3 py-2.5 text-[15px] text-inksoft"
+                  onPointerDown={(ev) => { ev.preventDefault(); pickNoRelease(); }}>
                   + Hours without a release (shop, misc)
                 </button>
               </div>
@@ -606,26 +631,33 @@ export default function Payroll() {
             ? allSections.filter((s) => s.release_id === null || relById2.get(s.release_id)?.contract_id === linkContract)
             : allSections;
           const hiddenCount = allSections.length - sections.length;
+          const hiddenLine = hiddenCount === 1 ? "1 release from another contract is hidden." : `${hiddenCount} releases from other contracts are hidden.`;
           if (sections.length === 0) {
+            // the week's hours are still on their way: two placeholder cards hold the spot
+            if (loadingWeek) {
+              return (<>{[0, 1].map((i) => <div key={`sk${i}`} className="card mb-3 card-pad"><div className="skeleton h-24 w-full" /></div>)}</>);
+            }
             return (
-              <div className="card p-5 text-sm text-inksoft">
+              <div className="empty anim-fade">
                 {hiddenCount > 0
-                  ? `No hours for this contract yet — ${hiddenCount} release${hiddenCount === 1 ? "" : "s"} from other contracts ${hiddenCount === 1 ? "is" : "are"} hidden. Switch the filter back to "All contracts" to see everything.`
-                  : "Pick a release above — then add its workers and type their hours for each day."}
+                  ? `No hours on this contract yet. ${hiddenLine} Switch the filter to All contracts to see them.`
+                  : readOnly ? "No hours this week yet." : "Add a release above, then its workers, then each day's hours."}
               </div>
             );
           }
-          return (<>
+          return (<div className="anim-fade">
           {hiddenCount > 0 && (
-            <div className="mb-2 text-[12px] text-inksoft">
-              Showing this contract only — {hiddenCount} release{hiddenCount === 1 ? "" : "s"} from other contracts hidden.{" "}
-              <button className="underline" onClick={() => setLinkContract("")}>Show all</button>
+            <div className="mb-2 flex flex-wrap items-center gap-2 text-[12px] text-inksoft">
+              <span>Showing this contract only. {hiddenLine}</span>
+              <button type="button" className="btn btn-ghost btn-sm min-h-[44px]" onClick={() => setLinkContract("")}>Show all</button>
             </div>
           )}
           {sections.map((sec) => {
             const ents = entries.filter((en) => (en.release_id || "none") === sec.key);
             const rel = sec.release_id ? relById2.get(sec.release_id) ?? null : null;
             const check = sec.release_id ? weekCheck.find((wc) => wc.rel.id === sec.release_id) : null;
+            // how many hours the release is still short, by class or in total, whichever is bigger
+            const short = check ? Math.max(check.result.totalRequired - check.result.totalLogged, check.result.shorts.reduce((s, r) => s + (r.required - r.logged), 0)) : 0;
             const relInfo = rel ? { id: rel.id as string | null, label: `#${rel.rel_number} — ${rel.location}` } : { id: null as string | null, label: "" };
             const inSection = new Set(ents.map((e) => e.employee_id));
             const query = addQ.trim().toLowerCase();
@@ -638,25 +670,30 @@ export default function Payroll() {
               .filter((t) => !emps.some((e) => e.active !== false && e.name.trim().toLowerCase() === t.name.toLowerCase()))
               .filter((t) => matches(query, t.name));
             const contract = rel ? contracts.find((x) => x.id === rel.contract_id) : null;
+            // Enter in the worker box takes the first name offered: the crew first, then the template
+            const pickFirstWorker = () => {
+              if (crewMatch[0]) { addEntry(crewMatch[0].id, crewMatch[0], relInfo); setAddQ(""); }
+              else if (tplMatch[0]) { addFromTemplate(tplMatch[0].idx, relInfo); setAddQ(""); }
+            };
             return (
-              <div key={sec.key} className="card mb-3 p-3.5">
+              <div key={sec.key} className="card mb-3 card-pad">
                 <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
                   <div className="min-w-0">
-                    <b className="font-mono text-[14px]">{rel ? `#${rel.rel_number}${rel.canceled ? " (canceled)" : ""}` : "No release"}</b>
+                    <b className="font-mono text-[14px]">{rel ? `#${rel.rel_number}${rel.canceled ? " (canceled)" : ""}` : "No release (shop, misc)"}</b>
                     {rel && <span className="ml-2 text-[14px]">{rel.location}</span>}
-                    {contract && <span className="ml-1.5 text-[11px] text-inksoft">· {contractLabel(contract)}</span>}
+                    {contract && <span className="ml-1.5 text-[12px] text-inksoft">· {contractLabel(contract)}</span>}
                   </div>
                   {check && (
                     <span className="flex items-center gap-2">
                       <span className="font-mono text-xs">{check.result.totalLogged}/{check.result.totalRequired}h</span>
-                      {check.result.ok ? <Stamp label="MEETS MIN" tone="ok" /> : <Stamp label="NEEDS MORE" tone="alert" />}
+                      {check.result.ok ? <Stamp label="HOURS OK" tone="ok" /> : <Stamp label={`SHORT ${Math.round(short * 10) / 10}H`} tone="alert" />}
                     </span>
                   )}
                 </div>
                 {check && check.result.rows.length > 0 && (
                   <div className="mb-2 flex flex-wrap gap-1.5">
                     {check.result.rows.map((row) => (
-                      <span key={row.cls} className={`rounded-sm border px-2 py-0.5 font-mono text-[11px] ${row.logged < row.required ? "border-alert text-alert" : "border-rulesoft text-inksoft"}`}>
+                      <span key={row.cls} className={`chip-outline px-2 py-0.5 ${row.logged < row.required ? "border-alert text-alert" : "border-rulesoft text-inksoft"}`}>
                         {row.cls} {row.logged}/{row.required}h{row.logged < row.required ? ` · need ${row.required - row.logged} more` : ""}
                       </span>
                     ))}
@@ -672,25 +709,25 @@ export default function Payroll() {
                   const fits = reqClasses.includes(canon);
                   // combined day totals across every release this worker is on — >8h in a day gets flagged
                   const empDayTot = dayTotAll.get(en.employee_id) || [0, 0, 0, 0, 0, 0, 0];
-                  const overDays = DAYS.filter((_, i) => empDayTot[i] > 8);
                   return (
-                    <div key={en.id} className="border-t border-rulesoft py-2.5 first:border-t-0">
-                      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
-                        <b className="text-[14px]">{emp?.name || "?"}</b>
-                        <div className="flex flex-wrap items-center gap-2">
-                          {overDays.length > 0 && <Stamp label={`OVER 8H ${overDays.join(" ")}`} tone="alert" />}
-                          <input className="field w-40 px-2 py-1.5 text-[13px]" placeholder="Classification" readOnly={readOnly}
-                            value={en.trade ?? ""} onChange={(e) => set({ trade: e.target.value })} onBlur={() => saveTrade(en)} />
-                          {clsText !== "" && reqClasses.length > 0 && (fits ? <Stamp label={`✓ ${canon}`} tone="ok" /> : <Stamp label={`no ${canon} req`} tone="work" />)}
+                    <div key={en.id} className="anim-row border-t border-rulesoft py-2.5 first:border-t-0">
+                      <div className="mb-1.5 flex items-center justify-between gap-2">
+                        <b className="min-w-0 truncate text-[14px]">{emp?.name || "?"}</b>
+                        <div className="flex shrink-0 items-center gap-2">
                           <span className="font-mono text-xs text-inksoft">{hrs}h</span>
-                          {!readOnly && <button className="btn-icon text-alert" title="Remove from this release" onClick={() => { if (hrs > 0 && !window.confirm(`Remove ${emp?.name || "this worker"} from this release? Their ${hrs}h here will be deleted.`)) return; delEntry(en.id!); }}>✕</button>}
+                          {!readOnly && <button type="button" className="btn-icon text-alert" aria-label={`Remove ${emp?.name || "this worker"} from this release`} onClick={() => { if (hrs > 0 && !window.confirm(`Remove ${emp?.name || "this worker"} from this release? Their ${hrs}h here will be deleted.`)) return; delEntry(en.id!); }}>✕</button>}
                         </div>
+                      </div>
+                      <div className="mb-1.5 flex flex-wrap items-center gap-2">
+                        <input className="field w-40 px-2 py-1.5 text-[13px]" placeholder="Classification" readOnly={readOnly} aria-label="Classification"
+                          value={en.trade ?? ""} onChange={(e) => set({ trade: e.target.value })} onBlur={() => saveTrade(en)} />
+                        {clsText !== "" && reqClasses.length > 0 && (fits ? <Stamp label={`✓ ${canon}`} tone="ok" /> : <Stamp label={`${canon} NOT ON RELEASE`} tone="work" />)}
                       </div>
                       <div className="grid grid-cols-7 gap-1.5">
                         {DAYS.map((d, i) => (
                           <div key={d}>
-                            <div className={`text-center text-[11px] uppercase tracking-wide ${empDayTot[i] > 8 ? "font-semibold text-alert" : i < 2 ? "font-semibold text-work" : "text-inksoft"}`}>{d}{i < 2 ? "·OT" : ""}</div>
-                            <input className={`field px-1 py-2 text-center font-mono ${empDayTot[i] > 8 ? "bg-alert/10 ring-1 ring-alert" : i < 2 ? "bg-work/5" : ""}`} inputMode="decimal" placeholder="0" readOnly={readOnly}
+                            <div className={`text-center text-[11px] uppercase tracking-wide ${empDayTot[i] > 8 ? "font-semibold text-alert" : i < 2 ? "font-semibold text-work" : "text-inksoft"}`}>{d}</div>
+                            <input className={`field px-1 py-2.5 text-center font-mono ${empDayTot[i] > 8 ? "bg-alert/10 ring-1 ring-alert" : i < 2 ? "bg-work/5" : ""}`} inputMode="decimal" placeholder="0" readOnly={readOnly} aria-label={`${d} hours`}
                               {...num(`${en.id}:h${i}`, Number(en.hours[i]) || 0,
                                 (n) => { const hours = [...en.hours]; hours[i] = n; set({ hours }); },
                                 (n) => saveDay(en, i, n))} />
@@ -700,113 +737,140 @@ export default function Payroll() {
                     </div>
                   );
                 })}
-                {ents.length === 0 && <div className="py-2 text-[13px] text-inksoft">{readOnly ? "No workers on this release yet." : "No workers yet — add the first one below."}</div>}
+                {ents.length === 0 && <div className="empty my-2">{readOnly ? "No workers on this release yet." : "No workers yet. Add the first one below."}</div>}
                 {readOnly ? null : addFor === sec.key ? (
                   <div className="relative mt-2">
-                    <input className="field" autoFocus placeholder="Type a worker's name…" value={addQ}
+                    <input className="field" autoFocus autoComplete="off" enterKeyHint="done" placeholder="Type a worker's name…" value={addQ}
                       onChange={(e) => setAddQ(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") { e.preventDefault(); pickFirstWorker(); }
+                        else if (e.key === "Escape") { e.preventDefault(); setAddFor(null); }
+                      }}
                       onBlur={() => setTimeout(() => setAddFor((cur) => (cur === sec.key ? null : cur)), 150)} />
-                    <div className="card absolute inset-x-0 top-full z-10 max-h-80 overflow-y-auto shadow-lg">
+                    <div className="popover max-h-72 overflow-y-auto">
                       {crewMatch.map((e) => (
-                        <button key={e.id} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
-                          onMouseDown={(ev) => { ev.preventDefault(); addEntry(e.id, e, relInfo); setAddQ(""); }}>
+                        <button key={e.id} type="button" className="row-btn flex items-center justify-between border-b border-rulesoft px-3 py-2.5 text-[15px] last:border-b-0"
+                          onPointerDown={(ev) => { ev.preventDefault(); addEntry(e.id, e, relInfo); setAddQ(""); }}>
                           <span>{e.name}</span>
-                          <span className="text-[11px] text-inksoft">{inSection.has(e.id) ? "+ add again" : "+ add"}</span>
+                          <span className="text-[11px] text-inksoft">{inSection.has(e.id) ? "+ another row" : "+ add"}</span>
                         </button>
                       ))}
                       {tplMatch.map((t) => (
-                        <button key={t.name} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
-                          onMouseDown={(ev) => { ev.preventDefault(); addFromTemplate(t.idx, relInfo); setAddQ(""); }}>
+                        <button key={t.name} type="button" className="row-btn flex items-center justify-between border-b border-rulesoft px-3 py-2.5 text-[15px] last:border-b-0"
+                          onPointerDown={(ev) => { ev.preventDefault(); addFromTemplate(t.idx, relInfo); setAddQ(""); }}>
                           <span>{t.name}</span>
-                          <span className="text-[11px] text-inksoft">+ from template</span>
+                          <span className="text-[11px] text-inksoft">+ add to crew</span>
                         </button>
                       ))}
                       {crewMatch.length === 0 && tplMatch.length === 0 && <div className="p-2.5 text-sm text-inksoft">No one matches “{addQ}”.</div>}
                     </div>
                   </div>
                 ) : (
-                  <button className="btn btn-ghost mt-2 px-3 py-1.5 text-[13px]" onClick={() => { setAddFor(sec.key); setAddQ(""); }}>+ Add worker</button>
+                  <button type="button" className="btn btn-ghost btn-sm mt-2 min-h-[44px]" onClick={() => { setAddFor(sec.key); setAddQ(""); }}>+ Add worker</button>
                 )}
               </div>
             );
           })}
-          </>);
+          </div>);
         })()}
         {summ.length > 0 && (
           <div className="card mt-2 overflow-x-auto">
-            <table className="w-full border-collapse text-sm" style={{ minWidth: 400 }}>
+            <table className="w-full border-collapse text-sm">
               <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
-                <th className="p-2.5">Worker</th><th className="p-2.5 text-right">Reg</th><th className="p-2.5 text-right">OT (Sat/Sun)</th><th className="p-2.5 text-right">Total</th><th className="p-2.5 text-center">Paid</th></tr></thead>
+                <th className="p-2">Worker</th><th className="p-2 text-right">Reg</th><th className="p-2 text-right">OT</th><th className="p-2 text-right">Total</th><th className="p-2 text-center">Paid</th></tr></thead>
               <tbody>
                 {summ.map((x) => {
                   const paidOn = openWeek.paid_map?.[x.eid];
+                  // a day over 8 hours across every release the worker touched is flagged once, here
+                  const overDays = DAYS.filter((_, i) => x.days[i] > 8);
                   return (
                     <tr key={x.eid} className="border-b border-rulesoft">
-                      <td className="p-2.5">{x.name}</td><td className="p-2.5 text-right font-mono">{x.reg}</td>
-                      <td className={`p-2.5 text-right font-mono ${x.ot > 0 ? "text-work" : ""}`}>{x.ot}</td>
-                      <td className="p-2.5 text-right font-mono font-semibold">{x.hrs}h</td>
-                      <td className="p-2.5 text-center">
+                      <td className="p-2">
+                        <span className="flex flex-wrap items-center gap-1.5">{x.name}{overDays.length > 0 && <Stamp label={`OVER 8H ${overDays.join(" ")}`} tone="alert" />}</span>
+                      </td>
+                      <td className="p-2 text-right font-mono">{x.reg}h</td>
+                      <td className={`p-2 text-right font-mono ${x.ot > 0 ? "text-work" : ""}`}>{x.ot}h</td>
+                      <td className="p-2 text-right font-mono font-semibold">{x.hrs}h</td>
+                      <td className="p-2 text-center">
                         {readOnly ? (
-                          <Stamp label={paidOn ? "PAID" : "NOT PAID"} tone={paidOn ? "ok" : "work"} />
-                        ) : (
-                          <button className="btn-stamp" onClick={() => togglePaid(x.eid)} title={paidOn ? `Paid ${prettyDate(paidOn)}` : "Mark paid"}>
+                          <span className="inline-flex items-center gap-1.5">
                             <Stamp label={paidOn ? "PAID" : "NOT PAID"} tone={paidOn ? "ok" : "work"} />
+                            {paidOn && <span className="text-[11px] text-inksoft">{shortDay(paidOn)}</span>}
+                          </span>
+                        ) : (
+                          <button type="button" className="btn-stamp inline-flex min-h-[44px] items-center gap-1.5" onClick={() => togglePaid(x.eid)}>
+                            <Stamp label={paidOn ? "PAID" : "NOT PAID"} tone={paidOn ? "ok" : "work"} />
+                            {paidOn && <span className="text-[11px] text-inksoft">{shortDay(paidOn)}</span>}
                           </button>
                         )}
                       </td>
                     </tr>
                   );
                 })}
-                <tr><td className="p-2.5 font-display font-bold uppercase">Week total</td><td></td><td></td><td className="p-2.5 text-right font-mono text-[15px] font-bold">{totHrs}h</td>
-                  <td className="p-2.5 text-center font-mono text-xs text-inksoft">{summ.filter((x) => openWeek.paid_map?.[x.eid]).length}/{summ.length}</td></tr>
+                <tr><td className="p-2 font-display font-bold uppercase">Week total</td><td></td><td></td><td className="p-2 text-right font-mono text-[15px] font-bold">{totHrs}h</td>
+                  <td className="p-2 text-center font-mono text-xs text-inksoft">{summ.filter((x) => openWeek.paid_map?.[x.eid]).length} of {summ.length} paid</td></tr>
               </tbody>
             </table>
           </div>
         )}
-        {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
+        <Toast msg={msg} />
       </div>
     );
   }
 
+  const thisWeek = fridayOf(localISO());
+  const activeCrew = emps.filter((e) => e.active !== false).length;
   return (
-    <div>
+    <div key="weeks" className="page-enter">
+      {making && <div className="busy-bar" aria-busy="true" aria-label="Working" />}
       <PageHeader title="Payroll">
-        <Link className="btn btn-ghost min-h-[44px] whitespace-nowrap px-3 py-2 text-[13px]" href="/payroll/certified" title="Turn certified payroll PDFs into a CSV for eComply">eComply CSV</Link>
-        <Link className="btn btn-ghost min-h-[44px] whitespace-nowrap px-3 py-2 text-[13px]" href="/settings" title="Crew list and phone numbers now live in Settings">Crew ({emps.filter((e) => e.active !== false).length}) →</Link>
+        <Link className="btn btn-ghost btn-sm whitespace-nowrap" href="/payroll/certified" title="Turn certified payroll PDFs into a CSV for eComply">Certified payroll</Link>
+        <Link className="btn btn-ghost btn-sm whitespace-nowrap" href="/settings#crew" title="Edit the crew in Settings">Crew list ({activeCrew}) →</Link>
       </PageHeader>
 
-      {!readOnly && (() => {
-        const we = fridayOf(localISO());
-        return (
-          <div className="card mb-3 p-3.5">
-            <button className="btn btn-primary w-full py-3.5 text-base" onClick={() => makePayroll()}>
-              Make payroll · {prettyDate(addDays(we, -6))} – {prettyDate(we)}
-            </button>
-            <Disclosure label="Open a different week" className="mt-1.5">
-              <div className="flex flex-wrap items-center gap-2 pb-1.5">
-                <span className="text-[12px] text-inksoft">Pick any day in the week</span>
-                <input type="date" className="field w-44" value={pickDate} onChange={(e) => setPickDate(e.target.value)} />
-                <button className="btn min-h-[44px]" disabled={!pickDate} onClick={() => makePayroll(pickDate)}>Open that week</button>
-              </div>
-            </Disclosure>
-          </div>
-        );
-      })()}
+      {!readOnly && (
+        <div className="card mb-3 card-pad">
+          <button type="button" className="btn btn-primary w-full py-3.5 text-base" disabled={making} onClick={() => makePayroll()}>
+            {making ? "Opening…" : `Make payroll · ${weekRange(thisWeek)}`}
+          </button>
+          <Disclosure label="Open a different week" className="mt-1.5">
+            <form className="flex flex-wrap items-center gap-2 pb-1.5" onSubmit={(e) => { e.preventDefault(); if (pickDate) makePayroll(pickDate); }}>
+              <label className="flex flex-wrap items-center gap-2 text-[12px] text-inksoft">
+                Pick any day in the week
+                <input type="date" className="field w-44 min-h-[44px]" value={pickDate} onChange={(e) => setPickDate(e.target.value)} />
+              </label>
+              <button type="submit" className="btn" disabled={!pickDate || making}>Open that week</button>
+            </form>
+          </Disclosure>
+        </div>
+      )}
 
       <div className="card divide-y divide-rulesoft">
-        {(() => { const weCounts: Record<string, number> = {}; weeks.forEach((w) => (weCounts[w.week_ending] = (weCounts[w.week_ending] || 0) + 1)); return weeks.map((w) => (
-          <div key={w.id} className="flex items-center justify-between gap-3 p-3.5">
-            <button className="flex-1 text-left" onClick={() => openW(w)}>
-              <span className="font-mono text-[13px] font-semibold">{prettyDate(addDays(w.week_ending, -6))} – {prettyDate(w.week_ending)}</span>
-              {weCounts[w.week_ending] > 1 && <span className="chip ml-2 rounded-[2px] border border-alert px-1 py-px font-semibold text-alert" title="Two payroll weeks cover the same dates — delete the one you don't need, its hours go with it">DUPLICATE</span>}
-              <span className="ml-2 text-xs text-inksoft">open →</span>
-            </button>
-            {!readOnly && <RowActions items={[{ label: "Delete week…", destructive: true, onSelect: () => deleteWeek(w) }]} />}
-          </div>
-        )); })()}
-        {weeks.length === 0 && <div className="p-5 text-sm text-inksoft">No payroll weeks yet. Add the crew, start a week, punch hours, download the weekly sheet.</div>}
+        {!loaded && [0, 1, 2].map((i) => (
+          <div key={`sk${i}`} className="flex min-h-[44px] items-center p-3"><div className="skeleton h-4 w-44" /></div>
+        ))}
+        {loaded && (() => {
+          // two weeks on the same dates is a mistake worth flagging on both rows
+          const weCounts: Record<string, number> = {};
+          weeks.forEach((w) => (weCounts[w.week_ending] = (weCounts[w.week_ending] || 0) + 1));
+          return weeks.map((w) => (
+            <div key={w.id} className="anim-fade flex items-center gap-2 pr-2">
+              <button type="button" className="row-btn min-w-0 flex-1 p-3 transition-colors duration-150" onClick={() => openW(w)}>
+                <span className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-[14px] font-semibold">{weekRange(w.week_ending)}</span>
+                  {weCounts[w.week_ending] > 1 && <Stamp label="DUPLICATE" tone="alert" />}
+                </span>
+                {weCounts[w.week_ending] > 1 && <span className="mt-0.5 block text-[12px] text-inksoft">Two weeks cover these dates. Delete the one you don&apos;t need (its hours go with it).</span>}
+              </button>
+              {!readOnly && <RowActions items={[{ label: "Delete week…", destructive: true, onSelect: () => deleteWeek(w) }]} />}
+            </div>
+          ));
+        })()}
+        {loaded && weeks.length === 0 && (
+          <div className="p-3"><div className="empty anim-fade">{readOnly ? "No payroll weeks yet." : "No payroll weeks yet. Tap Make payroll to start this week."}</div></div>
+        )}
       </div>
-      {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
+      <Toast msg={msg} />
     </div>
   );
 }

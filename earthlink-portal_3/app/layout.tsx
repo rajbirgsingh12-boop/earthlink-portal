@@ -1,5 +1,5 @@
-import type { Metadata } from "next";
-// fonts are baked into the build and served from our own domain — no
+import type { Metadata, Viewport } from "next";
+// fonts are baked into the build and served from our own domain: no
 // render-blocking trip to Google on every page open
 import { Inter, Barlow_Condensed, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
@@ -11,7 +11,13 @@ const plexMono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "600"], var
 export const metadata: Metadata = {
   title: "Earth Link Field Office",
   description: "Earth Link General Construction portal",
+  // added to an iPhone home screen (app/apple-icon.png) it opens full screen, named "Earth Link", under a dark status bar
+  appleWebApp: { title: "Earth Link", capable: true, statusBarStyle: "black" },
 };
+
+// the page runs edge to edge on an iPhone (the kit pads the home indicator
+// itself) and the browser chrome takes the header's ink
+export const viewport: Viewport = { themeColor: "#2B231B", viewportFit: "cover", width: "device-width", initialScale: 1 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (

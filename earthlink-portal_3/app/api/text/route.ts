@@ -102,7 +102,7 @@ export async function POST(req: Request) {
     if (messages.length === 0) return NextResponse.json({ configured: true, sent: 0, skipped, failed: [] });
   }
   if (overLimit(user.id, messages.length)) {
-    return NextResponse.json({ error: "Texting limit reached for this hour — try again later" }, { status: 429 });
+    return NextResponse.json({ error: "Texting limit reached for this hour, try again later" }, { status: 429 });
   }
 
   // once pictures texted back go on the job, the text asks for them — a PACT

@@ -30,7 +30,7 @@ export async function POST(req: Request) {
   try { text = String(((await req.json()) as { text?: unknown }).text || "").replace(/\s+/g, " ").trim(); } catch { text = ""; }
   if (!text) return NextResponse.json({ error: "Nothing to translate" }, { status: 400 });
   if (text.length > 1500) return NextResponse.json({ error: "Too long to translate" }, { status: 400 });
-  if (!smartConfigured()) return NextResponse.json({ ok: false, note: "Claude isn't set up — add ANTHROPIC_API_KEY in Vercel" });
+  if (!smartConfigured()) return NextResponse.json({ ok: false, note: "Claude isn't set up: add ANTHROPIC_API_KEY in Vercel" });
   try {
     const out = await askClaudeSpanish(text);
     if (!out) return NextResponse.json({ ok: false, note: "Claude answered with nothing" });

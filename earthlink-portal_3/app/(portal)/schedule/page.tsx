@@ -1,14 +1,20 @@
 "use client";
-// Day-by-day crew schedule: pick a date, add a release, assign workers.
-// Assigning a worker with a saved number opens a prefilled text right away —
-// release location and work description already written, one tap to send.
+// Day-by-day crew schedule: pick a day, add a release, add the workers, then
+// "Text crew" messages the whole crew at once (from the company number, or a
+// prefilled group text on this phone), the location and the work already written.
 import { useEffect, useRef, useState } from "react";
 import { matches } from "@/lib/search";
 import { sb } from "@/lib/supabase";
 import { myProfile } from "@/lib/profile";
 import { prettyDate, addDays, localISO } from "@/lib/docs";
+import { scrollTo } from "@/lib/motion";
 import Stamp from "@/components/Stamp";
 import PageHeader from "@/components/PageHeader";
+import Modal from "@/components/Modal";
+import CardToolbar from "@/components/CardToolbar";
+import { RowActions } from "@/components/ActionMenu";
+import { Toast, useFlash } from "@/components/Toast";
+import SendLaterPicker from "@/components/SendLaterPicker";
 import TextedPhotos from "@/components/TextedPhotos";
 import ContractPicker, { contractLabel } from "@/components/ContractPicker";
 import { useLive } from "@/lib/useLive";
@@ -17,23 +23,31 @@ import { cleanPhone, smsHref, sendServerTexts, textMachineReady, textRows, stamp
 import { normText, saveWorkerLang } from "@/lib/pactCrew";
 import { crewText, langOf, LANG_LABEL, type Lang } from "@/lib/crewText";
 import { spanishKnown, spanishNow, spanishWork } from "@/lib/spanish";
-import { goesOnItsOwn, isLate, isQueued, localStamp, prettyWhen, queueRows, sendDueNow, sendPicks, unqueueRows } from "@/lib/sendLater";
+import { goesOnItsOwn, isLate, isQueued, prettyWhen, queueRows, sendDueNow, unqueueRows } from "@/lib/sendLater";
 import LangToggle from "@/components/LangToggle";
 
 interface Emp { id: string; name: string; trade: string; active?: boolean; phone?: string | null; lang?: string | null; }
 interface RelRow { id: string; rel_number: string; location: string; contract_id: string; address?: string | null; }
-// (a row with pact_job_id belongs to a PACT job — those live on the PACT calendar, not here)
+// (a row with pact_job_id belongs to a PACT job; those live on the PACT calendar, not here)
 interface Assign { id: string; day: string; release_id: string | null; pact_job_id?: string | null; employee_id: string; description: string; texted: boolean; address?: string | null; send_at?: string | null; }
 
-const upgradeMsg = "Run supabase/upgrade_day_schedule.sql first";
+// words from another part of the app (the texting) shown here: their dashes become plain punctuation
+const plain = (s: string) => s.replace(/\s+[\u2014\u2013]\s+/g, ": ").replace(/[\u2014\u2013]/g, "-");
+// a save that didn't land, and a database behind the app, in the office's words
+const SAVE_FAILED = "Couldn't save. Check your signal and try again.";
+const upgradeMsg = "This day can't load until the database update is run (Settings → System check)";
+const addrUpgradeMsg = "The address can't be saved until the database update is run (Settings → System check)";
 
 export default function Schedule() {
   const [role, setRole] = useState("");
   const canEdit = role === "admin" || role === "office";
-  const [day, setDay] = useState(localISO());
+  // the day is read after mount (today, or ?day= from the calendar), so the
+  // first paint never shows the server's idea of today for a blink
+  const [day, setDay] = useState("");
   const [emps, setEmps] = useState<Emp[]>([]);
   const [rels, setRels] = useState<RelRow[]>([]);
   const [contracts, setContracts] = useState<Contract[]>([]);
+  const [listsLoaded, setListsLoaded] = useState(false);
   const [rows, setRows] = useState<Assign[]>([]);
   const [linkContract, setLinkContract] = useState("");
   const [relPickQ, setRelPickQ] = useState("");
@@ -42,21 +56,20 @@ export default function Schedule() {
   const [addQ, setAddQ] = useState("");
   const [descBuf, setDescBuf] = useState<Record<string, string>>({}); // per release: work description being typed
   const [addrBuf, setAddrBuf] = useState<Record<string, string>>({}); // per release: address being typed
-  // the mini map window: which release it's picking for, the committed search, and the box being typed
+  // the map window: which release it's picking for, the committed search, and the box being typed
   const [mapFor, setMapFor] = useState<string | null>(null);
   const [mapQ, setMapQ] = useState("");
   const [mapInput, setMapInput] = useState("");
-  const [msg, setMsg] = useState("");
-  const [machine, setMachine] = useState(false); // company Twilio number configured?
+  const { msg, flash: show } = useFlash();
+  const flash = (m: string) => show(plain(m));
+  const [machine, setMachine] = useState(false); // company texting number set up?
   const [sending, setSending] = useState<string | null>(null); // release currently texting
   const [laterFor, setLaterFor] = useState<string | null>(null); // release whose "send it later" picker is open
-  const [when, setWhen] = useState("");
   const [onItsOwn, setOnItsOwn] = useState<boolean | null>(null);
   useEffect(() => { goesOnItsOwn().then(setOnItsOwn); }, []);
-  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 4000); };
   useEffect(() => { textMachineReady().then(setMachine); }, []);
   // anything set up for later whose time has come goes out now. With the
-  // Vercel cron set up it has gone already; this is the catch-up for when it
+  // timer set up it has gone already; this is the catch-up for when it
   // isn't, and it costs one small call whenever the schedule is open.
   useEffect(() => {
     let stop = false;
@@ -64,8 +77,8 @@ export default function Schedule() {
       const out = await sendDueNow();
       if (stop || !out) return;
       if (out.sent > 0) flash(`${out.sent} text${out.sent === 1 ? "" : "s"} that ${out.sent === 1 ? "was" : "were"} set up just went out ✓`);
-      else if (out.failed > 0) flash(`${out.failed} text${out.failed === 1 ? "" : "s"} set up for earlier didn't go through — ${out.errors?.[0]?.error || "see Settings → System check"}`);
-      else if (out.missed > 0) flash(`${out.missed} text${out.missed === 1 ? "" : "s"} set up for earlier didn't go out (no number, or that day has passed) — the crew shows as not told`);
+      else if (out.failed > 0) flash(`${out.failed} text${out.failed === 1 ? "" : "s"} set up for earlier didn't go through: ${out.errors?.[0]?.error || "see Settings → System check"}`);
+      else if (out.missed > 0) flash(`${out.missed} text${out.missed === 1 ? "" : "s"} set up for earlier didn't go out (no number, or that day has passed). The crew shows as not told`);
       if (out.sent > 0 || out.missed > 0 || out.failed > 0) load();
     };
     tick();
@@ -78,10 +91,10 @@ export default function Schedule() {
     // pickers and texts use, not attachments and money details
     const fetchRels = async () => {
       const allR: RelRow[] = [];
-      for (let from = 0; ; from += 1000) { // paginated — an unranged select stops silently at 1000
+      for (let from = 0; ; from += 1000) { // paginated: an unranged select stops silently at 1000
         const { data: r } = await sb().from("releases").select("id,rel_number,location,contract_id,address").eq("canceled", false).order("id").range(from, from + 999);
         if (r) allR.push(...(r as RelRow[]));
-        else { // address column may predate its upgrade — fall back to full rows
+        else { // address column may predate its upgrade: fall back to full rows
           const { data: r2 } = await sb().from("releases").select("*").eq("canceled", false).order("id").range(from, from + 999);
           allR.push(...((r2 || []) as RelRow[]));
           if (!r2 || r2.length < 1000) break;
@@ -99,14 +112,14 @@ export default function Schedule() {
     setEmps(((e || []) as Emp[]).filter((x) => x.active !== false));
     setRels(allR.sort((x, y) => (parseFloat(x.rel_number) || 0) - (parseFloat(y.rel_number) || 0)));
     setContracts((c || []) as Contract[]);
+    setListsLoaded(true);
   };
-  useEffect(() => { myProfile().then((p) => setRole(p?.role || "")); load(); }, []);
-  // the calendar links here with ?day=YYYY-MM-DD (read after mount — the
-  // first paint is today's, the same on the server and the phone)
+  useEffect(() => { myProfile().then((p) => setRole(p?.role || "")); load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // the calendar links here with ?day=YYYY-MM-DD; without it, today
   useEffect(() => {
     const qs = new URLSearchParams(window.location.search);
     const d = qs.get("day") || "";
-    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) setDay(d);
+    setDay(/^\d{4}-\d{2}-\d{2}$/.test(d) ? d : localISO());
     const r = qs.get("release") || "";
     if (r) setFocusRel(r);
   }, []);
@@ -117,11 +130,11 @@ export default function Schedule() {
     const { data, error } = await sb().from("texted_photos").select("release_id").eq("status", "nobody").not("release_id", "is", null).limit(200);
     if (!error) setNobodyRel(new Set(((data || []) as { release_id: string }[]).map((n) => n.release_id)));
   };
-  // admin and office only — the notices are theirs (the database says so too)
+  // admin and office only: the notices are theirs (the database says so too)
   useEffect(() => { if (canEdit) loadNobody(); }, [canEdit]); // eslint-disable-line react-hooks/exhaustive-deps
   useLive(["texted_photos"], () => loadNobody(), { enabled: canEdit });
   // "Give it a new day…" (and ?release= from the PACT tab): the day it was
-  // missed, at its card — add it to another day from there. It waits for the
+  // missed, at its card; add it to another day from there. It waits for the
   // releases and that day's crew to load, clears a contract filter that would
   // hide it, and puts its card on the day even if nobody's on it any more.
   const [focusRel, setFocusRel] = useState("");
@@ -134,18 +147,19 @@ export default function Schedule() {
     if (!rels.some((r) => r.id === id)) { flash("That release isn't on the schedule any more (it may have been canceled)"); return; }
     setLinkContract("");
     setExtraRels((prev) => (prev.includes(id) ? prev : [...prev, id]));
-    setTimeout(() => document.querySelector(`[data-rel-card="${id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 250);
+    setTimeout(() => scrollTo(document.querySelector(`[data-rel-card="${id}"]`)), 250);
   }, [focusRel, rels, rowsDay, day]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadDay = async (d: string) => {
+    if (!d) return;
     const { data, error } = await sb().from("schedule_days").select("*").eq("day", d).order("created_at");
     if (dayRef.current !== d) return; // switched days while this was in flight
-    if (error) { if (/relation|column|schema cache/i.test(error.message)) flash(upgradeMsg); return; }
+    if (error) { if (/relation|column|schema cache/i.test(error.message)) flash(upgradeMsg); setRows([]); setRowsDay(d); return; }
     setRows((data || []) as Assign[]);
     setRowsDay(d);
   };
   const dayRef = useRef(day);
-  useEffect(() => { dayRef.current = day; setExtraRels([]); setAddFor(null); setAddQ(""); setDescBuf({}); setAddrBuf({}); setMapFor(null); loadDay(day); }, [day]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { dayRef.current = day; if (!day) return; setExtraRels([]); setAddFor(null); setAddQ(""); setDescBuf({}); setAddrBuf({}); setMapFor(null); loadDay(day); }, [day]); // eslint-disable-line react-hooks/exhaustive-deps
   // a schedule_days event only refreshes the day; crew/release changes reload the lists
   useLive(["schedule_days", "employees", "releases"], (changed) => {
     if (!changed || changed.some((t) => t !== "schedule_days")) load();
@@ -154,7 +168,7 @@ export default function Schedule() {
 
   const relLabel = (r: RelRow) => {
     const c = contracts.find((x) => x.id === r.contract_id);
-    return `#${r.rel_number} — ${r.location}${c ? ` · ${contractLabel(c)}` : ""}`;
+    return `#${r.rel_number} · ${r.location}${c ? ` · ${contractLabel(c)}` : ""}`;
   };
   const descOf = (relId: string) =>
     descBuf[relId] ?? rows.find((x) => x.release_id === relId && (x.description || "").trim())?.description ?? "";
@@ -162,7 +176,6 @@ export default function Schedule() {
   const addrOf = (relId: string) =>
     addrBuf[relId] ?? rows.find((x) => x.release_id === relId && (x.address || "").trim())?.address
     ?? (rels.find((r) => r.id === relId)?.address || "");
-  const mapLink = (addr: string) => `https://maps.google.com/?q=${encodeURIComponent(addr)}`;
   // the street when one is known (typed, saved on the day, or read off the release PDF), the building always.
   // A Spanish-reading worker gets the work in Spanish too: Claude's translation
   // once it has answered (asked below, ahead of the tap), the glossary's until then
@@ -184,7 +197,7 @@ export default function Schedule() {
     return () => clearTimeout(t);
   }, [rows, emps, descBuf]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // + Add worker just adds them to the day — no message goes out until Assign & text
+  // Add worker just adds them to the day; no message goes out until Text crew
   const addingNow = useRef<Set<string>>(new Set()); // guards a double-tap on the same name
   const addWorker = async (rel: RelRow, emp: Emp) => {
     const k = `${rel.id}:${emp.id}`;
@@ -196,24 +209,24 @@ export default function Schedule() {
     let { data, error } = await sb().from("schedule_days").insert({ ...base, address: addrOf(rel.id).trim() }).select().single();
     if (error && /column|schema cache/i.test(error.message)) {
       ({ data, error } = await sb().from("schedule_days").insert(base).select().single());
-      if (data) flash("Re-run supabase/upgrade_day_schedule.sql so addresses save");
+      if (data) flash(addrUpgradeMsg);
     }
-    if (error) { flash(/relation|column|schema cache/i.test(error.message) ? upgradeMsg : error.message); return; }
+    if (error) { flash(/relation|column|schema cache/i.test(error.message) ? upgradeMsg : SAVE_FAILED); return; }
     const row = data as Assign;
     setRows((prev) => (prev.some((x) => x.id === row.id) ? prev : [...prev, row]));
   };
 
-  // Assign & text: one tap messages the whole crew on this release.
-  // With the company number set up (Twilio keys in Vercel) the texts go out
-  // silently from that number; otherwise it opens a group text on this phone.
+  // Text crew: one tap messages the whole crew on this release. With the
+  // company number set up the texts go out silently from that number;
+  // otherwise it opens a group text on this phone.
   const textCrew = async (rel: RelRow) => {
     const assigned = rows.filter((x) => x.release_id === rel.id);
     const targets = assigned
       .map((row) => ({ row, emp: emps.find((e) => e.id === row.employee_id) }))
       .filter((t): t is { row: Assign; emp: Emp } => !!t.emp && !!cleanPhone(t.emp.phone || ""))
       .map((t) => ({ rowId: t.row.id, to: cleanPhone(t.emp.phone || ""), first: t.emp.name.split(" ")[0], body: msgFor(rel, rel.id, t.emp.name.split(" ")[0], t.emp.lang), lang: t.emp.lang }));
-    if (targets.length === 0) { flash("No saved numbers on this crew — add them in Settings → Crew first"); return; }
-    if (!descOf(rel.id).trim() && !window.confirm("No work description yet — send the assignments anyway?")) return;
+    if (targets.length === 0) { flash("No saved numbers on this crew. Add them in Settings → Crew first"); return; }
+    if (!descOf(rel.id).trim() && !window.confirm("No work description yet. Send the assignments anyway?")) return;
     const stamp = async (ids: string[]) => {
       setRows((prev) => prev.map((x) => (ids.includes(x.id) ? { ...x, texted: true } : x)));
       await stampRows(ids);
@@ -221,7 +234,7 @@ export default function Schedule() {
     setSending(rel.id);
     // the one sender every crew text goes through: row ids ride along so the
     // server stamps TEXTED itself and a retry after a dead spot skips workers
-    // who were already texted — nobody gets doubled
+    // who were already texted; nobody gets doubled
     // the Spanish ones wait for Claude's wording (the glossary's if Claude can't answer)
     for (const t of targets) if (langOf(t.lang) === "es") t.body = await msgForAsync(rel, rel.id, t.first, t.lang);
     const out = await textRows(targets);
@@ -234,7 +247,7 @@ export default function Schedule() {
       if (okIds.length > 0) await stamp(okIds);
       flash(out.message);
     } else if (out.status === "fallback") {
-      // no company number yet — a group text opened on this phone. The stamp
+      // no company number yet: a group text opened on this phone. The stamp
       // waits for the owner to confirm: the composer can be canceled (or never
       // open right on some phones), and a false TEXTED ✓ means a crew that was
       // never told.
@@ -245,32 +258,39 @@ export default function Schedule() {
       flash(out.message);
     }
   };
+  // the row menu asked first when the worker was already texted
   const unassign = async (id: string) => {
     const { error } = await sb().from("schedule_days").delete().eq("id", id);
-    if (error) { flash(error.message); return; }
+    if (error) { flash(SAVE_FAILED); return; }
     setRows((prev) => prev.filter((x) => x.id !== id));
   };
   const markTexted = async (id: string) => {
     setRows((prev) => prev.map((x) => (x.id === id ? { ...x, texted: true } : x)));
     await sb().from("schedule_days").update({ texted: true }).eq("id", id);
   };
+  // a TEXTED mark that landed without a text really going out (a group
+  // message nobody sent, say) comes off here
+  const clearTexted = async (id: string) => {
+    setRows((prev) => prev.map((x) => (x.id === id ? { ...x, texted: false } : x)));
+    await sb().from("schedule_days").update({ texted: false }).eq("id", id);
+  };
   const saveDesc = async (relId: string) => {
-    // untouched field = nothing typed — saving here would blank the crew's
+    // untouched field = nothing typed; saving here would blank the crew's
     // saved description just for tapping in and out of the box
     if (descBuf[relId] === undefined) return;
     const desc = descBuf[relId].trim();
     const mine = rows.filter((x) => x.release_id === relId);
     const ids = mine.map((x) => x.id);
     if (ids.length === 0) return;
-    // the crew was texted the OLD wording — a real change puts them back in the
-    // to-send pile, otherwise Assign & text skips everyone and says it sent ✓
+    // the crew was texted the OLD wording: a real change puts them back in the
+    // to-send pile, otherwise Text crew skips everyone and says it sent ✓
     const resend = mine.some((x) => normText(x.description || "") !== normText(desc)) && mine.some((x) => x.texted);
     setRows((prev) => prev.map((x) => (x.release_id === relId ? { ...x, description: desc, ...(resend ? { texted: false } : {}) } : x)));
     await sb().from("schedule_days").update(resend ? { description: desc, texted: false } : { description: desc }).in("id", ids);
-    if (resend) flash("Description changed — hit Assign & text again so the crew gets it");
+    if (resend) flash("Description changed. Tap Text crew again so the crew gets it");
   };
   const saveAddr = async (relId: string, value?: string) => {
-    if (value === undefined && addrBuf[relId] === undefined) return; // untouched — see saveDesc
+    if (value === undefined && addrBuf[relId] === undefined) return; // untouched, see saveDesc
     const addr = (value ?? addrBuf[relId] ?? "").trim();
     if (value !== undefined) setAddrBuf((p) => ({ ...p, [relId]: addr }));
     const mine = rows.filter((x) => x.release_id === relId);
@@ -281,13 +301,15 @@ export default function Schedule() {
     const resend = mine.some((x) => normText(x.address || "") !== normText(addr)) && mine.some((x) => x.texted);
     setRows((prev) => prev.map((x) => (x.release_id === relId ? { ...x, address: addr, ...(resend ? { texted: false } : {}) } : x)));
     const { error } = await sb().from("schedule_days").update(resend ? { address: addr, texted: false } : { address: addr }).in("id", ids);
-    if (error && /column|schema cache/i.test(error.message)) flash("Re-run supabase/upgrade_day_schedule.sql so addresses save");
-    else if (resend) flash("Address changed — hit Assign & text again so the crew gets it");
+    if (error && /column|schema cache/i.test(error.message)) flash(addrUpgradeMsg);
+    else if (resend) flash("Address changed. Tap Text crew again so the crew gets it");
   };
   const openMap = (relId: string) => {
     const start = addrOf(relId).trim() || (rels.find((r) => r.id === relId)?.location || "");
     setMapFor(relId); setMapInput(start); setMapQ(start);
   };
+  // a release picked for this day: its card opens with the add-worker box ready
+  const pickRel = (id: string) => { setExtraRels((prev) => (prev.includes(id) ? prev : [...prev, id])); setRelPickQ(""); setAddFor(id); setAddQ(""); };
 
   // one card per release on this day (assigned rows ∪ releases just added)
   const relIds = [...new Set([...rows.map((x) => x.release_id).filter(Boolean) as string[], ...extraRels])];
@@ -296,18 +318,31 @@ export default function Schedule() {
     .filter((r): r is RelRow => !!r)
     .filter((r) => !linkContract || r.contract_id === linkContract)
     .sort((a, b) => a.rel_number.localeCompare(b.rel_number, undefined, { numeric: true }));
+  // the lists and this day's rows are both in: until then the cards shimmer
+  const ready = listsLoaded && rowsDay === day;
+  const todayISO = localISO();
+  const header = <PageHeader title="Schedule" sub="NYCHA · crews by day" />;
+  const skeletons = [0, 1, 2].map((i) => (
+    <div key={`sk${i}`} className="card mb-3 p-3.5" aria-busy="true">
+      <div className="flex items-center justify-between gap-2"><div className="skeleton h-4 w-28" /><div className="skeleton h-4 w-14" /></div>
+      <div className="skeleton mt-3 h-11 w-full" />
+      <div className="skeleton mt-2 h-4 w-40" />
+    </div>
+  ));
+
+  // the day isn't known until the page has mounted
+  if (!day) return <div>{header}{skeletons}</div>;
 
   return (
     <div>
-      {msg && <div className="mb-3 rounded-sm border border-work bg-work/10 p-2.5 text-sm">{msg}</div>}
-      <PageHeader title="Schedule">
-        <button className={`btn min-h-[44px] ${day === localISO() ? "btn-primary" : ""}`} onClick={() => setDay(localISO())}>Today</button>
-        <button className={`btn min-h-[44px] ${day === addDays(localISO(), 1) ? "btn-primary" : ""}`} onClick={() => setDay(addDays(localISO(), 1))}>Tomorrow</button>
-        <input type="date" className="field w-44" value={day} onChange={(e) => e.target.value && setDay(e.target.value)} />
-      </PageHeader>
-      <div className="mb-1 text-[13px] text-inksoft">
-        Scheduling for <b className="text-ink">{prettyDate(day)}</b> — add a release, write the description, add workers, then <b className="text-ink">Assign &amp; text</b> messages the whole crew at once
-        {machine ? " from the company number." : " (opens a group text on this phone)."}
+      {header}
+      {/* which day: today, tomorrow, or any date */}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <div className="seg" role="radiogroup" aria-label="Today or tomorrow">
+          <button type="button" role="radio" aria-checked={day === todayISO} className="seg-item" onClick={() => setDay(todayISO)}>Today</button>
+          <button type="button" role="radio" aria-checked={day === addDays(todayISO, 1)} className="seg-item" onClick={() => setDay(addDays(todayISO, 1))}>Tomorrow</button>
+        </div>
+        <input type="date" className="field w-44 font-mono" aria-label="Day" value={day} onChange={(e) => e.target.value && setDay(e.target.value)} />
       </div>
       <TextedPhotos canEdit={canEdit} flash={flash} onShow={(b) => {
         if (b.pact_job_id) { window.location.href = `/pact/schedule?job=${b.pact_job_id}`; return; }
@@ -317,21 +352,24 @@ export default function Schedule() {
       }} />
 
       {canEdit && (
-        <div className="mb-3 grid gap-2 md:grid-cols-2">
-          <ContractPicker contracts={contracts} value={linkContract} onChange={setLinkContract}
-            extra={[{ id: "", label: "All contracts" }]} placeholder="Filter releases by contract…" />
-          <div className="relative">
-            <input className="field" placeholder="+ Add a release to this day — type release # or development…"
+        <div className="mb-3 grid items-end gap-2 md:grid-cols-2">
+          <div>
+            <div className="section-label mb-1">Contract</div>
+            <ContractPicker contracts={contracts} value={linkContract} onChange={setLinkContract} extra={[{ id: "", label: "All contracts" }]} />
+          </div>
+          <div>
+            <input className="field" type="search" enterKeyHint="search" autoComplete="off" placeholder="+ Add a release to this day: release # or development"
               value={relPickQ} onChange={(e) => setRelPickQ(e.target.value)} />
             {relPickQ.trim() && (
-              <div className="card absolute inset-x-0 top-full z-10 max-h-72 overflow-y-auto shadow-lg">
+              <div className="popover static max-h-72 overflow-y-auto">
                 {rels
                   .filter((r) => !linkContract || r.contract_id === linkContract)
                   .filter((r) => relLabel(r).toLowerCase().includes(relPickQ.trim().toLowerCase()))
                   .slice(0, 40)
                   .map((r) => (
-                    <button key={r.id} className="block w-full border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
-                      onMouseDown={(ev) => { ev.preventDefault(); setExtraRels((prev) => (prev.includes(r.id) ? prev : [...prev, r.id])); setRelPickQ(""); setAddFor(r.id); setAddQ(""); }}>
+                    // the pick lands on pointer down so the box keeps its focus; the keyboard's Enter still works (a click with no pointer)
+                    <button key={r.id} type="button" className="row-btn border-b border-rulesoft px-3 py-2.5 text-[14px] last:border-b-0"
+                      onPointerDown={(ev) => { ev.preventDefault(); pickRel(r.id); }} onClick={(ev) => { if (ev.detail === 0) pickRel(r.id); }}>
                       {relLabel(r)}
                     </button>
                   ))}
@@ -341,13 +379,12 @@ export default function Schedule() {
         </div>
       )}
 
-      {cards.length === 0 && (
-        <div className="card p-5 text-sm text-inksoft">
-          Nothing scheduled for {prettyDate(day)} yet{canEdit ? " — add a release above to start." : "."}
-        </div>
+      {!ready && skeletons}
+      {ready && cards.length === 0 && (
+        <div className="empty mb-3">Nothing on {prettyDate(day)} yet.{canEdit ? " Add a release above, add the workers, then Text crew." : ""}</div>
       )}
 
-      {cards.map((rel) => {
+      {ready && cards.map((rel) => {
         const assigned = rows.filter((x) => x.release_id === rel.id);
         const inCard = new Set(assigned.map((x) => x.employee_id));
         const q = addQ.trim().toLowerCase();
@@ -360,138 +397,117 @@ export default function Schedule() {
                 {nobodyRel.has(rel.id) && <span className="mr-2" data-nobody-stamp><Stamp label="⚠ NOBODY HOME" tone="alert" /></span>}
                 <b className="font-mono text-[14px]">#{rel.rel_number}</b>
                 <span className="ml-2 text-[14px]">{rel.location}</span>
-                {contract && <span className="ml-1.5 text-[11px] text-inksoft">· {contractLabel(contract)}</span>}
+                {contract && <span className="ml-1.5 text-[12px] text-inksoft">· {contractLabel(contract)}</span>}
               </div>
-              <span className="font-mono text-xs text-inksoft">{assigned.length} worker{assigned.length === 1 ? "" : "s"}</span>
+              <span className="chip text-inksoft">{assigned.length} worker{assigned.length === 1 ? "" : "s"}</span>
             </div>
-            <input className="field mb-2" placeholder="Work description (what should they do there?)"
+            <input className="field mb-2" placeholder="The work: what should they do there?"
               value={descBuf[rel.id] ?? descOf(rel.id)} readOnly={!canEdit}
               onChange={(e) => setDescBuf((p) => ({ ...p, [rel.id]: e.target.value }))}
               onBlur={() => canEdit && saveDesc(rel.id)} />
             <div className="mb-2 flex gap-2">
-              <input className="field flex-1" placeholder="Address — where they should show up"
+              <input className="field flex-1" placeholder="Address: where they should show up"
                 value={addrBuf[rel.id] ?? addrOf(rel.id)} readOnly={!canEdit}
                 onChange={(e) => setAddrBuf((p) => ({ ...p, [rel.id]: e.target.value }))}
                 onBlur={() => canEdit && saveAddr(rel.id)} />
-              {canEdit && <button className="btn min-h-[44px] shrink-0 px-3" title="Find it on the map" onClick={() => openMap(rel.id)}>Map</button>}
+              {canEdit && <button type="button" className="btn btn-ghost shrink-0 px-3" onClick={() => openMap(rel.id)}>Map</button>}
             </div>
             {assigned.map((row) => {
               const emp = emps.find((e) => e.id === row.employee_id);
               if (!emp) return null;
               const ok = !!cleanPhone(emp.phone || "");
+              const first = emp.name.split(" ")[0];
               return (
-                <div key={row.id} className="flex flex-wrap items-center gap-2 border-t border-rulesoft py-2 first:border-t-0">
+                <div key={row.id} className="anim-row flex flex-wrap items-center gap-2 border-t border-rulesoft py-2 first:border-t-0">
                   <b className="text-[14px]">{emp.name}</b>
                   <LangToggle value={langOf(emp.lang)} disabled={!canEdit} name={`Language for ${emp.name}`} onChange={async (l: Lang) => {
                     const bad = await saveWorkerLang(sb(), emp.id, l);
                     if (bad) { flash(bad); return; }
                     setEmps((prev) => prev.map((x) => (x.id === emp.id ? { ...x, lang: l } : x)));
-                    flash(`${emp.name.split(" ")[0]} gets texts in ${LANG_LABEL[l]}`);
+                    flash(`${first} gets texts in ${LANG_LABEL[l]}`);
                   }} />
-                  {row.texted && (canEdit
-                    // a stamp that landed without a text really going out (e.g. the
-                    // group message was never hit send on) can be tapped off
-                    ? <button className="btn-stamp" title="Tap to clear if the text never actually went out" onClick={async () => {
-                        if (!window.confirm(`Clear the TEXTED mark for ${emp.name.split(" ")[0]}? Do this if the message never really went out.`)) return;
-                        setRows((prev) => prev.map((x) => (x.id === row.id ? { ...x, texted: false } : x)));
-                        await sb().from("schedule_days").update({ texted: false }).eq("id", row.id);
-                      }}><Stamp label="TEXTED ✓" tone="ok" /></button>
-                    : <Stamp label="TEXTED ✓" tone="ok" />)}
+                  {row.texted && <Stamp label="TEXTED ✓" tone="ok" />}
                   {isQueued(row) && <Stamp label={`${isLate(row) ? "STILL WAITING · " : "GOES OUT "}${prettyWhen(row.send_at)}`} tone={isLate(row) ? "alert" : "work"} />}
-                  {!ok && <span className="text-[11px] text-inksoft">no number in the crew list</span>}
-                  <span className="ml-auto flex items-center gap-2.5">
+                  {!row.texted && !isQueued(row) && <Stamp label="NOT TEXTED" tone="mute" />}
+                  {!ok && <span className="text-[12px] text-inksoft">no number in the crew list</span>}
+                  <span className="ml-auto flex items-center gap-1">
                     {ok && !machine && (
-                      <a className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline" title="Opens their text on this phone"
-                        href={smsHref(emp.phone || "", msgFor(rel, rel.id, emp.name.split(" ")[0], emp.lang))}
-                        onClick={() => setTimeout(() => { if (window.confirm(`Did the text to ${emp.name.split(" ")[0]} send? OK stamps TEXTED ✓`)) markTexted(row.id); }, 600)}>resend</a>
+                      // their text opens on this phone; the stamp waits for the person to say it went
+                      <a className="btn-link text-inksoft" href={smsHref(emp.phone || "", msgFor(rel, rel.id, first, emp.lang))}
+                        onClick={() => setTimeout(() => { if (window.confirm(`Did the text to ${first} send? OK stamps TEXTED ✓`)) markTexted(row.id); }, 600)}>Resend</a>
                     )}
                     {ok && machine && canEdit && (
-                      <button className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline" title="Resend from the company number"
+                      <button type="button" className="btn-link text-inksoft"
                         onClick={async () => {
                           const res = await sendServerTexts(
-                            [{ to: cleanPhone(emp.phone || ""), body: await msgForAsync(rel, rel.id, emp.name.split(" ")[0], emp.lang), id: row.id }],
+                            [{ to: cleanPhone(emp.phone || ""), body: await msgForAsync(rel, rel.id, first, emp.lang), id: row.id }],
                             (await sb().auth.getSession()).data.session?.access_token || null);
-                          if (res.ok && (res.failed || []).length === 0) { markTexted(row.id); flash(`Texted ${emp.name.split(" ")[0]} ✓`); }
-                          else flash(res.failed?.[0]?.error || res.error || "Couldn't send");
-                        }}>resend</button>
+                          if (res.ok && (res.failed || []).length === 0) { markTexted(row.id); flash(`Texted ${first} ✓`); }
+                          else flash(res.failed?.[0]?.error || res.error || "Couldn't send the text. Check your signal and try again.");
+                        }}>Resend</button>
                     )}
-                    {canEdit && <button className="btn-icon border-0 bg-transparent text-[15px] text-alert shadow-none" title="Remove from this day" onClick={() => { if (row.texted && !window.confirm(`${emp.name.split(" ")[0]} was already texted about this job — remove them anyway? They won't be told automatically.`)) return; unassign(row.id); }}>✕</button>}
+                    {canEdit && <RowActions items={[
+                      { label: "Clear TEXTED mark", hidden: !row.texted, confirm: `Clear the TEXTED mark for ${first}? Do this if the message never really went out.`, onSelect: () => void clearTexted(row.id) },
+                      { label: "Remove from this day", destructive: true, confirm: row.texted ? `${first} was already texted about this job. Remove them anyway? They won't be told automatically.` : undefined, onSelect: () => void unassign(row.id) },
+                    ]} />}
                   </span>
                 </div>
               );
             })}
-            {assigned.length === 0 && <div className="py-1.5 text-[13px] text-inksoft">No one added yet — add workers, then hit Assign & text.</div>}
+            {assigned.length === 0 && <div className="empty my-2">No one on it yet.{canEdit ? " Add workers, then Text crew." : ""}</div>}
             {canEdit && addFor === rel.id && (
-              <div className="relative mt-2">
-                <input className="field" autoFocus placeholder="Type a worker's name…" value={addQ}
+              <div className="mt-2">
+                <input className="field" autoFocus autoComplete="off" placeholder="Type a worker's name…" value={addQ}
                   onChange={(e) => setAddQ(e.target.value)}
                   onBlur={() => setTimeout(() => setAddFor((cur) => (cur === rel.id ? null : cur)), 150)} />
-                <div className="card absolute inset-x-0 top-full z-10 max-h-80 overflow-y-auto shadow-lg">
+                <div className="popover static max-h-80 overflow-y-auto">
                   {match.map((e) => (
-                    <button key={e.id} className="flex w-full items-center justify-between border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0"
-                      onMouseDown={(ev) => { ev.preventDefault(); addWorker(rel, e); setAddQ(""); }}>
-                      <span>{e.name}{langOf(e.lang) === "es" ? <span className="chip ml-1.5 text-inksoft" title="Texted in Spanish">ES</span> : null}</span>
-                      <span className="text-[11px] text-inksoft">{cleanPhone(e.phone || "") ? "+ add" : "+ add (no number)"}</span>
+                    <button key={e.id} type="button" className="row-btn flex items-center justify-between border-b border-rulesoft px-3 py-2.5 text-[14px] last:border-b-0"
+                      onPointerDown={(ev) => { ev.preventDefault(); addWorker(rel, e); setAddQ(""); }} onClick={(ev) => { if (ev.detail === 0) { addWorker(rel, e); setAddQ(""); } }}>
+                      <span>{e.name}{langOf(e.lang) === "es" ? <span className="chip ml-1.5 text-inksoft">ES</span> : null}</span>
+                      <span className="text-[12px] text-inksoft">{cleanPhone(e.phone || "") ? "+ add" : "+ add (no number)"}</span>
                     </button>
                   ))}
-                  {match.length === 0 && <div className="p-2.5 text-sm text-inksoft">No one matches “{addQ}”.</div>}
+                  {match.length === 0 && <div className="p-2.5 text-[14px] text-inksoft">No one matches “{addQ}”.</div>}
                 </div>
               </div>
             )}
             {canEdit && addFor !== rel.id && (() => {
               const waiting = assigned.filter((r) => isQueued(r));
+              const late = waiting.length > 0 && isLate(waiting[0]);
               const setUp = async (t: Date) => {
                 const ids = assigned.filter((r) => !r.texted || isQueued(r)).map((r) => r.id);
                 if (ids.length === 0) { flash("Everyone here has already been texted"); return; }
                 const bad = await queueRows(ids, t);
                 if (bad) { flash(bad); return; }
-                setLaterFor(null); setWhen("");
+                setLaterFor(null);
                 flash(`${ids.length === 1 ? "The text goes" : `${ids.length} texts go`} out ${prettyWhen(t.toISOString())}`);
                 loadDay(day);
               };
               return (
               <>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <button className="btn min-h-[44px] px-3 text-[13px]" onClick={() => { setAddFor(rel.id); setAddQ(""); }}>+ Add worker</button>
-                {assigned.length > 0 && (
-                  <button className="btn btn-primary min-h-[44px] px-3 text-[13px]" disabled={sending === rel.id}
-                    onClick={() => textCrew(rel)}>
-                    {sending === rel.id ? "Sending…" : `Assign & text ${assigned.length === 1 ? "worker" : "crew"}`}
+              <CardToolbar className="mt-2"
+                primary={assigned.length > 0 ? (
+                  <button type="button" className="btn btn-primary" disabled={sending === rel.id} onClick={() => textCrew(rel)}>
+                    {sending === rel.id ? "Sending…" : assigned.length === 1 ? "📱 Text worker" : `📱 Text crew (${assigned.length})`}
                   </button>
-                )}
-                {machine && assigned.length > 0 && laterFor !== rel.id && (
-                  <button className="btn min-h-[44px] px-3 text-[13px]" data-later={rel.rel_number}
-                    onClick={() => { setLaterFor(rel.id); setWhen(localStamp(sendPicks()[0]?.when || new Date())); }}>📅 Send it later…</button>
-                )}
-              </div>
+                ) : undefined}
+                secondary={<>
+                  <button type="button" className="btn btn-ghost" onClick={() => { setAddFor(rel.id); setAddQ(""); }}>Add worker</button>
+                  {machine && assigned.length > 0 && laterFor !== rel.id && (
+                    <button type="button" className="btn btn-ghost" data-later={rel.rel_number} onClick={() => setLaterFor(rel.id)}>Send it later…</button>
+                  )}
+                </>} />
               {waiting.length > 0 && (
-                <div className="mt-2 flex flex-wrap items-center gap-2 rounded-sm border border-rulesoft bg-white px-3 py-2 text-[13px]" data-later-waiting={rel.rel_number}>
-                  <span>{isLate(waiting[0]) ? "⚠ " : "📅 "}{waiting.length === 1 ? "A text is" : `${waiting.length} texts are`} set to go out {prettyWhen(waiting.map((r) => r.send_at || "").sort()[0])}{isLate(waiting[0]) ? " — it hasn't gone yet" : ""}.</span>
-                  <span className="ml-auto flex items-center gap-2">
-                    <button className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline" disabled={sending === rel.id} onClick={() => textCrew(rel)}>send it now</button>
-                    <button className="inline-flex min-h-[44px] items-center text-[13px] text-alert underline" onClick={async () => { const bad = await unqueueRows(waiting.map((r) => r.id)); if (bad) { flash(bad); return; } flash("The text that was set up is called off"); loadDay(day); }}>call it off</button>
+                <div className="anim-open mt-2 flex flex-wrap items-center gap-2 rounded-sm border border-rulesoft bg-white px-3 py-2 text-[13px]" data-later-waiting={rel.rel_number}>
+                  <span>{late ? "⚠ " : "📅 "}{waiting.length === 1 ? "A text is" : `${waiting.length} texts are`} set to go out {prettyWhen(waiting.map((r) => r.send_at || "").sort()[0])}.{late ? " It hasn't gone yet." : ""}</span>
+                  <span className="ml-auto flex items-center gap-1">
+                    <button type="button" className="btn-link text-inksoft" disabled={sending === rel.id} onClick={() => textCrew(rel)}>Send it now</button>
+                    <button type="button" className="btn-link text-alert" onClick={async () => { const bad = await unqueueRows(waiting.map((r) => r.id)); if (bad) { flash(bad); return; } flash("The text that was set up is called off"); loadDay(day); }}>Call it off</button>
                   </span>
                 </div>
               )}
-              {laterFor === rel.id && (
-                <div className="mt-2 rounded-sm border border-work bg-white p-3" data-later-picker>
-                  <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-widest text-inksoft">When should it go out?</div>
-                  <div className="mb-2 flex flex-wrap gap-1.5">
-                    {sendPicks().map((p) => (
-                      <button key={p.label} className="btn min-h-[44px] px-3 py-1.5 text-[12px] normal-case tracking-normal" onClick={() => void setUp(p.when)}>{p.label}</button>
-                    ))}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <input type="datetime-local" className="field min-h-[44px] w-auto font-mono" aria-label="When the text goes out" value={when} onChange={(e) => setWhen(e.target.value)} />
-                    <button className="btn btn-primary min-h-[44px]" disabled={!when} onClick={() => { const t = new Date(when); if (Number.isNaN(t.getTime())) { flash("That time doesn't look right"); return; } void setUp(t); }}>Set it</button>
-                    <button className="btn btn-ghost min-h-[44px]" onClick={() => setLaterFor(null)}>Cancel</button>
-                  </div>
-                  <div className="mt-1.5 text-[11px] text-inksoft">
-                    The text is written when it goes out, so a change here before then goes with it.
-                    {onItsOwn === false ? " It goes out the next time somebody has the portal open — Settings → System check says how to have it go out on its own." : onItsOwn ? " It goes out on its own, whether or not anyone has the portal open." : ""}
-                  </div>
-                </div>
-              )}
+              {laterFor === rel.id && <SendLaterPicker dataAttr="data-later-picker" onItsOwn={onItsOwn} onCancel={() => setLaterFor(null)} onPick={(iso) => void setUp(new Date(iso))} />}
               </>
               );
             })()}
@@ -499,43 +515,32 @@ export default function Schedule() {
         );
       })}
 
-      <div className="mt-1 text-[11px] text-inksoft">
-        Phone numbers live in the crew list (Settings → Crew) — enter each one once.
-        {machine
-          ? " Company texting number is connected ✓"
-          : " Want texts to come from a company number instead of your phone? Add the TWILIO keys in Vercel → Settings → Environment Variables."}
-      </div>
-
-      {/* mini map window: type the place, check the pin, use it — the text
-          the workers get includes a tap-to-navigate Google Maps link */}
-      {mapFor && (
-        <div className="fixed inset-0 z-30 flex items-center justify-center bg-ink/60 p-4" onClick={() => setMapFor(null)}>
-          <div className="card w-full max-w-lg p-3.5" onClick={(e) => e.stopPropagation()}>
-            <div className="mb-2 font-display text-lg font-bold uppercase">Pick the location</div>
-            <div className="mb-2 flex gap-2">
-              <input className="field flex-1" autoFocus placeholder="Type the address or place…"
-                value={mapInput} onChange={(e) => setMapInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") setMapQ(mapInput.trim()); }} />
-              <button className="btn shrink-0" onClick={() => setMapQ(mapInput.trim())}>Search</button>
-            </div>
-            {mapQ ? (
-              <iframe title="map" className="h-72 w-full rounded-sm border border-rulesoft"
-                src={`https://www.google.com/maps?q=${encodeURIComponent(mapQ)}&output=embed`} />
-            ) : (
-              <div className="flex h-72 items-center justify-center rounded-sm border border-rulesoft bg-paper text-sm text-inksoft">
-                Type an address above and hit Search to see it on the map.
-              </div>
-            )}
-            <div className="mt-2.5 flex justify-end gap-2">
-              <button className="btn btn-ghost" onClick={() => setMapFor(null)}>Cancel</button>
-              <button className="btn btn-primary" disabled={!mapInput.trim()}
-                onClick={() => { saveAddr(mapFor, mapInput.trim()); setMapFor(null); }}>
-                Use this location
-              </button>
-            </div>
-          </div>
+      {!machine && (
+        <div className="mt-1 text-[12px] text-inksoft">
+          Texts open on this phone. To send them from a company number, see Settings → System check. Numbers come from the crew list (Settings → Crew).
         </div>
       )}
+
+      {/* the map window: type the place, check the pin, use it. The text the
+          workers get includes a tap-to-navigate Google Maps link */}
+      {mapFor && (
+        <Modal title="Pick the location" onClose={() => setMapFor(null)}
+          primary={<button type="button" className="btn btn-primary" disabled={!mapInput.trim()} onClick={() => { saveAddr(mapFor, mapInput.trim()); setMapFor(null); }}>Use this location</button>}
+          secondary={<button type="button" className="btn btn-ghost" onClick={() => setMapFor(null)}>Cancel</button>}>
+          <form className="mb-2 flex gap-2" onSubmit={(e) => { e.preventDefault(); setMapQ(mapInput.trim()); }}>
+            <input className="field flex-1" type="search" enterKeyHint="search" autoComplete="off" autoFocus placeholder="Type the address or place…"
+              value={mapInput} onChange={(e) => setMapInput(e.target.value)} />
+            <button type="submit" className="btn shrink-0">Search</button>
+          </form>
+          {mapQ ? (
+            <iframe title="Map of the address" className="h-72 w-full rounded-sm border border-rulesoft"
+              src={`https://www.google.com/maps?q=${encodeURIComponent(mapQ)}&output=embed`} />
+          ) : (
+            <div className="empty flex h-72 items-center justify-center">Type an address above and tap Search to see it on the map.</div>
+          )}
+        </Modal>
+      )}
+      <Toast msg={msg} />
     </div>
   );
 }

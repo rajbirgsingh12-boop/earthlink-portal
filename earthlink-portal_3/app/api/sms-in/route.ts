@@ -49,8 +49,8 @@ export async function GET() {
   const on = !!db && ready && !!first && first.rows.length > 0;
   const why = on ? "" : !db ? "SUPABASE_SERVICE_ROLE_KEY isn't in Vercel yet (then Redeploy)"
     : !env("TWILIO_AUTH_TOKEN") ? "TWILIO_AUTH_TOKEN isn't in Vercel yet (then Redeploy)"
-    : first && !first.ok ? "the texted_photos table isn't there yet — paste RUN_ME.sql (section 20) in Supabase"
-    : "no text has reached the portal yet — check the webhook in Twilio, then text the company number once";
+    : first && !first.ok ? "the texted_photos table isn't there yet: paste RUN_ME.sql (section 20) in Supabase"
+    : "no text has reached the portal yet: check the webhook in Twilio, then text the company number once";
   return NextResponse.json({ ready, on, why });
 }
 

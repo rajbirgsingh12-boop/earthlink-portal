@@ -40,9 +40,9 @@ export async function POST(req: Request) {
     const data = typeof im.data === "string" ? im.data.replace(/^data:[^,]*,/, "").replace(/\s+/g, "") : "";
     const media = String(im.media_type || "image/jpeg").toLowerCase();
     if (!data || !MEDIA.includes(media)) return NextResponse.json({ error: "One of the photos isn't a picture the reader can take (JPEG, PNG, WebP, GIF)" }, { status: 400 });
-    if (data.length > MAX_ONE) return NextResponse.json({ error: "One of the photos is too big — the phone should have shrunk it; try picking it again" }, { status: 413 });
+    if (data.length > MAX_ONE) return NextResponse.json({ error: "One of the photos is too big. The phone should have shrunk it; try picking it again" }, { status: 413 });
     total += data.length;
-    if (total > MAX_ALL) return NextResponse.json({ error: "Too many big photos at once — try fewer" }, { status: 413 });
+    if (total > MAX_ALL) return NextResponse.json({ error: "Too many big photos at once, try fewer" }, { status: 413 });
     // the photo's size and the owner's marks, in its pixels — checked, never trusted
     const width = Math.max(0, Math.min(10000, Math.round(Number(im.width) || 0))), height = Math.max(0, Math.min(10000, Math.round(Number(im.height) || 0)));
     const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : NaN);
@@ -60,7 +60,7 @@ export async function POST(req: Request) {
     ceilingFt: Math.min(20, Math.max(6, Number(h.ceilingFt) || 8)),
     note: String(h.note || "").replace(/\s+/g, " ").trim().slice(0, 500),
   };
-  if (!smartConfigured()) return NextResponse.json({ ok: false, note: "Claude isn't set up — add ANTHROPIC_API_KEY in Vercel" });
+  if (!smartConfigured()) return NextResponse.json({ ok: false, note: "Claude isn't set up: add ANTHROPIC_API_KEY in Vercel" });
   const out = await measureSmart(images, hints);
   if ("note" in out) return NextResponse.json({ ok: false, note: out.note });
   return NextResponse.json({ ok: true, result: out.result });

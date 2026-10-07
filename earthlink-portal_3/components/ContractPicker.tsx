@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Contract } from "@/lib/types";
 
 // Friendly label: renamed contracts show their name with the number tucked after it.
@@ -18,31 +18,43 @@ interface Props {
 export default function ContractPicker({ contracts, value, onChange, extra, placeholder }: Props) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
+  const wrap = useRef<HTMLDivElement | null>(null);
+  // while the list is open: a tap anywhere outside closes it, and so does
+  // Escape (marked handled, so a dialog around the picker stays open)
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: PointerEvent) => { if (wrap.current && !wrap.current.contains(e.target as Node)) setOpen(false); };
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); setOpen(false); } };
+    document.addEventListener("pointerdown", away);
+    document.addEventListener("keydown", key);
+    return () => { document.removeEventListener("pointerdown", away); document.removeEventListener("keydown", key); };
+  }, [open]);
   const all: Option[] = [...contracts.map((c) => ({ id: c.id, label: contractLabel(c) })), ...(extra || [])];
   const sel = all.find((a) => a.id === value);
-  const matches = q ? all.filter((a) => a.label.toLowerCase().includes(q.toLowerCase())) : all;
+  const found = q ? all.filter((a) => a.label.toLowerCase().includes(q.toLowerCase())) : all;
   return (
-    <div className="relative">
-      {open && <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />}
-      <button type="button" className="field flex items-center justify-between gap-2 text-left" onClick={() => { setOpen(!open); setQ(""); }}>
+    <div ref={wrap} className="relative">
+      <button type="button" className="field flex items-center justify-between gap-2 text-left" aria-haspopup="listbox" aria-expanded={open}
+        onClick={() => { setOpen(!open); setQ(""); }}>
         <span className="truncate">{sel?.label || placeholder || "Pick a contract…"}</span>
-        <span className="shrink-0 text-xs text-inksoft">▾</span>
+        <span aria-hidden className={`shrink-0 text-xs text-inksoft transition-transform duration-150 ${open ? "rotate-180" : ""}`}>▾</span>
       </button>
       {open && (
-        <div className="card absolute inset-x-0 top-full z-20 mt-1 overflow-hidden shadow-lg">
+        <div role="listbox" className="popover">
           {all.length > 5 && (
-            <input autoFocus className="w-full border-b border-rulesoft bg-white px-3 py-2.5 text-base outline-none"
+            <input autoFocus type="search" enterKeyHint="search" autoComplete="off"
+              className="min-h-[44px] w-full border-b border-rulesoft bg-white px-3 py-2.5 text-base outline-none"
               placeholder="Search contracts…" value={q} onChange={(e) => setQ(e.target.value)} />
           )}
           <div className="max-h-56 overflow-y-auto">
-            {matches.map((a) => (
-              <button key={a.id || "none"} type="button"
-                className={`block w-full border-b border-rulesoft p-2.5 text-left text-sm last:border-b-0 hover:bg-paper ${a.id === value ? "font-semibold text-work" : ""}`}
+            {found.map((a) => (
+              <button key={a.id || "none"} type="button" role="option" aria-selected={a.id === value}
+                className={`row-btn border-b border-rulesoft px-3 py-2.5 text-[15px] last:border-b-0 ${a.id === value ? "font-semibold text-work" : ""}`}
                 onClick={() => { onChange(a.id); setOpen(false); }}>
                 {a.label}
               </button>
             ))}
-            {matches.length === 0 && <div className="p-2.5 text-sm text-inksoft">Nothing matches “{q}”.</div>}
+            {found.length === 0 && <div className="p-2.5 text-sm text-inksoft">Nothing matches “{q}”.</div>}
           </div>
         </div>
       )}

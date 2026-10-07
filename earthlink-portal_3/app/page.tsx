@@ -5,15 +5,15 @@ import { COMPANY, COMPANY_ADDRESS } from "@/lib/company";
 // crawler) that loads the domain sees the registered business name, address and
 // contact details in the HTML itself. The staff portal lives behind /home.
 export const metadata = {
-  title: `${COMPANY.legalName} — General Construction, New York City`,
+  title: `${COMPANY.legalName} · General Construction, New York City`,
   description: COMPANY.blurb,
 };
 
 const SERVICES = [
-  ["Apartment restoration", "Full turnover of vacant and occupied apartments — kitchens, bathrooms, floors, doors."],
+  ["Apartment restoration", "Full turnover of vacant and occupied apartments: kitchens, bathrooms, floors, doors."],
   ["Painting & plastering", "Skim coating, plaster repair, and painting to NYCHA specification."],
   ["Carpentry & tile", "Doors, frames, cabinets, trim, and floor and wall tile."],
-  ["Public housing contracts", "NYCHA blanket releases and PACT/RAD partner work across the five boroughs."],
+  ["Public housing contracts", "NYCHA contract releases and PACT/RAD partner work across the five boroughs."],
 ];
 
 export default function PublicHome() {
@@ -45,12 +45,10 @@ export default function PublicHome() {
           {COMPANY.street}
           <br />
           {COMPANY.city}, {COMPANY.state} {COMPANY.zip}
-          <br />
-          Telephone: <a className="underline" href={`tel:${COMPANY.phoneHref}`}>{COMPANY.phone}</a>
-          <br />
-          Email: <a className="underline" href={`mailto:${COMPANY.email}`}>{COMPANY.email}</a>
-          <br />
-          Web: <a className="underline" href={`https://${COMPANY.site}`}>{COMPANY.site}</a>
+          {/* each contact line is its own 44px tap target */}
+          <div>Telephone: <a className="btn-link text-[14px]" href={`tel:${COMPANY.phoneHref}`}>{COMPANY.phone}</a></div>
+          <div>Email: <a className="btn-link text-[14px]" href={`mailto:${COMPANY.email}`}>{COMPANY.email}</a></div>
+          <div>Web: <a className="btn-link text-[14px]" href={`https://${COMPANY.site}`}>{COMPANY.site}</a></div>
         </address>
       </section>
 
@@ -60,13 +58,13 @@ export default function PublicHome() {
           {COMPANY.shortName} employees use the Field Office portal to see their work assignments,
           walk sheets and hours. It is private to our staff.
         </p>
-        <a className="btn btn-primary mt-3 inline-block" href="/login">Employee sign-in</a>
+        <a className="btn btn-primary mt-3 inline-flex" href="/login">Employee sign-in</a>
       </section>
 
       <footer className="mt-12 border-t border-rulesoft pt-4 text-[12px] text-inksoft">
-        <a className="underline" href="/legal">Privacy Policy &amp; Text Message Terms</a>
+        <a className="btn-link" href="/legal">Privacy Policy &amp; Text Message Terms</a>
         <div className="mt-1.5">
-          © {new Date().getFullYear()} {COMPANY.legalName}. {COMPANY_ADDRESS}.
+          © {new Date().getFullYear()} {COMPANY.legalName} · {COMPANY_ADDRESS}
         </div>
       </footer>
     </main>

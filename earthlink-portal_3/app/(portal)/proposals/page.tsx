@@ -20,8 +20,10 @@ import type { SmartSurvey } from "@/lib/smartSurvey";
 import { useLive } from "@/lib/useLive";
 import PrintShell from "@/components/PrintShell";
 import Letterhead from "@/components/Letterhead";
-import ActionMenu, { RowActions } from "@/components/ActionMenu";
+import { RowActions } from "@/components/ActionMenu";
 import Disclosure from "@/components/Disclosure";
+import PageHeader from "@/components/PageHeader";
+import Toast, { useFlash } from "@/components/Toast";
 
 interface Proposal {
   id: string; number: string; client_name: string; job: string; date: string; tax_pct: number; status: string; notes: string;
@@ -33,12 +35,19 @@ interface ContractItem { id: string; line: number; code: string; category: strin
 type NychaLineItem = LineItem & { category?: string; line?: number };
 
 const tone = (s: string) => (s === "approved" ? "work" : s === "sent" ? "carbon" : s === "invoiced" ? "mute" : s === "declined" ? "alert" : "mute");
+// the status words on a sheet's stamp (the database keeps the short keys)
+const STATUS_LABEL: Record<string, string> = { draft: "Draft", approved: "In a release", sent: "Sent", invoiced: "Invoiced", declined: "Declined" };
+const statusLabel = (s: string) => STATUS_LABEL[s] || s;
 // how a sheet is named everywhere: the location, then what the work is for
 const sheetName = (p: { development?: string; address?: string; job?: string; number?: string }) =>
-  [p.development || p.address, p.job].filter(Boolean).join(" — ") || p.number || "proposal";
+  [p.development || p.address, p.job].filter(Boolean).join(" · ") || p.number || "proposal";
 const fileSafe = (s: string) => s.replace(/[\\/:*?"<>|]/g, "-").slice(0, 120);
+// what the office reads when the database says no: the upgrade it needs, or a
+// plain "try again" (never the database's own words)
+const UPGRADE_MSG = "The portal's database needs an upgrade before this works (Settings → System check).";
+const needsUpgrade = (m: string) => /column|schema|relation|qty_map/i.test(m);
 const HEAD_FIELDS = [
-  ["development", "Development"], ["address", "Address"], ["apt", "Apt"], ["stairhall", "Stairhall"],
+  ["development", "Development"], ["apt", "Apt"], ["stairhall", "Stairhall"],
   ["nycha_staff", "NYCHA staff"], ["vendor_staff", "Vendor staff"], ["walk_date", "Walk date"],
   ["release_number", "Release #"], ["start_date", "Start date"], ["finish_date", "Finish date"],
 ] as const;
@@ -73,11 +82,10 @@ export default function Proposals() {
   const CONTRACT_KEY = "proposals.contract";
   const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
   const [showHead, setShowHead] = useState(false); // walk-sheet header fields tucked away until needed
-  const [msg, setMsg] = useState("");
+  const { msg, flash } = useFlash();
   const sheetRef = useRef<HTMLInputElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3000); };
-  const upgradeHint = (m: string) => (/column|schema|relation|qty_map/i.test(m) ? "Database needs the upgrade — run supabase/upgrade_proposal_creator.sql" : m);
+  const upgradeHint = (m: string, what = "save") => (needsUpgrade(m) ? UPGRADE_MSG : `Couldn't ${what}. Check your signal and try again.`);
 
   const load = async () => {
     // the list never shows quantities — leaving qty_map out cuts the payload
@@ -144,6 +152,7 @@ export default function Proposals() {
   const openEditor = async (p: Proposal) => {
     openDocId.current = p.id;
     setDoc(p); setSearch(""); setCollapsed(new Set());
+    window.scrollTo(0, 0); // the sheet opens at its top, however far down the list was
     setQty({}); // never show the previous sheet's quantities while this one loads
     qtyDirty.current = false;
     // the list rows travel without qty_map — the full sheet loads here
@@ -166,14 +175,14 @@ export default function Proposals() {
     if (openDocId.current === p.id) setQty(m);
   };
   const newWalkSheet = async () => {
-    if (contracts.length === 0) { flash("No contracts yet — upload a release sheet or release PDF first"); return; }
+    if (contracts.length === 0) { flash("No contracts yet. Upload a release sheet or release PDF first"); return; }
     if (contracts.length > 1 && !pickOpen) { setPickOpen(true); return; }
     setPickOpen(false);
     const number = await nextNumber("proposals", "PROP");
     const { data, error } = await sb().from("proposals").insert({
       number, client_name: "New York City Housing Authority", contract_id: pickId || contracts[0].id,
     }).select().single();
-    if (error) { flash(upgradeHint(error.message)); return; }
+    if (error) { flash(upgradeHint(error.message, "make the walk sheet")); return; }
     // the list follows the new sheet's contract, so it is on screen when the editor closes
     const made = data as Proposal;
     if (made.contract_id && listContract !== "all" && listContract !== made.contract_id) pickListContract(made.contract_id);
@@ -203,14 +212,14 @@ export default function Proposals() {
       const url = URL.createObjectURL(new Blob([ab], { type: "application/pdf" }));
       const a = document.createElement("a"); a.href = url; a.download = SURVEY_FORM_NAME; a.click();
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      flash("Blank survey saved — fill the boxes on site, then upload it here");
+      flash("Blank survey saved. Fill the boxes on site, then upload it here");
     } catch (err) { flash(`Couldn't build the form (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`); }
   };
   // what a survey needs before it can be read, PDF or pasted note alike: a
   // contract to bill, and the move-out one among them
   const moveoutReady = () => {
-    if (contracts.length === 0) { flash("No contracts yet — upload a release sheet or release PDF first"); return false; }
-    if (!surveyContract()) { flash(`The portal has no contract ${MOVEOUT_CONTRACT} (the move-out contract) yet — upload one of its releases on the NYCHA tab first`); return false; }
+    if (contracts.length === 0) { flash("No contracts yet. Upload a release sheet or release PDF first"); return false; }
+    if (!surveyContract()) { flash(`The portal has no contract ${MOVEOUT_CONTRACT} (the move-out contract) yet. Upload one of its releases on the Releases tab first.`); return false; }
     return true;
   };
   const uploadSurvey = () => { if (moveoutReady()) surveyRef.current?.click(); };
@@ -251,7 +260,7 @@ export default function Proposals() {
     const hoursKept = plan.hours.filter((_, i) => !off.has(HOUR_KEY(i)));
     const hoursOff = plan.hours.filter((_, i) => off.has(HOUR_KEY(i)));
     const hourTotal = Math.ceil(hoursKept.reduce((sum, h) => sum + h.hours, 0) - 1e-9);
-    const labor = plan.labor && hourTotal > 0 ? { ...plan.labor, qty: hourTotal, label: `General Laborer — ${hourTotal} hour${hourTotal === 1 ? "" : "s"}` } : null;
+    const labor = plan.labor && hourTotal > 0 ? { ...plan.labor, qty: hourTotal, label: `General Laborer · ${hourTotal} hour${hourTotal === 1 ? "" : "s"}` } : null;
     return { keep: labor ? [...keepLines, labor] : keepLines, offLines, hoursKept, hoursOff, hourTotal };
   };
   // one walk sheet from the plan — what came off goes in its notes, so nothing is forgotten
@@ -265,10 +274,10 @@ export default function Proposals() {
       `✓ ${plan.who} from ${plan.pasted ? plan.file : `the survey PDF (${plan.file})`}`,
       ...(stray.length ? [`⚠ Lines before the first apartment: ${stray.join("; ")}`] : []),
       ...(hoursKept.length ? [`→ ${hourTotal} hour${hourTotal === 1 ? "" : "s"} General Laborer: ${hoursNote(hoursKept)}`] : []),
-      ...(plan.twice.length ? [`↺ Written twice: ${plan.twice.join("; ")}`] : []),
+      ...(plan.twice.length ? [`Written twice: ${plan.twice.join("; ")}`] : []),
       ...(plan.unmatched.length ? [`⚠ Not on the move-out list: ${plan.unmatched.join("; ")}`] : []),
-      ...(offLines.length ? [`✂ Left off: ${offLines.map((l) => `${l.label} (${fmt(l.qty * l.unit_price)})`).join("; ")}`] : []),
-      ...(hoursOff.length ? [`✂ Hours left off: ${hoursNote(hoursOff)}`] : []),
+      ...(offLines.length ? [`Left off: ${offLines.map((l) => `${l.label} (${fmt(l.qty * l.unit_price)})`).join("; ")}`] : []),
+      ...(hoursOff.length ? [`Hours left off: ${hoursNote(hoursOff)}`] : []),
     ];
     const number = await nextNumber("proposals", "PROP");
     const qty_map: Record<string, number> = {};
@@ -278,24 +287,23 @@ export default function Proposals() {
       job: plan.sv.kind || "Move-out", address: plan.sv.address, apt: plan.sv.apt, walk_date: localISO(), qty_map, total, notes: noteLines.join("\n"),
       ...(plan.development ? { development: plan.development } : {}),
     }).select().single();
-    if (pe || !data) { flash(upgradeHint(pe?.message || "Couldn't make the walk sheet")); return; }
+    if (pe || !data) { flash(upgradeHint(pe?.message || "", "make the walk sheet")); return; }
     const pid = (data as Proposal).id;
     const full = keep.map((l, i) => ({ proposal_id: pid, code: l.code, description: l.description, unit: l.uom, qty: l.qty, unit_price: l.unit_price, sort: i, category: byCode.get(l.code)?.category || "", line: l.line }));
     let { error: ie } = await sb().from("proposal_items").insert(full);
     if (ie && /column/i.test(ie.message)) ({ error: ie } = await sb().from("proposal_items").insert(full.map(({ category: _c, line: _l, ...rest }) => rest)));
-    if (ie) flash(ie.message);
+    if (ie) flash(upgradeHint(ie.message, "save the sheet's lines"));
     await load();
     pickListContract(plan.cid);
     const offCount = offLines.length + hoursOff.length;
     if (pasteQueue) {
       // one apartment of a pasted note: on to the next check box, no editor,
-      // the list shows the sheets once the note is done
-      flash(`Walk sheet ${number} made · ${fmt(total)}${offCount ? ` · ${offCount} left off (in the notes)` : ""}`);
+      // no flash per sheet (the end of the note says how many were made)
       nextInQueue(pasteQueue, true);
       return;
     }
     setTrim(null);
-    flash(`Walk sheet ${number} made — ${fmt(total)}${offCount ? ` · ${offCount} left off (in the notes)` : ""} — check the counts`);
+    flash(`Walk sheet ${number} made · ${fmt(total)}${offCount ? ` · ${offCount} left off (in the notes)` : ""} · check the counts`);
     openEditor(data as Proposal); // straight onto the sheet, counts in view
   };
   // the contract's price book, with the release's lines in it — the sheet,
@@ -304,7 +312,7 @@ export default function Proposals() {
   // Null when the book can't be read or added to (the snag is flashed).
   const moveoutCatalog = async (cid: string): Promise<{ catalog: ContractItem[]; bookNote: string } | null> => {
     const { data: cat, error } = await sb().from("contract_items").select("*").eq("contract_id", cid).order("line");
-    if (error) { flash(upgradeHint(error.message)); return null; }
+    if (error) { flash(upgradeHint(error.message, "load the price book")); return null; }
     let catalog = (cat || []) as ContractItem[];
     const have = new Set(catalog.map((c) => c.code));
     const missing = RELEASE_LINES.filter((r) => !have.has(r.code));
@@ -316,7 +324,7 @@ export default function Proposals() {
         // another phone got there first (the book holds each code once — RUN_ME section 16): take the book as it is now
         const { data: again } = await sb().from("contract_items").select("*").eq("contract_id", cid).order("line");
         catalog = (again || []) as ContractItem[];
-      } else if (ae) { flash(`Couldn't add release ${MOVEOUT_RELEASE}'s lines to this contract's price book (${upgradeHint(ae.message)})`); return null; }
+      } else if (ae) { flash(needsUpgrade(ae.message) ? UPGRADE_MSG : `Couldn't add release ${MOVEOUT_RELEASE}'s lines to this contract's price book. Check your signal and try again.`); return null; }
       else {
         catalog = [...catalog, ...((added && added.length ? added : rows) as ContractItem[])];
         bookNote = `${missing.length} line${missing.length === 1 ? "" : "s"} from release ${MOVEOUT_RELEASE} added to this contract's price book`;
@@ -339,20 +347,20 @@ export default function Proposals() {
       const token = (await sb().auth.getSession()).data.session?.access_token || "";
       const res = await fetch("/api/parse-survey", { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: form });
       const out = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; survey?: SmartSurvey; readBy?: "claude" | "rules"; note?: string };
-      if (!res.ok || !out.ok || !out.survey) { flash(out.error || `The survey couldn't be read (server said ${res.status})`); return; }
+      if (!res.ok || !out.ok || !out.survey) { flash(out.error || `The survey couldn't be read${!res.ok ? ` (server said ${res.status})` : ""}. Try again.`); return; }
       const sv = out.survey;
-      const who = out.readBy === "claude" ? "Read by Claude" : "Read by the rules";
+      const who = out.readBy === "claude" ? "Read by Claude" : "Read by the portal's own reader";
       // the written items, billed the way the release bills them
       const billed = billSurvey(sv.items, catalog);
       const lines = billed.lines;
       const unmatched = billed.unmatched.map((it) => `${it.written}${it.note ? ` (${it.note})` : ""}`);
-      if (lines.length === 0) { flash(`${who} — nothing on that survey is on the move-out list${out.note ? ` (${out.note})` : sv.items.length === 0 ? " (no lines read off the page)" : ""}`); return; }
+      if (lines.length === 0) { flash(`${who}: nothing on that survey is on the move-out list${out.note ? ` (${out.note})` : sv.items.length === 0 ? " (no lines read off the page)" : ""}`); return; }
       const plan: SurveyPlan = { cid, file: file.name, who, sv, lines, labor: lines.find((l) => l.itemKey === LABOR_KEY) || null, hours: billed.hours, unmatched, twice: billed.twice, note: out.note, bookNote, catalog, development: "" };
       // the check box: every line read, each with a tick to take it off — and
       // over what a super will sign, the sheet waits until enough comes off
       setTrim({ plan, off: new Set() });
     } catch (err) {
-      flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
+      flash(`Upload hit a snag, try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
     } finally { setSurveyBusy(false); }
   };
 
@@ -395,7 +403,7 @@ export default function Proposals() {
           body: JSON.stringify({ texts: texts.slice(i, i + 12) }),
         });
         const out = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; surveys?: PastedRead[] };
-        if (!res.ok || !out.ok || !out.surveys) { flash(out.error || `The note couldn't be read (server said ${res.status})`); return; }
+        if (!res.ok || !out.ok || !out.surveys) { flash(out.error || `The note couldn't be read${!res.ok ? ` (server said ${res.status})` : ""}. Try again.`); return; }
         reads.push(...out.surveys);
       }
       if (reads.length !== texts.length) { flash("The note couldn't be read (the server sent back the wrong number of apartments)"); return; }
@@ -409,7 +417,7 @@ export default function Proposals() {
         sv.kind = a.kind || sv.kind || "Move-out";
         // a reader that hands the building line back as an item (nothing on the list is it) is handing back the header: not an item
         sv.items = sv.items.filter((it) => it.key || norm(it.written) !== norm(headers[i]));
-        const who = readBy === "claude" ? "Read by Claude" : "Read by the rules";
+        const who = readBy === "claude" ? "Read by Claude" : "Read by the portal's own reader";
         const billed = billSurvey(sv.items, book.catalog);
         const unmatched = billed.unmatched.map((it) => `${it.written}${it.note ? ` (${it.note})` : ""}`);
         // the book note is one event, said once; an apartment with no lines keeps its (empty) plan for the check box to show what wasn't read
@@ -428,7 +436,7 @@ export default function Proposals() {
     if (!doc) return;
     setDoc({ ...doc, ...patch });
     const { error } = await sb().from("proposals").update(patch).eq("id", doc.id);
-    if (error) flash(upgradeHint(error.message)); else if (!silent) flash("Saved");
+    if (error) flash(upgradeHint(error.message)); else if (!silent) flash("Walk sheet saved");
     load();
   };
 
@@ -510,7 +518,7 @@ export default function Proposals() {
   // explicit save: flush quantities + line items right now
   const saveNow = async () => {
     if (!doc) return;
-    if (doc.contract_id && !catalog) { flash("Price book is still loading — one second"); return; }
+    if (doc.contract_id && !catalog) { flash("Price book is still loading, one second"); return; }
     if (saveTimer.current) clearTimeout(saveTimer.current);
     setSaveState("saving");
     const map: Record<string, number> = {};
@@ -535,7 +543,7 @@ export default function Proposals() {
       const full = rows.map((it, i) => ({ proposal_id: doc.id, code: it.code, description: it.description, unit: it.unit, qty: Number(it.qty) || 0, unit_price: Number(it.unit_price) || 0, sort: i, category: it.category || "", line: it.line || 0 }));
       let { error } = await sb().from("proposal_items").insert(full);
       if (error && /column/i.test(error.message)) ({ error } = await sb().from("proposal_items").insert(full.map(({ category: _c, line: _l, ...rest }) => rest)));
-      if (error) flash(error.message);
+      if (error) flash(upgradeHint(error.message, "save the sheet's lines"));
     }
     return rows;
   };
@@ -572,18 +580,18 @@ export default function Proposals() {
         const codesSeen = new Set<string>();
         const repeats = rows.filter((r) => { if (codesSeen.has(r.code)) return true; codesSeen.add(r.code); return false; }).length;
         const uniq = rows.filter((r, i) => rows.findIndex((x) => x.code === r.code) === i);
-        if (uniq.length === 0) { flash("No item rows found in that sheet"); return; }
+        if (uniq.length === 0) { flash("No lines found on that sheet"); return; }
         const { error: de } = await sb().from("contract_items").delete().eq("contract_id", doc.contract_id!);
-        if (de) { flash(upgradeHint(de.message)); return; }
+        if (de) { flash(upgradeHint(de.message, "replace the price book")); return; }
         for (let i = 0; i < uniq.length; i += 500) {
           const { error } = await sb().from("contract_items").insert(uniq.slice(i, i + 500).map((r) => ({ ...r, contract_id: doc.contract_id })));
-          // the old book is already cleared — say so, or a half-loaded book looks complete
-          if (error) { flash(`Upload stopped partway (${upgradeHint(error.message)}) — upload the sheet again to finish the book`); return; }
+          // the old book is already cleared: say so, or a half-loaded book looks complete
+          if (error) { flash(needsUpgrade(error.message) ? UPGRADE_MSG : `Upload stopped partway: only ${i} of ${uniq.length} lines made it. Upload the sheet again to finish the book`); return; }
         }
         const { data } = await sb().from("contract_items").select("*").eq("contract_id", doc.contract_id!).order("line");
         setCatalog((data || []) as ContractItem[]);
         flash(`Loaded ${uniq.length} price book lines for this contract${repeats ? ` (${repeats} repeated code${repeats === 1 ? "" : "s"} skipped)` : ""}`);
-      } catch { flash("Couldn't read that sheet — save as .xlsx or .csv"); }
+      } catch { flash("Couldn't read that sheet. Save it as .xlsx or .csv"); }
     };
     reader.readAsArrayBuffer(file);
     e.target.value = "";
@@ -591,7 +599,7 @@ export default function Proposals() {
 
   // ---------- export: NYCHA walk-sheet layout, used lines only, bordered ----------
   const exportWalkSheet = async () => {
-    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine \u2014 check your signal and try again"); return; }
+    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine. Check your signal and try again"); return; }
     if (!doc || !catalog) return;
     await materialize();
     const c = contracts.find((x) => x.id === doc.contract_id);
@@ -691,7 +699,7 @@ export default function Proposals() {
       const url = URL.createObjectURL(new Blob([ab], { type: "application/pdf" }));
       const a = document.createElement("a"); a.href = url; a.download = walkSheetFileName(fields); a.click();
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      flash(lines.length ? `PDF saved — ${lines.length} line${lines.length === 1 ? "" : "s"}` : "PDF saved — no quantities on that sheet yet");
+      flash(lines.length ? `PDF saved · ${lines.length} line${lines.length === 1 ? "" : "s"}` : "PDF saved · no quantities on that sheet yet");
     } catch (err) {
       flash(`Couldn't build the PDF (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
     } finally { setPdfBusy(""); }
@@ -699,8 +707,15 @@ export default function Proposals() {
 
   // step 1: ask which release number this walk sheet becomes
   const addToRelease = (p: Proposal) => {
-    if (!contracts.find((x) => x.id === p.contract_id)) { flash("That proposal isn't tied to a contract"); return; }
+    if (!contracts.find((x) => x.id === p.contract_id)) { flash("That walk sheet isn't tied to a contract"); return; }
     setRelAsk({ p, value: (p.release_number || "").trim() });
+  };
+  // the Add to release dialog's one action: close it, then make or update the release
+  const submitRelAsk = () => {
+    if (!relAsk || !relAsk.value.trim()) return;
+    const { p, value } = relAsk;
+    setRelAsk(null);
+    performAddToRelease(p, value.trim());
   };
   // step 2: create/update the release under that number
   const performAddToRelease = async (p: Proposal, rel: string) => {
@@ -721,7 +736,7 @@ export default function Proposals() {
       relId = (existing[0] as { id: string }).id;
       let { error } = await sb().from("releases").update({ amount: total, location: p.development || "", buildings: addr, address: addr }).eq("id", relId);
       if (error && /column/i.test(error.message)) ({ error } = await sb().from("releases").update({ amount: total, location: p.development || "", buildings: addr }).eq("id", relId));
-      if (error) { flash(error.message); return; }
+      if (error) { flash(upgradeHint(error.message, "update the release")); return; }
       await sb().from("release_items").delete().eq("release_id", relId);
     } else {
       const base = {
@@ -730,7 +745,7 @@ export default function Proposals() {
       };
       let { data, error } = await sb().from("releases").insert({ ...base, address: addr }).select().single();
       if (error && /column/i.test(error.message)) ({ data, error } = await sb().from("releases").insert(base).select().single());
-      if (error || !data) { flash(error?.message || "Couldn't create the release"); return; }
+      if (error || !data) { flash(upgradeHint(error?.message || "", "make the release")); return; }
       relId = (data as { id: string }).id;
     }
     const { error: e2 } = await sb().from("release_items").insert(its.map((it) => ({
@@ -738,11 +753,11 @@ export default function Proposals() {
       qty: Number(it.qty) || 0, uom: it.unit, unit_price: Number(it.unit_price) || 0,
       amount: (Number(it.qty) || 0) * (Number(it.unit_price) || 0),
     })));
-    if (e2) { flash(`Release saved, but line items failed: ${e2.message}`); return; }
+    if (e2) { flash(needsUpgrade(e2.message) ? UPGRADE_MSG : "Release saved, but its lines didn't. Check your signal and try again."); return; }
     await sb().from("proposals").update({ status: "approved" }).eq("id", p.id);
     if (doc && doc.id === p.id) setDoc({ ...doc, status: "approved" });
     load();
-    flash(`Release ${rel} ${existing && existing[0] ? "updated" : "created"} on contract ${c.number} — see the Releases tab`);
+    flash(`Release ${rel} ${existing && existing[0] ? "updated" : "created"} on contract ${c.number}. See the Releases tab`);
   };
 
   // ---------- delete (works from the dashboard) ----------
@@ -762,7 +777,7 @@ export default function Proposals() {
       await sb().from("proposal_items").delete().eq("proposal_id", p.id);
       ({ error } = await sb().from("proposals").delete().eq("id", p.id));
     }
-    if (error) { flash(error.message); return; }
+    if (error) { flash("Couldn't delete the walk sheet. Check your signal and try again."); return; }
     if (doc && doc.id === p.id) setDoc(null);
     load(); flash("Walk sheet deleted");
   };
@@ -791,46 +806,48 @@ export default function Proposals() {
     });
     return { groups: out, hiddenLines: found.length - rows.length };
   }, [catalog, searchSettled, qty]);
+  // the total bar sits fixed along the bottom while a walk sheet is open: the toast lifts above it
+  const barUp = !!(doc && doc.contract_id);
+  useEffect(() => {
+    document.documentElement.style.setProperty("--bottom-bar", barUp ? "56px" : "0px");
+    return () => { document.documentElement.style.setProperty("--bottom-bar", "0px"); };
+  }, [barUp]);
 
   // ================= WALK SHEET EDITOR =================
   if (doc && doc.contract_id) {
     const c = contracts.find((x) => x.id === doc.contract_id);
     return (
-      <div className="pb-24">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5">
-            <button className="btn btn-ghost" onClick={closeEditor}>← Back</button>
-            <span className="font-mono font-semibold">{doc.number}</span>
-            <Stamp label={doc.status.toUpperCase()} tone={tone(doc.status) as "ok"} />
+      <div key={doc.id} className="page-enter pb-24">
+        {!!pdfBusy && <div className="busy-bar" aria-busy="true" aria-label="Working" />}
+        <PageHeader title={doc.number} back={{ onClick: closeEditor }}
+          stamp={<>
+            <Stamp label={statusLabel(doc.status)} tone={tone(doc.status) as "ok"} />
             {saveState && <span className="text-xs text-inksoft">{saveState === "saving" ? "Saving…" : "Saved ✓"}</span>}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button className="btn btn-primary" onClick={async () => { await saveNow(); setDoc(null); setItems([]); }}>Save & close</button>
-            <ActionMenu label="⋯" items={[
-              { label: "View PDF", onSelect: () => { setPrintOpen(true); setTimeout(() => window.print(), 400); } },
-              { label: "⬇ Walk sheet (Excel)", onSelect: exportWalkSheet },
-            ]} />
-          </div>
-        </div>
+          </>}
+          menu={[
+            { label: "Preview and print", onSelect: () => setPrintOpen(true) },
+            { label: pdfBusy ? "Making the PDF…" : "Download PDF", glyph: "⬇", disabled: !!pdfBusy, onSelect: () => downloadPdf(doc) },
+            { label: "Walk sheet (Excel)", glyph: "⬇", onSelect: exportWalkSheet },
+          ]} />
         <input ref={sheetRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleContractSheet} />
 
-        <div className="card mb-3 p-3.5">
+        <div className="card card-pad mb-3">
           <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
-            <div className="col-span-2"><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Name</div>
-              <input className="field" placeholder="e.g. Queensbridge 41st Ave Apt 3F move-out" value={doc.job || ""}
+            <div className="col-span-2"><label className="section-label mb-1" htmlFor="ws-work">Work</label>
+              <input id="ws-work" className="field" placeholder="e.g. Move-out, plaster and paint" value={doc.job || ""}
                 onChange={(e) => setDoc({ ...doc, job: e.target.value })} onBlur={(e) => saveDoc({ job: e.target.value }, true)} /></div>
-            <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Contract / PO</div>
+            <div className="col-span-2"><div className="section-label mb-1">Contract</div>
               <ContractPicker contracts={contracts} value={doc.contract_id || ""} onChange={(id) => saveDoc({ contract_id: id }, true)} /></div>
-            <div className="col-span-2"><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Address of the location</div>
-              <input className="field" placeholder="e.g. 21-10 41st Ave, Queensbridge" value={doc.address || ""}
+            <div className="col-span-2"><label className="section-label mb-1" htmlFor="ws-address">Address</label>
+              <input id="ws-address" className="field" placeholder="e.g. 21-10 41st Ave, Queensbridge" value={doc.address || ""}
                 onChange={(e) => setDoc({ ...doc, address: e.target.value })} onBlur={(e) => saveDoc({ address: e.target.value }, true)} /></div>
           </div>
           <Disclosure className="mt-1.5 border-t border-rulesoft pt-1" label="Sheet header" sublabel="dates, staff, apt, release #"
             open={showHead} onToggle={() => setShowHead(!showHead)}>
             <div className="grid grid-cols-2 gap-2.5 pt-1.5 md:grid-cols-4">
               {HEAD_FIELDS.map(([k, label]) => (
-                <div key={k}><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
-                  <input className="field" type={/date/.test(k) ? "date" : "text"} value={doc[k] || ""}
+                <div key={k}><label className="section-label mb-1" htmlFor={`ws-${k}`}>{label}</label>
+                  <input id={`ws-${k}`} className="field" type={/date/.test(k) ? "date" : "text"} value={doc[k] || ""}
                     onChange={(e) => setDoc({ ...doc, [k]: e.target.value })}
                     onBlur={(e) => saveDoc({ [k]: e.target.value } as Partial<Proposal>, true)} /></div>
               ))}
@@ -838,67 +855,73 @@ export default function Proposals() {
           </Disclosure>
         </div>
 
-        {(catalog || []).length === 0 ? (
-          <div className="card border-work p-4">
+        {catalog === null ? (
+          <div className="card">
+            {[0, 1, 2].map((i) => (
+              /* the book's shape, shimmering, while its lines load */
+              <div key={`sk${i}`} className="flex items-start gap-3 border-b border-rulesoft p-3 last:border-b-0">
+                <div className="min-w-0 flex-1"><div className="skeleton h-3 w-20" /><div className="skeleton mt-2 h-4 w-3/4" /></div>
+                <div className="skeleton h-11 w-20" />
+              </div>
+            ))}
+          </div>
+        ) : catalog.length === 0 ? (
+          <div className="card card-pad border-work">
             <div className="text-sm text-inksoft">
-              No price book loaded for contract {c?.number} yet. Tap <b>Upload price book</b> and pick the contract price sheet —
-              the xlsx with Line / Item / Category / Description / UOM / Price columns (a blank walk sheet works). One time per contract.
+              No price book for contract {c?.number} yet. Upload the contract&apos;s price sheet once (the xlsx with Line, Item, Category, Description, UOM and Price columns); every walk sheet on this contract uses it.
             </div>
-            <button className="btn btn-primary mt-3" onClick={() => sheetRef.current?.click()}>Upload price book</button>
+            <button type="button" className="btn btn-primary mt-3" onClick={() => sheetRef.current?.click()}>Upload price sheet</button>
           </div>
         ) : (
           <>
-            <input className="field mb-1" placeholder="Search line #, code, or word…"
+            <input type="search" enterKeyHint="search" autoComplete="off" className="field mb-1" placeholder="Search line #, code, description…"
               value={search} onChange={(e) => setSearch(e.target.value)} />
-            <div className="mb-3 text-[11px] text-inksoft">
-              {catalog!.length} lines in this price book
-              {hiddenLines > 0 ? ` · showing ${SHOWN_LINES} at a time — type in the box to find the rest` : ""}
+            <div className="mb-3 text-[12px] text-inksoft">
+              {catalog.length} lines in this price book
+              {hiddenLines > 0 ? ` · showing ${SHOWN_LINES} at a time, type to find the rest` : ""}
             </div>
             {groups.map((g, gi) => {
               const isOpen = !!searchSettled || !collapsed.has(g.category);
               const filled = g.rows.filter((ci) => parseNum(qty[ci.code] || "") > 0).length;
               return (
-                <div key={`${g.category}-${gi}`} className="card mb-2 overflow-hidden">
-                  <button className="flex w-full items-center justify-between gap-2 bg-ink/5 px-3 py-2.5 text-left"
-                    onClick={() => { const next = new Set(collapsed); if (next.has(g.category)) next.delete(g.category); else next.add(g.category); setCollapsed(next); }}>
-                    <span className="font-display text-[13px] font-semibold uppercase tracking-wider">{isOpen ? "▾" : "▸"} {g.category || "Uncategorized"}</span>
-                    <span className="shrink-0 font-mono text-xs text-inksoft">{filled > 0 ? `${filled} filled · ` : ""}{g.rows.length} lines</span>
-                  </button>
-                  {isOpen && g.rows.map((ci) => {
+                <Disclosure key={`${g.category}-${gi}`} className="card mb-2 overflow-hidden px-3" label={g.category || "Uncategorized"}
+                  right={`${filled ? `${filled} filled · ` : ""}${g.rows.length} line${g.rows.length === 1 ? "" : "s"}`}
+                  open={isOpen} onToggle={() => { const next = new Set(collapsed); if (next.has(g.category)) next.delete(g.category); else next.add(g.category); setCollapsed(next); }}>
+                  {g.rows.map((ci) => {
                     const n = parseNum(qty[ci.code] || "");
                     return (
-                      <div key={ci.id} className={`flex items-start gap-3 border-t border-rulesoft px-3 py-2.5 ${n > 0 ? "bg-work/5" : ""}`}>
+                      <div key={ci.id} className={`-mx-3 flex items-start gap-3 border-t border-rulesoft px-3 py-2.5 ${n > 0 ? "bg-work/5" : ""}`}>
                         <div className="min-w-0 flex-1">
-                          <div className="font-mono text-[11px] text-inksoft">#{ci.line} · {ci.code}</div>
+                          <div className="font-mono text-[12px] text-inksoft">#{ci.line} · {ci.code}</div>
                           <div className="text-[13px] leading-snug">{ci.description}</div>
-                          <div className="font-mono text-[11px] text-inksoft">{fmt(Number(ci.unit_price))} / {ci.uom}</div>
+                          <div className="font-mono text-[12px] text-inksoft">{fmt(Number(ci.unit_price))} / {ci.uom}</div>
                         </div>
                         <div className="shrink-0 text-right">
-                          <input className="w-20 rounded-sm border border-rulesoft p-2 text-right font-mono text-base" inputMode="decimal" placeholder="qty"
+                          <input className="min-h-[44px] w-20 rounded-sm border border-rulesoft px-2 py-2.5 text-right font-mono text-base" inputMode="decimal" placeholder="qty"
+                            aria-label={`Quantity, line ${ci.line} ${ci.code}`}
                             value={qty[ci.code] || ""} onChange={(e) => setLineQty(ci.code, e.target.value)} />
                           <div className="mt-0.5 font-mono text-xs font-semibold">{n > 0 ? fmt(n * Number(ci.unit_price)) : ""}</div>
                         </div>
                       </div>
                     );
                   })}
-                </div>
+                </Disclosure>
               );
             })}
-            {groups.length === 0 && <div className="card p-4 text-sm text-inksoft">Nothing matches “{search}”.</div>}
+            {groups.length === 0 && <div className="empty">Nothing matches “{search}”. Clear the box to see every line.</div>}
           </>
         )}
 
-        <div className="fixed inset-x-0 bottom-0 z-30 border-t-2 border-ink bg-card px-4 py-3">
+        <div className="anim-sheet fixed inset-x-0 bottom-0 z-30 border-t-2 border-ink bg-card px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
           <div className="mx-auto flex max-w-5xl items-center justify-between">
-            <span className="text-xs uppercase tracking-widest text-inksoft">{billed.length} lines with qty</span>
+            <span className="text-xs uppercase tracking-widest text-inksoft">{billed.length} line{billed.length === 1 ? "" : "s"} filled</span>
             <span className="font-mono text-xl font-semibold">Total {fmt(grand)}</span>
           </div>
         </div>
 
         {printOpen && (
-          <PrintShell title={fileSafe(sheetName(doc))}>
-          <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
-            <div className="printable mx-auto max-w-4xl rounded-sm bg-white p-8 text-logo-ink">
+          <PrintShell title={fileSafe(sheetName(doc))} onClose={() => setPrintOpen(false)} wide sheetClass="text-logo-ink"
+            toolbar={<button type="button" className="btn btn-ghost bg-white" onClick={exportWalkSheet}>⬇ Walk sheet (Excel)</button>}>
               <Letterhead />
               {/* the same sheet the PDF download draws, in the logo's colors */}
               <div className="mt-5 flex items-start justify-between">
@@ -919,7 +942,7 @@ export default function Proposals() {
                   .filter(([l, v]) => v || l === "Contract #" || l === "Development").map(([l, v]) => (
                   <div key={l}>
                     <div className="text-[11px] font-bold uppercase tracking-widest text-logo-tan">{l}</div>
-                    <div className="text-[14px] font-bold text-logo-brown">{v || "—"}</div>
+                    <div className="text-[14px] font-bold text-logo-brown">{v || ""}</div>
                   </div>
                 ))}
               </div>
@@ -957,16 +980,9 @@ export default function Proposals() {
                 <div className="font-display text-[13px] font-bold uppercase tracking-widest">Total</div>
                 <div className="font-mono text-lg font-bold">{fmt(grand)}</div>
               </div>
-            </div>
-            <div className="no-print mx-auto mt-3 flex max-w-4xl flex-wrap justify-end gap-2">
-              <button className="btn btn-primary" onClick={exportWalkSheet}>⬇ Walk sheet (Excel)</button>
-              <button className="btn bg-white" onClick={() => window.print()}>Print / Save as PDF</button>
-              <button className="btn btn-ghost bg-white" onClick={() => setPrintOpen(false)}>Close</button>
-            </div>
-          </div>
           </PrintShell>
         )}
-        {msg && <div className="fixed bottom-16 left-1/2 z-[60] -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
+        <Toast msg={msg} />
       </div>
     );
   }
@@ -975,17 +991,12 @@ export default function Proposals() {
   if (doc) {
     const total = grandTotal(items, doc.tax_pct);
     return (
-      <div>
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5">
-            <button className="btn btn-ghost" onClick={closeEditor}>← Back</button>
-            <span className="font-mono font-semibold">{doc.number}</span>
-            <Stamp label={doc.status.toUpperCase()} tone={tone(doc.status) as "ok"} />
-          </div>
+      <div key={doc.id} className="page-enter">
+        <PageHeader title={doc.number} back={{ onClick: closeEditor }} stamp={<Stamp label={statusLabel(doc.status)} tone={tone(doc.status) as "ok"} />} />
+        <div className="card card-pad mb-3 text-sm text-inksoft">
+          {doc.client_name || "No client"}{doc.job ? ` · ${doc.job}` : ""}. This is an older proposal, shown read-only. New work goes on walk sheets.
         </div>
-        <div className="card mb-3 p-3.5 text-sm text-inksoft">
-          {doc.client_name || "No client"}{doc.job ? ` · ${doc.job}` : ""} — this is an old-style proposal (read-only line list below). New work happens in NYCHA walk sheets.
-        </div>
+        {items.length === 0 ? <div className="empty mb-3">No lines on this proposal.</div> : (
         <div className="card mb-3 overflow-x-auto">
           <table className="w-full border-collapse text-sm" style={{ minWidth: 540 }}>
             <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
@@ -1000,38 +1011,34 @@ export default function Proposals() {
                   <td className="p-2.5 text-right font-mono font-semibold">{fmt(Number(it.qty) * Number(it.unit_price))}</td>
                 </tr>
               ))}
-              {items.length === 0 && <tr><td colSpan={5} className="p-4 text-inksoft">No lines.</td></tr>}
             </tbody>
           </table>
         </div>
-        <div className="card flex justify-end p-3.5"><div className="font-mono text-xl font-semibold">Total {fmt(total)}</div></div>
-        {msg && <div className="fixed bottom-5 left-1/2 z-[60] -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
+        )}
+        <div className="card card-pad flex justify-end"><div className="font-mono text-xl font-semibold">Total {fmt(total)}</div></div>
+        <Toast msg={msg} />
       </div>
     );
   }
 
   // ================= LIST =================
   return (
-    <div>
-      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-        <div className="font-display text-2xl font-bold uppercase">Proposals</div>
-        <div className="flex flex-wrap gap-2">
-          <button className="btn" onClick={uploadSurvey} disabled={surveyBusy} title="The survey written on site, as a PDF — the walk sheet builds itself the way our move-out releases bill, kept under what a super will sign">{surveyBusy ? "Reading the survey…" : "📄 Upload a survey (PDF)"}</button>
-          <button className="btn min-h-[44px]" data-paste-notes onClick={openPasteNotes} disabled={surveyBusy || pasteBusy} title="The whole note for a development, pasted off the phone: one walk sheet per apartment, billed the way our move-out releases bill">📝 Paste notes</button>
-          <button className="btn btn-primary" onClick={newWalkSheet}>+ New NYCHA walk sheet</button>
-          <ActionMenu label="⋯" items={[
-            { label: "⬇ Blank survey (PDF)", title: "The survey form, organized by what gets checked — fill the boxes on the phone or print it", onSelect: downloadSurveyForm },
-          ]} />
-        </div>
-      </div>
+    <div key="list" className="page-enter">
+      {(surveyBusy || pasteBusy || !!pdfBusy) && <div className="busy-bar" aria-busy="true" aria-label="Working" />}
+      <PageHeader title="Proposals" sub="NYCHA walk sheets, priced from the contract's price book"
+        primary={<button type="button" className="btn btn-primary" onClick={newWalkSheet}>+ New walk sheet</button>}
+        menu={[
+          { label: surveyBusy ? "Reading the survey…" : "Upload survey PDF", glyph: "📄", disabled: surveyBusy, title: "Reads a survey PDF into a walk sheet", onSelect: uploadSurvey },
+          { label: "Blank survey form (PDF)", glyph: "⬇", title: "The blank survey form to fill on site", onSelect: downloadSurveyForm },
+        ]}>
+        <button type="button" className="btn btn-ghost" data-paste-notes onClick={openPasteNotes} disabled={surveyBusy || pasteBusy} title="One walk sheet per apartment from a pasted note">📝 Paste notes</button>
+      </PageHeader>
       <input ref={surveyRef} type="file" accept="application/pdf,.pdf" className="hidden" onChange={handleSurveyPdf} />
       {pasteOpen && (
         <Modal title="Paste the note" onClose={() => { if (!pasteBusy) setPasteOpen(false); }}
-          footer={<div className="flex justify-end gap-2">
-            <button className="btn btn-ghost min-h-[44px]" onClick={() => setPasteOpen(false)} disabled={pasteBusy}>Cancel</button>
-            <button className="btn btn-primary min-h-[44px]" data-paste-read onClick={readPastedNotes} disabled={pasteBusy || !pasteText.trim()}>{pasteBusy ? "Reading…" : "Read"}</button>
-          </div>}>
-          <div className="mb-2 text-[13px] text-inksoft">One apartment per block: a line with the building and apartment (Building 3 11K, B1 5K), then one item per line: 1 24 inch door privacy · Tub enclosure · 25 SF plaster. The first line can name the development.</div>
+          primary={<button type="button" className="btn btn-primary" data-paste-read onClick={readPastedNotes} disabled={pasteBusy || !pasteText.trim()}>{pasteBusy ? "Reading…" : "Read the note"}</button>}
+          secondary={<button type="button" className="btn btn-ghost" onClick={() => setPasteOpen(false)} disabled={pasteBusy}>Cancel</button>}>
+          <div className="mb-2 text-[13px] text-inksoft">Start each apartment with its building and apartment on one line (Building 3 11K), then one item per line. The first line can name the development.</div>
           {/* 16px type: iOS zooms in on anything smaller when it gets the focus */}
           <textarea data-paste-text className="field text-[16px]" rows={12} value={pasteText} onChange={(e) => setPasteText(e.target.value)} disabled={pasteBusy} autoFocus
             placeholder={"Grant houses Moveout\nBuilding 3 11K\n42 + 24 B and W\n2 24s door sliding closet\n\nB1 5K\n1 24 inch door privacy"} />
@@ -1050,7 +1057,7 @@ export default function Proposals() {
             <span className="min-w-0 flex-1">
               <span className="block text-[14px] font-semibold">{title}</span>
               <span className="block truncate text-[12px] text-inksoft">{sub}</span>
-              {pair && <span className="block text-[11px] font-semibold text-alert">{pair}</span>}
+              {pair && <span className="block text-[12px] font-semibold text-alert">{pair}</span>}
             </span>
             <span className="shrink-0 font-mono text-[14px] font-semibold">{right}</span>
           </label>
@@ -1058,11 +1065,10 @@ export default function Proposals() {
         return (
           <Modal wide title={over > 0 ? `Over ${fmt(DEFAULT_CAP)}` : pasteQueue ? `${[plan.sv.address, plan.sv.apt && `Apt ${plan.sv.apt}`].filter(Boolean).join(" · ") || "This apartment"} (${pasteQueue.at + 1} of ${pasteQueue.plans.length})` : "Check the walk sheet"} onClose={closeCheck}
             footer={<div className="flex flex-wrap items-center justify-between gap-2">
-              <span className={`font-mono text-base font-semibold ${over > 0 ? "text-alert" : "text-ok"}`}>{fmt(now)} {over > 0 ? `· still ${fmt(over)} over` : "· under ✓"}</span>
+              <span className={`font-mono text-base font-semibold ${over > 0 ? "text-alert" : "text-ok"}`}>{fmt(now)} {over > 0 ? `· ${fmt(over)} over the ${fmt(DEFAULT_CAP)} cap` : `· under the ${fmt(DEFAULT_CAP)} cap ✓`}</span>
               <div className="flex flex-wrap gap-2">
-                {pasteQueue && <button className="btn btn-ghost min-h-[44px]" data-skip-apartment disabled={surveyBusy} onClick={() => nextInQueue(pasteQueue, false)}>Skip this apartment</button>}
-                <button className="btn btn-ghost" onClick={closeCheck}>Cancel</button>
-                <button className="btn btn-primary" disabled={over > 0 || nothing || surveyBusy} title={over > 0 ? "Take more off first" : nothing ? "Nothing left on the sheet" : ""}
+                {pasteQueue && <button type="button" className="btn btn-ghost" data-skip-apartment disabled={surveyBusy} onClick={() => nextInQueue(pasteQueue, false)}>Skip this apartment</button>}
+                <button type="button" className="btn btn-primary" disabled={over > 0 || nothing || surveyBusy} title={over > 0 ? "Take more off first" : nothing ? "Nothing left on the sheet" : ""}
                   onClick={async () => { setSurveyBusy(true); try { await makeSheet(plan, off); } finally { setSurveyBusy(false); } }}>
                   {surveyBusy ? "Making…" : "Make the walk sheet"}
                 </button>
@@ -1070,25 +1076,25 @@ export default function Proposals() {
             </div>}>
             {pasteQueue && <div className="mb-1 text-[12px] text-inksoft">📝 From the note{plan.development ? `: ${plan.development}` : ""} · apartment {pasteQueue.at + 1} of {pasteQueue.plans.length}</div>}
             <div className="mb-2 text-[13px] text-inksoft">
-              <b className="text-ink">{planWhere(plan.sv) || "This survey"}</b> — {plan.who}, {plan.sv.items.length} line{plan.sv.items.length === 1 ? "" : "s"} read, <b className="text-ink">{fmt(sheetTotal(plan.lines))}</b>{over > 0 ? <> — <b className="text-alert">{fmt(sheetTotal(plan.lines) - DEFAULT_CAP)} over</b> what a super will sign</> : null}.
-              Tick anything that comes off; it's written in the sheet's notes so it isn't forgotten.
-              {plan.hours.some((h) => h.also) ? " A job the price book also prices is on the list twice — as its hours and as the book's line — so tick off the one that doesn't apply." : ""}
+              <b className="text-ink">{planWhere(plan.sv) || "This survey"}</b>: {plan.who.charAt(0).toLowerCase() + plan.who.slice(1)}, {plan.sv.items.length} line{plan.sv.items.length === 1 ? "" : "s"}, <b className="text-ink">{fmt(sheetTotal(plan.lines))}</b>{over > 0 ? <>, <b className="text-alert">{fmt(sheetTotal(plan.lines) - DEFAULT_CAP)} over</b> what a super will sign</> : null}.
+              Tick anything that comes off; it&apos;s written in the sheet&apos;s notes so it isn&apos;t forgotten.
+              {plan.hours.some((h) => h.also) ? " A job the price book also prices shows twice, as its hours and as the book's line. Tick off the one that doesn't apply." : ""}
             </div>
             <div className="divide-y divide-rulesoft rounded-sm border border-rulesoft">
-              {plan.lines.filter((l) => l.itemKey !== LABOR_KEY).map((l) => row(l.code, l.label, `#${l.line} ${l.description} · ${l.qty} × ${fmt(l.unit_price)}`, fmt(l.qty * l.unit_price), l.alsoHours ? "ALSO IN THE HOURS BELOW — keep one" : undefined))}
-              {plan.hours.map((h, i) => row(HOUR_KEY(i), h.written, `${h.label} · General Laborer hours`, `${h.hours}h`, h.also ? `ALSO LINE #${plan.lines.find((l) => l.code === h.also)?.line ?? h.also} ABOVE — keep one` : undefined))}
+              {plan.lines.filter((l) => l.itemKey !== LABOR_KEY).map((l) => row(l.code, l.label, `#${l.line} ${l.description} · ${l.qty} × ${fmt(l.unit_price)}`, fmt(l.qty * l.unit_price), l.alsoHours ? "Also in the hours below: keep one" : undefined))}
+              {plan.hours.map((h, i) => row(HOUR_KEY(i), h.written, `${h.label} · General Laborer hours`, `${h.hours}h`, h.also ? `Also line #${plan.lines.find((l) => l.code === h.also)?.line ?? h.also} above: keep one` : undefined))}
               {plan.labor && a.hourTotal > 0 && (
                 <div className="flex min-h-[44px] items-center gap-3 bg-paper px-3 py-2">
                   <span className="h-5 w-5 shrink-0" />
                   <span className="min-w-0 flex-1">
-                    <span className="block text-[14px] font-semibold">General Laborer — {a.hourTotal} hour{a.hourTotal === 1 ? "" : "s"}</span>
-                    <span className="block truncate text-[12px] text-inksoft">#{plan.labor.line} {plan.labor.description} · {a.hourTotal} × {fmt(plan.labor.unit_price)} — the hours above, rounded up</span>
+                    <span className="block text-[14px] font-semibold">General Laborer · {a.hourTotal} hour{a.hourTotal === 1 ? "" : "s"}</span>
+                    <span className="block truncate text-[12px] text-inksoft">#{plan.labor.line} {plan.labor.description} · {a.hourTotal} × {fmt(plan.labor.unit_price)}: the hours above, rounded up</span>
                   </span>
                   <span className="shrink-0 font-mono text-[14px] font-semibold">{fmt(a.hourTotal * plan.labor.unit_price)}</span>
                 </div>
               )}
             </div>
-            {plan.twice.length > 0 && <div className="mt-2 text-[12px] text-inksoft">↺ Written twice: {plan.twice.join("; ")}</div>}
+            {plan.twice.length > 0 && <div className="mt-2 text-[12px] text-inksoft">Written twice: {plan.twice.join("; ")}</div>}
             {plan.unmatched.length > 0 && (
               <div data-unmatched className="mt-2 rounded-sm border border-alert/40 bg-alert/5 px-3 py-2 text-[12px] text-alert">
                 <span className="font-semibold">⚠ Not on the move-out list, add by hand on the sheet:</span> {plan.unmatched.join("; ")}
@@ -1100,14 +1106,12 @@ export default function Proposals() {
         );
       })()}
       {pickOpen && (
-        <div className="card mb-3 border-work p-4">
-          <div className="mb-2 text-[11px] uppercase tracking-widest text-inksoft">Which contract is this walk for?</div>
-          <div className="mb-3"><ContractPicker contracts={contracts} value={pickId} onChange={setPickId} /></div>
-          <div className="flex gap-2">
-            <button className="btn btn-primary" onClick={newWalkSheet}>Start walk sheet</button>
-            <button className="btn btn-ghost" onClick={() => setPickOpen(false)}>Cancel</button>
-          </div>
-        </div>
+        <Modal title="New walk sheet" onClose={() => setPickOpen(false)}
+          primary={<button type="button" className="btn btn-primary" onClick={newWalkSheet}>Start walk sheet</button>}
+          secondary={<button type="button" className="btn btn-ghost" onClick={() => setPickOpen(false)}>Cancel</button>}>
+          <div className="section-label mb-1">Contract</div>
+          <ContractPicker contracts={contracts} value={pickId} onChange={setPickId} />
+        </Modal>
       )}
       {(() => {
         // the contract on screen; sheets not tied to any contract get their own choice
@@ -1119,20 +1123,20 @@ export default function Proposals() {
           <>
             {contracts.length > 0 && (
               <div className="mb-3">
-                <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Contract</div>
+                <div className="section-label mb-1">Contract</div>
                 <ContractPicker contracts={contracts} value={listContract} onChange={pickListContract}
                   extra={[{ id: "all", label: "All contracts" }, ...(strays.length > 0 ? [{ id: "none", label: `Not tied to a contract (${strays.length})` }] : [])]} />
               </div>
             )}
             <div className="mb-3 flex flex-wrap gap-2">
               {([["all", `All (${mine.length})`], ["draft", `Drafts (${mine.filter((p) => p.status === "draft").length})`], ["approved", `In a release (${mine.filter((p) => p.status === "approved").length})`]] as ["all" | "draft" | "approved", string][]).map(([f, l]) => (
-                <button key={f} className={`btn ${listFilter === f ? "btn-primary" : "btn-ghost"} px-3 py-1.5 text-[13px]`} onClick={() => setListFilter(f)}>{l}</button>
+                <button key={f} type="button" aria-pressed={listFilter === f} className={`btn btn-sm ${listFilter === f ? "btn-primary" : "btn-ghost"}`} onClick={() => setListFilter(f)}>{l}</button>
               ))}
             </div>
           </>
         );
       })()}
-      <input className="field mb-3" placeholder="Search name, development, address, release #…" value={listQ} onChange={(e) => setListQ(e.target.value)} />
+      <input type="search" enterKeyHint="search" autoComplete="off" className="field mb-3" placeholder="Search work, development, address, release #…" value={listQ} onChange={(e) => setListQ(e.target.value)} />
       {(() => {
         const strays = list.filter((p) => !p.contract_id || !contracts.some((c) => c.id === p.contract_id));
         const onContract = (p: Proposal) => listContract === "all" || !listContract ? true
@@ -1145,60 +1149,75 @@ export default function Proposals() {
             const c = contracts.find((x) => x.id === p.contract_id);
             return matches(listQ, p.number, p.job, p.client_name, p.development, p.address, p.apt, p.stairhall, p.release_number, c?.number);
           });
-        // on a phone the name and total take the whole first line; the buttons
-        // sit under them instead of squeezing the name into a column
+        // the whole row opens the sheet; its other actions sit behind the one ⋯
         const row = (p: Proposal) => (
-          <div key={p.id} className="flex flex-wrap items-center gap-2 p-3.5">
-            <button className="flex w-full min-w-0 items-center justify-between gap-2 text-left sm:w-auto sm:flex-1" onClick={() => openEditor(p)}>
+          <div key={p.id} className="flex items-center gap-2 p-3">
+            <button type="button" className="row-btn -my-3 -ml-3 flex min-w-0 flex-1 items-center justify-between gap-2 py-3 pl-3 pr-1" onClick={() => openEditor(p)}>
               <div className="min-w-0">
                 <div className="text-[14px] font-semibold">
                   {(p.development || p.address || p.job)
-                    ? <>{sheetName(p)}<span className="ml-1.5 font-mono text-[11px] font-normal text-inksoft">{p.number}</span></>
+                    ? <>{sheetName(p)}<span className="ml-1.5 font-mono text-[12px] font-normal text-inksoft">{p.number}</span></>
                     : <span className="font-mono">{p.number}</span>}
                 </div>
                 <div className="truncate text-[13px] text-inksoft">
                   {p.contract_id
-                    ? [p.development && p.address, p.apt && `Apt ${p.apt}`, p.stairhall && `Stair ${p.stairhall}`, p.release_number && `Rel ${p.release_number}`].filter(Boolean).join(" · ") || (p.development || p.address ? "" : "NYCHA walk")
+                    ? [p.development && p.address, p.apt && `Apt ${p.apt}`, p.stairhall && `Stairhall ${p.stairhall}`, p.release_number && `Release ${p.release_number}`].filter(Boolean).join(" · ") || (p.development || p.address ? "" : "NYCHA walk")
                     : p.client_name || "No client"}
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-2.5">
                 <span className="font-mono text-[13px]">{fmt(Number(p.total) || 0)}</span>
-                <Stamp label={p.status.toUpperCase()} tone={tone(p.status) as "ok"} />
+                <Stamp label={statusLabel(p.status)} tone={tone(p.status) as "ok"} />
               </div>
             </button>
-            <span className="ml-auto flex items-center gap-2">
-              <button type="button" className="btn btn-ghost min-h-[44px] px-2.5 text-[12px]" disabled={!!pdfBusy} title="The sheet as a PDF file — no need to open it" onClick={() => downloadPdf(p)}>{pdfBusy === p.id ? "…" : "⬇ PDF"}</button>
-              {p.contract_id && <button type="button" className="btn btn-ghost min-h-[44px] px-2.5 text-[12px]" title="Make (or update) the release on this contract from this sheet" onClick={() => addToRelease(p)}>→ Release</button>}
-              <RowActions items={[
-                { label: "Add to release…", hidden: !p.contract_id, onSelect: () => addToRelease(p) },
-                { label: "Delete…", destructive: true, onSelect: () => deleteProposal(p) }, // deleteProposal keeps its own confirm
-              ]} />
-            </span>
+            <RowActions items={[
+              { label: pdfBusy === p.id ? "Making the PDF…" : "Download PDF", glyph: "⬇", disabled: !!pdfBusy, onSelect: () => downloadPdf(p) },
+              { label: "Add to release…", hidden: !p.contract_id, onSelect: () => addToRelease(p) },
+              { label: "Delete…", destructive: true, onSelect: () => deleteProposal(p) }, // deleteProposal keeps its own confirm
+            ]} />
           </div>
         );
         // one card per contract, in contract order; anything not tied to a
         // contract (the old free-form proposals) sits in its own card at the end
         const groups = [
-          ...[...contracts].sort((a, b) => String(a.number).localeCompare(String(b.number), undefined, { numeric: true })).map((c) => ({ key: c.id, label: c.name && c.name !== c.number ? `Contract ${c.number} · ${c.name}` : `Contract ${c.number}`, rows: shown.filter((p) => p.contract_id === c.id) })),
+          ...[...contracts].sort((a, b) => String(a.number).localeCompare(String(b.number), undefined, { numeric: true })).map((c) => ({ key: c.id, label: contractLabel(c), rows: shown.filter((p) => p.contract_id === c.id) })),
           { key: "none", label: "Not tied to a contract", rows: shown.filter((p) => !p.contract_id || !contracts.some((c) => c.id === p.contract_id)) },
         ].filter((g) => g.rows.length > 0);
+        // one contract on screen: its name is already in the picker, so the card needs no heading
+        const single = listContract !== "all" && listContract !== "none";
         return (
           <>
+            {!listLoaded && (
+              <div className="card divide-y divide-rulesoft">
+                {[0, 1, 2].map((i) => (
+                  /* the list's shape, shimmering, while the sheets load */
+                  <div key={`sk${i}`} className="p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="skeleton h-4 w-32" />
+                      <div className="skeleton h-4 w-16" />
+                    </div>
+                    <div className="skeleton mt-2 h-3 w-1/2" />
+                  </div>
+                ))}
+              </div>
+            )}
             {groups.map((g) => (
               <div key={g.key} className="mb-4">
-                <div className="mb-1.5 flex items-baseline justify-between gap-2">
-                  <div className="text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">{g.label}</div>
-                  <div className="font-mono text-[11px] text-inksoft">{g.rows.length} · {fmt(g.rows.reduce((t, p) => t + (Number(p.total) || 0), 0))}</div>
-                </div>
+                {!single && (
+                  <div className="mb-1.5 flex items-baseline justify-between gap-2">
+                    <div className="section-label">{g.label}</div>
+                    <div className="font-mono text-[12px] text-inksoft">{g.rows.length} · {fmt(g.rows.reduce((t, p) => t + (Number(p.total) || 0), 0))}</div>
+                  </div>
+                )}
                 <div className="card divide-y divide-rulesoft">{g.rows.map(row)}</div>
               </div>
             ))}
-            {groups.length === 0 && (
-              <div className="card p-5 text-sm text-inksoft">
-                {list.length === 0 ? "No walk sheets yet. Tap + New NYCHA walk sheet, load the contract price book once, and fill quantities as you walk the unit."
+            {listLoaded && groups.length === 0 && (
+              <div className="empty">
+                {contracts.length === 0 && list.length === 0 ? "No contracts yet. Upload a release on the Releases tab first; walk sheets live under a contract."
+                  : list.length === 0 ? "No walk sheets yet. Tap + New walk sheet, upload the contract's price sheet once, and fill quantities as you walk the unit."
                   : listQ || listFilter !== "all" ? "Nothing matches that search."
-                  : "No walk sheets on this contract yet — pick another above, or All contracts."}
+                  : "No walk sheets on this contract yet. Pick another contract above, or All contracts."}
               </div>
             )}
           </>
@@ -1206,27 +1225,22 @@ export default function Proposals() {
       })()}
 
       {relAsk && (
-        <div className="fixed inset-0 z-40 grid place-items-center bg-ink/50 px-4" onClick={() => setRelAsk(null)}>
-          <div className="card w-full max-w-sm bg-card p-5" onClick={(e) => e.stopPropagation()}>
-            <div className="mb-1 font-display text-lg font-bold uppercase">Add to release</div>
-            <div className="mb-3 text-sm text-inksoft">
-              {relAsk.p.number} · {[relAsk.p.job, relAsk.p.development, relAsk.p.address].filter(Boolean).join(" · ") || "NYCHA walk"} — {fmt(Number(relAsk.p.total) || 0)}
-            </div>
-            <label className="text-[11px] uppercase tracking-widest text-inksoft">Release number</label>
-            <input className="field mb-2 mt-1" autoFocus placeholder="e.g. 12" value={relAsk.value}
-              onChange={(e) => setRelAsk({ ...relAsk, value: e.target.value })}
-              onKeyDown={(e) => { if (e.key === "Enter" && relAsk.value.trim()) { const { p, value } = relAsk; setRelAsk(null); performAddToRelease(p, value.trim()); } }} />
-            <div className="mb-4 text-xs text-inksoft">The release is created on contract {contracts.find((x) => x.id === relAsk.p.contract_id)?.number} with this walk sheet&apos;s lines and total. If release {relAsk.value.trim() || "…"} already exists there, it&apos;s updated — never duplicated.</div>
-            <div className="flex justify-end gap-2">
-              <button className="btn btn-ghost" onClick={() => setRelAsk(null)}>Cancel</button>
-              <button className="btn btn-primary" disabled={!relAsk.value.trim()}
-                onClick={() => { const { p, value } = relAsk; setRelAsk(null); performAddToRelease(p, value.trim()); }}>Create release</button>
-            </div>
+        <Modal title="Add to release" onClose={() => setRelAsk(null)}
+          primary={<button type="button" className="btn btn-primary" disabled={!relAsk.value.trim()} onClick={submitRelAsk}>Add to release</button>}
+          secondary={<button type="button" className="btn btn-ghost" onClick={() => setRelAsk(null)}>Cancel</button>}>
+          <div className="mb-3 text-sm text-inksoft">
+            {[relAsk.p.number, [relAsk.p.job, relAsk.p.development, relAsk.p.address].filter(Boolean).join(" · ") || "NYCHA walk", fmt(Number(relAsk.p.total) || 0)].join(" · ")}
           </div>
-        </div>
+          <form onSubmit={(e) => { e.preventDefault(); submitRelAsk(); }}>
+            <label className="section-label" htmlFor="rel-number">Release number</label>
+            <input id="rel-number" className="field mb-2 mt-1" autoFocus enterKeyHint="done" placeholder="e.g. 12" value={relAsk.value}
+              onChange={(e) => setRelAsk({ ...relAsk, value: e.target.value })} />
+          </form>
+          <div className="text-xs text-inksoft">Makes release {relAsk.value.trim() || "(number above)"} on contract {contracts.find((x) => x.id === relAsk.p.contract_id)?.number} from this sheet&apos;s lines and total. If that release already exists, it&apos;s updated instead.</div>
+        </Modal>
       )}
 
-      {msg && <div className="fixed bottom-5 left-1/2 z-[60] -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
+      <Toast msg={msg} />
     </div>
   );
 }

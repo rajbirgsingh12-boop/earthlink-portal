@@ -2,10 +2,12 @@
 import { useEffect, useRef, useState } from "react";
 import Modal from "@/components/Modal";
 import Stamp from "@/components/Stamp";
+import Disclosure from "@/components/Disclosure";
 import PhotoMarker from "@/components/PhotoMarker";
 import { sb } from "@/lib/supabase";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { annotate } from "@/lib/photoMark";
+import { scrollTo } from "@/lib/motion";
 import { CONF_LABEL, DEFAULT_HINTS, MAX_PHOTOS, firstSfLine, lineHasNumber, measureNote, measurePhotos, roundSf, sfLines, typedNote, type MeasureHints, type MeasureResult, type PhotoMarks, type SfLine } from "@/lib/measure";
 
 // "Sq ft from photos" on a PACT job: pick the photos of the wall or ceiling
@@ -48,6 +50,7 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
   const lines = sfLines(job.items);
   const [lineIdx, setLineIdx] = useState<number | null>(firstSfLine(job.items));
   const input = useRef<HTMLInputElement>(null);
+  const blockedNote = useRef<HTMLDivElement>(null);
   const [saving, setSaving] = useState(false);
   const alive = useRef(true);
   useEffect(() => () => { alive.current = false; objUrls.current.forEach((u) => URL.revokeObjectURL(u)); }, []);
@@ -95,14 +98,14 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
   };
   const measure = async () => {
     const paths = photos.map((a) => a.path).filter((p) => picked.has(p));
-    if (paths.length === 0) { flash("Pick a photo first — tap one, or take one"); return; }
+    if (paths.length === 0) { flash("Pick a photo first: tap one, or take one"); return; }
     const half = paths.filter((p) => marks[p]?.ruler && !(marks[p].ruler!.inches > 0));
-    if (half.length) { flash("A ruler on one photo has no length yet — pick how long it is, or clear it"); return; }
+    if (half.length) { flash("A ruler on one photo has no length yet. Pick how long it is, or clear it."); return; }
     setBusy(true);
     try {
       const got = await Promise.all(paths.map(async (p) => ({ path: p, name: photos.find((a) => a.path === p)?.name || "photo.jpg", blob: await bytesOf(p) })));
       const missing = got.filter((g) => !g.blob);
-      if (missing.length) { flash(`Couldn't load ${missing.map((g) => g.name).join(", ")} — check your signal and try again`); return; }
+      if (missing.length) { flash(`Couldn't load ${missing.map((g) => g.name).join(", ")}. Check your signal and try again.`); return; }
       // the marks are drawn onto the copies that go, and sent as numbers too
       const drawn = await Promise.all(got.map(async (g) => { const a = await annotate(g.blob!, marks[g.path]); return { name: g.name, blob: a.blob, width: a.width, height: a.height, marks: marks[g.path] }; }));
       const out = await measurePhotos(drawn, { ...hints, ceilingFt });
@@ -130,17 +133,19 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
   const pickedPaths = photos.map((a) => a.path).filter((p) => picked.has(p));
   const nPicked = pickedPaths.length;
   const nRulers = pickedPaths.filter((p) => marks[p]?.ruler && marks[p].ruler!.inches > 0).length;
+  // a number already on the line (typed on the card, or read off the PO)
+  // stays unless the owner types the new one: the estimate alone is refused
+  const blocked = !!result && !typedAny && lineHasNumber(job.items, lineIdx);
   const apply = async () => {
     if (!result || total <= 0) { flash("Nothing to put on the job yet"); return; }
-    // a number already on the line — typed on the card, or read off the PO — stays unless the owner types the new one
-    if (!typedAny && lineHasNumber(job.items, lineIdx)) { flash(`That line already has ${Number(job.items[lineIdx!].qty)} sq ft on it. An estimate never replaces a number that's there — type the new one in "Your own total" if you want it changed.`); return; }
+    if (blocked) { scrollTo(blockedNote.current, "center"); return; }
     setSaving(true);
     try {
       const note = useOwn
         ? typedNote(total, today(), estimateTotal)
         : measureNote({ ...result, areas: result.areas.map((a, i) => ({ ...a, sq_ft: sqOf(i) })), total_sq_ft: total }, sent.length || 1, today(), estimateTotal);
       const ok = await onApply(lineIdx, total, note);
-      if (ok) { flash(`${total} sq ft is on the job${typedAny ? "" : " — check it with the tape"}`); onClose(); }
+      if (ok) { flash(`${total} sq ft is on the job${typedAny ? "" : ". Check it with the tape."}`); onClose(); }
     } finally { if (alive.current) setSaving(false); }
   };
   // the number typed straight in: onto the line, no photo, no estimate
@@ -159,7 +164,7 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
         const it = job.items[i];
         return (
           <button key={i} type="button" role="radio" aria-checked={lineIdx === i} onClick={() => setLineIdx(i)}
-            className={`flex min-h-[44px] w-full items-center gap-2 border-b border-rulesoft px-2 text-left text-[13px] last:border-b-0 ${lineIdx === i ? "bg-work/10" : ""}`}>
+            className={`row-btn flex items-center gap-2 border-b border-rulesoft px-2 text-[13px] last:border-b-0 ${lineIdx === i ? "bg-work/10" : ""}`}>
             <span className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border-[1.5px] border-ink text-[11px] ${lineIdx === i ? "bg-ink text-white" : ""}`}>{lineIdx === i ? "✓" : ""}</span>
             <span className="min-w-0 flex-1 truncate">{it.description || "(no wording)"}</span>
             <span className="shrink-0 font-mono text-[11px] text-inksoft">now {Number(it.qty) || 0} {it.unit || "SF"}</span>
@@ -167,7 +172,7 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
         );
       })}
       <button type="button" role="radio" aria-checked={lineIdx === null} onClick={() => setLineIdx(null)}
-        className={`flex min-h-[44px] w-full items-center gap-2 px-2 text-left text-[13px] ${lines.length ? "border-t border-rulesoft" : ""} ${lineIdx === null ? "bg-work/10" : ""}`}>
+        className={`row-btn flex items-center gap-2 px-2 text-[13px] ${lines.length ? "border-t border-rulesoft" : ""} ${lineIdx === null ? "bg-work/10" : ""}`}>
         <span className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border-[1.5px] border-ink text-[11px] ${lineIdx === null ? "bg-ink text-white" : ""}`}>{lineIdx === null ? "✓" : ""}</span>
         <span>+ A new Plaster line</span>
       </button>
@@ -176,35 +181,35 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
   const tone = (c: "low" | "medium" | "high") => (c === "high" ? "ok" : c === "medium" ? "work" : "alert");
 
   return (
-    <Modal title={`Sq ft from photos · ${job.label}`} onClose={onClose} wide
+    <Modal title={`Sq ft from photos · ${job.label}`} onClose={onClose} wide dirty={picked.size > 0 || !!result}
       footer={result ? (
         <div className="flex flex-wrap items-center gap-2" data-measure-apply>
-          <button type="button" className="btn btn-primary min-h-[44px]" disabled={saving || total <= 0} onClick={apply}>
+          <button type="button" className="btn btn-primary" disabled={saving || total <= 0} onClick={apply}>
             {saving ? "Saving…" : `Put ${total} sq ft on the job`}
           </button>
-          <button type="button" className="btn btn-ghost min-h-[44px]" disabled={busy} onClick={() => { setResult(null); setEdits({}); }}>Measure again</button>
+          <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => { setResult(null); setEdits({}); }}>Measure again</button>
         </div>
       ) : (
         <div className="flex flex-wrap items-center gap-2">
-          <button type="button" className="btn btn-primary min-h-[44px]" disabled={busy || nPicked === 0} onClick={measure} data-measure-go>
+          <button type="button" className="btn btn-primary" disabled={busy || nPicked === 0} onClick={measure} data-measure-go>
             {busy ? "Measuring…" : `Measure${nPicked ? ` ${nPicked} photo${nPicked === 1 ? "" : "s"}` : ""}`}
           </button>
-          <button type="button" className="btn btn-ghost min-h-[44px]" disabled={busy} onClick={() => input.current?.click()}>📷 Take or pick photos</button>
+          <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => input.current?.click()}>📷 Take or pick photos</button>
         </div>
       )}>
       <input ref={input} type="file" accept="image/*" multiple className="hidden" data-measure-input
         onChange={(e) => { const fs = Array.from(e.target.files || []); e.target.value = ""; void addPhotos(fs); }} />
       {!result && (
         <>
-          <p className="mb-2 text-[13px] text-inksoft">Tap the photos of the wall or ceiling. Best shot: step back so the floor and the ceiling are both in the picture. The number that comes back is a starting point — the tape measure wins.</p>
-          {photos.length === 0 && <div className="mb-2 rounded-sm border border-rulesoft bg-paper p-3 text-[13px] text-inksoft">No photos on this job yet — take some, or pick them from the camera roll.</div>}
+          <p className="mb-2 text-[13px] text-inksoft">Tap the photos of the wall or ceiling. Step back so the floor and the ceiling are both in the shot.</p>
+          {photos.length === 0 && <div className="notice mb-2 text-inksoft">No photos on this job yet. Take some, or pick them from the camera roll.</div>}
           {photos.length > 0 && (
             <div className="mb-3 grid grid-cols-3 gap-1.5">
               {photos.map((a) => {
                 const on = picked.has(a.path);
                 return (
                   <button key={a.path} type="button" role="checkbox" aria-checked={on} aria-label={a.name} data-measure-photo={a.name} onClick={() => toggle(a.path)}
-                    className={`relative block min-h-[44px] w-full rounded-sm border-2 ${on ? "border-work" : "border-rulesoft"}`}>
+                    className={`relative block min-h-[44px] w-full rounded-sm border-2 transition-opacity active:opacity-80 ${on ? "border-work" : "border-rulesoft"}`}>
                     {srcOf(a.path)
                       // eslint-disable-next-line @next/next/no-img-element
                       ? <img src={srcOf(a.path)} alt={a.name} className="h-24 w-full rounded-[2px] object-cover" />
@@ -216,48 +221,51 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
             </div>
           )}
           {nPicked > 0 && (
-            <div className="mb-3" data-measure-marks>
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-widest text-inksoft">A ruler on each photo — {nRulers} of {nPicked}</div>
-              <p className="mb-2 text-[12px] text-inksoft">When nothing in the shot has a known size, mark one thing you do know: tap the floor and the ceiling on the wall (that's {ceilingFt} ft), the top and bottom of a door, or two ends of something you measured with the tape. With a ruler the number is worked out, not guessed.</p>
+            <div className="anim-open mb-3" data-measure-marks>
+              <div className="section-label mb-1">A ruler on each photo · {nRulers} of {nPicked}</div>
+              <p className="mb-2 text-[12px] text-inksoft">When nothing in the shot has a known size, mark one thing you do know: tap the floor and the ceiling on the wall (that&apos;s {ceilingFt} ft), the top and bottom of a door, or two ends of something you measured with the tape. With a ruler the number is worked out, not guessed.</p>
               <div className="grid gap-2">
                 {pickedPaths.map((p) => {
                   const a = photos.find((x) => x.path === p)!;
                   return srcOf(p)
                     ? <PhotoMarker key={p} src={srcOf(p)} name={a.name} natural={null} marks={marks[p] || {}} onChange={(m) => setMarks((prev) => ({ ...prev, [p]: m }))} ceilingFt={ceilingFt} />
-                    : <div key={p} className="rounded-sm border border-rulesoft bg-paper p-3 text-[12px] text-inksoft">{a.name} — can't be shown right now (no signal?), so no ruler on it; Claude will look for one in the shot.</div>;
+                    : <div key={p} className="notice text-inksoft">{a.name} can&apos;t be shown right now (no signal?), so no ruler on it. Claude will look for one in the shot.</div>;
                 })}
               </div>
             </div>
           )}
-          <div className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-inksoft">What to measure</div>
-          <div className="mb-3 inline-flex rounded-sm border-[1.5px] border-ink" role="radiogroup" aria-label="What to measure">
-            {([["spots", "Just the damaged spots"], ["whole", "The whole wall or ceiling"]] as const).map(([v, label], i) => (
-              <button key={v} type="button" role="radio" aria-checked={hints.scope === v} onClick={() => setHints({ ...hints, scope: v })}
-                className={`min-h-[44px] px-3 font-display text-[12px] font-semibold uppercase tracking-wider ${i > 0 ? "border-l-[1.5px] border-ink" : ""} ${hints.scope === v ? "bg-ink text-white" : "bg-white text-ink"}`}>{label}</button>
-            ))}
-          </div>
-          <div className="grid gap-2 sm:grid-cols-[140px_1fr]">
-            <label className="block"><span className="mb-1 block text-[11px] uppercase tracking-widest text-inksoft">Ceiling height (ft)</span>
-              <input className="field font-mono" inputMode="decimal" value={ceiling} onChange={(e) => setCeiling(e.target.value)} /></label>
-            <label className="block"><span className="mb-1 block text-[11px] uppercase tracking-widest text-inksoft">Anything it should know</span>
-              <input className="field" placeholder="e.g. the door is 32 in wide, the tile is 4 in" value={hints.note} onChange={(e) => setHints({ ...hints, note: e.target.value })} /></label>
-          </div>
-          <div className="mt-4 border-t border-rulesoft pt-3" data-measure-manual>
-            <div className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">Or type it in yourself</div>
-            <p className="mb-1.5 text-[12px] text-inksoft">Measured it with the tape? Put the number straight on the job — no photos needed.</p>
+          {/* what to measure, and the room's facts: asked once a photo is picked */}
+          {nPicked > 0 && (
+            <div className="anim-open">
+              <div className="section-label mb-2">What to measure</div>
+              <div className="seg mb-3 w-full md:w-auto" role="radiogroup" aria-label="What to measure">
+                {([["spots", "Just the damaged spots"], ["whole", "The whole wall or ceiling"]] as const).map(([v, label]) => (
+                  <button key={v} type="button" role="radio" aria-checked={hints.scope === v} onClick={() => setHints({ ...hints, scope: v })} className="seg-item flex-1">{label}</button>
+                ))}
+              </div>
+              <div className="grid gap-2 sm:grid-cols-[140px_1fr]">
+                <label className="block"><span className="section-label mb-1">Ceiling height (ft)</span>
+                  <input className="field w-24 px-2 py-2 text-right font-mono" inputMode="decimal" value={ceiling} onChange={(e) => setCeiling(e.target.value)} /></label>
+                <label className="block"><span className="section-label mb-1">Anything it should know</span>
+                  <input className="field" placeholder="e.g. the door is 32 in wide, the tile is 4 in" value={hints.note} onChange={(e) => setHints({ ...hints, note: e.target.value })} /></label>
+              </div>
+            </div>
+          )}
+          <Disclosure className="mt-4 border-t border-rulesoft pt-2" label="Type the square feet instead" sublabel="measured with the tape" data-measure-manual>
+            <p className="mb-1.5 text-[12px] text-inksoft">Measured it with the tape? Put the number straight on the job, no photos needed.</p>
             <label className="inline-flex items-center gap-2 text-[13px]">
-              <input className="field w-28 px-2 py-2 text-right font-mono" inputMode="decimal" placeholder="0" aria-label="Square feet, typed in" value={manual} onChange={(e) => setManual(e.target.value)} />sq ft
+              <input className="field w-24 px-2 py-2 text-right font-mono" inputMode="decimal" placeholder="0" aria-label="Square feet, typed in" value={manual} onChange={(e) => setManual(e.target.value)} />sq ft
             </label>
             {lineChooser()}
-            <button type="button" className="btn btn-primary mt-2 min-h-[44px]" disabled={saving || !(manualN > 0)} onClick={applyManual} data-measure-manual-go>
+            <button type="button" className={`btn mt-2 ${manualN > 0 ? "btn-primary" : "btn-ghost"}`} disabled={saving || !(manualN > 0)} onClick={applyManual} data-measure-manual-go>
               {saving ? "Saving…" : `Put ${manualN || ""} sq ft on the job`}
             </button>
-          </div>
+          </Disclosure>
         </>
       )}
       {result && (
-        <div data-measure-result>
-          {result.warnings.map((w, i) => <div key={i} className="mb-2 rounded-sm border border-alert/40 bg-white px-3 py-2 text-[13px] text-alert">⚠ {w}</div>)}
+        <div className="anim-open" data-measure-result>
+          {result.warnings.map((w, i) => <div key={i} className="notice-alert mb-2">⚠ {w}</div>)}
           {/* the photos, with what got measured drawn on them */}
           <div className="mb-2 grid gap-2">
             {sent.map((p, pi) => {
@@ -272,40 +280,42 @@ export default function MeasurePanel({ job, onAttach, onApply, onClose, flash }:
             <div key={i} className="flex flex-wrap items-center gap-2 border-t border-rulesoft py-2 first:border-t-0" data-measure-area>
               <div className="min-w-0 flex-1">
                 <div className="text-[13px] font-semibold">{a.where}<span className="ml-1.5 text-[11px] font-normal uppercase tracking-widest text-inksoft">{a.surface} · photo {a.photo}</span></div>
-                <div className="text-[11px] text-inksoft">
-                  {a.same_as ? `the same area as photo ${a.same_as} — counted once` : `${a.width_ft} × ${a.height_ft} ft${a.ruler ? ` · ruler: ${a.ruler}` : ""}`}{a.note ? ` · ${a.note}` : ""}
+                <div className="text-[12px] text-inksoft">
+                  {a.same_as ? `the same area as photo ${a.same_as}, counted once` : `${a.width_ft} × ${a.height_ft} ft${a.ruler ? ` · ruler: ${a.ruler}` : ""}`}{a.note ? ` · ${a.note}` : ""}
                 </div>
               </div>
               {!a.same_as && (
                 <div className="flex basis-full flex-wrap items-center gap-2 pt-1">
-                  <Stamp label={CONF_LABEL[a.confidence]} tone={tone(a.confidence)} />
+                  <Stamp label={CONF_LABEL[a.confidence]} tone={tone(a.confidence)} title="How sure the estimate is" />
                   <span className={`text-[13px] ${mine(i) ? "text-inksoft line-through decoration-rulesoft" : "font-semibold"}`} data-measure-estimate>Claude: {a.sq_ft} sq ft</span>
-                  <label className="ml-auto flex items-center gap-1 text-[11px] uppercase tracking-widest text-inksoft">Yours
-                    <input className="field w-20 px-1.5 py-1.5 text-right font-mono normal-case" inputMode="decimal" aria-label={`Square feet for ${a.where}`} placeholder={String(a.sq_ft)} value={edits[i] ?? ""}
+                  <label className="ml-auto flex items-center gap-1 text-[13px]"><span className="section-label">Yours</span>
+                    <input className="field w-24 px-2 py-2 text-right font-mono" inputMode="decimal" aria-label={`Square feet for ${a.where}`} placeholder={String(a.sq_ft)} value={edits[i] ?? ""}
                       onChange={(e) => setEdits({ ...edits, [i]: e.target.value })} />sq ft
                   </label>
-                  {mine(i) && <button type="button" className="min-h-[44px] px-2 text-[12px] text-inksoft underline" onClick={() => setEdits({ ...edits, [i]: "" })}>use Claude's</button>}
+                  {mine(i) && <button type="button" className="btn-link text-inksoft" onClick={() => setEdits({ ...edits, [i]: "" })}>Use Claude&apos;s</button>}
                 </div>
               )}
             </div>
           ))}
           <div className="mt-2 flex items-center justify-between border-t-2 border-ink pt-2">
-            <span className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">Total</span>
+            <span className="section-label">Total</span>
             <span className="font-mono text-[15px] font-bold" data-measure-total>{total} sq ft</span>
           </div>
           <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-[12px] text-inksoft" data-measure-using>
-            <span>{useOwn ? `Using your own total — Claude's estimate was ${estimateTotal} sq ft.` : nMine ? `Using your number on ${nMine} row${nMine === 1 ? "" : "s"} — Claude's estimate was ${estimateTotal} sq ft.` : "Using Claude's estimate. Type your own in any row, or your own total, to use that instead."}</span>
-            {(nMine > 0 || useOwn) && <button type="button" className="min-h-[44px] text-[12px] underline" onClick={() => { setEdits({}); setOwnTotal(""); }}>Use Claude's estimate for all</button>}
+            <span>{useOwn ? `Using your own total. Claude's estimate was ${estimateTotal} sq ft.` : nMine ? `Using your number on ${nMine} row${nMine === 1 ? "" : "s"}. Claude's estimate was ${estimateTotal} sq ft.` : "Using Claude's estimate. Type your own in any row, or your own total, to use that instead."}</span>
+            {(nMine > 0 || useOwn) && <button type="button" className="btn-link" onClick={() => { setEdits({}); setOwnTotal(""); }}>Use Claude&apos;s estimate for all</button>}
           </div>
+          {blocked && (
+            <div ref={blockedNote} className="notice-alert mt-2">That line already has {Number(job.items[lineIdx!].qty)} sq ft. An estimate never replaces a number that is there. Type the new number under Your own total to change it.</div>
+          )}
           <label className="mt-1 flex flex-wrap items-center gap-2 text-[13px]" data-measure-own>
-            <span className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">Your own total</span>
-            <input className="field w-24 px-2 py-1.5 text-right font-mono" inputMode="decimal" placeholder={String(rowsTotal)} aria-label="Your own total, in square feet" value={ownTotal} onChange={(e) => setOwnTotal(e.target.value)} />sq ft
-            <span className="text-[11px] text-inksoft">— a number you type always wins</span>
+            <span className="section-label">Your own total</span>
+            <input className="field w-24 px-2 py-2 text-right font-mono" inputMode="decimal" placeholder={String(rowsTotal)} aria-label="Your own total, in square feet" value={ownTotal} onChange={(e) => setOwnTotal(e.target.value)} />sq ft
           </label>
           <p className="mt-2 text-[12px] text-inksoft">{nRulers ? "Solid rows were worked out from your ruler." : "For a solid number next time, mark a ruler on the photo."} The tape measure wins.</p>
-          <div className="mt-3 text-[11px] font-semibold uppercase tracking-widest text-inksoft">Put it on</div>
+          <div className="section-label mt-3">Put it on</div>
           {lineChooser()}
-          <p className="mt-2 text-[11px] text-inksoft">Only this line's square feet change. The photos, the PO and the other lines are not touched, and a number already on the line stays unless you type the new one.</p>
+          <p className="mt-2 text-[12px] text-inksoft">Only this line changes. A number already on it stays unless you type a new one.</p>
         </div>
       )}
     </Modal>

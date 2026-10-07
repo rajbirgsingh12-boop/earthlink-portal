@@ -5,20 +5,50 @@
 // nothing here is uploaded or saved anywhere, and wages never touch the
 // portal's database.
 import { useRef, useState } from "react";
-import Link from "next/link";
 import { parseCertifiedPayroll, buildCsv, lcmWarnings, blankRow, dayLabels, splitReportByRelease, workerKey, type ReleaseHours, type CpReport, type CpRow, type CpLine, type Cell } from "@/lib/certifiedPayroll";
 import { askFileName } from "@/lib/format";
 import { sb } from "@/lib/supabase";
 import PageHeader from "@/components/PageHeader";
+import CardToolbar from "@/components/CardToolbar";
+import Toast, { useFlash } from "@/components/Toast";
 
 interface PdfDocLite { destroy?: () => Promise<void> }
 
+// every report and worker row carries its own key, so a row that was just
+// added slides in while the ones around it stay put
+let uidSeq = 0;
+const uid = () => `u${++uidSeq}`;
+type RowU = CpRow & { uid: string };
+type ReportU = Omit<CpReport, "rows"> & { uid: string; rows: RowU[] };
+const tagReport = (r: CpReport): ReportU => ({ ...r, uid: uid(), rows: r.rows.map((w) => ({ ...w, uid: uid() })) });
+const tagRow = (w: CpRow): RowU => ({ ...w, uid: uid() });
+
+const TYPED_IN = "typed in by hand";
+// the reader's notes and the pre-download warnings come from the CSV builder,
+// which is kept byte-stable; the dash and the "their upload" wording are swapped
+// here, on the way to the screen
+const clean = (s: string) => s
+  .replace(/\s+[—–]\s+(\S)/g, (_m, c: string) => `. ${c.toUpperCase()}`)
+  .replace(/their upload/gi, "eComply");
+// the week runs Saturday to Friday on the portal's timesheets; a dated label gets its real weekday
+const WEEK_DAYS = ["Sat", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri"];
+const dayNames = (weekEnding: string): string[] => {
+  const m = weekEnding.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  const labels = dayLabels(weekEnding);
+  if (!m) return WEEK_DAYS;
+  const end = new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2]));
+  return labels.map((d, i) => {
+    const day = new Date(end);
+    day.setDate(end.getDate() - (6 - i));
+    return `${day.toLocaleDateString("en-US", { weekday: "short" })} ${d}`;
+  });
+};
+
 export default function CertifiedPayroll() {
-  const [reports, setReports] = useState<CpReport[]>([]);
+  const [reports, setReports] = useState<ReportU[]>([]);
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState("");
+  const { msg, flash } = useFlash();
   const fileRef = useRef<HTMLInputElement>(null);
-  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 4000); };
 
   // read a PDF into text lines: words clustered by row (y), ordered by x —
   // that keeps table columns in left-to-right order for the reader
@@ -76,7 +106,7 @@ export default function CertifiedPayroll() {
         pdfjs = await import("pdfjs-dist");
         pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
       } catch {
-        flash("The PDF reader didn't load — the portal was probably just updated. Pull down to refresh the page and upload again.");
+        flash("The PDF reader didn't load. The portal was probably just updated: pull down to refresh and upload again.");
         return;
       }
       const parsed: CpReport[] = [];
@@ -87,21 +117,21 @@ export default function CertifiedPayroll() {
         } catch (err) {
           const scan = err instanceof Error && err.message === "scan";
           parsed.push({ ...emptyReport(), fileName: f.name, notes: [scan
-            ? `${f.name} is a scan — a photo of paper with no real text in it. Upload the ORIGINAL PDF from the payroll company's email (forward the email and save its attachment), not a printed or photographed copy — or type the rows in below.`
-            : `Couldn't read ${f.name} — refresh the page and try once more; if it still fails, type the rows in below.`] });
+            ? `${f.name} is a scan: a photo of paper with no real text in it. Upload the original PDF from the payroll company's email (forward the email and save its attachment), not a printed or photographed copy. Or type the rows in below.`
+            : `Couldn't read ${f.name}. Refresh the page and try once more. If it still fails, type the rows in below.`] });
         }
       }
-      setReports((prev) => [...prev, ...parsed]);
+      setReports((prev) => [...prev, ...parsed.map(tagReport)]);
       const found = parsed.reduce((s, r) => s + r.rows.length, 0);
-      flash(`${parsed.length} report${parsed.length === 1 ? "" : "s"} read · ${found} worker row${found === 1 ? "" : "s"} found — check the grid, then download the CSV`);
+      flash(`${parsed.length} report${parsed.length === 1 ? "" : "s"} read · ${found} worker row${found === 1 ? "" : "s"} found. Check the grid, then download the CSV.`);
     } finally {
       setBusy(false);
     }
   };
 
-  const emptyReport = (): CpReport => ({ fileName: "typed in by hand", contractor: "Earth Link General Construction Inc.", payrollNo: "", weekEnding: "", project: "", contractNo: "", rows: [blankRow()], notes: [] });
+  const emptyReport = (): CpReport => ({ fileName: TYPED_IN, contractor: "Earth Link General Construction Inc.", payrollNo: "", weekEnding: "", project: "", contractNo: "", rows: [blankRow()], notes: [] });
 
-  const setRep = (i: number, patch: Partial<CpReport>) =>
+  const setRep = (i: number, patch: Partial<ReportU>) =>
     setReports((prev) => prev.map((r, x) => (x === i ? { ...r, ...patch } : r)));
   const setRow = (ri: number, wi: number, patch: Partial<CpRow>) =>
     setReports((prev) => prev.map((r, x) => (x === ri ? { ...r, rows: r.rows.map((w, y) => (y === wi ? { ...w, ...patch } : w)) } : r)));
@@ -116,11 +146,11 @@ export default function CertifiedPayroll() {
       }) };
     }));
 
-  // anything their upload would bounce gets shown BEFORE the file downloads
+  // anything eComply would bounce gets shown BEFORE the file downloads
   const confirmWarnings = (reps: CpReport[]): boolean => {
-    const warns = lcmWarnings(reps);
+    const warns = lcmWarnings(reps).map(clean);
     if (warns.length === 0) return true;
-    return window.confirm(`Their upload may reject this file:\n\n• ${warns.slice(0, 10).join("\n• ")}${warns.length > 10 ? `\n…and ${warns.length - 10} more` : ""}\n\nDownload anyway?`);
+    return window.confirm(`eComply may reject this file:\n\n• ${warns.slice(0, 10).join("\n• ")}${warns.length > 10 ? `\n…and ${warns.length - 10} more` : ""}\n\nDownload anyway?`);
   };
 
   const download = (reps: CpReport[], name: string) => {
@@ -148,7 +178,7 @@ export default function CertifiedPayroll() {
   // wages) to see who was on which release.
   const downloadByRelease = async (ri: number, rep: CpReport) => {
     const m = rep.weekEnding.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-    if (!m) { flash("Type the week-ending date (MM/DD/YYYY) first — the split looks up that week's timesheet."); return; }
+    if (!m) { flash("Type the week-ending date (MM/DD/YYYY) first. The split looks up that week's timesheet."); return; }
     // "8/7/2026" becomes "08/07/2026" everywhere — the grid, the CSV, the file names
     const pretty = `${m[1].padStart(2, "0")}/${m[2].padStart(2, "0")}/${m[3]}`;
     if (pretty !== rep.weekEnding) { rep = { ...rep, weekEnding: pretty }; setRep(ri, { weekEnding: pretty }); }
@@ -156,19 +186,19 @@ export default function CertifiedPayroll() {
     setBusy(true);
     try {
       const { data: wks, error: wkErr } = await sb().from("timesheet_weeks").select("id").eq("week_ending", iso);
-      if (wkErr) { flash(`Couldn't reach the portal (${wkErr.message}) — try again.`); return; }
-      if (!wks?.length) { flash(`No payroll week ending ${rep.weekEnding} in the portal — enter that week's hours on the Payroll tab first.`); return; }
+      if (wkErr) { flash("Couldn't reach the portal. Check your signal and try again."); return; }
+      if (!wks?.length) { flash(`No payroll week ending ${rep.weekEnding} in the portal. Enter that week's hours on the Payroll tab first.`); return; }
       const [entsRes, empsRes] = await Promise.all([
         sb().from("timesheet_entries").select("employee_id,release_id,hours").in("week_id", wks.map((w: { id: string }) => w.id)),
         sb().from("employees").select("id,name"),
       ]);
-      if (entsRes.error || empsRes.error) { flash(`Couldn't reach the portal (${(entsRes.error || empsRes.error)!.message}) — try again.`); return; }
+      if (entsRes.error || empsRes.error) { flash("Couldn't reach the portal. Check your signal and try again."); return; }
       const ents = entsRes.data, emps = empsRes.data;
       const relIds = [...new Set((ents || []).map((e: { release_id: string | null }) => e.release_id).filter(Boolean))] as string[];
       const relsRes = relIds.length
         ? await sb().from("releases").select("id,rel_number").in("id", relIds)
         : { data: [] as { id: string; rel_number: string }[], error: null };
-      if (relsRes.error) { flash(`Couldn't reach the portal (${relsRes.error.message}) — try again.`); return; }
+      if (relsRes.error) { flash("Couldn't reach the portal. Check your signal and try again."); return; }
       const relNumById = new Map((relsRes.data || []).map((r: { id: string; rel_number: string | null }) => [r.id, String(r.rel_number ?? "")]));
       const nameById = new Map((emps || []).map((e: { id: string; name: string }) => [e.id, e.name]));
       // hours by release → by worker (7 days, Sat…Fri — same order as the CSV grid)
@@ -193,7 +223,7 @@ export default function CertifiedPayroll() {
       }
       const { groups, unmatched } = splitReportByRelease(rep, Object.values(byRel), offRelease);
       if (groups.length === 0) {
-        flash("Nobody on this report has release hours that week in the portal — check the names match the crew list in Settings.");
+        flash("Nobody on this report has release hours that week in the portal. Check the names match the crew list in Settings.");
         return;
       }
       const week = rep.weekEnding.replace(/\//g, "-");
@@ -203,7 +233,7 @@ export default function CertifiedPayroll() {
         const fname = askFileName(`cpr_rel${groups[0].rel}_${week}.csv`);
         if (!fname) return;
         saveBlob(buildCsv([groups[0].report]), "text/csv;charset=utf-8", fname);
-        flash(`Whole week was release #${groups[0].rel} — one CSV made.`);
+        flash(`The whole week was release #${groups[0].rel}: one CSV made.`);
         return;
       }
       const fname = askFileName(`cpr_by_release_${week}.zip`);
@@ -219,13 +249,13 @@ export default function CertifiedPayroll() {
       if (unmatched) put(`cpr_NO_RELEASE_FOUND_${week}`, unmatched);
       saveBlob(zipSync(files, { level: 6 }), "application/zip", fname);
       const skipped = unmatched ? ` · not split (see the NO_RELEASE_FOUND file): ${unmatched.rows.map((r) => r.name || "?").join(", ")}` : "";
-      flash(`Split into ${groups.length} releases (${groups.map((g) => `#${g.rel}`).join(", ")}) — one CSV each${skipped}`);
+      flash(`Split into ${groups.length} releases (${groups.map((g) => `#${g.rel}`).join(", ")}), one CSV each${skipped}`);
     } finally {
       setBusy(false);
     }
   };
 
-  // their upload takes ONE week per file — many weeks = one CSV each, zipped
+  // eComply takes ONE week per file — many weeks = one CSV each, zipped
   const downloadAllZip = async () => {
     if (!confirmWarnings(reports)) return;
     const fname = askFileName("cpr_uploads.zip");
@@ -244,80 +274,92 @@ export default function CertifiedPayroll() {
 
   const moneyFields: [keyof CpRow, string][] = [
     ["stRate", "ST rate"], ["otRate", "OT rate"], ["grossProject", "Gross (this job)"], ["grossTotal", "Gross (all jobs)"],
-    ["fica", "FICA"], ["fedTax", "Federal tax"], ["stateTax", "State tax"], ["cityTax", "City tax"], ["otherDed", "Other ded."], ["net", "Net pay"],
+    ["fica", "FICA"], ["fedTax", "Federal tax"], ["stateTax", "State tax"], ["cityTax", "City tax"], ["otherDed", "Other deductions"], ["net", "Net pay"],
   ];
+  const headFields: [keyof CpReport, string][] = [["payrollNo", "Payroll #"], ["weekEnding", "Week ending"], ["contractNo", "Contract / PO #"], ["project", "Project"], ["contractor", "Contractor"]];
+  const lab = (t: string) => <span className="section-label mb-0.5">{t}</span>;
 
   return (
     <div>
-      <PageHeader title="eComply CSV" sub="Certified payroll PDF → CSV for upload. Nothing on this page is saved anywhere."
+      {busy && <div className="busy-bar" aria-busy="true" aria-label="Working" />}
+      <PageHeader title="Certified payroll" sub="Turns the payroll company's PDFs into the CSV eComply takes. Nothing on this page is saved."
         primary={
-          <button className="btn btn-primary min-h-[44px] whitespace-nowrap px-3 py-2 text-[13px]" onClick={() => fileRef.current?.click()} disabled={busy}>
-            {busy ? "Reading…" : "📄 Upload payroll PDF(s)"}
+          <button type="button" className="btn btn-primary whitespace-nowrap" onClick={() => fileRef.current?.click()} disabled={busy}>
+            {busy ? "Reading…" : "Upload payroll PDFs"}
           </button>
         }>
-        <Link className="btn btn-ghost min-h-[44px] whitespace-nowrap px-3 py-2 text-[13px]" href="/payroll">← Payroll</Link>
-        <button className="btn btn-ghost min-h-[44px] whitespace-nowrap px-3 py-2 text-[13px]" onClick={() => setReports((p) => [...p, emptyReport()])}>+ Type one in</button>
+        <button type="button" className="btn btn-ghost whitespace-nowrap" onClick={() => setReports((p) => [...p, tagReport(emptyReport())])}>+ Type a week in</button>
       </PageHeader>
       <input ref={fileRef} type="file" accept="application/pdf" multiple className="hidden" onChange={handleFiles} />
 
-      {reports.length === 0 && (
-        <div className="card p-5 text-sm text-inksoft">
-          Upload the certified payroll PDF(s) from your payroll company — one per week. The reader pulls out each worker&apos;s
-          name, classification, day-by-day hours, rates, gross, deductions and net, shows it all in a grid you can correct,
-          then makes a CSV file for eComply. If a PDF reads badly, fix the cells by hand — and send that PDF over so the
-          reader can learn its layout. <b>⬇ CSV per release</b> splits a week into one CSV per release — the hours come
-          from the week you filled in on the Payroll tab, the money stays from the payroll report — which is how NYCHA
-          wants certified payroll turned in.
+      {/* a PDF is being read: a placeholder card holds the spot where its report will land */}
+      {busy && <div className="card mb-4 card-pad"><div className="skeleton h-40 w-full" /></div>}
+
+      {reports.length === 0 && !busy && (
+        <div className="card card-pad text-[14px] leading-relaxed text-inksoft">
+          <p>
+            Upload the certified payroll PDFs from the payroll company, one per week. The reader pulls each worker&apos;s
+            name, classification, daily hours, rates, gross, deductions and net into boxes you can correct, then makes the
+            CSV for eComply. If a PDF reads badly, fix the boxes by hand and send that PDF over so the reader learns its layout.
+          </p>
+          <p className="mt-2">
+            <b>CSV per release</b> splits a week into one CSV per release: hours from the Payroll tab, money from the payroll
+            report, the way NYCHA wants it.
+          </p>
         </div>
       )}
 
       {reports.map((rep, ri) => {
-        const days = dayLabels(rep.weekEnding);
+        const days = dayNames(rep.weekEnding);
         return (
-          <div key={ri} className="card mb-4 p-3.5">
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-              <div className="font-display text-base font-bold uppercase">Week {rep.weekEnding || "?"} <span className="ml-1 text-[11px] font-normal normal-case text-inksoft">from {rep.fileName}</span></div>
-              <div className="flex gap-2">
-                <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" title="One CSV per release, hours split from the portal's timesheets — how NYCHA wants it" onClick={() => downloadByRelease(ri, rep)} disabled={busy}>⬇ CSV per release</button>
-                <button className="btn btn-primary min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => download([rep], `ecomply_${(rep.payrollNo || "payroll")}_${rep.weekEnding.replace(/\//g, "-") || "week"}.csv`)}>⬇ CSV for this week</button>
-                <button className="btn-icon text-alert" title="Remove this report" onClick={() => { if (window.confirm("Remove this report from the page? (Nothing was saved anywhere.)")) setReports((p) => p.filter((_, x) => x !== ri)); }}>✕</button>
+          <div key={rep.uid} className="card anim-row mb-4 card-pad">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="font-display text-base font-bold uppercase">
+                Week {rep.weekEnding || "(date not set)"}
+                <span className="ml-1 text-[12px] font-normal normal-case text-inksoft">{rep.fileName === TYPED_IN ? ` · ${TYPED_IN}` : ` · from ${rep.fileName}`}</span>
               </div>
+              <CardToolbar align="end"
+                primary={<button type="button" className="btn btn-primary btn-sm" onClick={() => download([rep], `ecomply_${(rep.payrollNo || "payroll")}_${rep.weekEnding.replace(/\//g, "-") || "week"}.csv`)}>⬇ CSV for this week</button>}
+                menu={[
+                  { label: "CSV per release", glyph: "⬇", title: "One CSV per release. Hours split by the Payroll tab's timesheets, the way NYCHA wants it", disabled: busy, onSelect: () => downloadByRelease(ri, rep) },
+                  { label: "Remove this report…", destructive: true, confirm: "Remove this report from the page? (Nothing was saved anywhere.)", onSelect: () => setReports((p) => p.filter((_, x) => x !== ri)) },
+                ]} />
             </div>
             {rep.notes.length > 0 && (
-              <div className="mb-2 rounded-sm border border-work bg-work/5 p-2 text-[12px]">
-                {rep.notes.map((n, i) => <div key={i}>⚠ {n}</div>)}
+              <div className="notice-work mb-3 text-[12px]">
+                {rep.notes.map((n, i) => <div key={i}>⚠ {clean(n)}</div>)}
               </div>
             )}
             <div className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-5">
-              {([["payrollNo", "Payroll #"], ["weekEnding", "Week ending (MM/DD/YYYY)"], ["contractNo", "Contract / PO #"], ["project", "Project / development"], ["contractor", "Contractor"]] as [keyof CpReport, string][]).map(([k, label]) => (
+              {headFields.map(([k, label]) => (
                 <label key={k} className="block">
-                  <span className="text-[11px] uppercase tracking-widest text-inksoft">{label}</span>
-                  <input className="field px-2 py-2 text-sm" value={String(rep[k] ?? "")} onChange={(e) => setRep(ri, { [k]: e.target.value })} />
+                  {lab(label)}
+                  <input className="field px-2 py-2 text-sm" value={String(rep[k] ?? "")} onChange={(e) => setRep(ri, { [k]: e.target.value })}
+                    placeholder={k === "weekEnding" ? "MM/DD/YYYY" : undefined} inputMode={k === "weekEnding" ? "numeric" : undefined} />
                 </label>
               ))}
             </div>
 
-            {/* one card per worker — the sideways 1,180px grid was unreadable on
+            {/* one section per worker — the sideways 1,180px grid was unreadable on
                 a phone, and a phone is where this gets filled in. Every box is
                 full-size (16px on phones, so nothing zooms), every box has its
                 label, and the days are labeled over each hour. */}
             {rep.rows.map((w, wi) => {
               const stT = w.st.reduce<number>((s2, h) => s2 + (Number(h) || 0), 0);
               const otT = w.ot.reduce<number>((s2, h) => s2 + (Number(h) || 0), 0);
-              const lab = (t: string) => <span className="mb-0.5 block text-[11px] uppercase tracking-widest text-inksoft">{t}</span>;
               return (
-                <div key={wi} className="card mb-2.5 p-3">
+                <div key={w.uid} className="anim-row mb-3 border-t border-rulesoft pt-3">
                   <div className="flex items-start gap-2">
                     <label className="block flex-1">{lab("Worker")}
                       <input className="field" placeholder="Last, First" value={w.name} onChange={(e) => setRow(ri, wi, { name: e.target.value })} /></label>
                     <label className="block w-28">{lab("SSN last 4")}
-                      <input className="field text-center font-mono" maxLength={11} inputMode="numeric" title="Last 4 (goes out as 000-00-1234) or the full 9 digits" value={w.ssn4} onChange={(e) => setRow(ri, wi, { ssn4: e.target.value.replace(/[^\d-]/g, "") })} /></label>
-                    <button className="btn-icon mt-5 text-alert" title="Remove worker" onClick={() => { if (window.confirm(`Remove ${w.name || "this worker"} from this payroll?`)) setRep(ri, { rows: rep.rows.filter((_, y) => y !== wi) }); }}>✕</button>
+                      <input className="field text-center font-mono" maxLength={11} inputMode="numeric" placeholder="1234" value={w.ssn4} onChange={(e) => setRow(ri, wi, { ssn4: e.target.value.replace(/[^\d-]/g, "") })} /></label>
+                    <button type="button" className="btn-icon mt-5 text-alert" aria-label={`Remove ${w.name || "this worker"}`} onClick={() => { if (window.confirm(`Remove ${w.name || "this worker"} from this payroll?`)) setRep(ri, { rows: rep.rows.filter((_, y) => y !== wi) }); }}>✕</button>
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-2">
                     <label className="block">{lab("Classification")}
                       <input className="field" placeholder="Laborer…" value={w.classification} onChange={(e) => setRow(ri, wi, { classification: e.target.value })} /></label>
-                    <label className="block">{lab("Journeyman / Apprentice")}
+                    <label className="block">{lab("Level")}
                       <select className="field" value={w.trade} onChange={(e) => setRow(ri, wi, { trade: e.target.value })}>
                         <option value="J">Journeyman</option><option value="A">Apprentice</option>
                       </select></label>
@@ -328,7 +370,7 @@ export default function CertifiedPayroll() {
                     <label className="block">{lab("City")}
                       <input className="field" value={w.city} onChange={(e) => setRow(ri, wi, { city: e.target.value })} /></label>
                     <label className="block">{lab("State")}
-                      <input className="field text-center" maxLength={2} placeholder="NY" value={w.state} onChange={(e) => setRow(ri, wi, { state: e.target.value.toUpperCase() })} /></label>
+                      <input className="field text-center" maxLength={2} placeholder="NY" autoCapitalize="characters" spellCheck={false} value={w.state} onChange={(e) => setRow(ri, wi, { state: e.target.value.toUpperCase() })} /></label>
                     <label className="block">{lab("Zip")}
                       <input className="field" inputMode="numeric" value={w.zip} onChange={(e) => setRow(ri, wi, { zip: e.target.value })} /></label>
                   </div>
@@ -338,30 +380,30 @@ export default function CertifiedPayroll() {
                         <option value="S">Single</option><option value="M">Married</option>
                       </select></label>
                     <label className="block">{lab("Ethnicity")}
-                      <select className="field" title="Ethnicity code (their upload wants it)" value={w.ethnicity} onChange={(e) => setRow(ri, wi, { ethnicity: e.target.value })}>
-                        <option value="">—</option><option value="1">1 Caucasian</option><option value="2">2 African American</option>
+                      <select className="field" value={w.ethnicity} onChange={(e) => setRow(ri, wi, { ethnicity: e.target.value })}>
+                        <option value="">(pick one)</option><option value="1">1 Caucasian</option><option value="2">2 African American</option>
                         <option value="3">3 Hispanic</option><option value="4">4 Native Am./Alaskan</option>
                         <option value="5">5 Asian/Pac. Isl.</option><option value="6">6 Other</option>
                       </select></label>
                     <label className="block">{lab("Exemptions")}
-                      <input className="field text-center" inputMode="numeric" maxLength={2} title="Tax exemptions claimed (0-99)"
+                      <input className="field text-center" inputMode="numeric" maxLength={2} placeholder="0"
                         value={String(w.exemption ?? "")} onChange={(e) => setRow(ri, wi, { exemption: e.target.value.replace(/\D/g, "") })} /></label>
                   </div>
-                  <div className="mt-3 text-[11px] font-semibold uppercase tracking-widest text-inksoft">Hours — straight time</div>
+                  <div className="section-label mt-3">Straight-time hours</div>
                   <div className="mt-1 grid grid-cols-7 gap-1">
                     {days.map((d, di) => (
                       <label key={di} className="block text-center">
                         <span className="block text-[11px] text-inksoft">{d}</span>
-                        <input className="field px-1 py-2 text-center font-mono" inputMode="decimal" placeholder="0" value={String(w.st[di] ?? "")} onChange={(e) => setDay(ri, wi, "st", di, e.target.value)} />
+                        <input className="field px-1 py-2.5 text-center font-mono" inputMode="decimal" placeholder="0" value={String(w.st[di] ?? "")} onChange={(e) => setDay(ri, wi, "st", di, e.target.value)} />
                       </label>
                     ))}
                   </div>
-                  <div className="mt-2 text-[11px] font-semibold uppercase tracking-widest text-work">Hours — overtime</div>
+                  <div className="section-label mt-2 text-work">Overtime hours</div>
                   <div className="mt-1 grid grid-cols-7 gap-1">
                     {days.map((d, di) => (
                       <label key={di} className="block text-center">
                         <span className="block text-[11px] text-inksoft">{d}</span>
-                        <input className="field bg-work/5 px-1 py-2 text-center font-mono" inputMode="decimal" placeholder="0" title="Overtime" value={String(w.ot[di] ?? "")} onChange={(e) => setDay(ri, wi, "ot", di, e.target.value)} />
+                        <input className="field bg-work/5 px-1 py-2.5 text-center font-mono" inputMode="decimal" placeholder="0" value={String(w.ot[di] ?? "")} onChange={(e) => setDay(ri, wi, "ot", di, e.target.value)} />
                       </label>
                     ))}
                   </div>
@@ -376,15 +418,15 @@ export default function CertifiedPayroll() {
                 </div>
               );
             })}
-            <button className="btn btn-ghost min-h-[44px] mt-2 px-3 py-1.5 text-[13px]" onClick={() => setRep(ri, { rows: [...rep.rows, blankRow()] })}>+ Add worker</button>
+            <button type="button" className="btn btn-ghost btn-sm mt-2" onClick={() => setRep(ri, { rows: [...rep.rows, tagRow(blankRow())] })}>+ Add worker</button>
           </div>
         );
       })}
 
       {reports.length > 1 && (
-        <button className="btn btn-primary" onClick={downloadAllZip}>⬇ All {reports.length} weeks — one CSV each, zipped</button>
+        <button type="button" className="btn btn-primary mt-2 min-h-[44px]" onClick={downloadAllZip}>⬇ All {reports.length} weeks (one CSV each, zipped)</button>
       )}
-      {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
+      <Toast msg={msg} />
     </div>
   );
 }

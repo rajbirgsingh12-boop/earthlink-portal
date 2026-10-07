@@ -24,6 +24,11 @@ export const COMPANY = {
     // the line along the foot of their own letters
     footer: "Proudly serving since 1999  ·  Interior & exterior renovations  ·  Fully licensed and insured",
   },
+  // the letterhead's phone and email lines one by one, for screens that set
+  // them with a dot between (the strings above stay as the PDF and Word
+  // documents print them)
+  phones: ["(917) 509-6427", "(718) 316-9098"],
+  emails: ["earthlink99@gmail.com", "info@earthlinkgc.com"],
   // filing details used on NYCHA paperwork (Statement of Services, invoices)
   fax: "718-766-8010",
   supplierNo: "104638",
@@ -32,7 +37,7 @@ export const COMPANY = {
   principal: "HARPINDER SINGH.",
   principalTitle: "PRESIDENT",
   blurb:
-    "General construction contractor serving New York City public and affordable housing — NYCHA and PACT/RAD partners. Painting, plastering, carpentry, tile, and full apartment restoration.",
+    "General construction contractor serving New York City public and affordable housing: NYCHA and PACT/RAD partners. Painting, plastering, carpentry, tile, and full apartment restoration.",
 } as const;
 
 export const COMPANY_ADDRESS = `${COMPANY.street}, ${COMPANY.city}, ${COMPANY.state} ${COMPANY.zip}`;

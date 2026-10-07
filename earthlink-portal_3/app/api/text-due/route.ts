@@ -112,7 +112,7 @@ async function sweep(req: Request) {
 
   const now = new Date();
   const due = await get<Row>(`schedule_days?send_at=lte.${encodeURIComponent(now.toISOString())}&texted=is.false&select=id,day,employee_id,description,address,texted,send_at,release_id,pact_job_id&order=send_at&limit=200`);
-  if (!due) return NextResponse.json({ error: "Couldn't read the schedule — nothing was sent (RUN_ME.sql section 19 gives the schedule its send_at column)" }, { status: 500 });
+  if (!due) return NextResponse.json({ error: "Couldn't read the schedule, nothing was sent (RUN_ME.sql section 19 gives the schedule its send_at column)" }, { status: 500 });
   if (due.length === 0) return NextResponse.json({ sent: 0, missed: 0, failed: 0, due: 0 });
   if (!twilioConfigured()) {
     return NextResponse.json({ sent: 0, missed: 0, failed: 0, due: due.length, note: "The company texting number isn't set up, so a text can't go out on its own" });
@@ -133,7 +133,7 @@ async function sweep(req: Request) {
   // a lookup that failed leaves every text waiting for the next sweep — it
   // must not turn the whole queue into "the worker isn't in the crew list"
   if (!emps || !jobs || !rels) {
-    return NextResponse.json({ error: `Couldn't read the ${!emps ? "crew list" : !jobs ? "PACT jobs" : "releases"} — nothing was sent; the texts are still set up` }, { status: 500 });
+    return NextResponse.json({ error: `Couldn't read the ${!emps ? "crew list" : !jobs ? "PACT jobs" : "releases"}. Nothing was sent; the texts are still set up` }, { status: 500 });
   }
   const empOf = new Map(emps.map((e) => [e.id, e]));
   const jobOf = new Map(jobs.map((j) => [j.id, j]));

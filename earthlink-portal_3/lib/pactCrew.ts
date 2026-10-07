@@ -87,9 +87,9 @@ export const crewState = (rows: CrewRow[], j: CrewJob): "none" | "told" | "not_t
     // every one still to tell has a text waiting for its time — not a red flag
     : rows.filter((r) => rowNeedsText(r, j)).every((r) => !!r.send_at) ? "waiting"
     : "not_told";
-// "Jose TEXTED ✓ · Luis not told" — the one wording every screen uses
+// "Jose texted ✓ · Luis not texted": the one wording every screen uses
 export const crewLine = (rows: CrewRow[], j: CrewJob, emps: Worker[]): string =>
-  rows.length === 0 ? "No one sent yet" : rows.map((r) => {
+  rows.length === 0 ? "No one on it yet" : rows.map((r) => {
     const first = (emps.find((e) => e.id === r.employee_id)?.name || "?").split(" ")[0];
-    return `${first} ${r.texted && !(j.start_date && r.day !== j.start_date) ? "TEXTED ✓" : r.send_at ? "text set up" : !r.texted ? "not told" : "needs the new day"}`;
+    return `${first} ${r.texted && !(j.start_date && r.day !== j.start_date) ? "texted ✓" : r.send_at ? "text set up" : !r.texted ? "not texted" : "needs the new day"}`;
   }).join(" · ");

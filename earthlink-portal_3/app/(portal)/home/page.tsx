@@ -17,6 +17,12 @@ interface Row {
 }
 interface Prop { id: string; number: string; job: string; development?: string; release_number?: string; status: string; total?: number; contract_id?: string | null; created_at: string; qty_map?: Record<string, number> | null; }
 
+// the everyday jobs, one tap each
+const LAUNCHERS: [string, string][] = [
+  ["Enter today's hours", "/payroll"], ["Fill out a walk sheet", "/proposals"],
+  ["Make an invoice", "/package"], ["See the releases", "/releases"],
+];
+
 export default function Home() {
   const [rows, setRows] = useState<Row[]>([]);
   const [contracts, setContracts] = useState<Contract[]>([]);
@@ -32,14 +38,14 @@ export default function Home() {
 
   useEffect(() => {
     (async () => {
-      // one round of parallel fetches — serial awaits doubled the board's load
+      // one round of parallel fetches: serial awaits doubled the board's load
       // time on a phone; only the columns the board actually uses come over
       const fetchReleases = async () => {
         const all: Row[] = [];
         let from = 0;
         for (;;) {
-          // ordered — pages of an unordered scan can overlap between requests,
-          // double-counting money in the totals
+          // ordered, because pages of an unordered scan can overlap between
+          // requests, double-counting money in the totals
           const { data } = await sb().from("releases")
             .select("id,contract_id,rel_number,location,amount,received,payroll_done,canceled,invoice_sent,labor_hours,labor_breakdown")
             .order("id").range(from, from + 999);
@@ -70,7 +76,7 @@ export default function Home() {
         const ents: { release_id: string | null; employee_id: string; hours: number[]; trade?: string | null }[] = [];
         // chunks fetch together, each page-looped and ordered
         await Promise.all(Array.from({ length: Math.ceil(needIds.length / 200) }, (_, x) => x * 200).map(async (i) => {
-          for (let f = 0; ; f += 1000) { // paginated — an unranged select stops silently at 1000
+          for (let f = 0; ; f += 1000) { // paginated: an unranged select stops silently at 1000
             const { data: chunk } = await sb().from("timesheet_entries").select("*").in("release_id", needIds.slice(i, i + 200)).order("id").range(f, f + 999);
             ents.push(...((chunk || []) as typeof ents));
             if (!chunk || chunk.length < 1000) break;
@@ -90,7 +96,7 @@ export default function Home() {
           .map(({ r, missing }) => ({ r, missing })));
       }
       // has anyone entered hours for the current payroll week? (all week rows
-      // for that Friday — with an accidental duplicate week the hours could
+      // for that Friday: with an accidental duplicate week the hours could
       // live on either copy, and reading just one falsely nags)
       if (wk && wk.length > 0) {
         const ids = (wk as { id: string }[]).map((w) => w.id);
@@ -112,9 +118,9 @@ export default function Home() {
 
   const cards: [string, string, string][] = [
     ["Contracts", String(contracts.length), "text-ink"],
-    ["Released (live)", fmt(tot), "text-ink"],
-    ["Not received", fmt(open.reduce((s, r) => s + Number(r.amount), 0)), "text-work"],
-    ["Payroll pending", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"],
+    ["Released", fmt(tot), "text-ink"],
+    ["Payment not received", fmt(open.reduce((s, r) => s + Number(r.amount), 0)), "text-work"],
+    ["Payroll to do", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"],
   ];
 
   // gentle nudges so nothing slips just because nobody looked
@@ -122,24 +128,39 @@ export default function Home() {
   const payrollNudge = (dow >= 3 && dow <= 5) && (weekHours === null || weekHours === 0);
   const stale = open.filter((r) => r.invoice_sent && days(r.invoice_sent!) > 45);
 
+  // one look for every list row, card footer and card heading
+  const rowCls = "flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[14px] first:border-t-0";
+  const footCls = "mt-1 border-t border-rulesoft pt-2 text-[12px] text-inksoft";
+  const headCls = "mb-1 flex items-center justify-between";
+
   return (
     <div>
-      <PageHeader title="The Board" />
-      {/* plain-language launcher — jump straight to the everyday jobs */}
+      <PageHeader title="Home" sub="What needs attention: money to chase, walk sheets to deliver, payroll that's short" />
+      {/* the nudges come first: they are the reason to look at this page today */}
+      {!loading && payrollNudge && (
+        <Link href="/payroll" className="card mb-2.5 block border-alert p-3 text-[14px] transition-shadow hover:shadow active:translate-y-px">
+          ⚠ <b>No hours entered for this week yet.</b> Tap here, then Make payroll, and enter the hours before Friday. →
+        </Link>
+      )}
+      {!loading && stale.length > 0 && (
+        <Link href="/package" className="card mb-2.5 block border-work p-3 text-[14px] transition-shadow hover:shadow active:translate-y-px">
+          ⚠ <b>{stale.length} invoice{stale.length === 1 ? "" : "s"} out over 45 days.</b> Worth a call. Tap to see who owes what.
+        </Link>
+      )}
+      {/* plain-language launchers: straight to the everyday jobs */}
       <div className="mb-4 grid grid-cols-2 gap-2.5 md:grid-cols-4">
-        {([["Enter today's hours", "/payroll"], ["Fill out a walk sheet", "/proposals"],
-           ["Make an invoice", "/package"], ["See the releases", "/releases"]] as [string, string][]).map(([label, href]) => (
-          <Link key={href} href={href} className="card flex min-h-[44px] items-center gap-2.5 p-3.5 transition-shadow hover:shadow">
-            <span className="font-display text-[14px] font-semibold uppercase leading-tight tracking-wide">{label} →</span>
+        {LAUNCHERS.map(([label, href]) => (
+          <Link key={href} href={href} className="btn btn-ghost flex min-h-[48px] items-center justify-between px-3.5 active:translate-y-px">
+            <span>{label}</span><span aria-hidden>→</span>
           </Link>
         ))}
       </div>
       {loading ? (
-        /* the board's shape, shimmering — no text flash, no layout jump */
-        <div aria-label="Opening the books…">
+        /* the board's shape, shimmering: no text flash, no layout jump */
+        <div role="status" aria-busy="true" aria-label="Loading">
           <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
             {[0, 1, 2, 3].map((i) => (
-              <div key={i} className="card p-3.5"><div className="skeleton mb-2 h-3 w-20" /><div className="skeleton h-6 w-24" /></div>
+              <div key={i} className="card card-tight"><div className="skeleton mb-2 h-3 w-20" /><div className="skeleton h-6 w-24" /></div>
             ))}
           </div>
           <div className="mt-4 grid gap-3 md:grid-cols-3">
@@ -154,77 +175,65 @@ export default function Home() {
           </div>
         </div>
       ) : (
-        <>
-          {payrollNudge && (
-            <Link href="/payroll" className="card mb-2.5 block border-alert p-3 text-[14px]">
-              ⚠ <b>No hours entered for this week yet.</b> Tap here, hit Make payroll, and punch them in before Friday.
-            </Link>
-          )}
-          {stale.length > 0 && (
-            <Link href="/package" className="card mb-2.5 block border-work p-3 text-[14px]">
-              ⚠ <b>{stale.length} invoice{stale.length === 1 ? "" : "s"} out over 45 days</b> — worth a call. Tap to see who owes what.
-            </Link>
-          )}
+        <div className="anim-fade">
           <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
             {cards.map(([l, v, cls]) => (
-              <div key={l} className="card p-3.5">
-                <div className="text-[11px] uppercase tracking-[.12em] text-inksoft">{l}</div>
-                <div className={`font-mono text-lg font-semibold ${cls}`}>{v}</div>
+              <div key={l} className="card card-tight">
+                <div className="text-[12px] uppercase tracking-[.12em] text-inksoft">{l}</div>
+                <div className={`truncate font-mono text-[15px] font-semibold tabular-nums md:text-lg ${cls}`}>{v}</div>
               </div>
             ))}
           </div>
 
           <div className="mt-4 grid gap-3 md:grid-cols-3">
             <div className="card p-3.5">
-              <div className="mb-2 flex items-baseline justify-between">
+              <div className={headCls}>
                 <div className="font-display text-sm font-bold uppercase">Chase these first</div>
-                <Link href="/package" className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline">Invoice Package →</Link>
+                <Link href="/package" className="btn-link text-inksoft">Invoice Package →</Link>
               </div>
               {oldest.map((r) => (
-                <div key={r.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
+                <div key={r.id} className={rowCls}>
                   <span className="min-w-0 truncate"><span className="font-mono font-semibold">#{r.rel_number}</span> <span className="text-inksoft">{r.location || cNum(r.contract_id)}</span></span>
                   <span className="flex shrink-0 items-center gap-1.5">
                     <span className="font-mono">{fmt(Number(r.amount))}</span>
-                    <Stamp label={`${days(r.invoice_sent!)}D`} tone={days(r.invoice_sent!) > 60 ? "alert" : "work"} />
+                    <Stamp label={`${days(r.invoice_sent!)} DAYS`} tone={days(r.invoice_sent!) > 60 ? "alert" : "work"} />
                   </span>
                 </div>
               ))}
-              {oldest.length === 0 && <div className="py-2 text-[13px] text-inksoft">No invoiced money outstanding.</div>}
-              {notInvoiced.length > 0 && <div className="mt-1 border-t border-rulesoft pt-2 text-xs text-inksoft">{notInvoiced.length} unpaid release{notInvoiced.length === 1 ? "" : "s"} not invoiced yet — {fmt(notInvoiced.reduce((s, r) => s + Number(r.amount), 0))}</div>}
+              {oldest.length === 0 && <div className="empty text-[14px]">Nothing to chase.</div>}
+              {notInvoiced.length > 0 && <div className={footCls}>{notInvoiced.length} unpaid release{notInvoiced.length === 1 ? "" : "s"} not invoiced yet · {fmt(notInvoiced.reduce((s, r) => s + Number(r.amount), 0))}</div>}
             </div>
 
             <div className="card p-3.5">
-              <div className="mb-2 flex items-baseline justify-between">
-                <div className="font-display text-sm font-bold uppercase">Walk sheets undelivered</div>
-                <Link href="/proposals" className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline">Proposals →</Link>
+              <div className={headCls}>
+                <div className="font-display text-sm font-bold uppercase">Walk sheets not delivered</div>
+                <Link href="/proposals" className="btn-link text-inksoft">Proposals →</Link>
               </div>
               {walks.slice(0, 5).map((p) => (
-                <div key={p.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
+                <div key={p.id} className={rowCls}>
                   <span className="min-w-0 truncate">{p.job || p.development || p.number}<span className="text-inksoft"> · {prettyDate(localISO(new Date(p.created_at)))}</span></span>
                   <span className="shrink-0 font-mono">{fmt(Number(p.total) || 0)}</span>
                 </div>
               ))}
-              {walks.length === 0 && <div className="py-2 text-[13px] text-inksoft">Every walk sheet has been delivered.</div>}
-              {walks.length > 5 && <div className="mt-1 border-t border-rulesoft pt-2 text-xs text-inksoft">+{walks.length - 5} more drafts</div>}
+              {walks.length === 0 && <div className="empty text-[14px]">Nothing waiting to be delivered.</div>}
+              {walks.length > 5 && <div className={footCls}>+{walks.length - 5} more drafts</div>}
             </div>
 
             <div className="card p-3.5">
-              <div className="mb-2 flex items-baseline justify-between">
+              <div className={headCls}>
                 <div className="font-display text-sm font-bold uppercase">Payroll short</div>
-                <Link href="/payroll" className="inline-flex min-h-[44px] items-center text-[13px] text-inksoft underline">Payroll →</Link>
+                <Link href="/payroll" className="btn-link text-inksoft">Payroll →</Link>
               </div>
               {shorts.map(({ r, missing }) => (
-                <div key={r.id} className="flex items-center justify-between gap-2 border-t border-rulesoft py-2 text-[13px] first:border-t-0">
+                <div key={r.id} className={rowCls}>
                   <span className="min-w-0 truncate"><span className="font-mono font-semibold">#{r.rel_number}</span> <span className="text-inksoft">{r.location || cNum(r.contract_id)}</span></span>
-                  <Stamp label={`NEED ${missing}H`} tone="alert" />
+                  <Stamp label={`SHORT ${missing}H`} tone="alert" />
                 </div>
               ))}
-              {shorts.length === 0 && <div className="py-2 text-[13px] text-inksoft">Every open release meets its labor minimum.</div>}
+              {shorts.length === 0 && <div className="empty text-[14px]">No payroll shortfalls.</div>}
             </div>
           </div>
-
-          <Link href="/releases" className="btn btn-primary mt-5 inline-block">Open releases →</Link>
-        </>
+        </div>
       )}
     </div>
   );

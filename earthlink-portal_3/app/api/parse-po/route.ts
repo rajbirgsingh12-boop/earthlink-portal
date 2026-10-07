@@ -31,7 +31,7 @@ export async function POST(req: Request) {
 
   const buf = await req.arrayBuffer();
   if (buf.byteLength === 0 || buf.byteLength > 4 * 1024 * 1024) {
-    return NextResponse.json({ error: "Send the PDF file itself (max 4 MB — bigger files are read on the phone)" }, { status: 400 });
+    return NextResponse.json({ error: "Send the PDF file itself (max 4 MB; bigger files are read on the phone)" }, { status: 400 });
   }
   try {
     // the page's own lines are rebuilt from where the words sit, exactly like

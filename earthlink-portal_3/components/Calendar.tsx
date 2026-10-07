@@ -4,14 +4,14 @@ import { addDays, localISO } from "@/lib/docs";
 
 // The calendar, the way a calendar is supposed to look: Month, Week and Day
 // views, a bar with Today and arrows, weekday headings, today marked, every
-// job a colored bar on its day — named by its PO number, the way the office
-// and the partners talk about a job. Built for a thumb — every cell and bar
-// is a button, and a bar moves to another day by dragging it there (hold it
-// first on a phone) — and for a desk, where the month fills the screen.
+// job a colored bar on its day, named by its PO number, the way the office
+// and the partners talk about a job. Built for a thumb (every cell and bar
+// is a button, and a bar moves to another day by dragging it there, after a
+// hold on a phone) and for a desk, where the month fills the screen.
 export type CalEvent = {
   id: string;
   day: string;                 // "YYYY-MM-DD"
-  title: string;               // "PO 116843" — what the bar says
+  title: string;               // "PO 116843": what the bar says
   short?: string;              // the number alone, for a phone's month cell
   subtitle?: string;           // the street · apartment · partner
   kind: "pact" | "nycha";      // color: PACT orange, NYCHA blue
@@ -160,6 +160,10 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
     onSelect(e.day); onOpen?.(e);
   };
   const dropCls = (iso: string) => (drag && drag.over === iso && iso !== drag.e.day ? "bg-work/15 outline outline-2 -outline-offset-2 outline-work" : "");
+  // the day cells settle into and out of the drop highlight instead of snapping
+  const cellMotion = "transition-[background-color,outline-color] duration-100";
+  // a grid is drawn fresh (and fades in) when the period it shows changes, never on a tap inside it
+  const gridKey = `${view}:${view === "month" ? monthOf(anchor) : view === "week" ? weekStart(anchor) : anchor}`;
 
   // ---- navigation ----
   const step = (n: number) => {
@@ -167,7 +171,7 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
     else onAnchor(addDays(anchor, view === "week" ? 7 * n : n));
   };
   const title = view === "month" ? fmt(anchor, { month: "long", year: "numeric" })
-    : view === "week" ? `${fmt(weekStart(anchor), { month: "short", day: "numeric" })} – ${fmt(addDays(weekStart(anchor), 6), { month: "short", day: "numeric", year: "numeric" })}`
+    : view === "week" ? `${fmt(weekStart(anchor), { month: "short", day: "numeric" })} to ${fmt(addDays(weekStart(anchor), 6), { month: "short", day: "numeric", year: "numeric" })}`
     : fmt(anchor, { weekday: "long", month: "long", day: "numeric", year: "numeric" });
 
   // size: "bar" on a desk and in the week, "compact" in a desk's month cell, "chip" in a phone's month cell (the number alone).
@@ -183,7 +187,7 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
         style={movable ? { WebkitUserSelect: "none", userSelect: "none", WebkitTouchCallout: "none" } : undefined}
         title={[e.title, e.subtitle, e.flag, movable ? "drag to another day to move it" : ""].filter(Boolean).join(" · ")}
         data-po-bar={e.id}
-        className={`block w-full rounded-[3px] border-l-[3px] text-left ${size === "chip" ? "min-h-[20px] px-[2px] py-[1px] font-mono text-[11px] leading-[18px] tracking-tight" : size === "compact" ? "px-1 py-[1px] text-[11px] leading-[1.25]" : "px-2 py-1 text-[12px] leading-snug"} ${barCls(e)} ${lifted ? "opacity-40" : ""} ${movable ? "cursor-grab active:cursor-grabbing" : ""}`}>
+        className={`anim-row block w-full rounded-[3px] border-l-[3px] text-left transition-opacity duration-100 hover:brightness-95 active:brightness-90 ${size === "chip" ? "min-h-[20px] px-[2px] py-[1px] font-mono text-[11px] leading-[18px] tracking-tight" : size === "compact" ? "px-1 py-[1px] text-[11px] leading-[1.25]" : "px-2 py-1 text-[12px] leading-snug"} ${barCls(e)} ${lifted ? "opacity-40" : ""} ${movable ? "cursor-grab active:cursor-grabbing" : ""}`}>
         {/* a phone's chip has no room for the ⚠ — the flag turns the number red
             instead — and a number too long for it keeps its last digits, the ones
             that tell two POs apart (the cut lands at the front: right-to-left flow) */}
@@ -203,7 +207,7 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
     const need = Math.ceil((first.getDay() + new Date(y, mo, 0).getDate()) / 7) * 7;
     const cells = Array.from({ length: need }, (_, i) => addDays(start, i));
     return (
-      <div className="overflow-hidden rounded-sm border border-rule bg-white">
+      <div key={gridKey} className="anim-fade overflow-hidden rounded-sm border border-rule bg-white">
         <div className="grid grid-cols-7 border-b border-rule bg-paper">
           {WEEKDAYS.map((d) => <div key={d} className="py-1.5 text-center font-display text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">{d}</div>)}
         </div>
@@ -217,9 +221,9 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
             const show = evs.slice(0, 3);
             const lastRow = i >= cells.length - 7;
             return (
-              <div key={iso} role="button" tabIndex={0} data-day={iso} onClick={() => onSelect(iso)} onKeyDown={(ev) => { if (ev.key === "Enter") onSelect(iso); }}
+              <div key={iso} role="button" tabIndex={0} data-day={iso} onClick={() => onSelect(iso)} onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); onSelect(iso); } }}
                 aria-label={`${fmt(iso, { weekday: "long", month: "long", day: "numeric" })}${evs.length ? `, ${evs.length} job${evs.length === 1 ? "" : "s"}` : ""}`}
-                className={`flex min-h-[52px] flex-col gap-[2px] border-r border-rulesoft p-[2px] md:min-h-[96px] md:p-1 ${lastRow ? "" : "border-b"} ${i % 7 === 6 ? "border-r-0" : ""} ${inMonth ? "bg-white" : "bg-paper/60"} ${isSel ? "outline outline-2 -outline-offset-2 outline-ink" : ""} ${dropCls(iso)}`}>
+                className={`flex min-h-[52px] flex-col gap-[2px] border-r border-rulesoft p-[2px] md:min-h-[96px] md:p-1 ${cellMotion} ${lastRow ? "" : "border-b"} ${i % 7 === 6 ? "border-r-0" : ""} ${inMonth ? "bg-white" : "bg-paper/60"} ${isSel ? "outline outline-2 -outline-offset-2 outline-ink" : ""} ${dropCls(iso)}`}>
                 <div className="flex items-center justify-between">
                   <span className={`grid h-6 w-6 place-items-center rounded-full font-mono text-[12px] ${isToday ? "bg-work font-bold text-white" : inMonth ? "text-ink" : "text-inksoft"}`}>{Number(iso.slice(-2))}</span>
                   {evs.length > 0 && <span className="hidden font-mono text-[11px] text-inksoft md:inline">{evs.length}</span>}
@@ -245,20 +249,19 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
     const start = weekStart(anchor);
     const days = Array.from({ length: 7 }, (_, i) => addDays(start, i));
     return (
-      <div ref={weekScroll} data-week-scroll className="overflow-x-auto rounded-sm border border-rule bg-white">
+      <div key={gridKey} ref={weekScroll} data-week-scroll className="anim-fade overflow-x-auto rounded-sm border border-rule bg-white">
         <div className="grid min-w-[700px] grid-cols-7">
           {days.map((iso, i) => {
             const evs = byDay[iso] || [];
             const isToday = iso === today, isSel = iso === selected;
             return (
-              <div key={iso} data-day={iso} className={`flex min-h-[320px] flex-col border-r border-rulesoft ${i === 6 ? "border-r-0" : ""} ${isSel ? "bg-card" : ""} ${dropCls(iso)}`}>
+              <div key={iso} data-day={iso} className={`flex min-h-[320px] flex-col border-r border-rulesoft ${cellMotion} ${i === 6 ? "border-r-0" : ""} ${isSel ? "bg-card" : ""} ${dropCls(iso)}`}>
                 <button type="button" onClick={() => onSelect(iso)} className={`border-b border-rule px-2 py-1.5 text-left ${isToday ? "bg-work/10" : "bg-paper"}`}>
                   <div className="font-display text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">{WEEKDAYS[i]}</div>
                   <div className={`font-mono text-[15px] ${isToday ? "font-bold text-work" : ""}`}>{Number(iso.slice(-2))}</div>
                 </button>
                 <div className="flex flex-col gap-1 p-1.5">
                   {evs.map((e) => bar(e))}
-                  {evs.length === 0 && <div className="py-2 text-center text-[11px] text-rulesoft">—</div>}
                 </div>
               </div>
             );
@@ -272,11 +275,11 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
   const day = () => {
     const evs = byDay[anchor] || [];
     return (
-      <div className="rounded-sm border border-rule bg-white">
+      <div key={gridKey} className="anim-fade rounded-sm border border-rule bg-white">
         {renderDay ? renderDay(anchor, evs) : (
           <div className="flex flex-col gap-1.5 p-2">
             {evs.map((e) => bar(e))}
-            {evs.length === 0 && <div className="p-4 text-[13px] text-inksoft">Nothing on this day.</div>}
+            {evs.length === 0 && <div className="empty m-2">Nothing on this day.</div>}
           </div>
         )}
       </div>
@@ -287,27 +290,28 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
     <div>
       {/* the bar: Today ‹ › · title · Month | Week | Day */}
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <button type="button" className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => { onAnchor(today); onSelect(today); }}>Today</button>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => { onAnchor(today); onSelect(today); }}>Today</button>
         <div className="flex">
           <button type="button" className="btn-icon rounded-r-none" aria-label={`Previous ${view}`} onClick={() => step(-1)}>‹</button>
           <button type="button" className="btn-icon -ml-[1.5px] rounded-l-none" aria-label={`Next ${view}`} onClick={() => step(1)}>›</button>
         </div>
         <div className="font-display text-[16px] font-bold uppercase tracking-wide md:text-[18px]">{title}</div>
-        <div className="ml-auto flex rounded-sm border-[1.5px] border-ink" role="tablist" aria-label="Calendar view">
-          {(["month", "week", "day"] as CalView[]).map((v, i) => (
-            <button key={v} type="button" role="tab" aria-selected={view === v} onClick={() => onView(v)}
-              className={`min-h-[40px] px-3 font-display text-[13px] font-semibold uppercase tracking-wider ${i > 0 ? "border-l-[1.5px] border-ink" : ""} ${view === v ? "bg-ink text-white" : "bg-white text-ink"}`}>{v}</button>
+        {/* on a phone the view tabs take their own full row under the title */}
+        <div className="seg ml-auto w-full md:w-auto" role="tablist" aria-label="Calendar view">
+          {(["month", "week", "day"] as CalView[]).map((v) => (
+            <button key={v} type="button" role="tab" aria-selected={view === v} onClick={() => onView(v)} className="seg-item flex-1 md:flex-none">{v}</button>
           ))}
         </div>
       </div>
       {view === "month" ? month() : view === "week" ? week() : day()}
-      <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-inksoft">
+      {/* the legend, on one wrapping line; the Day view's cards say it all, so none there */}
+      {view !== "day" && <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-inksoft">
         {(!events.length || events.some((e) => e.kind === "pact")) && <span className="inline-flex items-center gap-1"><span className="inline-block h-3 w-3 rounded-[2px] border-l-[3px] border-l-work bg-work/10" /> PACT job</span>}
         {events.some((e) => e.kind === "nycha") && <span className="inline-flex items-center gap-1"><span className="inline-block h-3 w-3 rounded-[2px] border-l-[3px] border-l-carbon bg-carbon/10" /> NYCHA release</span>}
         <span className="inline-flex items-center gap-1"><span className="inline-block h-3 w-3 rounded-[2px] border-l-[3px] border-l-rule bg-paper" /> done</span>
         <span className="inline-flex items-center gap-1">⚠ crew not told</span>
-        {onMove && view !== "day" && <span className="inline-flex items-center gap-1">→ drag a PO to another day to move it <span className="md:hidden">(hold it first)</span></span>}
-      </div>
+        {onMove && <span className="inline-flex items-center gap-1">→ drag a PO to another day to move it <span className="md:hidden">(hold it first)</span></span>}
+      </div>}
       {/* the bar in flight, riding just above the finger or the pointer */}
       {drag && (
         <div className="pointer-events-none fixed z-[60] max-w-[calc(100vw-8px)]" data-drag-ghost

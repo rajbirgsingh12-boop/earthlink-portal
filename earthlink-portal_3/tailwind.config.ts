@@ -4,16 +4,20 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        ink: "#1A1D21",
-        paper: "#F6F4EF",
-        card: "#FCFBF8",
-        rule: "#C9C4B8",
-        rulesoft: "#E2DED4",
-        work: "#E8611C",
-        ok: "#2E7D4F",
-        carbon: "#33566E",
+        // the logo's own colors (lib/logoColors.ts): the banner's dark brown is the
+        // ink, the ocean teal the accent, the land green the "ok", the copper
+        // ribbon the quiet third tone, and the cream the paper
+        ink: "#2B231B",
+        paper: "#F6F2EA",
+        card: "#FCFAF5",
+        rule: "#CFC6B6",
+        rulesoft: "#E2DACD",
+        work: "#10728C",
+        ok: "#516F11",
+        carbon: "#8A633C",
         alert: "#B3261E",
-        inksoft: "#6B6B63",
+        inksoft: "#70665A",
+        papersoft: "#A9A69C", // the quiet text on the dark header
         // the logo's colors (lib/logoColors.ts) — the proposals are drawn in these
         logo: { brown: "#3A2B19", teal: "#10728C", green: "#516F11", tan: "#8A633C", ink: "#2B231B", muted: "#70665A", cream: "#F6F2EA", hair: "#E2DACD" },
       },

@@ -220,7 +220,7 @@ export async function savePrices(store: PriceStore): Promise<string | null> {
   // check again at the moment of writing: if the saved list can't be read
   // right now, nothing is written at all
   const { ok, older, from } = await readStore();
-  if (!ok) return "Couldn't read the saved line items just now — nothing was changed. Try again in a moment.";
+  if (!ok) return "Couldn't read the saved line items just now, so nothing was changed. Try again in a moment.";
   // the name is stamped AFTER that read, so it always sorts above anything the
   // read saw; two saves in the same millisecond just take the next stamp
   const body = () => new Blob([JSON.stringify(store)], { type: "application/json" });
@@ -235,7 +235,7 @@ export async function savePrices(store: PriceStore): Promise<string | null> {
     if (!error) { written = path; break; }
     if (!/exists|409|duplicate/i.test(error.message)) return error.message;
   }
-  if (!written) return "Couldn't write the line items — try again in a moment.";
+  if (!written) return "Couldn't write the line items, try again in a moment.";
   // the new one is safely written, so anything OLDER than it can go — never a
   // file someone else wrote in the meantime
   const mine = stamped(written.split("/").pop() || "");

@@ -33,7 +33,7 @@ export async function claimInvoiceNo(jobId: string, current?: string | null): Pr
   const rpc = await sb().rpc("pact_claim_invoice_no", { job: jobId });
   if (!rpc.error && typeof rpc.data === "string" && rpc.data) return rpc.data;
   // the counter answered with nothing: no such job — it was deleted under this screen
-  if (!rpc.error) throw new Error("This job is no longer here — it was deleted");
+  if (!rpc.error) throw new Error("This job is no longer here, it was deleted");
   // the function isn't there yet (RUN_ME section 17 not run): count up here. Any other error is an error.
   if (!/could not find|schema cache|does not exist|not found|404/i.test(rpc.error.message)) throw new Error(rpc.error.message);
   const n = await nextInvoiceNo();
@@ -41,7 +41,7 @@ export async function claimInvoiceNo(jobId: string, current?: string | null): Pr
   if (error) throw new Error(error.message);
   const { data, error: re } = await sb().from("pact_jobs").select("invoice_number").eq("id", jobId).maybeSingle();
   if (re) throw new Error(re.message);
-  if (!data) throw new Error("This job is no longer here — it was deleted");
+  if (!data) throw new Error("This job is no longer here, it was deleted");
   return String((data as { invoice_number?: string }).invoice_number || n);
 }
 export const subtotalOf = (items: { qty: number; unit_price: number }[]) =>
@@ -119,7 +119,7 @@ export async function intakePoFile(file: File, priceBook: () => Promise<PriceIte
       }
       else how = `server said ${res.status}: ${(await res.text().catch(() => "")).slice(0, 90)}`;
     } catch { how = "server unreachable"; }
-  } else if (!isDocx) how = "file too big for the server — read on this device";
+  } else if (!isDocx) how = "file too big for the server, read on this device";
   // the server answering with nothing usable counts as a miss too
   if (!isDocx && fields && !fields.po && !fields.partner && !fields.desc) fields = null;
   // …and so does an answer whose work lines don't add up to the total the PO
@@ -182,7 +182,7 @@ export async function intakePoFile(file: File, priceBook: () => Promise<PriceIte
   // still the same job when it's the same address for the same money.
   // If the list can't be read, nothing is made rather than risk a twin.
   const { data: all, error: le } = await sb().from("pact_jobs").select(DUPE_COLS).order("created_at", { ascending: false }).limit(5000);
-  if (le) return { kind: "error", message: `Couldn't check for duplicates (${le.message.slice(0, 60)}) — nothing was created, try again` };
+  if (le) return { kind: "error", message: `Couldn't check for duplicates (${le.message.slice(0, 60)}), so nothing was created. Try again` };
   const dupe = findDupe((all || []) as DupeRow[], { po: f.po, address: f.address, property_unit: f.punit, amount });
   if (dupe) {
     const atts = dupe.attachments || [];
@@ -238,7 +238,7 @@ export async function intakePoFile(file: File, priceBook: () => Promise<PriceIte
   const path = `pact/${made.id}/${file.name}`;
   const { error: ue } = await sb().storage.from("docs").upload(path, file, { upsert: true });
   if (!ue) await sb().from("pact_jobs").update({ attachments: [{ name: file.name, path }] }).eq("id", made.id);
-  const attachError = ue ? (/bucket/i.test(ue.message) ? "storage not set up — run supabase/upgrade_invoices_aging_docs.sql" : ue.message.slice(0, 80)) : undefined;
+  const attachError = ue ? (/bucket/i.test(ue.message) ? "storage not set up: run supabase/upgrade_invoices_aging_docs.sql" : ue.message.slice(0, 80)) : undefined;
   return { kind: "made", id: made.id, job: made, po: f.po, unreadable, isDocx, readBy, readNote, how, flags, ...(f.accessDate ? { accessDate: f.accessDate } : {}), ...(attachError ? { attachError } : {}) };
 }
 
@@ -251,7 +251,7 @@ export async function addJobByHand(d: HandJob): Promise<HandOutcome> {
   const po = (d.job_number || "").trim();
   if (po) {
     const { data: all, error: le } = await sb().from("pact_jobs").select(DUPE_COLS).limit(5000);
-    if (le) return { kind: "error", message: `Couldn't check for duplicates (${le.message.slice(0, 60)}) — nothing was created, try again` };
+    if (le) return { kind: "error", message: `Couldn't check for duplicates (${le.message.slice(0, 60)}), so nothing was created. Try again` };
     const dupe = findDupe((all || []) as DupeRow[], { po });
     if (dupe) return { kind: "dupe", id: dupe.id, canceled: !!dupe.canceled, start_date: dupe.start_date ?? null };
   }

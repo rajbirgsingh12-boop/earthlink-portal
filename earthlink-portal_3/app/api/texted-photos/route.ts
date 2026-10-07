@@ -40,11 +40,11 @@ export async function POST(req: Request) {
   // a "nobody home" notice, a crew reply, or a texted measurement the office has seen
   if (body.action === "seen") {
     if (!["nobody", "reply", "measure", "done"].includes(b.status || "")) return NextResponse.json({ error: "Nothing to clear there" }, { status: 409 });
-    return (await db.patch(`texted_photos?id=eq.${b.id}`, { status: "seen" })) ? NextResponse.json({ ok: true }) : NextResponse.json({ error: "Couldn't clear it — try again" }, { status: 500 });
+    return (await db.patch(`texted_photos?id=eq.${b.id}`, { status: "seen" })) ? NextResponse.json({ ok: true }) : NextResponse.json({ error: "Couldn't clear it, try again" }, { status: 500 });
   }
   if (body.action === "throw") {
-    if (b.status !== "held") return NextResponse.json({ error: "These are on a job already — take them off from the job's Documents" }, { status: 409 });
-    return (await dropBatch(db, b)) ? NextResponse.json({ ok: true }) : NextResponse.json({ error: "Couldn't throw them away — try again" }, { status: 500 });
+    if (b.status !== "held") return NextResponse.json({ error: "These are on a job already: take them off from the job's Documents" }, { status: 409 });
+    return (await dropBatch(db, b)) ? NextResponse.json({ ok: true }) : NextResponse.json({ error: "Couldn't throw them away, try again" }, { status: 500 });
   }
   if (body.action !== "file") return NextResponse.json({ error: "Bad request" }, { status: 400 });
   if (b.status !== "held" && b.status !== "filed") return NextResponse.json({ error: "Those photos were thrown away" }, { status: 409 });
@@ -68,6 +68,6 @@ export async function POST(req: Request) {
   }
   if (!target) return NextResponse.json({ error: "That job isn't in the portal" }, { status: 404 });
   const n = await fileBatch(db, b, target, "office", kind);
-  if (!n) return NextResponse.json({ error: "Couldn't move the photos — try again" }, { status: 500 });
+  if (!n) return NextResponse.json({ error: "Couldn't move the photos, try again" }, { status: 500 });
   return NextResponse.json({ ok: true, n, label: target.label });
 }

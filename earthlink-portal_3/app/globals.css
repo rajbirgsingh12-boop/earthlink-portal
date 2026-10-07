@@ -1,27 +1,100 @@
 /* fonts are self-hosted via next/font in app/layout.tsx */
 @tailwind base;
 @tailwind components;
-@tailwind utilities;
+/* the utility classes are emitted at the very end of this file, so a utility
+   written next to a kit class wins: "btn-icon border-0" has no border and
+   "field py-1.5" is a shorter field, the way every page is written. The kit
+   classes that must hold their shape whatever is written next to them (44px
+   buttons and fields, 16px fields on phones) say so themselves. */
 body { @apply bg-paper text-ink font-body antialiased; }
 /* professional touch-feel: no gray tap flash, no double-tap zoom delay on controls */
 * { -webkit-tap-highlight-color: transparent; }
 button, a, input, select, textarea, label { touch-action: manipulation; }
-/* iPhones auto-zoom into any field under 16px — keep fields at 16px on phones */
+/* iPhones auto-zoom into any field under 16px, so on phones every field is 16px whatever size it asked for */
 @media (max-width: 640px) {
-  input, select, textarea { font-size: 16px; }
+  input, select, textarea { font-size: 16px !important; }
 }
 /* keyboard users get a clear focus ring; mouse users are not shouted at */
 :focus-visible { outline: 2px solid theme('colors.work'); outline-offset: 2px; border-radius: 2px; }
-::selection { background: rgb(191 84 26 / 0.22); }
+::selection { background: rgb(16 114 140 / 0.22); }
 /* slim, unobtrusive scrollbars on the many scrollable panels */
 *::-webkit-scrollbar { height: 8px; width: 8px; }
 *::-webkit-scrollbar-thumb { @apply rounded-full bg-rule; }
 *::-webkit-scrollbar-track { background: transparent; }
 /* content never hides behind the iPhone home indicator */
 body { padding-bottom: env(safe-area-inset-bottom); }
-/* pages slide in gently instead of popping */
-@keyframes pagein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-.page-enter { animation: pagein 160ms ease-out; }
+/* ---- motion kit: three speeds, one arrival curve. Enter-only: nothing animates out, and nothing keeps
+   filling: a transform animation that stays applied turns the page wrapper into the containing block for
+   every fixed dialog inside it, so each animation ends and lets go. ---- */
+:root {
+  --t-fast: 120ms;  /* menus, popovers, pressed states, chips, carets */
+  --t-base: 180ms;  /* modals, panels, disclosures, rows, toasts, bottom bars */
+  --t-slow: 240ms;  /* a page arriving */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --bottom-bar: 0px; /* set to the height of a fixed bottom bar while one is mounted; the toast lifts above it */
+  --color-work: #10728C;
+  --color-alert: #B3261E;
+}
+@media screen {
+  @keyframes pagein  { from { opacity: 0; transform: translateY(4px) } }
+  @keyframes k-fade  { from { opacity: 0 } }
+  @keyframes k-pop   { from { opacity: 0; transform: scale(0.98) } }
+  @keyframes k-rise  { from { opacity: 0; transform: translateY(-4px) } }
+  @keyframes k-sheet { from { transform: translateY(100%) } }
+  @keyframes k-toast { from { opacity: 0; transform: translate(-50%, 8px) } to { opacity: 1; transform: translate(-50%, 0) } }
+  @keyframes k-stamp { from { transform: scale(1.12) } }
+  @keyframes k-busy  { from { background-position: -40% 0 } to { background-position: 140% 0 } }
+  .page-enter { animation: pagein var(--t-slow) var(--ease-out); }
+  .anim-fade  { animation: k-fade var(--t-base) var(--ease-out); }   /* skeleton -> content, calendar page/view change */
+  .anim-pop   { animation: k-pop var(--t-base) var(--ease-out); }    /* modal panel */
+  .anim-menu  { animation: k-rise var(--t-fast) var(--ease-out); transform-origin: top; } /* .menu, .popover, nav group panel, ContractPicker */
+  .anim-open  { animation: k-rise var(--t-base) var(--ease-out); }   /* disclosure bodies, inline panels and forms */
+  .anim-row   { animation: k-rise var(--t-base) var(--ease-out); }   /* a row that was just added */
+  .anim-sheet { animation: k-sheet var(--t-base) var(--ease-out); }  /* SaveBar, walk-sheet total bar */
+  .anim-stamp { animation: k-stamp var(--t-fast) var(--ease-out); }  /* a stamp whose label just changed */
+}
+/* the one overlay every dialog and print preview sits in */
+.overlay { @apply fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5; }
+@media screen {
+  .overlay { animation: k-fade var(--t-fast) var(--ease-out); }
+  .overlay > .panel { animation: k-pop var(--t-base) var(--ease-out); }
+}
+/* on a phone a dialog is a sheet from the bottom, clear of the home indicator (mt-auto, not justify-end, so a tall panel still scrolls) */
+@media screen and (max-width: 640px) {
+  .overlay.sheet { @apply flex flex-col p-0; }
+  .overlay.sheet > .panel { @apply mt-auto w-full max-w-none rounded-b-none; padding-bottom: env(safe-area-inset-bottom); animation-name: k-sheet; }
+}
+/* the flash: one place, above any bottom bar, clear of the home indicator */
+.toast { @apply fixed left-1/2 z-[70] max-w-[calc(100vw-2rem)] rounded-sm bg-ink px-4 py-2.5 text-[14px] text-paper shadow-lg; bottom: calc(1.25rem + env(safe-area-inset-bottom) + var(--bottom-bar)); transform: translateX(-50%); }
+@media screen { .toast { animation: k-toast var(--t-base) var(--ease-out) both; } }
+/* a thin bar at the very top while the page is busy */
+.busy-bar { @apply fixed inset-x-0 top-0 z-[65] h-[3px]; background: linear-gradient(90deg, transparent, theme('colors.work'), transparent) 0 0 / 40% 100% no-repeat; }
+@media screen { .busy-bar { animation: k-busy 1s linear infinite; } }
+/* popovers (typeahead results, pickers) share the menu's look and arrival */
+.popover { @apply card absolute inset-x-0 top-full z-20 mt-1 overflow-hidden shadow-lg; }
+@media screen { .popover { animation: k-rise var(--t-fast) var(--ease-out); } }
+/* a full-width row that is a button: feedback on tap, not just hover */
+.row-btn { @apply block w-full min-h-[44px] text-left transition-colors; }
+.row-btn:hover { @apply bg-paper; }
+.row-btn:active { @apply bg-rulesoft/60; }
+/* an underlined text button: one size, one hit area, pressed state */
+.btn-link { @apply inline-flex min-h-[44px] items-center px-1 text-[13px] underline underline-offset-2 decoration-rule transition-colors; }
+.btn-link:active { @apply bg-paper text-ink decoration-ink; }
+/* segmented control (EN | ES, Month | Week | Day, Spots | Whole wall) */
+.seg { @apply inline-flex rounded-sm border-[1.5px] border-ink; }
+.seg-item { @apply min-h-[44px] bg-white px-3 font-display text-[12px] font-semibold uppercase tracking-wider text-ink transition-colors; }
+.seg-item + .seg-item { @apply border-l-[1.5px] border-ink; }
+.seg-item[aria-checked="true"], .seg-item[aria-selected="true"] { @apply bg-ink text-white; }
+.seg-item:active { @apply bg-paper; }
+/* horizontally scrolling strips (nav tabs, filter tabs) fade at the clipped edge */
+.scroll-fade { background: linear-gradient(90deg, #2B231B 30%, rgba(43,35,27,0)) left / 24px 100%, linear-gradient(270deg, #2B231B 30%, rgba(43,35,27,0)) right / 24px 100%; background-repeat: no-repeat; background-attachment: local, local; }
+.scroll-fade-paper { background: linear-gradient(90deg, #F6F2EA 30%, rgba(246,242,234,0)) left / 24px 100%, linear-gradient(270deg, #F6F2EA 30%, rgba(246,242,234,0)) right / 24px 100%; background-repeat: no-repeat; background-attachment: local, local; }
+/* the same for a strip on a card background (the nav tabs) */
+.scroll-fade-card { background: linear-gradient(90deg, #FCFAF5 30%, rgba(252,250,245,0)) left / 24px 100%, linear-gradient(270deg, #FCFAF5 30%, rgba(252,250,245,0)) right / 24px 100%; background-repeat: no-repeat; background-attachment: local, local; }
+/* reduced motion: one global switch (covers every transition utility and the smooth scrolls) */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+}
 /* while data loads, shimmering placeholders hold the layout steady */
 .skeleton { position: relative; overflow: hidden; border-radius: 2px; @apply bg-rulesoft; }
 .skeleton::after {
@@ -30,33 +103,47 @@ body { padding-bottom: env(safe-area-inset-bottom); }
   animation: shimmer 1.2s infinite;
 }
 @keyframes shimmer { to { transform: translateX(100%); } }
-@media (prefers-reduced-motion: reduce) { .skeleton::after, .page-enter { animation: none; } }
 /* wide tables hint that they scroll: soft shadows appear at the clipped edge */
 .card.overflow-x-auto {
   background:
-    linear-gradient(90deg, #FCFBF8 30%, rgba(252, 251, 248, 0)) left / 32px 100%,
-    linear-gradient(270deg, #FCFBF8 30%, rgba(252, 251, 248, 0)) right / 32px 100%,
+    linear-gradient(90deg, #FCFAF5 30%, rgba(252, 250, 245, 0)) left / 32px 100%,
+    linear-gradient(270deg, #FCFAF5 30%, rgba(252, 250, 245, 0)) right / 32px 100%,
     linear-gradient(90deg, rgba(23, 22, 20, 0.10), transparent) left / 12px 100%,
     linear-gradient(270deg, rgba(23, 22, 20, 0.10), transparent) right / 12px 100%;
   background-repeat: no-repeat;
   background-attachment: local, local, scroll, scroll;
 }
 /* ---- action menus: the one dropdown pattern for grouped actions ---- */
-.menu { @apply rounded-sm border-[1.5px] border-ink bg-white py-1 shadow-xl; min-width: 220px; max-width: calc(100vw - 2rem); }
-.menu-item { @apply block w-full min-h-[44px] px-4 py-2.5 text-left text-[15px] transition-colors hover:bg-paper disabled:opacity-50; }
+.menu { @apply rounded-sm border-[1.5px] border-ink bg-white py-1 shadow-xl; min-width: 260px; max-width: calc(100vw - 2rem); }
+.menu-item { @apply block w-full min-h-[44px] px-4 py-2.5 text-left text-[15px] transition-colors hover:bg-paper active:bg-rulesoft/60 focus-visible:bg-paper disabled:opacity-50; }
 .menu-item-danger { @apply text-alert; }
-.btn-icon { @apply grid h-11 w-11 shrink-0 cursor-pointer select-none place-items-center rounded-sm border-[1.5px] border-ink bg-white shadow-sm transition-all duration-150 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50; }
-/* small info chips (pipeline states, counts) — never below 11px */
+.btn-icon { @apply grid h-11 w-11 shrink-0 cursor-pointer select-none place-items-center rounded-sm border-[1.5px] border-ink bg-white shadow-sm disabled:cursor-not-allowed disabled:opacity-50; }
+/* small info chips (pipeline states, counts), never below 11px */
 .chip { @apply font-mono text-[11px] tracking-wide; }
-/* a stamp that is really a button says so on touch */
-.btn-stamp { @apply cursor-pointer select-none transition-all active:translate-y-px hover:brightness-95; }
+.chip-outline { @apply chip rounded-[2px] border px-1 py-px font-semibold; }
+/* a stamp that is really a button says so on touch, and is as tall as any other button */
+.btn-stamp { @apply inline-flex min-h-[44px] cursor-pointer select-none items-center hover:brightness-95; }
 .stamp { @apply inline-block border-2 rounded-sm px-2.5 py-0.5 font-display uppercase tracking-widest text-[12px] font-semibold; }
-.btn { @apply cursor-pointer select-none rounded-sm border-[1.5px] border-ink bg-white px-4 py-2.5 font-display uppercase tracking-wider text-[15px] font-semibold shadow-sm transition-all duration-150 hover:shadow active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50; }
-/* a touch deeper than the accent orange — white text reads at 4.9:1 (AA) */
-.btn-primary { @apply text-white hover:brightness-105; background-color: #C24A0A; border-color: #C24A0A; }
-.btn-ghost { @apply border-rule text-inksoft shadow-none hover:border-ink hover:text-ink; }
-.field { @apply w-full rounded-sm border border-rule bg-white px-3 py-3 text-base outline-none transition-colors duration-150 focus:border-ink focus:ring-2 focus:ring-ink/10; }
+.btn { @apply inline-flex min-h-[44px] items-center justify-center gap-1.5 cursor-pointer select-none rounded-sm border-[1.5px] border-ink bg-white px-4 py-2.5 font-display uppercase tracking-wider text-[15px] font-semibold shadow-sm hover:shadow disabled:cursor-not-allowed disabled:opacity-50; }
+.btn-sm { @apply px-3 py-1.5 text-[13px]; }
+/* every button presses the same way: a short settle on the look, a 1px dip on the tap */
+.btn, .btn-icon, .btn-stamp { transition: box-shadow var(--t-fast), background-color var(--t-fast), border-color var(--t-fast), color var(--t-fast), filter var(--t-fast), transform 60ms; }
+.btn:active, .btn-icon:active, .btn-stamp:active { transform: translateY(1px); box-shadow: none; }
+.btn-primary:active, .btn-stamp:active { filter: brightness(0.95); }
+/* a touch deeper than the accent orange: white text reads at 4.9:1 (AA) */
+/* the logo's ocean teal: white text reads at 5.5:1 (AA) */
+.btn-primary { @apply text-white hover:brightness-105; background-color: #10728C; border-color: #10728C; }
+.btn-ghost { @apply border-rule text-inksoft shadow-none hover:border-ink hover:text-ink hover:shadow-none; }
+/* min-h keeps a field a thumb tall even where a page trims its padding */
+.field { @apply w-full min-h-[44px] rounded-sm border border-rule bg-white px-3 py-3 text-base outline-none transition-[border-color,box-shadow] duration-150 focus:border-ink focus:ring-2 focus:ring-ink/10; }
 .card { @apply rounded-sm border border-rule bg-card shadow-sm; }
+.card-pad { @apply p-3.5 sm:p-4; }
+.card-tight { @apply p-2.5; }
+.section-label { @apply block text-[11px] font-semibold uppercase tracking-widest text-inksoft; }
+.empty { @apply rounded-sm border border-dashed border-rule px-4 py-5 text-center text-[13px] text-inksoft; }
+.notice { @apply rounded-sm border border-rulesoft bg-paper px-3 py-2 text-[13px]; }
+.notice-alert { @apply rounded-sm border border-alert/40 bg-white px-3 py-2 text-[13px] text-alert; }
+.notice-work { @apply rounded-sm border border-work bg-work/10 px-3 py-2 text-[13px]; }
 @media print {
   @page { size: letter portrait; margin: 0.45in; }
   html, body { height: auto !important; background: white !important; }
@@ -72,3 +159,5 @@ body { padding-bottom: env(safe-area-inset-bottom); }
   .printable * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .no-print { display: none !important; }
 }
+/* last on purpose: see the note at the top of this file */
+@tailwind utilities;

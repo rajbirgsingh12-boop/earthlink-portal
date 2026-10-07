@@ -39,10 +39,17 @@ export default function PhotoMarker({ src, name, natural, marks, onChange, ceili
     const r = el.getBoundingClientRect();
     return { x: Math.round(((ev.clientX - r.left) / r.width) * dims.width), y: Math.round(((ev.clientY - r.top) / r.height) * dims.height) };
   };
+  // how far, in the photo's pixels, a finger's width on the screen reaches
+  const fingerPx = (): number => {
+    const el = box.current; if (!el || !dims) return 0;
+    return (22 / el.getBoundingClientRect().width) * dims.width;
+  };
   const tap = (ev: React.MouseEvent) => {
     if (readOnly || !mode) return;
     const p = at(ev); if (!p) return;
     if (!pending) { setPending(p); return; }
+    // a tap back on the first dot takes it off, so a slip is one tap to fix
+    if (Math.hypot(p.x - pending.x, p.y - pending.y) <= fingerPx()) { setPending(null); return; }
     if (mode === "box") { onChange({ ...marks, box: { x1: pending.x, y1: pending.y, x2: p.x, y2: p.y } }); setPending(null); setMode(null); return; }
     // a ruler: the two ends are down; the length comes next
     onChange({ ...marks, ruler: { x1: pending.x, y1: pending.y, x2: p.x, y2: p.y, inches: 0 } });
@@ -70,35 +77,36 @@ export default function PhotoMarker({ src, name, natural, marks, onChange, ceili
           <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox={`0 0 ${dims.width} ${dims.height}`} preserveAspectRatio="none" aria-hidden>
             {boxes.map((bx, i) => (
               <g key={i}>
-                <rect x={bx.box.x1} y={bx.box.y1} width={bx.box.x2 - bx.box.x1} height={bx.box.y2 - bx.box.y1} fill="rgba(194,74,10,0.12)" stroke="#C24A0A" strokeWidth={lw} />
-                <text x={bx.box.x1 + lw * 2} y={Math.max(fs, bx.box.y1 - lw * 2)} fontSize={fs} fontWeight="bold" fill="#C24A0A" stroke="#fff" strokeWidth={lw / 2} paintOrder="stroke">{bx.label}</text>
+                <rect x={bx.box.x1} y={bx.box.y1} width={bx.box.x2 - bx.box.x1} height={bx.box.y2 - bx.box.y1} fill="var(--color-work)" fillOpacity={0.12} stroke="var(--color-work)" strokeWidth={lw} />
+                <text x={bx.box.x1 + lw * 2} y={Math.max(fs, bx.box.y1 - lw * 2)} fontSize={fs} fontWeight="bold" fill="var(--color-work)" stroke="#fff" strokeWidth={lw / 2} paintOrder="stroke">{bx.label}</text>
               </g>
             ))}
-            {b && <rect x={Math.min(b.x1, b.x2)} y={Math.min(b.y1, b.y2)} width={Math.abs(b.x2 - b.x1)} height={Math.abs(b.y2 - b.y1)} fill="none" stroke="#e11d1d" strokeWidth={lw} strokeDasharray={`${lw * 3} ${lw * 2}`} />}
+            {b && <rect x={Math.min(b.x1, b.x2)} y={Math.min(b.y1, b.y2)} width={Math.abs(b.x2 - b.x1)} height={Math.abs(b.y2 - b.y1)} fill="none" stroke="var(--color-alert)" strokeWidth={lw} strokeDasharray={`${lw * 3} ${lw * 2}`} />}
             {r && (
-              <g stroke="#e11d1d" strokeWidth={lw} strokeLinecap="round">
+              <g stroke="var(--color-alert)" strokeWidth={lw} strokeLinecap="round">
                 <line x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} />
-                <circle cx={r.x1} cy={r.y1} r={lw * 2} fill="#e11d1d" /><circle cx={r.x2} cy={r.y2} r={lw * 2} fill="#e11d1d" />
-                {r.inches > 0 && <text x={(r.x1 + r.x2) / 2 + lw * 3} y={(r.y1 + r.y2) / 2} fontSize={fs} fontWeight="bold" fill="#e11d1d" stroke="#fff" strokeWidth={lw / 2} paintOrder="stroke">{inchesLabel(r.inches)}</text>}
+                <circle cx={r.x1} cy={r.y1} r={lw * 2} fill="var(--color-alert)" /><circle cx={r.x2} cy={r.y2} r={lw * 2} fill="var(--color-alert)" />
+                {r.inches > 0 && <text x={(r.x1 + r.x2) / 2 + lw * 3} y={(r.y1 + r.y2) / 2} fontSize={fs} fontWeight="bold" fill="var(--color-alert)" stroke="#fff" strokeWidth={lw / 2} paintOrder="stroke">{inchesLabel(r.inches)}</text>}
               </g>
             )}
-            {pending && <circle cx={pending.x} cy={pending.y} r={lw * 2.5} fill="#e11d1d" />}
+            {pending && <circle cx={pending.x} cy={pending.y} r={lw * 2.5} fill="var(--color-alert)" />}
           </svg>
         )}
+        {/* the instruction sits on the photo itself, where the eye already is */}
+        {!readOnly && hint && <div className="pointer-events-none absolute inset-x-0 top-0 bg-ink/70 px-2 py-1.5 text-center text-[13px] font-semibold text-white" data-marker-hint>{hint}</div>}
       </div>
       {!readOnly && (
         <>
-          {hint && <div className="mt-1.5 text-[12px] font-semibold text-work" data-marker-hint>{hint}</div>}
           {asking && r && (
-            <div className="mt-1.5" data-marker-length>
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-widest text-inksoft">How long is it?</div>
-              <div className="flex flex-wrap gap-1.5">
+            <div className="anim-open mt-1.5" data-marker-length>
+              <div className="section-label mb-1">How long is it?</div>
+              <div role="radiogroup" aria-label="How long is it?" className="flex flex-wrap gap-1.5">
                 {RULER_PICKS(ceilingFt).map((p) => (
-                  <button key={p.label} type="button" className="btn min-h-[44px] px-3 py-1.5 text-[12px] normal-case tracking-normal" onClick={() => setLength(p.inches)}>{p.label}</button>
+                  <button key={p.label} type="button" role="radio" aria-checked={false} className="btn btn-sm normal-case tracking-normal" onClick={() => setLength(p.inches)}>{p.label}</button>
                 ))}
                 <span className="inline-flex items-center gap-1">
-                  <input className="field w-20 px-2 py-1.5 text-right font-mono" inputMode="decimal" placeholder="in" aria-label="Ruler length in inches" value={typed} onChange={(e) => setTyped(e.target.value)} />
-                  <button type="button" className="btn min-h-[44px] px-3 py-1.5 text-[12px]" onClick={() => setLength(parseFloat(typed) || 0)}>in ✓</button>
+                  <input className="field w-24 px-2 py-1.5 text-right font-mono" inputMode="decimal" placeholder="inches" aria-label="Ruler length in inches" value={typed} onChange={(e) => setTyped(e.target.value)} />
+                  <button type="button" className="btn btn-sm" onClick={() => setLength(parseFloat(typed) || 0)}>Use this length</button>
                 </span>
               </div>
             </div>
@@ -106,14 +114,14 @@ export default function PhotoMarker({ src, name, natural, marks, onChange, ceili
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             {!mode && !asking && (
               <>
-                <button type="button" className={`btn min-h-[44px] px-3 py-1.5 text-[12px] ${r && r.inches > 0 ? "border-work" : ""}`} onClick={() => start("ruler")} disabled={!dims}>{r && r.inches > 0 ? `Ruler ✓ ${inchesLabel(r.inches)}` : "Mark a ruler"}</button>
-                <button type="button" className={`btn min-h-[44px] px-3 py-1.5 text-[12px] ${b ? "border-work" : ""}`} onClick={() => start("box")} disabled={!dims}>{b ? "Outline ✓" : "Outline the spot"}</button>
-                {(r || b) && <button type="button" className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[12px]" onClick={clear}>Clear</button>}
+                <button type="button" className={`btn btn-sm ${r && r.inches > 0 ? "border-work text-work" : ""}`} onClick={() => start("ruler")} disabled={!dims}>{r && r.inches > 0 ? `✓ Ruler · ${inchesLabel(r.inches)}` : "Mark a ruler"}</button>
+                <button type="button" className={`btn btn-sm ${b ? "border-work text-work" : ""}`} onClick={() => start("box")} disabled={!dims}>{b ? "✓ Outline" : "Outline the spot"}</button>
+                {(r || b) && <button type="button" className="btn btn-ghost btn-sm" onClick={clear}>Clear</button>}
               </>
             )}
-            {(mode || asking) && <button type="button" className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[12px]" onClick={() => { setMode(null); setPending(null); setAsking(false); if (r && !(r.inches > 0)) onChange({ ...marks, ruler: null }); }}>Cancel</button>}
+            {(mode || asking) && <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setMode(null); setPending(null); setAsking(false); if (r && !(r.inches > 0)) onChange({ ...marks, ruler: null }); }}>{pending ? "Start over" : "Cancel"}</button>}
           </div>
-          {!r && !b && !mode && <div className="mt-1 text-[11px] text-inksoft">No ruler on this one — Claude will look for a door, an outlet or the floor-to-ceiling span.</div>}
+          {!r && !b && !mode && <div className="mt-1 text-[12px] text-inksoft">No ruler on this one. Claude will look for a door, an outlet or the floor-to-ceiling span.</div>}
         </>
       )}
     </div>

@@ -14,7 +14,7 @@ import { parseReleasePdfText, quickReleaseId, type ReleaseItem } from "@/lib/par
 import { prettyDate, localISO, type Org } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged } from "@/lib/labor";
 import { useLive } from "@/lib/useLive";
-import ContractPicker from "@/components/ContractPicker";
+import ContractPicker, { contractLabel } from "@/components/ContractPicker";
 import NychaInvoicePrint, { invoiceFileBase } from "@/components/NychaInvoicePrint";
 import { gatherReleaseDoc, buildInvoiceXlsx, buildInvoicePdfBytes, type DocRow } from "@/lib/releaseDoc";
 import { buildPackagePdf, downloadPdf } from "@/lib/packageDocs";
@@ -26,10 +26,13 @@ import { useNumBuffer } from "@/lib/numBuffer";
 import { planFolder, isReleaseFileName, parseReleaseFileName, contractKey, type FileMatch } from "@/lib/matchRelease";
 import ActionMenu, { RowActions } from "@/components/ActionMenu";
 import PageHeader from "@/components/PageHeader";
-import CardToolbar from "@/components/CardToolbar";
 import Modal from "@/components/Modal";
+import Toast, { useFlash } from "@/components/Toast";
+import { scrollTo } from "@/lib/motion";
 
 type Filter = "all" | "chase" | "payroll" | "received" | "canceled" | "hours";
+// the one line a person sees when a write fails; the technical reason goes to the console
+const SAVE_FAIL = "Couldn't save. Check your signal and try again.";
 // "007" and "7" are the same release — a database lookup is exact, so it has to
 // be asked for every shape the number could have been typed in
 const relKeyOf = (v: unknown) => String(v ?? "").trim().replace(/^0+(?=\d)/, "");
@@ -154,8 +157,14 @@ export default function Releases() {
   const dq = useDeferredValue(q); // heavy filtering runs on this, a beat behind the keystrokes
   const [limit, setLimit] = useState(100);
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState("");
+  // the list shows skeleton rows until the contracts AND the open contract's releases are here
+  const [contractsLoaded, setContractsLoaded] = useState(false);
+  const [rowsFor, setRowsFor] = useState<string | null>(null);
   const [logged, setLogged] = useState<Record<string, number> | null>(null);
+  // required hours as they are being typed on the Hours check tab (saved on blur or Enter)
+  const [hoursDraft, setHoursDraft] = useState<Record<string, string>>({});
+  // the contract name being typed in the Rename dialog; null while the dialog is closed
+  const [renaming, setRenaming] = useState<string | null>(null);
   const [pending, setPending] = useState<{ items: Omit<Release, "id" | "contract_id">[]; guess: string; omit?: string[]; greenDone?: number; greenOnlyPayroll?: boolean } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [pdfPending, setPdfPending] = useState<{
@@ -194,13 +203,17 @@ export default function Releases() {
   const [stageData, setStageData] = useState<{ items: Set<string>; walks: Set<string> }>({ items: new Set(), walks: new Set() });
   const [invPreview, setInvPreview] = useState<{ number: string; date: string; cNumber: string; relNum: string; dev: string; workOrder: string; rows: DocRow[] } | null>(null);
   // ---- line-item editor (release_items feed the SOS form and the invoice) ----
-  type RelItemRow = { id?: string; line: number; code: string; description: string; qty: number; uom: string; unit_price: number };
+  // uid is the row's key on screen, so a row that was just added slides in and the others stay put
+  type RelItemRow = { id?: string; uid: string; line: number; code: string; description: string; qty: number; uom: string; unit_price: number };
   const [itemsRel, setItemsRel] = useState<Release | null>(null);
   const [relItems, setRelItems] = useState<RelItemRow[] | null>(null);
 
-  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
+  // one flash, one busy bar: the toast at the foot of the page, the thin bar at the top
+  const { msg, flash, progress, setProgress, action, dismiss } = useFlash();
+  // a failed write: the person reads one plain line, the console keeps the reason
+  const failed = (e: { message?: string } | null | undefined, m = SAVE_FAIL) => { if (e?.message) console.error(e.message); flash(m); };
   // long run summaries (folder attach, duplicate fixes) land in a card that
-  // stays until dismissed — a 2.5s toast is gone before it can be read
+  // stays until dismissed: a toast is gone before it can be read
   const [result, setResult] = useState("");
   const numBuf = useNumBuffer();
   // accountants can look but not touch — their writes would be silent no-ops under RLS
@@ -212,6 +225,7 @@ export default function Releases() {
     const { data } = await sb().from("contracts").select("id,number,name").order("number");
     const list = (data || []) as Contract[];
     setContracts(list);
+    setContractsLoaded(true);
     if (!active && list[0]) setActive(list[0].id);
   };
   useEffect(() => {
@@ -225,7 +239,7 @@ export default function Releases() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadRows = async (cid: string, silent = false) => {
-    if (!cid) { setRows([]); return; }
+    if (!cid) { setRows([]); setRowsFor(cid); return; }
     const token = ++loadSeq.current; // a newer load makes this one throw its results away
     if (!silent) setBusy(true);
     const all: Release[] = [];
@@ -241,6 +255,7 @@ export default function Releases() {
     // sort numerically by release number when possible
     all.sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
     setRows(all);
+    setRowsFor(cid);
     if (!silent) setBusy(false);
     // which releases can produce an SOS? those with imported line items,
     // or a walk sheet (with quantities) whose Release # matches
@@ -279,18 +294,12 @@ export default function Releases() {
     setStageData({ items: itemsSet, walks: walkNums });
   };
 
-  // hours punched on the Payroll tab flow straight here: a release with its
-  // required hours met lights the PAY stage even before payroll is marked done
-  const hoursMet = (r: Release) => { const need = Number(r.labor_hours) || 0; return need > 0 && (logged?.[r.id] || 0) >= need; };
-
-  // the release's life at a glance: each stage lights up from data already
-  // entered (payroll complete implies the work is done, so no separate stage)
+  // the release's paperwork at a glance: each stage lights up from data already
+  // entered. Payroll and payment are the row's two stamps, so they are not chips.
   const pipeline = (r: Release): [string, boolean][] => [
     ["WALK SHEET", stageData.walks.has(String(r.rel_number).trim())],
-    ["RELEASE", stageData.items.has(r.id)],
-    ["PAYROLL", r.payroll_done || hoursMet(r)],
+    ["RELEASE PDF", stageData.items.has(r.id)],
     ["INVOICED", !!r.invoice_sent],
-    ["PAID", r.received],
   ];
   useEffect(() => { loadRows(active); }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -366,7 +375,7 @@ export default function Releases() {
       if (Object.keys(legacy).length > 0) ({ error } = await sb().from("releases").update(legacy).eq("id", r.id));
       else error = null;
     }
-    if (error) { flash(error.message); loadRows(active); }
+    if (error) { failed(error); loadRows(active); }
   };
 
   // ---------- invoice generator ----------
@@ -402,7 +411,7 @@ export default function Releases() {
         if (!res.ok) {
           const parts = res.shorts.map((s) => `${s.cls} ${s.logged}/${s.required}h`);
           if (res.totalLogged < res.totalRequired) parts.push(`total ${res.totalLogged}/${res.totalRequired}h`);
-          flash(`Short of the release minimum: ${[...new Set(parts)].join(" · ")} — log the hours in Payroll first`);
+          setResult(`Release ${r.rel_number} is short of its minimum: ${[...new Set(parts)].join(" · ")}. Log the hours on the Payroll tab first.`);
           return;
         }
       }
@@ -416,7 +425,7 @@ export default function Releases() {
     const c = contracts.find((x) => x.id === active);
     const d = await gatherReleaseDoc(active, r);
     setBusy(false);
-    if (d.rows.length === 0) { flash("No line items for this release — make a walk sheet for it, or import the release PDF"); return; }
+    if (d.rows.length === 0) { flash("No line items on this release. Make a walk sheet for it, or import the release PDF."); return; }
     const today = localISO();
     if (!r.invoice_sent && !readOnly) {
       // generating the invoice records the sent date (feeds the statement aging);
@@ -475,7 +484,7 @@ export default function Releases() {
         }));
     }
     setBusy(false);
-    if (rows.length === 0) { flash("No line items for this release — make a walk sheet with quantities for it, or import the release PDF"); return; }
+    if (rows.length === 0) { flash("No line items on this release. Make a walk sheet with quantities for it, or import the release PDF."); return; }
     setInvPreview(null); // one preview at a time
     const money2 = (n: number) => (Math.round(n * 100) / 100).toFixed(2);
     // a date typed by hand ("8/14/26", "Aug 14") is still a date — printing
@@ -521,8 +530,8 @@ export default function Releases() {
   const openItems = async (r: Release) => {
     setItemsRel(r); setRelItems(null);
     const { data } = await sb().from("release_items").select("*").eq("release_id", r.id).order("line");
-    setRelItems(((data || []) as RelItemRow[]).map((it) => ({
-      id: it.id, line: Number(it.line) || 0, code: it.code || "", description: it.description || "",
+    setRelItems(((data || []) as RelItemRow[]).map((it, i) => ({
+      id: it.id, uid: it.id || `row${i}`, line: Number(it.line) || 0, code: it.code || "", description: it.description || "",
       qty: Number(it.qty) || 0, uom: it.uom || "EA", unit_price: Number(it.unit_price) || 0,
     })));
   };
@@ -533,7 +542,7 @@ export default function Releases() {
     // hold the current rows — if the re-insert fails they go straight back
     const { data: prevRows } = await sb().from("release_items").select("*").eq("release_id", itemsRel.id);
     const { error: de } = await sb().from("release_items").delete().eq("release_id", itemsRel.id);
-    if (de) { flash(de.message); setBusy(false); return; }
+    if (de) { failed(de, "Couldn't save the line items. Check your signal and try again."); setBusy(false); return; }
     if (rows.length > 0) {
       const { error } = await sb().from("release_items").insert(rows.map((it, i) => ({
         release_id: itemsRel.id, line: it.line || i + 1, code: it.code, description: it.description,
@@ -541,14 +550,14 @@ export default function Releases() {
       })));
       if (error) {
         if (prevRows && prevRows.length > 0) await sb().from("release_items").insert(prevRows as Record<string, unknown>[]);
-        flash(`Couldn't save the new lines (${error.message}) — the old ones were kept`);
+        failed(error, "Couldn't save the new lines. The old ones were kept.");
         setBusy(false); return;
       }
     }
     setBusy(false);
     setItemsRel(null); setRelItems(null);
     loadRows(active, true);
-    flash(`Line items saved — ${rows.length} line${rows.length === 1 ? "" : "s"}, ${fmt(rows.reduce((s, it) => s + it.qty * it.unit_price, 0))}`);
+    flash(`Line items saved · ${rows.length} line${rows.length === 1 ? "" : "s"} · ${fmt(rows.reduce((s, it) => s + it.qty * it.unit_price, 0))}`);
   };
 
   // ---------- attachments ----------
@@ -556,7 +565,7 @@ export default function Releases() {
     const path = `${r.id}/${file.name}`;
     const { error } = await sb().storage.from("docs").upload(path, file, { upsert: true });
     if (error) {
-      flash(/bucket/i.test(error.message) ? "Storage not set up — run supabase/upgrade_invoices_aging_docs.sql first" : error.message);
+      failed(error, /bucket/i.test(error.message) ? "File storage isn't set up yet (Settings → System check)." : `Couldn't upload ${file.name}. Check your signal and try again.`);
       return null;
     }
     return { name: file.name, path };
@@ -578,7 +587,7 @@ export default function Releases() {
         || r.attachments || [];
       const list = [...existing.filter((a) => !added.some((b) => b.path === a.path)), ...added];
       const { error } = await sb().from("releases").update({ attachments: list }).eq("id", r.id);
-      if (error) flash(error.message);
+      if (error) failed(error, "Couldn't attach the files. Check your signal and try again.");
       else {
         setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, attachments: list } : x)));
         setAttachRel((prev) => (prev && prev.id === r.id ? { ...prev, attachments: list } : prev));
@@ -591,20 +600,24 @@ export default function Releases() {
 
   const openAttachment = async (path: string) => {
     const { data, error } = await sb().storage.from("docs").createSignedUrl(path, 3600);
-    if (error || !data) { flash(error?.message || "Couldn't open the file"); return; }
+    if (error || !data) { failed(error, "Couldn't open that file. Check your signal and try again."); return; }
     window.open(data.signedUrl, "_blank");
   };
 
-  const removeAttachment = async (r: Release, path: string) => {
-    // fresh list — another phone may have attached files since this render;
+  // deleting a photo or a file always asks first: there is no undo on storage
+  const removeAttachment = async (r: Release, a: { name: string; path: string }) => {
+    if (!window.confirm(`Delete ${a.name}? It is removed from this release for good.`)) return;
+    const path = a.path;
+    // fresh list: another phone may have attached files since this render;
     // and the row updates first, so a failed write never orphans the entry
     const { data: cur } = await sb().from("releases").select("attachments").eq("id", r.id).single();
-    const list = (((cur as Release | null)?.attachments) || r.attachments || []).filter((a) => a.path !== path);
+    const list = (((cur as Release | null)?.attachments) || r.attachments || []).filter((x) => x.path !== path);
     const { error } = await sb().from("releases").update({ attachments: list }).eq("id", r.id);
-    if (error) { flash(error.message); return; }
+    if (error) { failed(error, `Couldn't delete ${a.name}. Check your signal and try again.`); return; }
     await sb().storage.from("docs").remove([path]);
     setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, attachments: list } : x)));
     setAttachRel((prev) => (prev && prev.id === r.id ? { ...prev, attachments: list } : prev));
+    flash(`${a.name} deleted`);
   };
 
   // timestamped job photos straight from the phone camera — shrunk before upload;
@@ -644,7 +657,7 @@ export default function Releases() {
         const sheet = wb.Sheets[wb.SheetNames[0]];
         const raw: string[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false, blankrows: true });
         const hIdx = raw.findIndex((r) => r.some((c) => /release/i.test(c)) && r.some((c) => /amount/i.test(c)));
-        if (hIdx < 0) { flash("No header row with Release + Amount found"); return; }
+        if (hIdx < 0) { flash("Couldn't find a header row with Release and Amount in that sheet"); return; }
         // red-row numbers from the XML are absolute — offset by where the sheet's used range starts
         const rangeBase = XLSX.utils.decode_range(String(sheet["!ref"] || "A1")).s.r;
         const headers = raw[hIdx].map((h) => String(h).toLowerCase());
@@ -691,7 +704,7 @@ export default function Releases() {
         // no Payroll column at all: the green paint is the only thing that can
         // say "done" — a plain row says nothing about payroll either way
         setPending({ items, guess: gm ? gm[1] : "", omit, greenDone: greenFilled, greenOnlyPayroll: m.payroll < 0 });
-      } catch { flash("Couldn't read that file — save as .xlsx or .csv"); }
+      } catch { flash("Couldn't read that file. Save it as .xlsx or .csv and try again."); }
     };
     reader.readAsArrayBuffer(file);
     e.target.value = "";
@@ -708,7 +721,7 @@ export default function Releases() {
       const { data: again } = await sb().from("contracts").select("id,number,name").eq("number", num).limit(1);
       if (again && again[0]) return again[0] as Contract;
     }
-    flash(error?.message || "Couldn't create the contract");
+    failed(error, "Couldn't create the contract. Check your signal and try again.");
     return null;
   };
 
@@ -796,7 +809,7 @@ export default function Releases() {
           // fall back to row-by-row (in parallel) so one odd row can't sink the import
           const results = await Promise.all(chunk.map(({ id, ...patch }) => sb().from("releases").update(patch).eq("id", id)));
           const bad = results.find((r) => r.error);
-          if (bad?.error) { flash(bad.error.message); setFolderProgress(""); setBusy(false); return; }
+          if (bad?.error) { failed(bad.error, "Couldn't save the import. Check your signal and try again."); setFolderProgress(""); setBusy(false); return; }
           error = null;
         }
         updated += chunk.length;
@@ -889,22 +902,22 @@ export default function Releases() {
       for (let i = 0; i < toInsert.length; i += 500) {
         const chunk = toInsert.slice(i, i + 500).map((it) => ({ ...it, contract_id: contract!.id }));
         const { error } = await sb().from("releases").insert(chunk);
-        if (error) { flash(error.message); break; }
+        if (error) { failed(error, "Couldn't save the import. Check your signal and try again."); break; }
         added += chunk.length;
       }
       setPending(null); setBusy(false);
       await loadContracts(); setActive(contract.id); await loadRows(contract.id);
-      flash(`Loaded into ${num} — ${updated} updated, ${added} added${removed ? `, ${removed} removed (incl. duplicate copies)` : ""}${keptReceived ? `, ${keptReceived} received release${keptReceived === 1 ? "" : "s"} left untouched` : ""}${kept ? `, ${kept} moved to Canceled (payroll hours linked — restore from the Canceled list if needed)` : ""}`);
+      setResult(`Imported into ${num}: ${updated} updated, ${added} added${removed ? `, ${removed} removed (including duplicate copies)` : ""}${keptReceived ? `, ${keptReceived} received release${keptReceived === 1 ? "" : "s"} left alone` : ""}${kept ? `, ${kept} moved to Canceled (payroll hours linked; restore from the Canceled list if needed)` : ""}.`);
       return;
     }
     for (let i = 0; i < pending.items.length; i += 500) {
       const chunk = pending.items.slice(i, i + 500).map((it) => ({ ...it, contract_id: contract!.id }));
       const { error } = await sb().from("releases").insert(chunk);
-      if (error) { flash(error.message); break; }
+      if (error) { failed(error, "Couldn't save the import. Check your signal and try again."); break; }
     }
     setPending(null); setBusy(false);
     await loadContracts(); setActive(contract.id); await loadRows(contract.id);
-    flash(`Loaded into ${num}`);
+    flash(`Imported into ${num}`);
   };
 
   // ---------- fix duplicates: merge twin contracts, then twin releases ----------
@@ -944,7 +957,7 @@ export default function Releases() {
       const have = ((keeperCodes || []) as { code: string }[]).map((r) => r.code).filter(Boolean);
       for (let i = 0; i < have.length; i += 200) await sb().from("contract_items").delete().eq("contract_id", t.id).in("code", have.slice(i, i + 200));
       const { error: moveErr } = await sb().from("contract_items").update({ contract_id: keeperContract.id }).eq("contract_id", t.id);
-      if (moveErr) { setFolderProgress(`Couldn't move contract ${t.number}'s price book (${moveErr.message}) — the contract was left in place`); continue; }
+      if (moveErr) { console.error(moveErr.message); setFolderProgress(`Couldn't move contract ${t.number}'s price book. The contract was left in place.`); continue; }
       await sb().from("proposals").update({ contract_id: keeperContract.id }).eq("contract_id", t.id).then(() => null, () => null);
       const { error } = await sb().from("contracts").delete().eq("id", t.id);
       if (!error) contractsMerged += 1;
@@ -1031,7 +1044,7 @@ export default function Releases() {
       const chunk = attPatches.slice(i, i + 10);
       const results = await Promise.all(chunk.map((p) => sb().from("releases").update({ attachments: p.attachments }).eq("id", p.id)));
       const bad = results.find((r) => r.error);
-      if (bad?.error) flash(`Some file cleanups didn't save: ${bad.error.message}`);
+      if (bad?.error) failed(bad.error, "Some file cleanups didn't save. Check your signal and run Fix duplicates again.");
     }
     // only paths no surviving release still points to (AFTER the cleanup) get removed
     const finalLists = new Map<string, { name: string; path: string }[]>();
@@ -1050,7 +1063,7 @@ export default function Releases() {
   // every contract in one go — for when duplicates are spread across the board
   const fixDuplicatesEverywhere = async () => {
     if (!window.confirm(
-      "Fix duplicates in EVERY contract?\n\nFor each release number only the original is kept (received / invoiced / photos win) — copies are merged into it and removed, and stacked file copies like \"name (2).pdf\" are cleaned off. Nothing received or payroll-linked is ever deleted."
+      "Fix duplicates in every contract?\n\nFor each release number only the original is kept (received, invoiced or with photos wins). Copies are merged into it and removed, and stacked file copies like \"name (2).pdf\" are cleaned off. Nothing received or payroll-linked is ever deleted."
     )) return;
     setBusy(true);
     const doneKeys = new Set<string>();
@@ -1068,8 +1081,8 @@ export default function Releases() {
     if (active) await loadRows(active);
     setResult(
       merged + contractsMerged + attCopies === 0
-        ? "No duplicates found anywhere — everything is clean"
-        : `All contracts cleaned — ${merged} duplicate release${merged === 1 ? "" : "s"} merged away${contractsMerged ? `, ${contractsMerged} twin contract${contractsMerged === 1 ? "" : "s"} merged` : ""}${attCopies ? `, ${attCopies} duplicate file cop${attCopies === 1 ? "y" : "ies"} removed` : ""}${blocked ? `, ${blocked} moved to Canceled (payroll linked)` : ""}${keptRecv ? `, ${keptRecv} received duplicate${keptRecv === 1 ? "" : "s"} left alone` : ""}.`
+        ? "No duplicates found anywhere. Everything is clean."
+        : `All contracts cleaned: ${merged} duplicate release${merged === 1 ? "" : "s"} merged away${contractsMerged ? `, ${contractsMerged} twin contract${contractsMerged === 1 ? "" : "s"} merged` : ""}${attCopies ? `, ${attCopies} duplicate file cop${attCopies === 1 ? "y" : "ies"} removed` : ""}${blocked ? `, ${blocked} moved to Canceled (payroll linked)` : ""}${keptRecv ? `, ${keptRecv} received duplicate${keptRecv === 1 ? "" : "s"} left alone` : ""}.`
     );
   };
 
@@ -1078,7 +1091,7 @@ export default function Releases() {
     if (!cur) return;
     const key = contractKey(cur.number);
     if (!window.confirm(
-      `Fix duplicates for contract ${key}?\n\nDuplicate copies of the same release will be merged into the original — the original's payment status, photos and line items always win, and the copy's attachments move over before the copy is removed. Nothing that's been received or has payroll hours is deleted.`
+      `Fix duplicates in contract ${key}?\n\nFor each release number only the original is kept (received, invoiced or with photos wins). Copies are merged into it and removed, and stacked file copies like "name (2).pdf" are cleaned off. Nothing received or payroll-linked is ever deleted.`
     )) return;
     setBusy(true);
     setFolderProgress("Checking for duplicates…");
@@ -1089,16 +1102,13 @@ export default function Releases() {
     await loadRows(res.keeperContractId);
     setResult(
       res.dupGroups === 0 && res.contractsMerged === 0
-        ? "No duplicates found — this contract is clean"
-        : `Done — ${res.merged} duplicate release${res.merged === 1 ? "" : "s"} merged away${res.contractsMerged ? `, ${res.contractsMerged} twin contract${res.contractsMerged === 1 ? "" : "s"} merged` : ""}${res.attCopies ? `, ${res.attCopies} duplicate file cop${res.attCopies === 1 ? "y" : "ies"} removed` : ""}${res.blocked ? `, ${res.blocked} moved to Canceled (payroll hours linked)` : ""}${res.keptReceivedDupes ? `, ${res.keptReceivedDupes} received duplicate${res.keptReceivedDupes === 1 ? "" : "s"} left alone` : ""}. Totals are back to the real numbers.`
+        ? "No duplicates found. This contract is clean."
+        : `Done: ${res.merged} duplicate release${res.merged === 1 ? "" : "s"} merged away${res.contractsMerged ? `, ${res.contractsMerged} twin contract${res.contractsMerged === 1 ? "" : "s"} merged` : ""}${res.attCopies ? `, ${res.attCopies} duplicate file cop${res.attCopies === 1 ? "y" : "ies"} removed` : ""}${res.blocked ? `, ${res.blocked} moved to Canceled (payroll hours linked)` : ""}${res.keptReceivedDupes ? `, ${res.keptReceivedDupes} received duplicate${res.keptReceivedDupes === 1 ? "" : "s"} left alone` : ""}. Totals are back to the real numbers.`
     );
   };
 
   // ---------- attach a whole folder: each file lands on its own release ----------
   const MAX_FOLDER_FILES = 5000;
-  // a contract's own name may be wrong or missing — the number is what identifies it
-  const contractLabelOf = (c: { number: string; name?: string | null }) =>
-    c.name && c.name !== c.number ? `${c.number} (${c.name})` : `contract ${c.number}`;
   const handleFolder = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const all = Array.from(e.target.files || []).filter((f) => f.size > 0);
     e.target.value = "";
@@ -1192,14 +1202,15 @@ export default function Releases() {
         const ck = contractKey(ident.contract);
         const cands = cByKey.get(ck) || [];
         const contract = cands[0];
-        const cLabel = contract ? contractLabelOf(contract) : `contract ${ident.contract}`;
+        // a contract's own name may be wrong or missing; the number is what identifies it
+        const cLabel = contract ? contractLabel(contract) : `contract ${ident.contract}`;
         if (!contract) {
-          // neither the contract nor the release is on file — both get made from the PDF
+          // neither the contract nor the release is on file: both get made from the PDF
           otherContract += 1;
           plan.push({
             ...base, relNum: ident.rel, relId: null, confidence: "none",
             newRel: { contractNum: ident.contract, rel: ident.rel }, willCreate: true,
-            why: `new — contract ${ident.contract} and release #${ident.rel} will be created`,
+            why: `new: contract ${ident.contract} and release #${ident.rel} will be created`,
           });
           continue;
         }
@@ -1208,32 +1219,32 @@ export default function Releases() {
           if (found[0].received) {
             // received = closed. Nothing gets attached, created or changed on it.
             plan.push({ ...base, relNum: ident.rel, relId: null, confidence: "none", skipped: true,
-              why: `release #${ident.rel} is already received — left alone` });
+              why: `release #${ident.rel} is already paid, left alone` });
           } else {
             plan.push({
               ...base, relNum: ident.rel, relId: found[0].id, confidence: fromFile ? "high" : "low",
-              why: `release #${ident.rel} · ${cLabel}${fromFile ? "" : " — from the file name (PDF unreadable)"}`,
+              why: `release #${ident.rel} · ${cLabel}${fromFile ? "" : " (from the file name, PDF unreadable)"}`,
             });
           }
         } else if (found.length === 0) {
-          // the release isn't on file yet — build it from what the PDF says
+          // the release isn't on file yet: build it from what the PDF says
           plan.push({
             ...base, relNum: ident.rel, relId: null, confidence: "none",
             newRel: { contractNum: ident.contract, rel: ident.rel }, willCreate: true,
-            why: `new release #${ident.rel} in ${cLabel} — will be created`,
+            why: `new: release #${ident.rel} in ${cLabel} will be created`,
           });
         } else {
-          // the number exists more than once — the file goes to the ORIGINAL
+          // the number exists more than once: the file goes to the ORIGINAL
           // (received / invoiced / photographed wins); the copies get merged
           // away automatically after the attach
           const keeper = [...found].sort((a, b) => relScore(b) - relScore(a))[0];
           if (keeper.received) {
             plan.push({ ...base, relNum: ident.rel, relId: null, confidence: "none", skipped: true,
-              why: `release #${ident.rel} is already received — left alone` });
+              why: `release #${ident.rel} is already paid, left alone` });
           } else {
             plan.push({
               ...base, relNum: ident.rel, relId: keeper.id, confidence: fromFile ? "high" : "low",
-              why: `release #${ident.rel} · ${cLabel} — original of ${found.length} copies (duplicates get cleaned up)`,
+              why: `release #${ident.rel} · ${cLabel} · original of ${found.length} copies (duplicates get cleaned up)`,
             });
           }
         }
@@ -1246,7 +1257,7 @@ export default function Releases() {
     }
     setFolderProgress(""); setBusy(false);
     if (plan.length === 0) {
-      flash(`Read ${files.length} PDF${files.length === 1 ? "" : "s"} — none of them are NYCHA release PDFs`);
+      flash(`Read ${files.length} PDF${files.length === 1 ? "" : "s"}. None of them are NYCHA release PDFs.`);
       return;
     }
     const top = (relPath(files[0]).split("/")[0] || "").trim();
@@ -1280,7 +1291,7 @@ export default function Releases() {
   const runFolderAttach = async () => {
     if (!folderPlan) return;
     const todo = folderPlan.rows.filter((r) => r.relId || r.willCreate);
-    if (todo.length === 0) { flash("Nothing to attach — pick a release for at least one file"); return; }
+    if (todo.length === 0) { flash("Nothing to attach. Pick a release for at least one file."); return; }
     setBusy(true);
     const pdfjsEarly = await import("pdfjs-dist").catch(() => null);
     if (pdfjsEarly) pdfjsEarly.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
@@ -1525,11 +1536,11 @@ export default function Releases() {
     setResult(
       `Attached ${ok} file${ok === 1 ? "" : "s"} to ${byRel.size} release${byRel.size === 1 ? "" : "s"}`
       + (made ? ` · ${made} new release${made === 1 ? "" : "s"} created` : "")
-      + (reused ? ` · ${reused} already existed — files attached to the originals instead` : "")
+      + (reused ? ` · ${reused} already existed, files attached to the originals instead` : "")
       + (autoMerged ? ` · ${autoMerged} duplicate${autoMerged === 1 ? "" : "s"} merged away` : "")
       + (madeFailed.length ? ` · ${madeFailed.length} couldn't be created` : "")
-      + (sosMade ? ` · SOS + invoice ready on ${sosMade}` : "")
-      + (alreadyAttached ? ` · ${alreadyAttached} already attached before — skipped` : "")
+      + (sosMade ? ` · SOS form and invoice ready on ${sosMade}` : "")
+      + (alreadyAttached ? ` · ${alreadyAttached} already attached before, skipped` : "")
       + (recvFilesSkipped ? ` · ${recvFilesSkipped} file${recvFilesSkipped === 1 ? "" : "s"} for received releases left alone` : "")
       + (skipPaid ? ` · ${skipPaid} already paid, left alone` : "")
       + (skipHave ? ` · ${skipHave} already had line items` : "")
@@ -1541,8 +1552,8 @@ export default function Releases() {
   // ---------- mass import: several release PDFs at once, saved automatically ----------
   const importPdfBatch = async (files: File[]) => {
     setBusy(true);
-    flash(`Reading ${files.length} PDFs…`);
-    const done: string[] = []; const failed: string[] = [];
+    setProgress(`Reading ${files.length} PDFs…`);
+    const done: string[] = []; const failedFiles: string[] = [];
     let skippedRecv = 0;
     const cCache = new Map<string, Contract>();
     contracts.forEach((c) => cCache.set(c.number, c));
@@ -1560,12 +1571,12 @@ export default function Releases() {
             text += tc.items.map((it) => ("str" in it ? it.str : "")).join(" ") + "\n";
           }
           const parsed = parseReleasePdfText(text);
-          if (!parsed) { failed.push(file.name); continue; }
+          if (!parsed) { failedFiles.push(file.name); continue; }
           const num = parsed.contract.trim() || "Contract";
           let contract = cCache.get(num);
           if (!contract) {
             const nc = await resolveContract(num);
-            if (!nc) { failed.push(file.name); continue; }
+            if (!nc) { failedFiles.push(file.name); continue; }
             contract = nc; cCache.set(num, contract);
           }
           used.add(contract.id);
@@ -1587,7 +1598,7 @@ export default function Releases() {
             };
             let { error } = await sb().from("releases").update(patch).eq("id", relId);
             if (error && /column|schema cache/i.test(error.message)) ({ error } = await sb().from("releases").update(stripNew(patch)).eq("id", relId));
-            if (error) { failed.push(file.name); continue; }
+            if (error) { failedFiles.push(file.name); continue; }
             await sb().from("release_items").delete().eq("release_id", relId);
           } else {
             const payload: Record<string, unknown> = {
@@ -1598,7 +1609,7 @@ export default function Releases() {
             };
             let { data: rel, error } = await sb().from("releases").insert(payload).select().single();
             if (error && /column|schema cache/i.test(error.message)) ({ data: rel, error } = await sb().from("releases").insert(stripNew(payload)).select().single());
-            if (error || !rel) { failed.push(file.name); continue; }
+            if (error || !rel) { failedFiles.push(file.name); continue; }
             relId = (rel as Release).id;
           }
           if (parsed.items.length > 0) {
@@ -1612,14 +1623,15 @@ export default function Releases() {
             await sb().from("releases").update({ attachments: [...prev, { name: file.name, path }] }).eq("id", relId);
           }
           done.push(parsed.rel);
-        } catch { failed.push(file.name); }
+        } catch { failedFiles.push(file.name); }
       }
     } catch { /* pdfjs failed to load */ }
+    setProgress("");
     setBusy(false);
     await loadContracts();
     const target = used.size === 1 ? [...used][0] : active;
     if (target) { setActive(target); loadRows(target); }
-    flash(`${done.length} release${done.length === 1 ? "" : "s"} added${done.length ? ` (${done.slice(0, 10).join(", ")})` : ""}${failed.length ? ` · ${failed.length} failed` : ""}${skippedRecv ? ` · ${skippedRecv} already received — left alone` : ""} — SOS is ready on each row`);
+    setResult(`${done.length} release${done.length === 1 ? "" : "s"} added${done.length ? ` (${done.slice(0, 10).join(", ")})` : ""}${failedFiles.length ? ` · ${failedFiles.length} failed` : ""}${skippedRecv ? ` · ${skippedRecv} already received, left alone` : ""}. SOS form is ready on each row.`);
   };
 
   // ---------- release PDF import ----------
@@ -1643,8 +1655,8 @@ export default function Releases() {
         const parsed = parseReleasePdfText(text);
         if (!parsed) {
           flash(/Purchase Order No/i.test(text)
-            ? "That's a PACT purchase order — upload it on the PACT tab (📄 Upload PO / proposal). Releases only takes NYCHA release PDFs."
-            : "Couldn't read this PDF — is it a NYCHA blanket release?");
+            ? "That's a PACT purchase order. Upload it on PACT Billing (Upload PO or proposal). Releases only takes NYCHA release PDFs."
+            : "Couldn't read this PDF. Is it a NYCHA release PDF?");
           setBusy(false); return;
         }
         const breakdown = parsed.items
@@ -1663,7 +1675,7 @@ export default function Releases() {
     e.target.value = "";
   };
 
-  // reads the proposal/walk sheet and pulls Development, Address, Apt, Stairhall, Release #
+  // reads the walk sheet and pulls Development, Address, Apt, Stairhall, Release #
   const handleProposal = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !pdfPending) return;
@@ -1698,8 +1710,8 @@ export default function Releases() {
         const po = findVal(/^po\s*:?$/i);
         const parts = [addr, apt && `Apt ${apt}`, stair && `Stairhall ${stair}`].filter(Boolean);
         let note = "";
-        if (relNo && pdfPending.rel && relNo !== pdfPending.rel) note = `Proposal says release ${relNo} but PDF is release ${pdfPending.rel} — double-check`;
-        else if (po && pdfPending.contract && po !== pdfPending.contract) note = `Proposal is for contract ${po} but PDF is ${pdfPending.contract} — double-check`;
+        if (relNo && pdfPending.rel && relNo !== pdfPending.rel) note = `The walk sheet says release ${relNo} but the PDF is release ${pdfPending.rel}. Double-check.`;
+        else if (po && pdfPending.contract && po !== pdfPending.contract) note = `The walk sheet is for contract ${po} but the PDF is ${pdfPending.contract}. Double-check.`;
         setPdfPending({
           ...pdfPending,
           address: parts.join(", ") || pdfPending.address,
@@ -1707,8 +1719,8 @@ export default function Releases() {
           propNote: note,
           propFile: file,
         });
-        flash(note ? "Proposal loaded — release # mismatch!" : "Address pulled from proposal");
-      } catch { flash("Couldn't read that proposal sheet"); }
+        flash(note ? "Walk sheet loaded, but its release number doesn't match" : "Address pulled from the walk sheet");
+      } catch { flash("Couldn't read that walk sheet"); }
     };
     reader.readAsArrayBuffer(file);
     e.target.value = "";
@@ -1726,7 +1738,7 @@ export default function Releases() {
     const prior = [...((existing || []) as (Release & { address?: string })[])]
       .sort((a, b) => Number(!!b.received) - Number(!!a.received))[0];
     if (prior?.received) {
-      flash(`Release ${pdfPending.rel} is already received (paid) — its numbers stay as they are. Flip it to NOT received on the row first if you really need to change it.`);
+      setResult(`Release ${pdfPending.rel} is already marked received, so its numbers stay as they are. Tap its RECEIVED stamp to mark it not received first if you really need to change it.`);
       setPdfPending(null); setBusy(false); return;
     }
     let relId: string;
@@ -1741,9 +1753,9 @@ export default function Releases() {
       let { error } = await sb().from("releases").update(patch).eq("id", prior.id);
       if (error && /column|schema cache/i.test(error.message)) {
         ({ error } = await sb().from("releases").update(stripNew(patch)).eq("id", prior.id));
-        if (!error) flash("Saved — run supabase/RUN_ME.sql so labor hours & address save too");
+        if (!error) setResult("Saved. Labor hours and the address need a database update before they can be kept (Settings → System check).");
       }
-      if (error) { flash(error.message); setBusy(false); return; }
+      if (error) { failed(error, "Couldn't save the release. Check your signal and try again."); setBusy(false); return; }
       relId = prior.id;
       await sb().from("release_items").delete().eq("release_id", relId);
     } else {
@@ -1756,16 +1768,16 @@ export default function Releases() {
       let { data: rel, error } = await sb().from("releases").insert(payload).select().single();
       if (error && /column|schema cache/i.test(error.message)) {
         ({ data: rel, error } = await sb().from("releases").insert(stripNew(payload)).select().single());
-        if (!error) flash("Saved — run supabase/RUN_ME.sql so labor hours & address save too");
+        if (!error) setResult("Saved. Labor hours and the address need a database update before they can be kept (Settings → System check).");
       }
-      if (error || !rel) { flash(error?.message || "Save failed"); setBusy(false); return; }
+      if (error || !rel) { failed(error, "Couldn't save the release. Check your signal and try again."); setBusy(false); return; }
       relId = (rel as Release).id;
     }
     if (pdfPending.items.length > 0) {
       const { error: e2 } = await sb().from("release_items").insert(
         pdfPending.items.map((it) => ({ release_id: relId, ...it }))
       );
-      if (e2) flash(`Release saved, but items failed: ${e2.message}`);
+      if (e2) failed(e2, "Release saved, but its line items didn't. Open Line items on the row and add them.");
     }
     // auto-attach the source documents to the release (best-effort)
     const ups: { name: string; path: string }[] = [];
@@ -1783,12 +1795,12 @@ export default function Releases() {
     const saved = pdfPending; const updated = !!prior;
     setPdfPending(null); setBusy(false);
     await loadContracts(); setActive(contract.id); await loadRows(contract.id);
-    flash(`Release ${saved.rel} ${updated ? "updated" : "added"} — ${saved.items.length} line items`);
-    // the invoice package rides along automatically — invoice + affidavit +
+    flash(`Release ${saved.rel} ${updated ? "updated" : "added"} · ${saved.items.length} line item${saved.items.length === 1 ? "" : "s"}`);
+    // the invoice package rides along automatically: invoice + affidavit +
     // REP + hiring summary + equal opportunity report, ready to send
     if (saved.items.length > 0) {
       try {
-        flash(`Release ${saved.rel} saved — making its invoice package…`);
+        setProgress(`Making the invoice package for release ${saved.rel}…`);
         const { data: o } = await sb().from("org").select("*").single();
         const rows: DocRow[] = saved.items
           .filter((it) => Number(it.qty) > 0)
@@ -1805,15 +1817,29 @@ export default function Releases() {
         downloadPdf(merged, `package_${contract.number}_rel${saved.rel}.pdf`);
         // its invoice just went out the door — date the release as invoiced
         await sb().from("releases").update({ invoice_sent: localISO() }).eq("id", relId).then(() => loadRows(contract.id));
-        flash(`Release ${saved.rel} saved — invoice package downloaded (one PDF: invoice + 4 documents)`);
+        setProgress("");
+        setResult(`Release ${saved.rel} saved. Its invoice package downloaded as one PDF: the invoice and 4 documents.`);
       } catch {
-        flash(`Release ${saved.rel} saved — package couldn't be built right now, use ⬇ Invoice package (zip) on the Invoice Package tab`);
+        setProgress("");
+        setResult(`Release ${saved.rel} saved. The package couldn't be built right now; open Invoice Package and use Invoice package (PDF) from the row's menu.`);
       }
     }
   };
 
+  // the Rename dialog's Save: a blank name goes back to the number
+  const saveContractName = async () => {
+    const c = contracts.find((x) => x.id === active);
+    if (!c || renaming === null) return;
+    const clean = renaming.trim() || c.number;
+    const { error } = await sb().from("contracts").update({ name: clean }).eq("id", c.id);
+    if (error) { failed(error, "Couldn't save the name. Check your signal and try again."); return; }
+    setContracts((prev) => prev.map((x) => (x.id === c.id ? { ...x, name: clean } : x)));
+    setRenaming(null);
+    flash("Contract name saved");
+  };
+
   const exportSheet = async () => {
-    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine \u2014 check your signal and try again"); return; }
+    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine. Check your signal and try again"); return; }
     const c = contracts.find((x) => x.id === active);
     const out = rows.map((r) => ({
       Release: r.rel_number, Location: r.location, Buildings: r.buildings, "Ticket #": r.ticket,
@@ -1825,41 +1851,94 @@ export default function Releases() {
     XLSX.writeFile(wb, `${c?.number || "releases"}-export.xlsx`);
   };
 
+  // what the header, the summary line and the empty states need to know about the open contract
+  const activeContract = contracts.find((x) => x.id === active);
+  const openCount = live.filter((r) => !r.received).length;
+  // the list is "loaded" once the contracts and the open contract's releases are both here
+  const loaded = contractsLoaded && (!active || rowsFor === active);
+  // duplicates in the open contract: the same release number twice, or the contract listed twice
+  const twinCount = activeContract ? contracts.filter((x) => contractKey(x.number) === contractKey(activeContract.number)).length : 1;
+  const numCounts = new Map<string, number>();
+  rows.forEach((r) => {
+    const k = String(r.rel_number || "").trim().replace(/^0+(?=\d)/, "");
+    if (k) numCounts.set(k, (numCounts.get(k) || 0) + 1);
+  });
+  const dupNums = [...numCounts.values()].filter((n) => n > 1).length;
+  const hasDupes = twinCount > 1 || dupNums > 0;
+  // the filter strip scrolls the picked tab into view (not on the first paint: that would scroll the page)
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const tabsPainted = useRef(false);
+  useEffect(() => {
+    if (!tabsPainted.current) { tabsPainted.current = true; return; }
+    scrollTo(tabsRef.current?.querySelector('[aria-selected="true"]') || null, "nearest");
+  }, [filter]);
+  const tabs: [Filter, string][] = [
+    ["all", `Open (${openCount})`], ["chase", `Chase (${notR.length})`], ["payroll", `Payroll to do (${prPend.length})`],
+    ["received", `Received (${receivedRows.length})`], ["canceled", `Canceled (${canceledRows.length})`], ["hours", "Hours check"],
+  ];
+  // one true sentence for an empty list, by what is being looked at
+  const emptyText = () => {
+    if (contracts.length === 0 || rows.length === 0) return "No releases yet. Add a release PDF, or import the contract sheet, from + Add release.";
+    if (dq) return `Nothing matches “${dq}”.`;
+    if (filter === "chase") return "Nothing to chase. Every release is paid.";
+    if (filter === "payroll") return "Payroll is done on every release.";
+    if (filter === "received") return "Nothing received yet.";
+    if (filter === "canceled") return "No canceled releases.";
+    return "Every release is paid.";
+  };
+
   return (
     <div>
-      <PageHeader title="Releases"
+      {busy && <div className="busy-bar" aria-busy="true" aria-label="Working" />}
+      <PageHeader title="Releases" sub="NYCHA releases: paid, to chase, or waiting on payroll"
         primary={!readOnly ? (
-          <ActionMenu label="Add" variant="primary" items={[
-            { label: "+ From PDF(s)", onSelect: () => pdfRef.current?.click() },
-            { label: "Attach folder of PDFs", glyph: "📄", onSelect: () => folderRef.current?.click() },
-            { label: "Import contract sheet (xlsx)", onSelect: () => fileRef.current?.click() },
+          <ActionMenu label="+ Add release" variant="primary" items={[
+            { label: "From release PDFs", glyph: "📄", onSelect: () => pdfRef.current?.click() },
+            { label: "From a folder of PDFs", glyph: "📄", onSelect: () => folderRef.current?.click() },
+            { label: "From a contract sheet (Excel)", onSelect: () => fileRef.current?.click() },
           ]} />
         ) : undefined}
         menuLabel="Tools"
         menu={[
-          { label: "Export Excel", hidden: rows.length === 0, onSelect: exportSheet },
+          { label: "Release list (Excel)", glyph: "⬇", hidden: rows.length === 0, onSelect: exportSheet },
+          { label: "Rename contract…", hidden: readOnly || !activeContract, disabled: busy, onSelect: () => setRenaming(activeContract && activeContract.name !== activeContract.number ? activeContract.name : "") },
+          { label: "Fix duplicates in this contract…", destructive: true, hidden: readOnly || !activeContract || !hasDupes, disabled: busy, onSelect: fixDuplicates },
           { label: "Fix duplicates in all contracts…", destructive: true, hidden: readOnly || contracts.length === 0, disabled: busy, onSelect: fixDuplicatesEverywhere },
         ]} />
       <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFile} />
       <input ref={pdfRef} type="file" accept="application/pdf" multiple className="hidden" onChange={handlePdf} />
-      {/* folder picker — webkitdirectory isn't in React's types, hence the cast */}
+      {/* folder picker: webkitdirectory isn't in React's types, hence the cast */}
       <input ref={folderRef} type="file" multiple className="hidden" onChange={handleFolder}
         {...({ webkitdirectory: "", directory: "" } as unknown as Record<string, string>)} />
       <input ref={propRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleProposal} />
 
       {!folderPlan && folderProgress && (
-        <div className="card mb-4 border-work p-4 text-sm">
+        <div className="card anim-open mb-4 border-work card-pad text-[14px]">
           <b>{folderProgress}</b>
-          <div className="text-[12px] text-inksoft">Working — leave this tab open until it finishes.</div>
+          <div className="text-[12px] text-inksoft">Working. Leave this tab open until it finishes.</div>
         </div>
       )}
 
       {/* the summary of a long run stays on screen until it's been read */}
       {result && (
-        <div className="card mb-4 flex items-start gap-2 border-ok p-4 text-sm">
+        <div className="card anim-open mb-4 flex items-start gap-2 border-ok card-pad text-[14px]" role="status">
           <div className="min-w-0 flex-1 pt-2">{result}</div>
           <button type="button" aria-label="Dismiss" className="btn-icon border-0 shadow-none text-inksoft hover:text-ink" onClick={() => setResult("")}>✕</button>
         </div>
+      )}
+
+      {/* a name the office recognizes, with the number tucked after it in every picker */}
+      {renaming !== null && activeContract && (
+        <Modal title="Rename contract" onClose={() => setRenaming(null)}
+          primary={<button type="submit" form="rename-contract" className="btn btn-primary" disabled={busy}>Save name</button>}
+          secondary={<button type="button" className="btn btn-ghost" onClick={() => setRenaming(null)}>Cancel</button>}>
+          <form id="rename-contract" onSubmit={(e) => { e.preventDefault(); saveContractName(); }}>
+            <label className="section-label mb-1" htmlFor="rename-contract-name">Name for contract {activeContract.number}</label>
+            <input id="rename-contract-name" className="field" autoFocus enterKeyHint="done" placeholder="e.g. Van Dyke move-outs"
+              value={renaming} onChange={(e) => setRenaming(e.target.value)} />
+            <div className="mt-2 text-[12px] text-inksoft">Leave it blank to go back to the number.</div>
+          </form>
+        </Modal>
       )}
 
       {/* folder review — nothing uploads until this is confirmed */}
@@ -1882,29 +1961,29 @@ export default function Releases() {
             ...prev,
             rows: prev.rows.map((r, k) => {
               if (k !== i) return r;
-              if (value === "__new__" && r.newRel) return { ...r, relId: null, willCreate: true, why: `new release #${r.newRel.rel} — will be created` };
+              if (value === "__new__" && r.newRel) return { ...r, relId: null, willCreate: true, why: `new: release #${r.newRel.rel} will be created` };
               if (!value) return { ...r, relId: null, willCreate: false, why: "skipped" };
               return { ...r, relId: value, willCreate: false, why: "picked by hand" };
             }),
           }));
         return (
-          <div className="card mb-4 border-work p-4">
+          <div className="card anim-open mb-4 border-work card-pad">
             <div className="mb-1 font-display text-base font-semibold uppercase">
               Attach folder{folderPlan.folder ? ` “${folderPlan.folder}”` : ""}
             </div>
             <div className="mb-3 text-[13px] text-inksoft">
               <b className="text-ok">{matched} matched</b>
               {creating > 0 && <> · <b className="text-work">{creating} new release{creating === 1 ? "" : "s"} to create</b></>}
-              {skippedRecv > 0 && <> · {skippedRecv} for received releases — left alone</>}
+              {skippedRecv > 0 && <> · {skippedRecv} for received releases, left alone</>}
               {unmatched > 0 && <> · <b className="text-alert">{unmatched} need a release</b> (leave blank to skip)</>}
-              {" — nothing uploads until you press Attach."}
+              {". Nothing uploads until you press Attach."}
               <div className="mt-1 text-[12px]">
                 Read {folderPlan.rows.length + (folderPlan.notRelease || 0)} PDF{folderPlan.rows.length === 1 ? "" : "s"} in this folder
                 {(folderPlan.notRelease || 0) > 0 && <> · {folderPlan.notRelease} weren&apos;t release PDFs (left alone)</>}
                 {(folderPlan.notPdf || 0) > 0 && <> · {folderPlan.notPdf} non-PDF file{folderPlan.notPdf === 1 ? "" : "s"} skipped</>}
                 {(folderPlan.otherContract || 0) > 0 && <> · {folderPlan.otherContract} bring in a contract that isn&apos;t in the app yet (it&apos;ll be created too)</>}
                 {manyContracts && <> · files are matched to their own contract, whichever one is open</>}
-                {folderPlan.capped > 0 && <> · {folderPlan.capped} past the {MAX_FOLDER_FILES}-file limit — run it again for the rest</>}
+                {folderPlan.capped > 0 && <> · {folderPlan.capped} past the {MAX_FOLDER_FILES}-file limit, run it again for the rest</>}
               </div>
             </div>
             {(() => {
@@ -1923,14 +2002,14 @@ export default function Releases() {
               const ok = idx.filter(({ r }) => r.relId || r.willCreate).sort(inRelOrder);
               const SHOWN = 300;
               const picker = (i: number, row: PlanRow) => (
-                <select className="field w-60 px-2 py-1.5 text-[13px]"
+                <select className="field w-full px-2 py-1.5 text-[13px] sm:w-60" aria-label="Which release this file goes to"
                   value={row.relId || (row.willCreate ? "__new__" : "")}
                   onChange={(e) => { setRow(i, e.target.value); setFolderEdit((p) => { const n = new Set(p); n.delete(i); return n; }); }}>
                   {row.newRel && <option value="__new__">+ Make release #{row.newRel.rel} (from this PDF)</option>}
-                  <option value="">— skip this file —</option>
+                  <option value="">Skip this file</option>
                   {relOptions.map((o) => (
                     <option key={o.id} value={o.id}>
-                      {manyContracts ? `${cNumOf(o)} · ` : ""}#{o.rel_number} — {o.location || "no location"}
+                      {manyContracts ? `${cNumOf(o)} · ` : ""}#{o.rel_number} · {o.location || "no location"}
                     </option>
                   ))}
                 </select>
@@ -1938,68 +2017,65 @@ export default function Releases() {
               return (
                 <div className="max-h-80 overflow-y-auto rounded-sm border border-rulesoft">
                   {needs.length > 0 && (
-                    <div className="sticky top-0 z-10 border-b border-rulesoft bg-alert/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-widest text-alert">
-                      Need a release — {needs.length}
+                    <div className="section-label sticky top-0 z-10 border-b border-rulesoft bg-alert/10 px-3 py-1 text-alert">
+                      Need a release ({needs.length})
                     </div>
                   )}
                   {needs.slice(0, SHOWN).map(({ r, i }) => (
-                    <div key={`n${i}`} className="flex flex-wrap items-center gap-2 border-b border-rulesoft bg-alert/5 p-2">
+                    <div key={`n${i}`} className="flex flex-wrap items-center gap-2 border-b border-rulesoft bg-alert/5 p-3">
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-[13px]">
                           {r.relNum && <><b className="font-mono">#{r.relNum}</b> <span className="text-inksoft">·</span> </>}
                           {r.name}
                         </div>
-                        <div className="truncate text-[11px] text-inksoft">{r.why}</div>
+                        <div className="truncate text-[12px] text-inksoft">{r.why}</div>
                       </div>
                       {folderEdit.has(i)
                         ? picker(i, r)
-                        : <button className="btn min-h-[44px] px-2.5 py-1 text-[13px]" onClick={() => setFolderEdit((prev) => new Set(prev).add(i))}>pick release</button>}
+                        : <button type="button" className="btn btn-ghost btn-sm" onClick={() => setFolderEdit((prev) => new Set(prev).add(i))}>Pick release</button>}
                     </div>
                   ))}
                   {needs.length > SHOWN && (
-                    <div className="border-b border-rulesoft p-2 text-[12px] text-inksoft">…and {needs.length - SHOWN} more needing a release — sort these out, attach, then run the folder again.</div>
+                    <div className="border-b border-rulesoft p-3 text-[12px] text-inksoft">…and {needs.length - SHOWN} more needing a release. Sort these out, attach, then run the folder again.</div>
                   )}
                   {ok.length > 0 && (
-                    <div className="sticky top-0 z-10 border-b border-rulesoft bg-paper px-2 py-1 text-[11px] font-semibold uppercase tracking-widest text-inksoft">
-                      In release order — {ok.length}
+                    <div className="section-label sticky top-0 z-10 border-b border-rulesoft bg-paper px-3 py-1">
+                      In release order ({ok.length})
                     </div>
                   )}
                   {ok.slice(0, SHOWN).map(({ r, i }) => {
                     const relNo = r.relId ? relById.get(r.relId)?.rel_number : r.newRel?.rel;
                     return (
-                    <div key={`m${i}`} className="flex flex-wrap items-center gap-2 border-b border-rulesoft p-2 last:border-b-0">
+                    <div key={`m${i}`} className="flex flex-wrap items-center gap-2 border-b border-rulesoft p-3 last:border-b-0">
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-[13px]">
                           <b className="font-mono">#{relNo ?? "?"}</b>
-                          {!r.relId && r.willCreate && <span className="chip ml-1 rounded-[2px] border border-work px-1 py-px font-semibold text-work">NEW</span>}
+                          {!r.relId && r.willCreate && <span className="chip-outline ml-1 border-work text-work">NEW</span>}
                           <span className="text-inksoft"> · </span>{r.name}
                         </div>
-                        <div className="truncate text-[11px] text-inksoft">{r.why}</div>
+                        <div className="truncate text-[12px] text-inksoft">{r.why}</div>
                       </div>
                       {folderEdit.has(i)
                         ? picker(i, r)
-                        : (
-                          <button className="min-h-[44px] px-2 text-[13px] text-inksoft underline"
-                            onClick={() => setFolderEdit((p) => new Set(p).add(i))}>change</button>
-                        )}
+                        : <button type="button" className="btn btn-ghost btn-sm" onClick={() => setFolderEdit((p) => new Set(p).add(i))}>Change</button>}
                     </div>
                     );
                   })}
                   {ok.length > SHOWN && (
-                    <div className="p-2 text-[12px] text-inksoft">…and {ok.length - SHOWN} more matched files — all of them will be attached.</div>
+                    <div className="p-3 text-[12px] text-inksoft">…and {ok.length - SHOWN} more matched files. All of them will be attached.</div>
                   )}
                 </div>
               );
             })()}
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <button className="btn btn-primary" disabled={busy || matched + creating === 0} onClick={runFolderAttach}>
+              <button type="button" className="btn btn-primary" disabled={busy || matched + creating === 0} onClick={runFolderAttach}>
                 {busy
                   ? folderProgress || "Attaching…"
                   : `Attach ${matched + creating} file${matched + creating === 1 ? "" : "s"}${creating > 0 ? ` · make ${creating} release${creating === 1 ? "" : "s"}` : ""}`}
               </button>
-              <button className="btn btn-ghost" disabled={busy} onClick={() => { setFolderPlan(null); setFolderEdit(new Set()); }}>Cancel</button>
+              <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => { setFolderPlan(null); setFolderEdit(new Set()); }}>Cancel</button>
               {unmatched > 0 && !busy && (
-                <span className="text-[11px] text-inksoft">Files left blank are skipped — nothing is deleted either way.</span>
+                <span className="text-[12px] text-inksoft">Files left blank are skipped. Nothing is deleted either way.</span>
               )}
             </div>
           </div>
@@ -2007,39 +2083,41 @@ export default function Releases() {
       })()}
 
       {pending && (
-        <div className="card mb-4 border-work p-4">
+        <form className="card anim-open mb-4 border-work card-pad" onSubmit={(e) => { e.preventDefault(); if (!busy && pending.guess.trim()) runImport("replace"); }}>
           <div className="mb-2 font-display text-base font-semibold uppercase">Import {pending.items.length} releases</div>
-          <label className="text-[11px] uppercase tracking-widest text-inksoft">Contract number</label>
-          <input className="field mb-2 mt-1" value={pending.guess} onChange={(e) => setPending({ ...pending, guess: e.target.value })} />
-          <div className="mb-3 font-mono text-xs text-inksoft">
-            Total {fmt(pending.items.reduce((s, i) => s + i.amount, 0))} · canceled flagged: {pending.items.filter((i) => i.canceled).length}{(pending.greenDone || 0) > 0 ? ` · counted done from green highlight: ${pending.greenDone}` : ""}
+          <label className="section-label mb-1" htmlFor="import-contract">Contract number</label>
+          <input id="import-contract" className="field mb-2" autoFocus enterKeyHint="done" placeholder="e.g. 2442583"
+            value={pending.guess} onChange={(e) => setPending({ ...pending, guess: e.target.value })} />
+          <div className="mb-2 font-mono text-[12px] text-inksoft">
+            Total {fmt(pending.items.reduce((s, i) => s + i.amount, 0))} · {pending.items.filter((i) => i.canceled).length} canceled{(pending.greenDone || 0) > 0 ? ` · ${pending.greenDone} marked done by green highlight` : ""}
           </div>
+          <div className="mb-3 text-[12px] text-inksoft">Releases already here are updated. Releases not on this sheet are removed (paid ones are kept).</div>
           <div className="flex flex-wrap gap-2">
-            <button className="btn btn-primary" onClick={() => runImport("replace")} disabled={busy}>Load</button>
-            <button className="btn btn-ghost" onClick={() => setPending(null)}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={busy || !pending.guess.trim()}>Import</button>
+            <button type="button" className="btn btn-ghost" onClick={() => setPending(null)}>Cancel</button>
           </div>
-        </div>
+        </form>
       )}
 
       {pdfPending && (
-        <div className="card mb-4 border-work p-4">
+        <div className="card anim-open mb-4 border-work card-pad">
           <div className="mb-3 font-display text-base font-semibold uppercase">
             New release from PDF{pdfPending.date ? ` · ordered ${pdfPending.date}` : ""}
           </div>
           <div className="mb-3 grid grid-cols-2 gap-2.5 md:grid-cols-3">
             {([
               ["contract", "Contract #"], ["rel", "Release #"], ["location", "Development"],
-              ["address", "Address / Apt (from proposal)"], ["ticket", "Ticket / Work Order"],
-              ["amount", "Amount"], ["hours", "Labor hrs"],
+              ["address", "Address / Apt (from walk sheet)"], ["ticket", "Ticket / Work Order"],
+              ["amount", "Amount"], ["hours", "Labor hours"],
             ] as ["contract" | "rel" | "location" | "address" | "ticket" | "amount" | "hours", string][]).map(([k, label]) => (
               <div key={k} className={k === "address" ? "col-span-2 md:col-span-1" : ""}>
-                <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
+                <label className="section-label mb-1" htmlFor={`pdf-${k}`}>{label}</label>
                 {k === "amount" || k === "hours" ? (
-                  <input className="field" inputMode="decimal"
+                  <input id={`pdf-${k}`} className="field" inputMode="decimal"
                     {...numBuf(`pdf:${k}`, Number(pdfPending[k]) || 0,
                       (n) => setPdfPending((prev) => (prev ? { ...prev, [k]: n } : prev)))} />
                 ) : (
-                  <input className="field"
+                  <input id={`pdf-${k}`} className="field"
                     placeholder={k === "address" ? "e.g. Stairhall 15, Apt 526" : ""}
                     value={String(pdfPending[k])}
                     onChange={(e) => setPdfPending({ ...pdfPending, [k]: e.target.value })} />
@@ -2049,7 +2127,7 @@ export default function Releases() {
           </div>
           {pdfPending.breakdown.length > 0 && (
             <div className="mb-3">
-              <div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Labor by classification</div>
+              <div className="section-label mb-1">Labor by classification</div>
               <div className="flex flex-wrap gap-1.5">
                 {pdfPending.breakdown.map((b, i) => (
                   <span key={i} className="rounded-sm border border-rulesoft px-2 py-1 font-mono text-xs">{b.cls} · {b.hours}h</span>
@@ -2057,12 +2135,12 @@ export default function Releases() {
               </div>
             </div>
           )}
-          {pdfPending.propNote && <div className="mb-3 text-xs font-semibold text-alert">{pdfPending.propNote}</div>}
-          <div className="mb-2 text-[11px] uppercase tracking-widest text-inksoft">Line items ({pdfPending.items.length})</div>
+          {pdfPending.propNote && <div className="notice-alert mb-3 font-semibold">{pdfPending.propNote}</div>}
+          <div className="section-label mb-2">Line items ({pdfPending.items.length})</div>
           <div className="mb-3 max-h-64 overflow-y-auto rounded-sm border border-rulesoft">
             <table className="w-full border-collapse text-xs">
               <thead><tr className="border-b border-rulesoft text-left font-display uppercase tracking-widest text-inksoft">
-                <th className="p-2">Ln</th><th className="p-2">Item</th><th className="p-2">Description</th>
+                <th className="p-2">Ln</th><th className="p-2">Code</th><th className="p-2">Description</th>
                 <th className="p-2 text-right">Qty</th><th className="p-2">UOM</th>
                 <th className="p-2 text-right">Unit</th><th className="p-2 text-right">Amount</th><th></th>
               </tr></thead>
@@ -2076,8 +2154,8 @@ export default function Releases() {
                     <td className="p-2">{it.uom}</td>
                     <td className="p-2 text-right font-mono">{it.unit_price ? fmt(it.unit_price) : ""}</td>
                     <td className="p-2 text-right font-mono">{fmt(it.amount)}</td>
-                    <td className="p-2 text-center">
-                      <button className="text-alert" title="Remove line" onClick={() => {
+                    <td className="p-1 text-center">
+                      <button type="button" className="btn-icon border-0 shadow-none text-alert" aria-label="Remove line" onClick={() => {
                         const items = pdfPending.items.filter((_, j) => j !== i);
                         setPdfPending({ ...pdfPending, items, amount: items.reduce((sm, x) => sm + x.amount, 0) });
                       }}>✕</button>
@@ -2087,62 +2165,31 @@ export default function Releases() {
               </tbody>
             </table>
           </div>
-          <div className="mb-3 font-mono text-xs text-inksoft">
+          <div className="mb-3 font-mono text-[12px] text-inksoft">
             Items sum {fmt(pdfPending.items.reduce((sm, x) => sm + x.amount, 0))} · Release total {fmt(pdfPending.amount)}
-            {Math.abs(pdfPending.items.reduce((sm, x) => sm + x.amount, 0) - pdfPending.amount) > 0.01 && <span className="text-alert"> · MISMATCH — check lines</span>}
+            {Math.abs(pdfPending.items.reduce((sm, x) => sm + x.amount, 0) - pdfPending.amount) > 0.01 && <span className="text-alert"> · Lines don&apos;t add up to the release total</span>}
           </div>
           <div className="flex flex-wrap gap-2">
-            <button className="btn btn-primary" onClick={savePdfRelease} disabled={busy}>Save release</button>
-            <button className="btn" onClick={() => propRef.current?.click()}>Attach proposal sheet</button>
-            <button className="btn btn-ghost" onClick={() => setPdfPending(null)}>Cancel</button>
+            <button type="button" className="btn btn-primary" onClick={savePdfRelease} disabled={busy}>Save release</button>
+            <button type="button" className="btn btn-ghost" onClick={() => propRef.current?.click()}>Attach walk sheet</button>
+            <button type="button" className="btn btn-ghost" onClick={() => setPdfPending(null)}>Cancel</button>
           </div>
         </div>
       )}
 
-      {(contracts.length > 1 || (active && !readOnly)) && (
-        <div className="mb-3 flex items-center gap-2">
-          {contracts.length > 1 && (
-            <div className="min-w-0 flex-1"><ContractPicker contracts={contracts} value={active} onChange={(id) => { setActive(id); setLimit(100); }} /></div>
-          )}
-          {active && !readOnly && (
-            <button className="btn btn-ghost whitespace-nowrap" title="Give this contract a name you'll recognize"
-              onClick={async () => {
-                const c = contracts.find((x) => x.id === active);
-                if (!c) return;
-                const name = window.prompt(`Name for contract ${c.number}:`, c.name && c.name !== c.number ? c.name : "");
-                if (name === null) return;
-                const clean = name.trim() || c.number;
-                const { error } = await sb().from("contracts").update({ name: clean }).eq("id", c.id);
-                if (error) { flash(error.message); return; }
-                setContracts((prev) => prev.map((x) => (x.id === c.id ? { ...x, name: clean } : x)));
-                flash("Contract name saved");
-              }}>Rename</button>
-          )}
-        </div>
+      {contracts.length > 1 && (
+        <div className="mb-3"><ContractPicker contracts={contracts} value={active} onChange={(id) => { setActive(id); setLimit(100); }} /></div>
       )}
-      {/* which contract is this really? the developments in it say so — handy when a
+      {/* which contract is this really? the developments in it say so, handy when a
           contract's name doesn't match the work that's actually in it */}
       {active && rows.length > 0 && (() => {
-        const c = contracts.find((x) => x.id === active);
         const devs = [...new Set(rows.map((r) => (r.location || "").trim()).filter(Boolean))];
-        const twinCount = c ? contracts.filter((x) => contractKey(x.number) === contractKey(c.number)).length : 1;
-        const numCounts = new Map<string, number>();
-        rows.forEach((r) => {
-          const k = String(r.rel_number || "").trim().replace(/^0+(?=\d)/, "");
-          if (k) numCounts.set(k, (numCounts.get(k) || 0) + 1);
-        });
-        const dupNums = [...numCounts.values()].filter((n) => n > 1).length;
-        const hasDupes = twinCount > 1 || dupNums > 0;
         return (
-          <div className="mb-3 -mt-1 flex flex-wrap items-center gap-2 text-[11px] text-inksoft">
-            <span>
-              Contract <b className="font-mono">{c?.number}</b> · {rows.length} release{rows.length === 1 ? "" : "s"}
-              {devs.length > 0 && <> · {devs.slice(0, 4).join(", ")}{devs.length > 4 ? `, +${devs.length - 4} more` : ""}</>}
-            </span>
+          <div className="mb-3 -mt-1 text-[12px] text-inksoft">
+            {rows.length} release{rows.length === 1 ? "" : "s"}
+            {devs.length > 0 && <> · {devs.slice(0, 4).join(", ")}{devs.length > 4 ? `, +${devs.length - 4} more` : ""}</>}
             {hasDupes && !readOnly && (
-              <button className="btn btn-ghost min-h-[44px] px-2.5 py-1 text-[13px] text-alert" onClick={fixDuplicates} disabled={busy}>
-                Fix duplicates in this contract{dupNums > 0 ? ` (${dupNums} release #s doubled)` : twinCount > 1 ? " (contract listed twice)" : ""}
-              </button>
+              <span className="text-alert"> · {dupNums > 0 ? `${dupNums} release number${dupNums === 1 ? "" : "s"} doubled` : "contract listed twice"} · Fix duplicates is under Tools</span>
             )}
           </div>
         );
@@ -2153,10 +2200,13 @@ export default function Releases() {
         const outst = live.filter((r) => !r.received).reduce((s, r) => s + Number(r.amount), 0);
         const pct = tot > 0 ? Math.round((rec / tot) * 100) : 0;
         return (
-          <div className="card mb-3 p-3">
-            <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-mono text-[13px]">
-              {([["Released", fmt(tot), "text-ink"], [`Received ${pct}%`, fmt(rec), "text-ok"], ["Waiting", fmt(outst), "text-work"], ["Chase", fmt(notR.reduce((s, r) => s + Number(r.amount), 0)), "text-work"], ["Payroll left", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
-                <span key={l} className={cls}><span className="mr-1 text-[11px] uppercase tracking-[.12em] text-inksoft">{l}</span><b>{v}</b></span>
+          <div className="card card-tight mb-3">
+            <div className="grid grid-cols-3 gap-x-3 gap-y-2 sm:grid-cols-5">
+              {([["Released", fmt(tot), "text-ink"], [`Received · ${pct}%`, fmt(rec), "text-ok"], ["Unpaid", fmt(outst), "text-work"], ["Chase", fmt(notR.reduce((s, r) => s + Number(r.amount), 0)), "text-work"], ["Payroll to do", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
+                <div key={l} className={`min-w-0 ${cls}`}>
+                  <div className="section-label truncate">{l}</div>
+                  <b className="block truncate font-mono text-[15px] tabular-nums">{v}</b>
+                </div>
               ))}
             </div>
             <div className="mt-2 h-1.5 overflow-hidden rounded-sm bg-rulesoft">
@@ -2166,51 +2216,81 @@ export default function Releases() {
         );
       })()}
 
-      <div className="mb-3 flex snap-x gap-2 overflow-x-auto pb-1">
-        {([["all", "Open"], ["chase", `Chase (${notR.length})`], ["payroll", `Payroll (${prPend.length})`], ["received", `Received (${receivedRows.length})`], ["canceled", `Canceled (${canceledRows.length})`], ["hours", "Hours"]] as [Filter, string][]).map(([f, l]) => (
-          <button key={f} className={`btn ${filter === f ? "btn-primary" : "btn-ghost"} min-h-[44px] snap-start whitespace-nowrap px-3 py-1.5 text-[13px]`} onClick={() => { setFilter(f); setLimit(100); if (f === "hours" && !logged) loadLogged(); }}>{l}</button>
-        ))}
+      {/* the filter strip and the search stay in reach on a desk while a long list scrolls */}
+      <div className="bg-paper sm:sticky sm:top-[101px] sm:z-[5]">
+        <div ref={tabsRef} role="tablist" aria-label="Which releases" className="scroll-fade-paper mb-3 flex snap-x overflow-x-auto pb-1">
+          <div className="seg min-w-max">
+            {tabs.map(([f, l]) => (
+              <button key={f} type="button" role="tab" aria-selected={filter === f}
+                className={`seg-item snap-start whitespace-nowrap ${filter === f ? "bg-ink text-paper" : ""}`}
+                onClick={() => { setFilter(f); setLimit(100); if (f === "hours" && !logged) loadLogged(); }}>{l}</button>
+            ))}
+          </div>
+        </div>
+        <input type="search" enterKeyHint="search" autoComplete="off" aria-label="Search releases" className="field mb-3"
+          placeholder="Search release #, development, work order…" value={q} onChange={(e) => { setQ(e.target.value); setLimit(100); }} />
       </div>
 
-      <input className="field mb-3" placeholder="Search release #, development, ticket…" value={q} onChange={(e) => { setQ(e.target.value); setLimit(100); }} />
-
-      {filter === "hours" && (
+      {filter === "hours" && (logged === null || hoursList.length > 0 ? (
         <div className="card overflow-x-auto">
           <table className="w-full border-collapse text-sm" style={{ minWidth: 560 }}>
             <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
-              <th className="p-2.5">Rel</th><th className="p-2.5">Location</th><th className="p-2.5 text-right">Required hrs</th><th className="p-2.5 text-right">Logged hrs</th><th className="p-2.5 text-center">Check</th></tr></thead>
+              <th className="p-2.5">Release #</th><th className="p-2.5">Development</th><th className="p-2.5 text-right">Required hrs</th><th className="p-2.5 text-right">Logged hrs</th><th className="p-2.5 text-center">Status</th></tr></thead>
             <tbody>
-              {hoursList.slice(0, limit).map((r) => {
+              {logged !== null && hoursList.slice(0, limit).map((r) => {
                 const got = logged?.[r.id] || 0;
                 const need = Number(r.labor_hours) || 0;
+                // the box shows what is being typed, then the saved figure
+                const draft = hoursDraft[r.id];
+                const commit = (v: string) => {
+                  setHoursDraft((p) => { const n = { ...p }; delete n[r.id]; return n; });
+                  const n = parseNum(v);
+                  if (!readOnly && n !== need) toggle(r, { labor_hours: n });
+                };
                 return (
                   <tr key={r.id} className="border-b border-rulesoft">
                     <td className="p-2.5 font-mono text-xs">{r.rel_number}</td>
-                    <td className="p-2.5">{r.location}<div className="max-w-[220px] truncate text-[11px] text-inksoft">{r.buildings}</div>{(r.labor_breakdown || []).length > 0 && <div className="max-w-[220px] truncate text-[11px] text-inksoft">{(r.labor_breakdown || []).map((b) => `${b.cls} ${b.hours}h`).join(" · ")}</div>}</td>
+                    <td className="p-2.5">{r.location}<div className="max-w-[220px] truncate text-[12px] text-inksoft">{r.buildings}</div>{(r.labor_breakdown || []).length > 0 && <div className="max-w-[220px] truncate text-[12px] text-inksoft">{(r.labor_breakdown || []).map((b) => `${b.cls} ${b.hours}h`).join(" · ")}</div>}</td>
                     <td className="p-2.5 text-right">
-                      <input className="w-20 rounded-sm border border-rulesoft p-1.5 text-right font-mono" inputMode="decimal" defaultValue={need || ""} placeholder="0" readOnly={readOnly}
-                        onBlur={(e) => !readOnly && toggle(r, { labor_hours: parseNum(e.target.value) })} />
+                      <input className="field w-24 py-2 text-right font-mono" inputMode="decimal" placeholder="0" readOnly={readOnly} aria-label={`Required hours for release ${r.rel_number}`}
+                        value={draft ?? (need || "")}
+                        onChange={(e) => setHoursDraft((p) => ({ ...p, [r.id]: e.target.value }))}
+                        onBlur={(e) => commit(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} />
                     </td>
                     <td className="p-2.5 text-right font-mono">{got}</td>
                     <td className="p-2.5 text-center">
-                      {need === 0 ? <Stamp label="SET HRS" tone="mute" /> : got >= need ? <Stamp label="OK" tone="ok" /> : <Stamp label={`SHORT ${need - got}`} tone="alert" />}
+                      {need === 0 ? <Stamp label="SET HOURS" tone="mute" /> : got >= need ? <Stamp label="HOURS OK" tone="ok" /> : <Stamp label={`SHORT ${need - got}H`} tone="alert" />}
                     </td>
                   </tr>
                 );
               })}
-              {logged === null && <tr><td colSpan={5} className="p-4 text-inksoft">Loading payroll…</td></tr>}
-              {logged !== null && live.filter((r) => Number(r.labor_hours) > 0 || (logged?.[r.id] || 0) > 0).length === 0 && (
-                <tr><td colSpan={5} className="p-4 text-inksoft">No releases with hours yet. Set required hours here (or import a sheet with an Hours column), and link payroll entries to releases in the Payroll tab.</td></tr>
-              )}
+              {logged === null && [0, 1, 2].map((i) => (
+                /* the table's shape, shimmering, while the hours come in */
+                <tr key={`hk${i}`} className="border-b border-rulesoft">
+                  <td className="p-2.5"><div className="skeleton h-4 w-10" /></td>
+                  <td className="p-2.5"><div className="skeleton h-4 w-40" /></td>
+                  <td className="p-2.5"><div className="skeleton ml-auto h-4 w-16" /></td>
+                  <td className="p-2.5"><div className="skeleton ml-auto h-4 w-10" /></td>
+                  <td className="p-2.5"><div className="skeleton mx-auto h-4 w-20" /></td>
+                </tr>
+              ))}
+              {logged === null && <tr><td colSpan={5} className="sr-only">Loading hours…</td></tr>}
             </tbody>
           </table>
         </div>
-      )}
+      ) : (
+        <div className="empty">
+          {dq && live.some((r) => Number(r.labor_hours) > 0 || (logged?.[r.id] || 0) > 0)
+            ? `Nothing matches “${dq}”.`
+            : "No releases with hours yet. Type the required hours here, then link each worker's hours to a release on the Payroll tab."}
+        </div>
+      ))}
       {filter !== "hours" && <div className="card divide-y divide-rulesoft">
-        {shown.map((r) => {
+        {loaded && shown.map((r) => {
           const att = (r.attachments || []).length;
           return (
-            <div key={r.id} className={`flex items-start gap-3 p-3 ${r.canceled ? "opacity-50" : ""}`}>
+            <div key={r.id} className={`anim-fade flex items-start gap-3 p-3 ${r.canceled ? "opacity-50" : ""}`}>
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="font-mono text-[13px] font-semibold">#{r.rel_number}</span>
@@ -2218,7 +2298,7 @@ export default function Releases() {
                 </div>
                 <div className={`text-sm ${r.canceled ? "line-through" : ""}`}>
                   {r.location}
-                  <div className="truncate text-[11px] text-inksoft">{r.buildings}{r.ticket ? ` · ${r.ticket}` : ""}</div>
+                  <div className="truncate text-[12px] text-inksoft">{r.buildings}{r.ticket ? ` · ${r.ticket}` : ""}</div>
                 </div>
                 {!r.canceled && (() => {
                   const stages = pipeline(r);
@@ -2227,54 +2307,51 @@ export default function Releases() {
                   const need = Number(r.labor_hours) || 0;
                   return (
                     <div className="mt-1 flex flex-wrap items-center gap-1">
+                      {/* a stage that is done folds to a ✓ on a phone; the words come back on a desk */}
                       {stages.map(([l, done], i) => (
-                        <span key={l} title={l} className={`chip rounded-[2px] border px-1 py-px font-semibold ${
+                        <span key={l} className={`chip-outline ${
                           done ? "border-ok bg-ok/10 text-ok" : i === current ? "border-work text-work" : "border-rulesoft text-rule"
-                        }`}>{l}</span>
+                        }`}>{done ? <><span aria-hidden className="sm:hidden">✓</span><span className="sr-only sm:hidden">{l} done</span><span className="hidden sm:inline">{l} ✓</span></> : l}</span>
                       ))}
                       {(need > 0 || got > 0) && (
                         <span className={`chip ml-1 ${need > 0 && got >= need ? "text-ok" : "text-work"}`}
-                          title="Payroll hours logged vs the release minimum — live from the Payroll tab">
+                          title="Hours logged on the Payroll tab vs. the release minimum">
                           {got}{need > 0 ? `/${need}` : ""}h{need > 0 && got >= need ? " ✓" : ""}
                         </span>
                       )}
                       {att > 0 && <span className="chip ml-1 text-inksoft" title="Attached documents">📎 {att}</span>}
                       {relCounts[String(r.rel_number).trim()] > 1 && (
-                        <span className="chip ml-1 rounded-[2px] border border-alert px-1 py-px font-semibold text-alert" title="This release number appears more than once on this contract — cancel or delete the extra copy">DUPLICATE</span>
+                        <span className="chip-outline ml-1 border-alert text-alert" title="This release number appears twice on this contract. Use Fix duplicates (Tools), or cancel the extra copy.">DUPLICATE</span>
                       )}
                     </div>
                   );
                 })()}
               </div>
-              <div className="flex shrink-0 items-start gap-2">
-                {!r.canceled && (
-                  <div className="flex flex-col items-center gap-0.5">
-                    <span className="text-[11px] uppercase tracking-widest text-inksoft">Payroll</span>
-                    {readOnly ? <Stamp label={r.payroll_done ? "DONE" : "TO DO"} tone={r.payroll_done ? "ok" : "alert"} /> :
-                      <button className="btn-stamp" onClick={() => togglePayroll(r)}><Stamp label={r.payroll_done ? "DONE" : "TO DO"} tone={r.payroll_done ? "ok" : "alert"} /></button>}
-                  </div>
-                )}
-                <div className="flex flex-col items-center gap-0.5">
-                  {!r.canceled && <span className="text-[11px] uppercase tracking-widest text-inksoft">Received</span>}
-                  {r.canceled ? <Stamp label="CANCELED" tone="mute" /> : readOnly ? <Stamp label={r.received ? "YES" : "NO"} tone={r.received ? "ok" : "work"} /> :
-                    <button className="btn-stamp" onClick={() => {
-                      if (r.received && !window.confirm(`Release ${r.rel_number} is marked received${r.paid_date ? ` (paid ${prettyDate(r.paid_date)})` : ""} — switch it back to NOT received? The paid date is cleared.`)) return;
+              <div className="flex shrink-0 items-start gap-1">
+                {/* the two stamps stack on a phone so the release's words keep their room; side by side on a desk */}
+                <div className="flex flex-col items-end gap-0.5 sm:flex-row sm:items-center sm:gap-1.5">
+                  {!r.canceled && (readOnly
+                    ? <Stamp label={r.payroll_done ? "PAYROLL DONE" : "PAYROLL TO DO"} tone={r.payroll_done ? "ok" : "alert"} />
+                    : <button type="button" className="btn-stamp" onClick={() => togglePayroll(r)}><Stamp label={r.payroll_done ? "PAYROLL DONE" : "PAYROLL TO DO"} tone={r.payroll_done ? "ok" : "alert"} /></button>)}
+                  {r.canceled ? <Stamp label="CANCELED" tone="mute" /> : readOnly ? <Stamp label={r.received ? "RECEIVED" : "NOT RECEIVED"} tone={r.received ? "ok" : "work"} /> :
+                    <button type="button" className="btn-stamp" onClick={() => {
+                      if (r.received && !window.confirm(`Release ${r.rel_number} is marked received${r.paid_date ? ` (paid ${prettyDate(r.paid_date)})` : ""}. Mark it not received? The paid date will be cleared.`)) return;
                       toggle(r, { received: !r.received, paid_date: !r.received ? localISO() : null });
-                    }}><Stamp label={r.received ? "YES" : "NO"} tone={r.received ? "ok" : "work"} /></button>}
+                    }}><Stamp label={r.received ? "RECEIVED" : "NOT RECEIVED"} tone={r.received ? "ok" : "work"} /></button>}
                 </div>
                 <RowActions items={[
+                  { label: att > 0 ? `Documents · ${att}` : "Documents", onSelect: () => setAttachRel(r) },
                   { label: "Line items", hidden: r.canceled || readOnly, title: "Edit this release's line items", onSelect: () => openItems(r) },
                   { label: "Invoice", hidden: r.canceled || !sosReady.has(r.id), title: "Make the NYCHA invoice", onSelect: () => genInvoice(r) },
                   { label: "SOS form", hidden: r.canceled || !sosReady.has(r.id), title: "Make the Statement of Services form", onSelect: () => genSOS(r) },
-                  { label: att > 0 ? `Documents (📎 ${att})` : "Documents", onSelect: () => setAttachRel(r) },
                   { label: "Restore", glyph: "↺", hidden: readOnly || !r.canceled, onSelect: () => toggle(r, { canceled: false }) },
-                  { label: "Cancel release…", destructive: true, hidden: readOnly || r.canceled, confirm: `Cancel release ${r.rel_number}? It moves to the Canceled tab — you can restore it any time.`, onSelect: () => toggle(r, { canceled: true }) },
+                  { label: "Cancel release…", destructive: true, hidden: readOnly || r.canceled, confirm: `Cancel release ${r.rel_number}? It moves to the Canceled list. You can restore it any time.`, onSelect: () => toggle(r, { canceled: true }) },
                 ]} />
               </div>
             </div>
           );
         })}
-        {shown.length === 0 && busy && [0, 1, 2, 3, 4].map((i) => (
+        {!loaded && [0, 1, 2].map((i) => (
           /* the list's shape, shimmering, while the contract loads */
           <div key={`sk${i}`} className="p-3">
             <div className="flex items-center justify-between gap-2">
@@ -2284,49 +2361,45 @@ export default function Releases() {
             <div className="skeleton mt-2 h-4 w-40" />
           </div>
         ))}
-        {shown.length === 0 && !busy && (
-          <div className="p-4 text-sm text-inksoft">{contracts.length === 0 ? "Import a contract sheet to get started — it reads your columns as-is." : "Nothing matches. If this is the chase list — that's the goal."}</div>
+        {loaded && shown.length === 0 && (
+          <div className="p-3"><div className="empty anim-fade">{emptyText()}</div></div>
         )}
       </div>}
       {filter !== "hours" && list.length > limit && (
-        <div className="mt-3 text-center"><button className="btn btn-ghost" onClick={() => setLimit(limit + 200)}>Show more ({list.length - limit} left)</button></div>
+        <div className="mt-3 text-center"><button type="button" className="btn btn-ghost" onClick={() => setLimit(limit + 200)}>Show more ({list.length - limit} left)</button></div>
       )}
       {filter === "hours" && hoursList.length > limit && (
-        <div className="mt-3 text-center"><button className="btn btn-ghost" onClick={() => setLimit(limit + 200)}>Show more ({hoursList.length - limit} left)</button></div>
+        <div className="mt-3 text-center"><button type="button" className="btn btn-ghost" onClick={() => setLimit(limit + 200)}>Show more ({hoursList.length - limit} left)</button></div>
       )}
-      {busy && <div className="mt-3 text-sm text-inksoft">Working…</div>}
 
 
       {/* ---------- attachments panel ---------- */}
       {attachRel && (
         <Modal title={`Documents · Release ${attachRel.rel_number}`} onClose={() => setAttachRel(null)}
-          footer={!readOnly ? (
-            <CardToolbar
-              primary={<button className="btn btn-primary" onClick={() => photoInputRef.current?.click()} disabled={busy}>📷 Take photo</button>}
-              secondary={<button className="btn btn-ghost" onClick={() => attachInputRef.current?.click()} disabled={busy}>Upload file</button>} />
-          ) : undefined}>
-          {(attachRel.attachments || []).length === 0 && <div className="mb-3 text-sm text-inksoft">Nothing attached yet. Release PDFs and proposal sheets imported with “+ From PDF” attach themselves automatically — and job photos land here too.</div>}
+          primary={!readOnly ? <button type="button" className="btn btn-primary" onClick={() => photoInputRef.current?.click()} disabled={busy}>📷 Take photo</button> : undefined}
+          secondary={!readOnly ? <button type="button" className="btn btn-ghost" onClick={() => attachInputRef.current?.click()} disabled={busy}>Upload file</button> : undefined}>
+          {(attachRel.attachments || []).length === 0 && <div className="empty mb-3">Nothing attached yet. Release PDFs and walk sheets added from + Add release land here by themselves, and so do job photos.</div>}
           {(attachRel.attachments || []).filter((a) => isImg(a.name)).length > 0 && (
             <div className="mb-3 grid grid-cols-3 gap-1.5">
               {(attachRel.attachments || []).filter((a) => isImg(a.name)).map((a) => (
                 <div key={a.path} className="relative">
-                  <button className="block w-full" onClick={() => openAttachment(a.path)} title={a.name}>
+                  <button type="button" className="block w-full active:opacity-80" onClick={() => openAttachment(a.path)} aria-label={`Open ${a.name}`}>
                     {photoUrls[a.path]
                       // eslint-disable-next-line @next/next/no-img-element
-                      ? <img src={photoUrls[a.path]} alt={a.name} className="h-24 w-full rounded-sm border border-rulesoft object-cover" />
-                      : <div className="grid h-24 w-full place-items-center rounded-sm border border-rulesoft text-xs text-inksoft">…</div>}
+                      ? <img src={photoUrls[a.path]} alt={a.name} className="anim-fade h-24 w-full rounded-sm border border-rulesoft object-cover" />
+                      : <div className="skeleton h-24 w-full" />}
                   </button>
-                  {!readOnly && <button className="absolute right-1 top-1 rounded-sm bg-ink/70 px-1.5 text-xs text-paper" title="Delete photo" onClick={() => removeAttachment(attachRel, a.path)}>✕</button>}
+                  {!readOnly && <button type="button" className="btn-icon absolute right-1 top-1 border-0 bg-ink/70 text-paper shadow-none" aria-label="Delete photo" onClick={() => removeAttachment(attachRel, a)}>✕</button>}
                 </div>
               ))}
             </div>
           )}
           {(attachRel.attachments || []).filter((a) => !isImg(a.name)).map((a) => (
             <div key={a.path} className="mb-1.5 flex items-center gap-1">
-              <button className="block w-full rounded-sm border border-rulesoft p-2.5 text-left text-sm hover:border-work" onClick={() => openAttachment(a.path)}>
+              <button type="button" className="row-btn flex-1 rounded-sm border border-rulesoft p-2.5 text-sm hover:border-work active:border-work" onClick={() => openAttachment(a.path)}>
                 📄 {a.name}
               </button>
-              {!readOnly && <button className="shrink-0 px-1 text-xs text-alert" title="Delete file" onClick={() => removeAttachment(attachRel, a.path)}>✕</button>}
+              {!readOnly && <button type="button" className="btn-icon border-0 shadow-none text-alert" aria-label="Delete file" onClick={() => removeAttachment(attachRel, a)}>✕</button>}
             </div>
           ))}
         </Modal>
@@ -2354,8 +2427,8 @@ export default function Releases() {
         };
         const lineTable = (list: "labor" | "materials", title: string, note: string) => (
           <div className="mt-3">
-            <div className="text-[11px] font-semibold uppercase tracking-widest text-inksoft">{title}</div>
-            {note && <div className="mb-1 text-[11px] italic text-inksoft">{note}</div>}
+            <div className="section-label">{title}</div>
+            {note && <div className="mb-1 text-[12px] italic text-inksoft">{note}</div>}
             <div className="overflow-x-auto">
               <table className="w-full border-collapse" style={{ minWidth: 520 }}>
                 <thead><tr className="text-left text-[11px] uppercase tracking-widest text-inksoft">
@@ -2363,11 +2436,11 @@ export default function Releases() {
                 <tbody>
                   {d[list].map((l, i) => (
                     <tr key={i}>
-                      <td className="p-0.5"><input className="field px-2 py-1.5 text-[13px]" value={l.describe} onChange={(e) => setL(list, i, "describe", e.target.value)} /></td>
-                      <td className="p-0.5"><input className="field w-16 px-1.5 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" value={l.qty} onChange={(e) => setL(list, i, "qty", e.target.value)} /></td>
-                      <td className="p-0.5"><input className="field w-16 px-1.5 py-1.5 text-center font-mono text-[13px]" value={l.uom} onChange={(e) => setL(list, i, "uom", e.target.value)} /></td>
-                      <td className="p-0.5"><input className="field w-24 px-1.5 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" value={l.rate} onChange={(e) => setL(list, i, "rate", e.target.value)} /></td>
-                      <td className="p-0.5"><input className="field w-24 px-1.5 py-1.5 text-right font-mono text-[13px]" inputMode="decimal" value={l.total} onChange={(e) => setL(list, i, "total", e.target.value)} /></td>
+                      <td className="p-0.5"><input className="field px-2 py-1.5 text-[13px]" aria-label={`${title} line ${i + 1} description`} value={l.describe} onChange={(e) => setL(list, i, "describe", e.target.value)} /></td>
+                      <td className="p-0.5"><input className="field w-16 px-1.5 py-1.5 text-right font-mono text-[13px]" aria-label={`Line ${i + 1} qty`} inputMode="decimal" value={l.qty} onChange={(e) => setL(list, i, "qty", e.target.value)} /></td>
+                      <td className="p-0.5"><input className="field w-16 px-1.5 py-1.5 text-center font-mono text-[13px]" aria-label={`Line ${i + 1} UOM`} autoCapitalize="characters" spellCheck={false} value={l.uom} onChange={(e) => setL(list, i, "uom", e.target.value)} /></td>
+                      <td className="p-0.5"><input className="field w-24 px-1.5 py-1.5 text-right font-mono text-[13px]" aria-label={`Line ${i + 1} unit price`} inputMode="decimal" value={l.rate} onChange={(e) => setL(list, i, "rate", e.target.value)} /></td>
+                      <td className="p-0.5"><input className="field w-24 px-1.5 py-1.5 text-right font-mono text-[13px]" aria-label={`Line ${i + 1} total`} inputMode="decimal" value={l.total} onChange={(e) => setL(list, i, "total", e.target.value)} /></td>
                     </tr>
                   ))}
                 </tbody>
@@ -2376,99 +2449,92 @@ export default function Releases() {
           </div>
         );
         return (
-          <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
-            <div className="mx-auto max-w-3xl rounded-sm border-t-4 border-ink bg-white p-5 text-ink">
-              <div className="font-display text-lg font-bold uppercase">NYCHA Statement of Services</div>
-              <div className="mb-3 text-[12px] text-inksoft">This fills the official NYCHA form (042.726) exactly as filed — check the numbers, describe the work, download, sign, send.</div>
-              <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
-                {([["poRelease", "PO Number / Release #"], ["workOrder", "Work Order #"], ["dateOfServices", "Date of services (M/D/YY)"]] as [keyof SosData, string][]).map(([k, l]) => (
-                  <label key={k} className="block"><span className="text-[11px] uppercase tracking-widest text-inksoft">{l}</span>
-                    <input className="field px-2 py-2 text-sm" value={String(d[k] ?? "")} onChange={(e) => set({ [k]: e.target.value } as Partial<SosData>)} /></label>
-                ))}
-              </div>
-              <label className="mt-2 block"><span className="text-[11px] uppercase tracking-widest text-inksoft">Services performed — describe the work</span>
-                <textarea className="field min-h-[70px] px-2 py-2 text-sm" placeholder="e.g. Repair apartment and basement doors and all related accessories"
-                  value={d.description} onChange={(e) => set({ description: e.target.value })} /></label>
-              {lineTable("labor", "Itemized labor (include all titles used)", "Prefilled from this release's contract line items — the form fits 7 lines.")}
-              {lineTable("materials", "Itemized list of materials", "")}
-              <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-3">
-                {([["overhead", "Overhead $"], ["profit", "Profit $"], ["totalCost", "Total cost $"], ["vendorNameTitle", "Vendor name & title"], ["dateSigned", "Date signed (M/D/YY)"]] as [keyof SosData, string][]).map(([k, l]) => (
-                  <label key={k} className="block"><span className="text-[11px] uppercase tracking-widest text-inksoft">{l}</span>
-                    <input className="field px-2 py-2 text-sm" value={String(d[k] ?? "")} onChange={(e) => set({ [k]: e.target.value } as Partial<SosData>)} /></label>
-                ))}
-              </div>
-              <div className="mt-4 flex flex-wrap justify-end gap-2">
-                <button className="btn btn-primary" onClick={async () => {
-                  const fname = askFileName(`${sosEdit.fileBase}.pdf`);
-                  if (!fname) return;
-                  try { await downloadSosPdf(d, fname); flash("Official SOS form downloaded — ready to sign and send"); }
-                  catch { flash("Couldn't build the form — check your signal and try again"); }
-                }}>⬇ SOS form</button>
-                <button className="btn btn-ghost" onClick={() => setSosEdit(null)}>Close</button>
-              </div>
+          <Modal wide title="NYCHA Statement of Services" onClose={() => setSosEdit(null)}
+            primary={<button type="button" className="btn btn-primary" onClick={async () => {
+              const fname = askFileName(`${sosEdit.fileBase}.pdf`);
+              if (!fname) return;
+              try { await downloadSosPdf(d, fname); flash("SOS form downloaded, ready to sign and send"); }
+              catch { flash("Couldn't build the form. Check your signal and try again"); }
+            }}>⬇ SOS form (PDF)</button>}
+            secondary={<button type="button" className="btn btn-ghost" onClick={() => setSosEdit(null)}>Cancel</button>}>
+            <div className="mb-3 text-[12px] text-inksoft">Fills the official NYCHA form 042.726. Check the numbers, describe the work, then download, sign and send.</div>
+            <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+              {([["poRelease", "PO Number / Release #"], ["workOrder", "Work Order #"], ["dateOfServices", "Date of services (M/D/YY)"]] as [keyof SosData, string][]).map(([k, l]) => (
+                <label key={k} className="block"><span className="section-label">{l}</span>
+                  <input className="field px-2 py-2 text-sm" value={String(d[k] ?? "")} onChange={(e) => set({ [k]: e.target.value } as Partial<SosData>)} /></label>
+              ))}
             </div>
-          </div>
+            <label className="mt-2 block"><span className="section-label">Services performed (describe the work)</span>
+              <textarea className="field min-h-[70px] px-2 py-2 text-sm" placeholder="e.g. Repair apartment and basement doors and all related accessories"
+                value={d.description} onChange={(e) => set({ description: e.target.value })} /></label>
+            {lineTable("labor", "Itemized labor (include all titles used)", "Prefilled from this release's line items. The form fits 7 lines.")}
+            {lineTable("materials", "Itemized list of materials", "")}
+            <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-3">
+              {([["overhead", "Overhead $"], ["profit", "Profit $"], ["totalCost", "Total cost $"], ["vendorNameTitle", "Vendor name & title"], ["dateSigned", "Date signed (M/D/YY)"]] as [keyof SosData, string][]).map(([k, l]) => (
+                <label key={k} className="block"><span className="section-label">{l}</span>
+                  <input className="field px-2 py-2 text-sm" value={String(d[k] ?? "")} onChange={(e) => set({ [k]: e.target.value } as Partial<SosData>)} /></label>
+              ))}
+            </div>
+          </Modal>
         );
       })()}
 
       {itemsRel && (() => {
-        const COLS = "56px 96px minmax(170px,1fr) 60px 72px 88px 88px 22px";
+        const COLS = "56px 96px minmax(170px,1fr) 60px 72px 88px 88px 44px";
         const setIt = (i: number, patch: Partial<RelItemRow>) =>
           setRelItems((prev) => (prev ? prev.map((x, j) => (j === i ? { ...x, ...patch } : x)) : prev));
         return (
-          <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-6">
-            <div className="card mx-auto max-w-4xl border-work bg-card p-4">
-              <div className="mb-1 font-display text-lg font-bold uppercase">Line items · Release #{itemsRel.rel_number}</div>
-              <div className="mb-3 text-[13px] text-inksoft">
-                {itemsRel.location} — these lines feed the SOS form and the invoice.
-                {stageData.walks.has(String(itemsRel.rel_number).trim()) ? " Note: a walk sheet is linked to this release number, and walk-sheet quantities win on documents." : ""}
-              </div>
-              {relItems === null ? <div className="p-4 text-sm text-inksoft">Loading…</div> : (
-                <>
-                  <div className="overflow-x-auto">
-                    <div className="min-w-[680px]">
-                      <div className="mb-1 grid gap-1.5 text-[11px] font-semibold uppercase tracking-widest text-inksoft" style={{ gridTemplateColumns: COLS }}>
-                        <span>Line</span><span>Item code</span><span>Description of work</span><span>UOM</span>
-                        <span className="text-right">Qty</span><span className="text-right">Price</span><span className="text-right">Total</span><span />
-                      </div>
-                      {relItems.map((it, i) => (
-                        <div key={i} className="mb-1.5 grid items-center gap-1.5" style={{ gridTemplateColumns: COLS }}>
-                          <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="numeric" value={it.line || ""}
-                            onChange={(e) => setIt(i, { line: parseNum(e.target.value) })} />
-                          <input className="field px-1.5 py-1.5 font-mono" value={it.code}
-                            onChange={(e) => setIt(i, { code: e.target.value })} />
-                          <input className="field" placeholder="What the line is for" value={it.description}
-                            onChange={(e) => setIt(i, { description: e.target.value })} />
-                          <input className="field px-1 py-1.5 text-center font-mono" value={it.uom}
-                            onChange={(e) => setIt(i, { uom: e.target.value })} />
-                          <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="decimal"
-                            {...numBuf(`ri:${i}:q`, it.qty, (n) => setIt(i, { qty: n }))} />
-                          <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="decimal"
-                            {...numBuf(`ri:${i}:p`, it.unit_price, (n) => setIt(i, { unit_price: n }))} />
-                          <span className="text-right font-mono text-[12px]">{fmt(it.qty * it.unit_price)}</span>
-                          <button className="text-alert" title="Remove line" onClick={() => setRelItems((prev) => (prev ? prev.filter((_, j) => j !== i) : prev))}>✕</button>
-                        </div>
-                      ))}
-                      {relItems.length === 0 && <div className="p-3 text-sm text-inksoft">No line items yet — add them below and the SOS/Invoice buttons light up for this release.</div>}
-                    </div>
-                  </div>
-                  <button className="btn btn-ghost mt-1 px-3 py-1.5 text-[13px]"
-                    onClick={() => setRelItems((prev) => [...(prev || []), { line: (prev || []).reduce((m, x) => Math.max(m, x.line), 0) + 1, code: "", description: "", qty: 1, uom: "EA", unit_price: 0 }])}>+ Add line</button>
-                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-mono text-sm font-semibold">Total {fmt(relItems.reduce((s, it) => s + it.qty * it.unit_price, 0))}</span>
-                    <div className="flex gap-2">
-                      <button className="btn btn-primary" onClick={saveItems} disabled={busy}>Save & close</button>
-                      <button className="btn btn-ghost" onClick={() => { setItemsRel(null); setRelItems(null); }}>Cancel</button>
-                    </div>
-                  </div>
-                </>
-              )}
+          <Modal wide title={`Line items · Release #${itemsRel.rel_number}`} onClose={() => { setItemsRel(null); setRelItems(null); }}
+            primary={<button type="button" className="btn btn-primary" onClick={saveItems} disabled={busy || relItems === null}>Done</button>}
+            secondary={<button type="button" className="btn btn-ghost" onClick={() => { setItemsRel(null); setRelItems(null); }}>Cancel</button>}>
+            <div className="mb-3 text-[13px] text-inksoft">
+              {itemsRel.location ? `${itemsRel.location} · ` : ""}these lines feed the SOS form and the invoice.
+              {stageData.walks.has(String(itemsRel.rel_number).trim()) ? " A walk sheet is linked to this release; its quantities are what the documents use." : ""}
             </div>
-          </div>
+            {relItems === null ? (
+              <div aria-busy="true">
+                {[0, 1, 2].map((i) => <div key={`lk${i}`} className="skeleton mb-1.5 h-11 w-full" />)}
+                <span className="sr-only">Loading line items…</span>
+              </div>
+            ) : (
+              <div className="anim-fade">
+                <div className="overflow-x-auto">
+                  <div className="min-w-[680px]">
+                    <div className="mb-1 grid gap-1.5 text-[11px] font-semibold uppercase tracking-widest text-inksoft" style={{ gridTemplateColumns: COLS }}>
+                      <span>Line</span><span>Code</span><span>Description of work</span><span>UOM</span>
+                      <span className="text-right">Qty</span><span className="text-right">Price</span><span className="text-right">Total</span><span />
+                    </div>
+                    {relItems.map((it, i) => (
+                      <div key={it.uid} className="anim-row mb-1.5 grid items-center gap-1.5" style={{ gridTemplateColumns: COLS }}>
+                        <input className="field px-1.5 py-1.5 text-right font-mono" aria-label={`Line ${i + 1} number`} inputMode="numeric" value={it.line || ""}
+                          onChange={(e) => setIt(i, { line: parseNum(e.target.value) })} />
+                        <input className="field px-1.5 py-1.5 font-mono" aria-label={`Line ${i + 1} code`} value={it.code}
+                          onChange={(e) => setIt(i, { code: e.target.value })} />
+                        <input className="field" aria-label={`Line ${i + 1} description`} placeholder="What the line is for" value={it.description}
+                          onChange={(e) => setIt(i, { description: e.target.value })} />
+                        <input className="field px-1 py-1.5 text-center font-mono" aria-label={`Line ${i + 1} UOM`} autoCapitalize="characters" spellCheck={false} value={it.uom}
+                          onChange={(e) => setIt(i, { uom: e.target.value })} />
+                        <input className="field px-1.5 py-1.5 text-right font-mono" aria-label={`Line ${i + 1} qty`} inputMode="decimal"
+                          {...numBuf(`ri:${it.uid}:q`, it.qty, (n) => setIt(i, { qty: n }))} />
+                        <input className="field px-1.5 py-1.5 text-right font-mono" aria-label={`Line ${i + 1} price`} inputMode="decimal"
+                          {...numBuf(`ri:${it.uid}:p`, it.unit_price, (n) => setIt(i, { unit_price: n }))} />
+                        <span className="text-right font-mono text-[12px]">{fmt(it.qty * it.unit_price)}</span>
+                        <button type="button" className="btn-icon border-0 shadow-none text-alert" aria-label="Remove line" onClick={() => setRelItems((prev) => (prev ? prev.filter((_, j) => j !== i) : prev))}>✕</button>
+                      </div>
+                    ))}
+                    {relItems.length === 0 && <div className="empty">No line items yet. Add them below and Invoice and SOS form appear in this release&apos;s menu.</div>}
+                  </div>
+                </div>
+                <button type="button" className="btn btn-ghost btn-sm mt-1"
+                  onClick={() => setRelItems((prev) => [...(prev || []), { uid: `new${Date.now()}`, line: (prev || []).reduce((m, x) => Math.max(m, x.line), 0) + 1, code: "", description: "", qty: 1, uom: "EA", unit_price: 0 }])}>+ Add line</button>
+                <div className="mt-3 font-mono text-sm font-semibold">Total {fmt(relItems.reduce((s, it) => s + it.qty * it.unit_price, 0))}</div>
+              </div>
+            )}
+          </Modal>
         );
       })()}
 
-      {msg && <div className="fixed bottom-5 left-1/2 z-[60] -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
+      <Toast msg={msg} progress={progress} action={action} onDismiss={dismiss} />
     </div>
   );
 }

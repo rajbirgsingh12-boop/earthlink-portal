@@ -19,6 +19,10 @@ import NychaInvoicePrint, { invoiceFileBase } from "@/components/NychaInvoicePri
 import { gatherReleaseDoc, buildInvoiceXlsx, buildInvoiceBytes, buildInvoicePdfBytes, type DocRow } from "@/lib/releaseDoc";
 import { PKG_SLOTS, type PkgSlot, listPkgOverrides, uploadPkgOverride, removePkgOverride, buildPackagePdf, downloadPdf } from "@/lib/packageDocs";
 import PrintShell from "@/components/PrintShell";
+import Toast, { useFlash } from "@/components/Toast";
+
+// the aging buckets: the keys stay short, the words a person reads say "to"
+const BUCKET_LABEL: Record<string, string> = { "0-30": "0 to 30 days", "31-60": "31 to 60 days", "61-90": "61 to 90 days", "90+": "90+ days" };
 
 export default function InvoicePackage() {
   const [contracts, setContracts] = useState<Contract[]>([]);
@@ -31,8 +35,9 @@ export default function InvoicePackage() {
   const [reloadTick, setReloadTick] = useState(0);
   const [booted, setBooted] = useState(false); // first fetch finished?
   const [stubs, setStubs] = useState<Release[]>([]); // open releases with no release data yet
-  const [msg, setMsg] = useState("");
-  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3000); };
+  // which contract the rows on screen belong to: until it is the one picked, the statement is loading
+  const [rowsFor, setRowsFor] = useState("");
+  const { msg, flash, progress, setProgress } = useFlash();
   // the accountant can read everything here but the database won't accept their
   // writes — keep the dates view-only for them instead of edits that don't save
   const [role, setRole] = useState("");
@@ -42,7 +47,7 @@ export default function InvoicePackage() {
   const genInvoice = async (r: Release) => {
     const c = contracts.find((x) => x.id === sel);
     const d = await gatherReleaseDoc(sel, r);
-    if (d.rows.length === 0) { flash(`Release ${r.rel_number} has no line items yet — import its release PDF or fill a walk sheet first`); return; }
+    if (d.rows.length === 0) { flash(`Release ${r.rel_number} has no line items yet. Import its release PDF or fill a walk sheet first`); return; }
     if (!r.invoice_sent && !readOnly) {
       await sb().from("releases").update({ invoice_sent: today }).eq("id", r.id);
       setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: today } : x)));
@@ -92,6 +97,7 @@ export default function InvoicePackage() {
   // live: releases, their items and walk sheets refresh the statement
   useLive(["releases", "release_items", "proposals", "contracts"], () => setReloadTick((t) => t + 1), { enabled: !!sel });
 
+  const selRef = useRef(sel); selRef.current = sel;
   useEffect(() => {
     if (!sel) { setRows([]); setStubs([]); return; }
     (async () => {
@@ -136,15 +142,18 @@ export default function InvoicePackage() {
       );
       const connected = all.filter((r) => ready.has(r.id) || walkNums.has(relNorm(r.rel_number)));
       connected.sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
+      if (sel !== selRef.current) return; // another contract was picked while this one loaded
       setRows(connected);
-      // open money the statement can't show yet — so "all square" is never a lie
+      // open money the statement can't show yet, so "all square" is never a lie
       setStubs(all.filter((r) => !ready.has(r.id) && !walkNums.has(relNorm(r.rel_number))));
+      setRowsFor(sel);
     })();
   }, [sel, reloadTick]);
+  const rowsLoaded = rowsFor === sel;
 
   const contract = contracts.find((c) => c.id === sel);
   const days = (r: Release) => (r.invoice_sent ? Math.max(0, Math.floor((new Date(today + "T00:00:00").getTime() - new Date(r.invoice_sent + "T00:00:00").getTime()) / 86400000)) : null);
-  const buckets: [string, number][] = [["0–30", 0], ["31–60", 0], ["61–90", 0], ["90+", 0]];
+  const buckets: [string, number][] = [["0-30", 0], ["31-60", 0], ["61-90", 0], ["90+", 0]];
   let notInvoiced = 0;
   rows.forEach((r) => {
     const d = days(r); const v = Number(r.amount);
@@ -154,6 +163,7 @@ export default function InvoicePackage() {
   const total = rows.reduce((s, r) => s + Number(r.amount), 0);
   // release-number order, everywhere on this page
   const sorted = [...rows].sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
+  const shownRows = sorted.filter((r) => matches(tq, r.rel_number, r.location, r.buildings));
 
   // ---- the invoice package: invoice + affidavit + REP + hiring + EO in one zip ----
   const [pkgBusy, setPkgBusy] = useState(""); // release id being packaged
@@ -171,8 +181,8 @@ export default function InvoicePackage() {
     setPkgBusy(r.id);
     try {
       const d = await gatherReleaseDoc(sel, r);
-      if (d.rows.length === 0) { flash(`Release ${r.rel_number} has no line items yet — import its release PDF or fill a walk sheet first`); setPkgBusy(""); return; }
-      flash("Building the package…");
+      if (d.rows.length === 0) { flash(`Release ${r.rel_number} has no line items yet. Import its release PDF or fill a walk sheet first`); return; }
+      setProgress("Making the package…");
       const invPdf = await buildInvoicePdfBytes({
         org: org || ({} as Org), cNumber: c.number, relNum: r.rel_number, workOrder: r.ticket || "",
         dev: r.location || d.dev, number: `${c.number}-${r.rel_number}`,
@@ -186,12 +196,11 @@ export default function InvoicePackage() {
           await sb().from("releases").update({ invoice_sent: today }).eq("id", r.id);
           setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: today } : x)));
         }
-        flash(`Package for release ${r.rel_number} downloaded — one PDF: invoice + the 4 documents`);
+        flash(`Package for release ${r.rel_number} downloaded: one PDF, invoice + the 4 documents`);
       }
     } catch {
-      flash("Couldn't build the package — check your signal and try again");
-    }
-    setPkgBusy("");
+      flash("Couldn't build the package. Check your signal and try again");
+    } finally { setProgress(""); setPkgBusy(""); }
   };
 
   const pickUpload = (slot: PkgSlot) => { upSlot.current = slot; upRef.current?.click(); };
@@ -200,15 +209,15 @@ export default function InvoicePackage() {
     e.target.value = "";
     if (!f || !slot || !sel) return;
     const err = await uploadPkgOverride(sel, slot, f);
-    if (err) { flash(err); return; }
+    if (err) { flash(`Couldn't save that PDF. Check your signal and try again`); return; }
     setOverrides((prev) => new Set([...prev, slot.file]));
-    flash(`${slot.label} for this contract saved — packages now use your copy`);
+    flash(`${slot.label} for this contract saved. Packages now use your copy`);
   };
   const onRemoveOverride = async (slot: PkgSlot) => {
     if (!sel) return;
     if (!window.confirm(`Go back to the standard ${slot.label}? This contract's uploaded copy is deleted.`)) return;
     const err = await removePkgOverride(sel, slot);
-    if (err) { flash(err); return; }
+    if (err) { flash(`Couldn't remove this contract's copy. Check your signal and try again`); return; }
     setOverrides((prev) => { const n = new Set(prev); n.delete(slot.file); return n; });
     flash(`${slot.label} back to the standard copy`);
   };
@@ -234,9 +243,9 @@ export default function InvoicePackage() {
         files[`package_${contract.number}_rel${r.rel_number}.pdf`] = await buildPackagePdf(sel, contract.number, r.rel_number, invPdf);
         if (!r.invoice_sent) stampIds.push(r.id);
         done += 1;
-        flash(`Making packages… ${done} of ${sorted.length}`);
+        setProgress(`Making packages: ${done} of ${sorted.length}`);
       }
-      if (done === 0) { flash("No releases with line items to package yet"); setAllPkgBusy(false); return; }
+      if (done === 0) { flash("No releases with line items to package yet"); return; }
       const { zipSync } = await import("fflate");
       const zipped = zipSync(files, { level: 1 }); // PDFs barely compress — keep it quick
       const ab = new ArrayBuffer(zipped.byteLength);
@@ -251,12 +260,11 @@ export default function InvoicePackage() {
           await sb().from("releases").update({ invoice_sent: today }).in("id", stampIds);
           setRows((prev) => prev.map((x) => (stampIds.includes(x.id) ? { ...x, invoice_sent: today } : x)));
         }
-        flash(`${done} package${done === 1 ? "" : "s"} downloaded — each one PDF: invoice + the 4 documents`);
+        flash(`${done} package${done === 1 ? "" : "s"} downloaded, one PDF each: invoice + the 4 documents`);
       }
     } catch {
-      flash("Couldn't build the packages — check your signal and try again");
-    }
-    setAllPkgBusy(false);
+      flash("Couldn't build the packages. Check your signal and try again");
+    } finally { setProgress(""); setAllPkgBusy(false); }
   };
 
   // every outstanding release's invoice, regenerated in the template format,
@@ -278,9 +286,9 @@ export default function InvoicePackage() {
         });
         files[`invoice_${contract.number}_rel${r.rel_number}.xlsx`] = bytes;
         done += 1;
-        flash(`Making invoices… ${done} of ${sorted.length}`);
+        setProgress(`Making invoices: ${done} of ${sorted.length}`);
       }
-      if (done === 0) { flash("No releases with line items to invoice yet"); setZipBusy(false); return; }
+      if (done === 0) { flash("No releases with line items to invoice yet"); return; }
       const { zipSync } = await import("fflate");
       const zipped = zipSync(files, { level: 6 });
       const ab = new ArrayBuffer(zipped.byteLength);
@@ -292,16 +300,15 @@ export default function InvoicePackage() {
         const a = document.createElement("a");
         a.href = url; a.download = fname; a.click();
         setTimeout(() => URL.revokeObjectURL(url), 60_000);
-        flash(`${done} invoice${done === 1 ? "" : "s"} downloaded in one zip — all in the template format`);
+        flash(`${done} invoice${done === 1 ? "" : "s"} downloaded in one zip, all in the template format`);
       }
     } catch {
-      flash("Couldn't build the zip — check your signal and try again");
-    }
-    setZipBusy(false);
+      flash("Couldn't build the zip. Check your signal and try again");
+    } finally { setProgress(""); setZipBusy(false); }
   };
 
   const downloadExcel = async () => {
-    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine \u2014 check your signal and try again"); return; }
+    try { await ensureXLSX(); } catch { flash("Couldn't load the Excel engine. Check your signal and try again"); return; }
     if (!contract) return;
     const aoa: (string | number)[][] = [];
     aoa.push(["STATEMENT OF ACCOUNT"]);
@@ -320,7 +327,7 @@ export default function InvoicePackage() {
     const totalRow = aoa.length;
     aoa.push(["", "", "", "", "Total due", total]);
     aoa.push([]);
-    aoa.push(["Aging:", `0–30: ${fmt(buckets[0][1])}`, `31–60: ${fmt(buckets[1][1])}`, `61–90: ${fmt(buckets[2][1])}`, `90+: ${fmt(buckets[3][1])}`, `Not invoiced: ${fmt(notInvoiced)}`]);
+    aoa.push(["Aging:", ...buckets.map(([b, v]) => `${BUCKET_LABEL[b]}: ${fmt(v)}`), `Not invoiced: ${fmt(notInvoiced)}`]);
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws["!cols"] = [{ wch: 12 }, { wch: 30 }, { wch: 40 }, { wch: 16 }, { wch: 12 }, { wch: 16 }];
     ws["!merges"] = [0, 1, 2, 3].map((r) => ({ s: { r, c: 0 }, e: { r, c: 5 } }));
@@ -354,42 +361,67 @@ export default function InvoicePackage() {
     XLSX.writeFile(wb, fname);
   };
 
+  const skeletonRows = (
+    <div className="card">
+      {[0, 1, 2].map((i) => (
+        /* the statement's shape, shimmering, while the contract loads */
+        <div key={`sk${i}`} className="border-b border-rulesoft p-3 last:border-b-0">
+          <div className="flex items-center justify-between gap-2">
+            <div className="skeleton h-4 w-14" />
+            <div className="skeleton h-4 w-20" />
+          </div>
+          <div className="skeleton mt-2 h-3 w-1/2" />
+        </div>
+      ))}
+    </div>
+  );
+  const stubTotal = fmt(stubs.reduce((s, r) => s + Number(r.amount), 0));
+
   return (
     <div>
-      <PageHeader title="Invoice Package" />
-      <div className="mb-3"><ContractPicker contracts={contracts} value={sel} onChange={setSel} /></div>
+      {(allPkgBusy || zipBusy || !!pkgBusy) && <div className="busy-bar" aria-busy="true" aria-label="Working" />}
+      <PageHeader title="Invoice Package" sub="What NYCHA still owes on each contract, with the invoice and package for every release" />
+      {contracts.length > 0 && <div className="mb-3"><ContractPicker contracts={contracts} value={sel} onChange={setSel} /></div>}
       <input ref={upRef} type="file" accept="application/pdf,.pdf" className="hidden" onChange={onUpload} />
       {contract && (
-        <>
-          <input className="field mb-3" placeholder="Search release #, development…" value={tq} onChange={(e) => setTq(e.target.value)} />
+        <div key={sel} className="anim-fade">
+          <input type="search" enterKeyHint="search" autoComplete="off" className="field mb-3" placeholder="Search release #, development…" value={tq} onChange={(e) => setTq(e.target.value)} />
+          {!rowsLoaded ? skeletonRows : sorted.length === 0 ? (
+            <div className="empty">{stubs.length > 0
+              ? `${stubs.length} open release${stubs.length === 1 ? "" : "s"} totaling ${stubTotal} ${stubs.length === 1 ? "is" : "are"} waiting on release data. Import the release PDF or fill a walk sheet to put ${stubs.length === 1 ? "it" : "them"} on the statement.`
+              : `Nothing outstanding on contract ${contract.number}. All square.`}</div>
+          ) : shownRows.length === 0 ? (
+            <div className="empty">Nothing matches that search. Clear the box to see every release.</div>
+          ) : (
           <div className="card overflow-x-auto">
             <table className="w-full border-collapse text-sm" style={{ minWidth: 560 }}>
               <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
-                <th className="p-2.5">Release</th><th className="p-2.5">Location</th><th className="p-2.5">Invoiced</th><th className="p-2.5 text-right">Days out</th><th className="p-2.5 text-right">Balance</th><th className="p-2.5"></th></tr></thead>
+                <th className="p-2.5">Release</th><th className="p-2.5">Development</th><th className="p-2.5">Invoiced</th><th className="p-2.5 text-right">Days out</th><th className="p-2.5 text-right">Balance</th><th className="p-2.5"></th></tr></thead>
               <tbody>
-                {sorted.filter((r) => matches(tq, r.rel_number, r.location, r.buildings)).map((r) => {
+                {shownRows.map((r) => {
                   const d = days(r);
                   return (
                     <tr key={r.id} className="border-b border-rulesoft">
                       <td className="p-2.5 font-mono text-[13px]">{r.rel_number}</td>
-                      <td className="p-2.5">{r.location}<div className="max-w-[220px] truncate text-[11px] text-inksoft">{r.buildings}</div></td>
+                      <td className="p-2.5">{r.location}<div className="max-w-[220px] truncate text-[12px] text-inksoft">{r.buildings}</div></td>
                       <td className="p-2.5">
                         {readOnly
-                          ? <span className="font-mono text-xs">{r.invoice_sent ? prettyDate(r.invoice_sent) : "—"}</span>
-                          : <input type="date" className="rounded-sm border border-rulesoft p-1 font-mono text-base sm:text-xs" defaultValue={r.invoice_sent || ""}
+                          ? <span className="font-mono text-xs">{r.invoice_sent ? prettyDate(r.invoice_sent) : "not yet"}</span>
+                          : <input type="date" aria-label={`Invoiced date, release ${r.rel_number}`} className="min-h-[44px] rounded-sm border border-rulesoft px-2 py-1 font-mono text-base sm:text-xs" defaultValue={r.invoice_sent || ""}
                               onChange={async (e) => {
                                 const v = e.target.value || null;
                                 const { error } = await sb().from("releases").update({ invoice_sent: v }).eq("id", r.id);
-                                if (error) { flash(error.message); return; }
+                                if (error) { flash("Couldn't save the invoice date. Check your signal and try again"); return; }
                                 setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: v } : x)));
+                                flash(v ? `Release ${r.rel_number} marked invoiced ${prettyDate(v)}` : `Release ${r.rel_number} marked not invoiced`);
                               }} />}
                       </td>
-                      <td className={`p-2.5 text-right font-mono ${d !== null && d > 60 ? "text-alert" : ""}`}>{d === null ? "—" : d}</td>
+                      <td className={`p-2.5 text-right font-mono ${d !== null && d > 90 ? "text-alert" : ""}`}>{d === null ? "" : d}</td>
                       <td className="p-2.5 text-right font-mono font-semibold">{fmt(Number(r.amount))}</td>
                       <td className="p-1.5 text-right">
                         <RowActions items={[
                           { label: "Invoice", title: "Make the NYCHA invoice", onSelect: () => genInvoice(r) },
-                          { label: pkgBusy === r.id ? "Making…" : "Invoice package (zip)", glyph: "⬇", disabled: !!pkgBusy,
+                          { label: pkgBusy === r.id ? "Making…" : "Invoice package (PDF)", glyph: "⬇", disabled: !!pkgBusy,
                             title: "Invoice + affidavit + REP + hiring summary + equal opportunity report, one PDF",
                             onSelect: () => downloadPackage(r) },
                         ]} />
@@ -397,66 +429,62 @@ export default function InvoicePackage() {
                     </tr>
                   );
                 })}
-                {sorted.length === 0 && <tr><td colSpan={6} className="p-4 text-inksoft">{stubs.length > 0
-                  ? `${stubs.length} open release${stubs.length === 1 ? "" : "s"} totaling ${fmt(stubs.reduce((s, r) => s + Number(r.amount), 0))} ${stubs.length === 1 ? "is" : "are"} waiting on release data — import the release PDF or fill a walk sheet to put ${stubs.length === 1 ? "it" : "them"} on the statement.`
-                  : `Nothing outstanding on contract ${contract.number}. All square.`}</td></tr>}
-                {sorted.length > 0 && <tr><td colSpan={5} className="p-2.5 font-display font-bold uppercase">Total due</td><td className="p-2.5 text-right font-mono text-base font-bold">{fmt(total)}</td></tr>}
+                <tr><td colSpan={5} className="p-2.5 font-display font-bold uppercase">Total due</td><td className="p-2.5 text-right font-mono text-base font-bold">{fmt(total)}</td></tr>
               </tbody>
             </table>
           </div>
+          )}
           {sorted.length > 0 && stubs.length > 0 && (
             <div className="no-print mt-2 text-xs text-inksoft">Not on this statement: {stubs.length} open release{stubs.length === 1 ? "" : "s"} totaling {fmt(stubs.reduce((s, r) => s + Number(r.amount), 0))} still waiting on release data (import the release PDF or fill a walk sheet).</div>
           )}
           {sorted.length > 0 && (
             <>
-              <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-5">
+              <div className="mt-3 grid grid-cols-3 gap-2 md:grid-cols-5">
                 {[...buckets, ["Not invoiced", notInvoiced] as [string, number]].map(([b, v]) => (
-                  <div key={b} className="card p-2.5 text-center">
-                    <div className="text-[11px] uppercase tracking-widest text-inksoft">{b}{b !== "Not invoiced" ? " days" : ""}</div>
-                    <div className={`font-mono text-[13px] font-semibold ${b === "90+" && v > 0 ? "text-alert" : ""}`}>{fmt(v)}</div>
+                  <div key={b} className="card card-tight text-center">
+                    <div className="section-label">{BUCKET_LABEL[b] || b}</div>
+                    <div className={`truncate font-mono text-[15px] font-semibold tabular-nums ${b === "90+" && v > 0 ? "text-alert" : ""}`}>{fmt(v)}</div>
                   </div>
                 ))}
               </div>
               <CardToolbar className="mt-3.5"
                 primary={
-                  <button className="btn btn-primary min-h-[44px]" onClick={downloadAllPackages} disabled={allPkgBusy} title="Every outstanding release's full package — invoice + the 4 documents merged into one PDF each — in one zip">
-                    {allPkgBusy ? "Making packages…" : `⬇ All packages (${sorted.length}) zip`}
+                  <button type="button" className="btn btn-primary" onClick={downloadAllPackages} disabled={allPkgBusy} title="One zip with every outstanding release's package PDF">
+                    {allPkgBusy ? "Making packages…" : `⬇ All packages (${sorted.length}, zip)`}
                   </button>
                 }
-                secondary={<button className="btn min-h-[44px]" onClick={() => { setInvPreview(null); setPrintOpen(true); }}>Preview statement</button>}
+                secondary={<button type="button" className="btn btn-ghost" onClick={() => { setInvPreview(null); setPrintOpen(true); }}>Preview statement</button>}
                 menu={[
                   { label: "Statement (Excel)", glyph: "⬇", onSelect: downloadExcel },
-                  { label: zipBusy ? "Making invoices…" : `All invoices (${sorted.length}) zip`, glyph: "⬇", disabled: zipBusy,
+                  { label: zipBusy ? "Making invoices…" : `All invoices (${sorted.length}) as Excel`, glyph: "⬇", disabled: zipBusy,
                     title: "Every outstanding invoice on this contract, regenerated in the template format, in one zip",
                     onSelect: downloadAllInvoices },
                 ]} />
             </>
           )}
           {/* the paperwork that rides along with every invoice on this contract */}
-          <div className="card mt-4 p-3.5">
-            <div className="mb-1 font-display text-sm font-semibold uppercase tracking-wide">Package documents — contract {contract.number}</div>
+          <div className="card card-pad mt-4">
+            <div className="mb-1 font-display text-sm font-semibold uppercase tracking-wide">Package documents · contract {contract.number}</div>
             <div className="mb-2.5 text-xs text-inksoft">
-              Every ⬇ Invoice package (zip) download is one PDF: the invoice plus these four. Contracts 2536683, 2536686,
-              2215867 and 2442583 use their own signed copies built in; anything else gets the standard copies
-              with the contract number filled in. Upload a PDF here to replace a document for this contract.
+              Every invoice package is one PDF: the invoice plus these four documents. Contracts with their own signed copies use them;
+              the rest get the standard copies with the contract number filled in. Upload a PDF to replace one for this contract.
             </div>
             <div className="grid gap-2">
               {PKG_SLOTS.map((s) => {
                 const custom = overrides.has(s.file);
                 return (
-                  <div key={s.key} className="flex flex-wrap items-center gap-2 border-b border-rulesoft pb-2 last:border-b-0 last:pb-0">
-                    <div className="min-w-[200px] flex-1">
+                  <div key={s.key} className="flex items-center gap-2 border-b border-rulesoft pb-2 last:border-b-0 last:pb-0">
+                    <div className="min-w-0 flex-1">
                       <div className="text-[13px] font-semibold">{s.label}</div>
-                      <div className="text-[11px] text-inksoft">
-                        {custom ? "this contract's uploaded copy" : `standard copy · contract # filled in automatically`}
-                        {!custom && s.note ? ` — ${s.note}` : ""}
-                      </div>
+                      <div className="text-[12px] text-inksoft">{custom ? "this contract's uploaded copy" : "standard copy, contract # filled in"}</div>
+                      {/* the slot's note comes from lib/packageDocs as written; the dash is swapped here, on display only */}
+                      {!custom && s.note && <div className="text-[12px] text-inksoft">{s.note.replace(/\s[—–]\s/g, ": ")}</div>}
                     </div>
                     {!readOnly && (
-                      <div className="flex gap-2">
-                        <button className="btn min-h-[44px] px-2.5 text-[13px]" onClick={() => pickUpload(s)}>{custom ? "Replace" : "Upload this contract's copy"}</button>
-                        {custom && <button className="btn btn-ghost min-h-[44px] px-2.5 text-[13px]" onClick={() => onRemoveOverride(s)}>Use standard</button>}
-                      </div>
+                      <RowActions items={[
+                        { label: custom ? "Replace this contract's copy" : "Upload this contract's copy", glyph: "📄", onSelect: () => pickUpload(s) },
+                        { label: "Use the standard copy", hidden: !custom, onSelect: () => onRemoveOverride(s) },
+                      ]} />
                     )}
                   </div>
                 );
@@ -464,9 +492,8 @@ export default function InvoicePackage() {
             </div>
           </div>
           {printOpen && org && (
-            <PrintShell>
-            <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
-              <div className="printable mx-auto max-w-3xl rounded-sm border-t-4 border-ink bg-white p-8 text-ink">
+            <PrintShell onClose={() => setPrintOpen(false)} wide sheetClass="text-ink"
+              toolbar={<button type="button" className="btn btn-ghost bg-white" onClick={downloadExcel}>⬇ Statement (Excel)</button>}>
                 <div className="border-2 border-ink bg-paper p-2 text-center font-display text-xl font-bold uppercase">Statement of Account</div>
                 <div className="my-4 flex justify-between text-[13px]">
                   <div>
@@ -480,7 +507,7 @@ export default function InvoicePackage() {
                   </div>
                 </div>
                 <table className="w-full border-collapse border border-ink text-[12px]">
-                  <thead><tr className="bg-paper text-left font-display text-[10px] uppercase tracking-widest">
+                  <thead><tr className="bg-paper text-left font-display text-[11px] uppercase tracking-widest">
                     <th className="border border-ink p-1.5">Release</th><th className="border border-ink p-1.5">Development</th>
                     <th className="border border-ink p-1.5">Invoiced</th><th className="border border-ink p-1.5 text-right">Days out</th>
                     <th className="border border-ink p-1.5 text-right">Balance</th>
@@ -493,7 +520,7 @@ export default function InvoicePackage() {
                           <td className="border border-rulesoft p-1.5 font-mono">{r.rel_number}</td>
                           <td className="border border-rulesoft p-1.5">{r.location}{r.buildings ? <span className="text-[11px] text-inksoft"> · {r.buildings}</span> : ""}</td>
                           <td className="border border-rulesoft p-1.5 font-mono text-[11px]">{r.invoice_sent ? prettyDate(r.invoice_sent) : "not invoiced"}</td>
-                          <td className="border border-rulesoft p-1.5 text-right font-mono">{d === null ? "—" : d}</td>
+                          <td className="border border-rulesoft p-1.5 text-right font-mono">{d === null ? "" : d}</td>
                           <td className="border border-rulesoft p-1.5 text-right font-mono font-semibold">{fmt(Number(r.amount))}</td>
                         </tr>
                       );
@@ -503,18 +530,11 @@ export default function InvoicePackage() {
                   </tbody>
                 </table>
                 <div className="mt-3 text-[11px] text-inksoft">
-                  Aging — 0–30: {fmt(buckets[0][1])} · 31–60: {fmt(buckets[1][1])} · 61–90: {fmt(buckets[2][1])} · 90+: {fmt(buckets[3][1])} · Not invoiced: {fmt(notInvoiced)}
+                  Aging: {buckets.map(([b, v]) => `${BUCKET_LABEL[b]} ${fmt(v)}`).join(", ")}, not invoiced {fmt(notInvoiced)}
                 </div>
-              </div>
-              <div className="no-print mx-auto mt-3 flex max-w-3xl justify-end gap-2">
-                <button className="btn min-h-[44px] bg-white" onClick={downloadExcel}>⬇ Statement (Excel)</button>
-                <button className="btn min-h-[44px] bg-white" onClick={() => window.print()}>Print / Save as PDF</button>
-                <button className="btn btn-ghost min-h-[44px] bg-white" onClick={() => setPrintOpen(false)}>Close</button>
-              </div>
-            </div>
             </PrintShell>
           )}
-        </>
+        </div>
       )}
       {invPreview && org && (
         <NychaInvoicePrint org={org} number={invPreview.number} date={invPreview.date}
@@ -526,9 +546,9 @@ export default function InvoicePackage() {
           close={() => setInvPreview(null)} />
       )}
       {contracts.length === 0 && (booted
-        ? <div className="text-sm text-inksoft">No active statements — nothing is currently owed on any contract. Releases you haven&apos;t been paid for show up here automatically.</div>
-        : <div className="card p-3.5"><div className="skeleton mb-3 h-4 w-40" /><div className="skeleton mb-2 h-3 w-full" /><div className="skeleton h-3 w-2/3" /></div>)}
-      {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
+        ? <div className="empty">Nothing is owed on any contract right now. Releases NYCHA hasn&apos;t paid show up here by themselves.</div>
+        : skeletonRows)}
+      <Toast msg={msg} progress={progress} />
     </div>
   );
 }

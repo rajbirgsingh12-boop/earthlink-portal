@@ -71,7 +71,7 @@ export type TextOutcome =
   | { status: "error"; message: string };
 export async function textRows(targets: TextTarget[], opts: { skipTexted?: boolean } = {}): Promise<TextOutcome> {
   const good = targets.filter((t) => cleanPhone(t.to));
-  if (good.length === 0) return { status: "error", message: "No saved numbers on this crew — add them in Settings → Crew first" };
+  if (good.length === 0) return { status: "error", message: "No saved numbers on this crew: add them in Settings → Crew first" };
   const token = (await sb().auth.getSession()).data.session?.access_token || null;
   const res = await sendServerTexts(good.map((t) => ({ to: cleanPhone(t.to), body: t.body, id: t.rowId })), token, { skipTexted: opts.skipTexted ?? true });
   if (res.ok) {
@@ -81,10 +81,10 @@ export async function textRows(targets: TextTarget[], opts: { skipTexted?: boole
     // number that isn't registered yet, a worker who texted STOP — none of
     // those is fixed by checking the worker's number
     const message = fails.length > 0
-      ? `Sent ${sent}, but ${fails.length} didn't go through — ${prettyPhone(fails[0].to)}: ${fails[0].error}`
+      ? `Sent ${sent}, but ${fails.length} didn't go through. ${prettyPhone(fails[0].to)}: ${fails[0].error}`
       // never a ✓ when nothing went out — that is how a crew ends up never told
-      : sent === 0 ? "Everyone here was already texted — nothing new went out"
-      : `Sent ${sent} text${sent === 1 ? "" : "s"} ${res.grouped ? `into the crew's thread${res.grouped === 1 ? "" : "s"}` : "from the company number"} ✓${skipped ? ` (${skipped} already texted — skipped)` : ""}${res.groupProblem ? ` · no thread for this one: ${res.groupProblem}` : ""}`;
+      : sent === 0 ? "Everyone here was already texted, nothing new went out"
+      : `Sent ${sent} text${sent === 1 ? "" : "s"} ${res.grouped ? `into the crew's thread${res.grouped === 1 ? "" : "s"}` : "from the company number"} ✓${skipped ? ` (${skipped} already texted, skipped)` : ""}${res.groupProblem ? ` · no thread for this one: ${res.groupProblem}` : ""}`;
     // a text that was set up for later has now gone by hand — drop the stamp
     // (silent before RUN_ME section 19: there is no column to clear)
     if (sent > 0) {
@@ -102,9 +102,9 @@ export async function textRows(targets: TextTarget[], opts: { skipTexted?: boole
     const strip = (t: TextTarget) => (t.first ? t.body.replace(new RegExp(`^(Hi|Hola) ${t.first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, `), "$1, ") : t.body);
     const forAll = [...new Set(good.map(strip))].join("\n\n");
     window.location.href = `sms:${good.map((t) => cleanPhone(t.to)).join(",")}?&body=${encodeURIComponent(forAll)}`;
-    return { status: "fallback", message: "Company number isn't set up — a group text opened on this phone", rowIds: good.map((t) => t.rowId) };
+    return { status: "fallback", message: "Company number isn't set up, so a group text opened on this phone", rowIds: good.map((t) => t.rowId) };
   }
-  return { status: "error", message: res.error || "Couldn't send — try again" };
+  return { status: "error", message: res.error || "Couldn't send, try again" };
 }
 export async function stampRows(ids: string[], texted = true): Promise<void> {
   if (ids.length) await sb().from("schedule_days").update({ texted }).in("id", ids);

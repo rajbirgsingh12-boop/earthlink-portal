@@ -9,12 +9,16 @@ import { fmt, parseNum, askFileName } from "@/lib/format";
 import { prettyDate, localISO, type Org } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
 import PrintShell from "@/components/PrintShell";
-import ActionMenu, { RowActions } from "@/components/ActionMenu";
+import { RowActions } from "@/components/ActionMenu";
 import PageHeader from "@/components/PageHeader";
 import CardToolbar from "@/components/CardToolbar";
 import Modal from "@/components/Modal";
 import Disclosure from "@/components/Disclosure";
 import MeasurePanel from "@/components/MeasurePanel";
+import WorkLines from "@/components/WorkLines";
+import Letterhead from "@/components/Letterhead";
+import Toast, { useFlash } from "@/components/Toast";
+import { scrollTo } from "@/lib/motion";
 import { applyMeasure } from "@/lib/measure";
 import { useLive } from "@/lib/useLive";
 import { findDupe, DUPE_COLS } from "@/lib/po";
@@ -60,6 +64,7 @@ export default function Pact() {
   const [draft, setDraft] = useState({ ...BLANK });
   const [openId, setOpenId] = useState<string | null>(null);
   const [attachJob, setAttachJob] = useState<Job | null>(null);
+  const [lightbox, setLightbox] = useState<{ name: string; path: string } | null>(null); // a photo opened big from the Documents dialog
   const [measureJob, setMeasureJob] = useState<Job | null>(null); // "Sq ft from photos" is open for this job
   const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
   const [invJob, setInvJob] = useState<Job | null>(null);
@@ -67,18 +72,45 @@ export default function Pact() {
   // details never flips another's, and closing a job doesn't forget it
   const [detailsOpen, setDetailsOpen] = useState<Record<string, boolean>>({});
   const showDetailsFor = (id: string) => setDetailsOpen((p) => ({ ...p, [id]: true }));
+  // a row opens and closes from its title. The card is brought into view when
+  // its body would run off the bottom of the phone, and back when it closes.
+  const toggleOpen = (j: Job) => {
+    const card = () => document.querySelector(`[data-job-card="${j.id}"]`);
+    if (openId === j.id) {
+      (document.activeElement as HTMLElement | null)?.blur?.();
+      setOpenId(null);
+      requestAnimationFrame(() => scrollTo(card(), "nearest"));
+      return;
+    }
+    setOpenId(j.id);
+    setTimeout(() => {
+      const el = card();
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      if (r.bottom > window.innerHeight) scrollTo(el, r.height > window.innerHeight ? "start" : "nearest");
+    }, 60);
+  };
+  // a stamp's date, short: the year is on the job, not in a list
+  const shortDay = (iso?: string | null) => (iso ? new Date(iso + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "");
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState("");
+  // the first fetch: skeleton rows until it answers, the empty words only after
+  const [loaded, setLoaded] = useState(false);
+  const { msg, flash, progress, setProgress, action, flashWithUndo } = useFlash();
   const fileRef = useRef<HTMLInputElement>(null);
   // one camera input serves every job card — snapPhotos aims it first
   const photoRef = useRef<HTMLInputElement>(null);
   const [photoTarget, setPhotoTarget] = useState<{ id: string; kind: "before" | "after" } | null>(null);
   const snapPhotos = (j: Job, kind: "before" | "after") => { setPhotoTarget({ id: j.id, kind }); photoRef.current?.click(); };
   const poRef = useRef<HTMLInputElement>(null);
-  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 3500); };
   const num = useNumBuffer();
-  const upgradeHint = (m: string) => (/proposal_sent/i.test(m) ? "Run supabase/upgrade_pact_proposal.sql to track proposals sent"
-    : /relation|column|schema/i.test(m) ? "Database needs the upgrade — re-run supabase/upgrade_pact.sql" : m);
+  // what the office reads when a save fails: never the database's own words
+  // or a file path (the console keeps those)
+  const upgradeHint = (m: string, what = "Couldn't save") => {
+    console.warn(m);
+    if (/proposal_sent/i.test(m)) return "Proposals sent can't be tracked until the database update is run (Settings → System check)";
+    if (/relation|column|schema/i.test(m)) return "This can't be saved until the database update is run (Settings → System check)";
+    return `${what}. Check your signal and try again.`;
+  };
   const today = () => localISO();
   const isImg = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n);
   const itemsOf = (j: Job): Item[] => (Array.isArray(j.items) ? j.items : []);
@@ -98,7 +130,7 @@ export default function Pact() {
     const d = (j.description || "").replace(/\s+/g, " ").trim();
     // (no regex lookbehind — Safari before 16.4 fails to load the whole page on it)
     const first = (d.match(/^[^.;]*[.;]?/)?.[0] || d).trim() || d;
-    return first.length > 54 ? `${first.slice(0, 54).trim()}…` : first;
+    return first.length > 90 ? `${first.slice(0, 90).trim()}…` : first;
   };
   // private work is taxable — NYC sales tax by default, editable per job
   const taxRate = (j: Job) => (j.tax_pct === null || j.tax_pct === undefined ? 8.875 : Number(j.tax_pct));
@@ -108,7 +140,8 @@ export default function Pact() {
 
   const load = async () => {
     const { data, error } = await sb().from("pact_jobs").select("*").order("created_at", { ascending: false });
-    if (error) { flash(upgradeHint(error.message)); return; }
+    setLoaded(true);
+    if (error) { flash(upgradeHint(error.message, "Couldn't load the POs")); return; }
     setJobs((data || []) as Job[]);
   };
   useEffect(() => {
@@ -116,7 +149,7 @@ export default function Pact() {
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
     myProfile().then((p) => setRole(p?.role || ""));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-  // ?job=<id> (the "Open on Billing" button on a From-the-crew notice): that job, open and in view
+  // ?job=<id> (the "Open the job" button on a From-the-crew notice): that job, open and in view
   const jobParamDone = useRef(false);
   useEffect(() => {
     if (jobParamDone.current || jobs.length === 0 || !role) return;
@@ -125,7 +158,7 @@ export default function Pact() {
     if (!id || !jobs.some((j) => j.id === id)) return;
     setOpenId(id);
     showDetailsFor(id);
-    setTimeout(() => document.querySelector(`[data-job-card="${id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 250);
+    setTimeout(() => scrollTo(document.querySelector(`[data-job-card="${id}"]`), "center"), 250);
   }, [jobs, role]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // live: PACT jobs changing anywhere refresh the list without a reload
@@ -146,7 +179,7 @@ export default function Pact() {
 
   // delete = gone for good (after a confirm) — the job, its photos and documents
   const deleteJob = async (j: Job) => {
-    const label = [j.po_number || j.job_number, j.partner].filter(Boolean).join(" — ");
+    const label = [j.po_number || j.job_number, j.partner].filter(Boolean).join(" · ");
     if (!window.confirm(`Delete PO ${label}? The job and its photos/documents disappear for good. This can't be undone.`)) return;
     await deleteJobNow(j);
   };
@@ -169,7 +202,7 @@ export default function Pact() {
     if (attachJob?.id === j.id) setAttachJob(null);
     if (invJob?.id === j.id) setInvJob(null);
     setJobs((prev) => prev.filter((x) => x.id !== j.id));
-    flash(cleanupFailed ? "Job deleted — some of its files couldn't be cleaned up (they still count toward storage)" : "Job deleted");
+    flash(cleanupFailed ? "PO deleted. Some of its files couldn't be cleaned up, so they still count toward storage." : "PO deleted");
     return true;
   };
 
@@ -216,7 +249,7 @@ export default function Pact() {
     if (!ok) {
       // the saved list couldn't be read: say so rather than quietly pricing
       // from the standard sheet with their own line items missing
-      flash("Couldn't read your saved line items — using the standard sheet. Check the prices before sending anything.");
+      flash("Couldn't read your saved line items. Using the standard sheet, so check the prices before sending anything.");
       if (book) return book.items; // the last good copy beats the fallback
       return items;
     }
@@ -260,14 +293,14 @@ export default function Pact() {
       const added = next.length - before.length;
       const changed = next.filter((n, i) => i < before.length && (n.unit_price !== before[i].unit_price || n.description !== before[i].description)).length;
       if (added === 0 && changed === 0) {
-        if (!auto) flash("Already matching the price list — nothing to change");
+        if (!auto) flash("Already matching the price list. Nothing to change.");
         return;
       }
       setItems(live, next, true, auto);
       flash(auto
-        ? "Priced off the quantities on the job — check the lines before invoicing"
+        ? "Priced off the quantities on the job. Check the lines before invoicing."
         : [added > 0 ? `${added} line${added === 1 ? "" : "s"} added` : "", changed > 0 ? `${changed} re-priced` : ""]
-            .filter(Boolean).join(" · ") + " from the price list — check them before invoicing");
+            .filter(Boolean).join(" · ") + " from the price list. Check them before invoicing.");
     } finally { if (!auto) setBusy(false); }
   };
 
@@ -329,12 +362,12 @@ export default function Pact() {
         const { data, error } = await insertJob({
           partner: "TEST Boulevard", development: "", job_number: t.po, po_number: t.po, description: t.description, address: t.address, property_unit: t.apt,
           start_date: day, items: lines, amount: Math.round(sub * 1.08875 * 100) / 100, list_subtotal: sub,
-          notes: `${TEST_MARK} made ${prettyDate(day)} to try the portal on: put a crew on it, text them, send photos and square feet, then tap "Delete test POs" on Billing`,
+          notes: `${TEST_MARK} made ${prettyDate(day)} to try the portal on: put a crew on it, text them, send photos, then tap "Delete test POs" on Billing`,
         });
-        if (error || !data) { flash(`Couldn't make the test POs (${error?.message.slice(0, 80) || "save failed"})`); break; }
+        if (error || !data) { flash(upgradeHint(error?.message || "", "Couldn't make the test POs")); break; }
         made += 1;
       }
-      if (made) { await load(); flash(`${made} test PO${made === 1 ? "" : "s"} added: PO 900001 to 900003, on today's date. Put a crew on them from the Schedule to text and try the thread. "Delete test POs" takes them all off.`); }
+      if (made) { await load(); flash(`${made} test PO${made === 1 ? "" : "s"} added (900001 to 900003, today). Put a crew on them from the PACT Schedule; Delete test POs takes them off.`); }
       else flash("The test POs are already here (900001 to 900003)");
     } finally { setBusy(false); }
   };
@@ -475,14 +508,14 @@ export default function Pact() {
     setBusy(true);
     try {
       const made = await proposalPdfBytes(j);
-      if (!made) { flash("Nothing priced on this job yet — fill the work lines in first"); return; }
+      if (!made) { flash("Nothing priced on this job yet: fill the work lines in first"); return; }
       const { bytes, name: def } = made;
       const name = askFileName(def);
       if (!name) return;
       saveBytes(bytes, name, "application/pdf");
       await keepOnJob(j, bytes, def, "application/pdf");
       await stampProposalSent(j);
-      flash("Proposal saved as a PDF — a copy is kept on the job, and the signed one reads straight back in here");
+      flash("Proposal saved as a PDF. A copy is kept on the job, and the signed one reads straight back in here.");
     } catch (err) {
       flash(`Couldn't build the proposal (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
     } finally { setBusy(false); }
@@ -492,14 +525,14 @@ export default function Pact() {
     setBusy(true);
     try {
       const made = await proposalBytes(j);
-      if (!made) { flash("Nothing priced on this job yet — fill the work lines in first"); return; }
+      if (!made) { flash("Nothing priced on this job yet: fill the work lines in first"); return; }
       const { bytes, name: def } = made;
       const name = askFileName(def);
       if (!name) return;
       saveBytes(bytes, name, DOCX);
       await keepOnJob(j, bytes, def, DOCX);
       await stampProposalSent(j);
-      flash("Proposal saved — a copy is kept on the job, and the signed one reads straight back in here");
+      flash("Proposal saved. A copy is kept on the job, and the signed one reads straight back in here.");
     } catch (err) {
       flash(`Couldn't build the proposal (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
     } finally { setBusy(false); }
@@ -513,12 +546,12 @@ export default function Pact() {
     if (!quiet) setBusy(true);
     try {
       const made = await proposalPdfBytes(j);
-      if (!made) { flash("Nothing priced on this job yet — fill the work lines in first"); return false; }
+      if (!made) { flash("Nothing priced on this job yet: fill the work lines in first"); return false; }
       const { bytes, name } = made;
       saveBytes(bytes, name, "application/pdf");
       await keepOnJob(j, bytes, name, "application/pdf");
       await stampProposalSent(j);
-      if (!quiet) flash("Proposal saved as a PDF — a copy is kept on the job");
+      if (!quiet) flash("Proposal saved as a PDF. A copy is kept on the job.");
       return true;
     } catch (err) {
       flash(`Couldn't build the proposal (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
@@ -530,12 +563,12 @@ export default function Pact() {
     if (!quiet) setBusy(true);
     try {
       const made = await proposalBytes(j);
-      if (!made) { flash("Nothing priced on this job yet — fill the work lines in first"); return false; }
+      if (!made) { flash("Nothing priced on this job yet: fill the work lines in first"); return false; }
       const { bytes, name } = made;
       saveBytes(bytes, name, DOCX);
       await keepOnJob(j, bytes, name, DOCX);
       await stampProposalSent(j);
-      if (!quiet) flash("Proposal saved — a copy is kept on the job");
+      if (!quiet) flash("Proposal saved. A copy is kept on the job.");
       return true;
     } catch (err) {
       flash(`Couldn't build the proposal (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
@@ -548,17 +581,17 @@ export default function Pact() {
     if (!quiet) setBusy(true);
     try {
       const theOrg = await companyOrg();
-      if (!theOrg) { flash("Company details haven't loaded — check your signal and try again"); return false; }
-      if (!hasLines(j)) { flash("Couldn't build the invoice — the job needs at least one priced work line"); return false; }
+      if (!theOrg) { flash("Company details haven't loaded. Check your signal and try again."); return false; }
+      if (!hasLines(j)) { flash("Couldn't build the invoice: the job needs at least one priced work line"); return false; }
       // the invoice number is given out the moment an invoice is built, if the
       // job has none yet — the same number the zip package carries later
       const no = await claimInvoiceNo(j.id, j.invoice_number);
       if (no !== (j.invoice_number || "")) { j = { ...j, invoice_number: no }; setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, invoice_number: no } : x))); }
       const bytes = await buildPackageBytes(j, theOrg);
-      if (!bytes) { flash("Couldn't build the invoice — the job needs at least one priced work line"); return false; }
+      if (!bytes) { flash("Couldn't build the invoice: the job needs at least one priced work line"); return false; }
       saveBytes(bytes, invoiceFileName(j), "application/pdf");
       await keepOnJob(j, bytes, invoiceFileName(j), "application/pdf");
-      if (!quiet) flash("Invoice saved — a copy is kept on the job");
+      if (!quiet) flash("Invoice saved. A copy is kept on the job.");
       return true;
     } catch (err) {
       flash(`Couldn't build the invoice (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
@@ -574,8 +607,8 @@ export default function Pact() {
       const i = await saveInvoiceFor(j, true);
       // whatever actually happened is what gets said
       if (p && i) flash("Proposal and invoice both saved");
-      else if (p) flash("Proposal saved — the invoice didn't build (see the message above)");
-      else if (i) flash("Invoice saved — the proposal didn't build");
+      else if (p) flash("Proposal saved. The invoice didn't build (see the message above).");
+      else if (i) flash("Invoice saved. The proposal didn't build.");
     } finally { setBusy(false); }
   };
 
@@ -590,7 +623,7 @@ export default function Pact() {
       const files: Record<string, Uint8Array> = {};
       let done = 0;
       for (const j of folderResult.made) {
-        flash(`Writing proposals… ${++done} of ${folderResult.made.length}`);
+        setProgress(`Writing proposals… ${++done} of ${folderResult.made.length}`);
         const live = jobs.find((x) => x.id === j.id) || j;
         try {
           const made = await proposalBytes(live);
@@ -603,10 +636,10 @@ export default function Pact() {
           await stampProposalSent(live);
         } catch { /* one bad letter must not stop the rest */ }
       }
-      if (Object.keys(files).length === 0) { flash("Couldn't build any of them — open one and check its work lines"); return; }
+      if (Object.keys(files).length === 0) { flash("Couldn't build any of them. Open one and check its work lines."); return; }
       saveBytes(zipSync(files, { level: 1 }), fname, "application/zip");
       flash(`${Object.keys(files).length} proposal${Object.keys(files).length === 1 ? "" : "s"} saved`);
-    } finally { setBusy(false); }
+    } finally { setProgress(""); setBusy(false); }
   };
 
   // read it on screen before it goes anywhere
@@ -627,7 +660,7 @@ export default function Pact() {
       if (!name) return;
       saveBytes(buildProposalDocx({ ...BLANK_PROPOSAL, date: prettyDate(today()) }, await logoBytes()), name,
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-      flash("Template saved — fill it in, keep the layout, and uploading it back here builds the job");
+      flash("Template saved. Fill it in, keep the layout, and uploading it back here builds the job.");
     } catch (err) {
       flash(`Couldn't build the template (${err instanceof Error ? err.message.slice(0, 60) : "unknown"})`);
     } finally { setBusy(false); }
@@ -649,7 +682,7 @@ export default function Pact() {
     const pdf = (j.attachments || []).find((a) => /\.pdf$/i.test(a.name) && !isMade(a));
     if (!pdf) { if (!quiet) flash("No PO PDF on this job to re-read"); return "none"; }
     const { data: signed, error: se } = await sb().storage.from("docs").createSignedUrl(pdf.path, 600);
-    if (se || !signed) { if (!quiet) flash(`Couldn't fetch the PDF (${se?.message || "no link"})`); return "none"; }
+    if (se || !signed) { if (!quiet) flash("Couldn't fetch the PO PDF. Check your signal and try again."); return "none"; }
     const res0 = await fetch(signed.signedUrl).catch(() => null);
     if (!res0 || !res0.ok) { if (!quiet) flash("Couldn't download the PDF"); return "none"; }
     const bytes = await res0.blob();
@@ -659,11 +692,11 @@ export default function Pact() {
       headers: { "Content-Type": "application/pdf", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) },
       body: bytes,
     });
-    if (!res.ok) { if (!quiet) flash(`The reader said ${res.status}`); return "none"; }
+    if (!res.ok) { if (!quiet) flash(`The reader couldn't be reached (${res.status}). Try again.`); return "none"; }
     const out = (await res.json()) as { fields: PactPoFields & { taxPct?: number }; readBy?: "claude" | "rules"; note?: string };
     const f = out.fields;
     const unreadable = !f.po && !f.partner && !f.desc;
-    if (unreadable) { if (!quiet) flash("The PDF couldn't be read — nothing changed"); return "none"; }
+    if (unreadable) { if (!quiet) flash("The PDF couldn't be read. Nothing changed."); return "none"; }
     const amount = f.amount;
     const { items, amount: amountOut, warnings: listNotes } = await linesFromPo(f, false, amount);
     const stamp = `${out.readBy === "claude" ? "🔁 Re-read by Claude" : "🔁 Re-read by the rules"} ${prettyDate(localISO(new Date()))}${out.note ? ` (${out.note})` : ""}`;
@@ -724,7 +757,7 @@ export default function Pact() {
     let done = 0;
     for (const j of gone) if (await deleteJobNow(j)) done += 1;
     setBusy(false);
-    flash(`${done} of ${gone.length} deleted — ${kept.length} kept for their photos or prices`);
+    flash(`${done} of ${gone.length} deleted · ${kept.length} kept for their photos or prices`);
   };
 
   // ---------- invoice numbers in a straight line ----------
@@ -746,13 +779,13 @@ export default function Pact() {
     // two jobs on one number: sort that out by hand first — moving numbers
     // around a duplicate could hand two jobs the same one for good
     const twin = rows.find((x, i) => i > 0 && rows[i - 1].n === x.n);
-    if (twin) { flash(`Two jobs share invoice #${twin.n} — give one of them its own number first (Job details → Invoice #)`); return; }
+    if (twin) { flash(`Two jobs share invoice #${twin.n}. Give one of them its own number first (PO details → Invoice #).`); return; }
     // the last number before the first hole — offered as the starting point,
     // and the owner confirms it: an older hole from some long-deleted job must
     // never pull already-sent invoices down with it
     let gapAt = -1;
     for (let i = 0; i + 1 < rows.length; i++) if (rows[i + 1].n > rows[i].n + 1) { gapAt = i; break; }
-    if (gapAt < 0) { flash("Invoice numbers already go up by one — nothing to fix"); return; }
+    if (gapAt < 0) { flash("Invoice numbers already go up by one. Nothing to fix."); return; }
     const typed = window.prompt(`Continue the numbers from which invoice? Everything above it moves down to follow on; it and everything before it stay as they are.`, String(rows[gapAt].n));
     if (typed === null) return;
     const last = /^\d+$/.test(typed.trim()) ? parseInt(typed.trim(), 10) : NaN;
@@ -776,8 +809,8 @@ export default function Pact() {
       if (next !== x.n) plan.push({ x, to: next });
     }
     const nextNew = Math.max(INVOICE_FLOOR, next, ...kept) + 1;
-    if (plan.length === 0) { flash(`Nothing to move — the next new invoice is #${nextNew}`); return; }
-    const msg = `Close the hole after #${last}? ${plan.length} invoice${plan.length === 1 ? "" : "s"} move${plan.length === 1 ? "s" : ""} down:\n\n${plan.slice(0, 14).map((p) => `#${p.x.n} → #${p.to}  ${label(p.x)}`).join("\n")}${plan.length > 14 ? `\n…and ${plan.length - 14} more` : ""}\n\nThe next new invoice will be #${nextNew}. Invoice PDFs already saved on these jobs are removed — download them again with the new number.`;
+    if (plan.length === 0) { flash(`Nothing to move. The next new invoice is #${nextNew}.`); return; }
+    const msg = `Close the hole after #${last}? ${plan.length} invoice${plan.length === 1 ? "" : "s"} move${plan.length === 1 ? "s" : ""} down:\n\n${plan.slice(0, 14).map((p) => `#${p.x.n} → #${p.to}  ${label(p.x)}`).join("\n")}${plan.length > 14 ? `\n…and ${plan.length - 14} more` : ""}\n\nThe next new invoice will be #${nextNew}. Invoice PDFs already saved on these jobs are removed. Download them again with the new number.`;
     if (!window.confirm(msg)) return;
     setBusy(true);
     let done = 0, stopped = "";
@@ -785,7 +818,7 @@ export default function Pact() {
     // still to come, so no two jobs ever hold the same one, even for a moment
     for (const p of plan) {
       const { error: e } = await sb().from("pact_jobs").update({ invoice_number: String(p.to) }).eq("id", p.x.r.id);
-      if (e) { stopped = `Stopped at #${p.x.n}: ${e.message.slice(0, 80)}`; break; }
+      if (e) { console.warn(e.message); stopped = `Stopped at #${p.x.n}`; break; }
       done += 1;
       // the invoice PDF the portal shelved carries the old number in its name —
       // off the shelf it goes; the next download makes a fresh one. The list is
@@ -805,8 +838,8 @@ export default function Pact() {
     // one message, and the truth: a run that stopped short says so, and
     // doesn't claim a next number it can't know
     flash(stopped
-      ? `${stopped} — ${done} of ${plan.length} moved. Run Renumber invoices… again to finish`
-      : `${done} invoice${done === 1 ? "" : "s"} renumbered — the next new one is #${nextNew}`);
+      ? `${stopped}. ${done} of ${plan.length} moved. Run Renumber invoices… again to finish.`
+      : `${done} invoice${done === 1 ? "" : "s"} renumbered. The next new one is #${nextNew}.`);
   };
 
   const handlePo = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -818,7 +851,7 @@ export default function Pact() {
     try {
       const out = await intakePoFile(file, priceBook);
       setBusy(false);
-      if (out.kind === "release") { flash("That's a NYCHA blanket release — upload it on the Releases tab (Import release PDFs). PACT only takes partner POs and proposal letters."); return; }
+      if (out.kind === "release") { flash("That's a NYCHA release. Upload it on the Releases tab: + Add release, then From release PDFs. PACT only takes partner POs and proposal letters."); return; }
       // the intake's own words when it says nothing was made — the hint alone would hide that
       if (out.kind === "error") { flash(/nothing was created/i.test(out.message) ? out.message : upgradeHint(out.message)); return; }
       await load();
@@ -826,10 +859,10 @@ export default function Pact() {
       if (out.kind === "dupe") {
         const label = out.po ? `PO ${out.po}` : "That proposal";
         flash(out.moved
-          ? `${label} is already here — the new PO moves it to ${prettyDate(out.movedTo!)}`
+          ? `${label} is already here. The new PO moves it to ${prettyDate(out.movedTo!)}.`
           : out.grew
-            ? `${label} is already here — picked up the PO's full wording (tap Price from list to refresh the lines)`
-            : `${label} is already here${out.canceled ? " (canceled)" : ""} — opened it, nothing new was created`);
+            ? `${label} is already here. Picked up the PO's full wording (tap Price from list to refresh the lines).`
+            : `${label} is already here${out.canceled ? " (canceled)" : ""}. Opened it, nothing new was created.`);
         return;
       }
       // the finished job, with the lines the price list filled in — and if
@@ -837,30 +870,32 @@ export default function Pact() {
       const { data: fresh } = await sb().from("pact_jobs").select("*").eq("id", out.id).single();
       const ready = (fresh as Job | null)?.id ? (fresh as Job) : (out.job as unknown as Job);
       if (!out.unreadable) setOneShot({ id: ready.id, job: ready, note: out.po ? `PO ${out.po}` : "PO read" });
+      // one line: what came in, how it was read, and the day it landed on (the card above says what to check)
       flash(out.attachError
-        ? `Job created, but the PDF didn't attach (${out.attachError}) — open the job → ⋯ → Documents`
+        ? "PO created, but the PDF didn't attach. Open the job, then ⋯ → Documents to add it."
         : out.unreadable
           ? out.isDocx
-            ? "File attached, but the proposal couldn't be read — type the partner, address and description below"
-            : `PDF attached, but no text could be read (scanned copy?${out.how ? ` · ${out.how}` : ""}) — type the partner, address and description below`
-          : `PO ${out.po || "imported"} — ${out.isDocx ? "our letter" : out.readBy === "claude" ? "read by Claude" : `⚠ read by the rules${out.readNote ? ` (${out.readNote})` : ""}`} · ${out.accessDate ? `on the Schedule for ${prettyDate(out.accessDate)}` : "no date on the PO — put it on a day from the Schedule tab"}${out.flags.length ? ` · ⚠ ${out.flags[0]}` : ""} · check the lines below; the crew is picked on the Schedule tab`);
+            ? "File attached, but the proposal couldn't be read. Type the partner, address and description below."
+            : `PDF attached, but no text could be read (scanned copy?${out.how ? ` · ${out.how}` : ""}). Type the partner, address and description below.`
+          : `PO ${out.po || "imported"}${out.isDocx ? " (our letter)" : out.readBy === "claude" ? " read by Claude" : ` ⚠ read by the rules${out.readNote ? ` (${out.readNote})` : ""}`} · ${out.accessDate ? `on the Schedule for ${prettyDate(out.accessDate)}` : "no date on the PO"}${out.flags.length ? ` · ⚠ ${out.flags[0]}` : ""}`);
     } catch (err) {
       setBusy(false);
-      flash(`Upload hit a snag — try again (${err instanceof Error ? err.message.slice(0, 80) : "unknown error"})`);
+      console.warn(err);
+      flash("Couldn't finish the upload. Try again.");
     }
   };
 
   const addJob = async () => {
-    if (!draft.partner.trim() || !draft.description.trim()) { flash("Partner and description are the minimum"); return; }
+    if (!draft.partner.trim() || !draft.description.trim()) { flash("Type a partner and a description first"); return; }
     // a typed PO number that's already a job opens that job instead
     if (draft.job_number.trim()) {
       const { data: all, error: le } = await sb().from("pact_jobs").select(DUPE_COLS).limit(5000);
-      if (le) { flash(`Couldn't check for duplicates (${le.message.slice(0, 60)}) — nothing was created, try again`); return; }
+      if (le) { flash("Couldn't check for duplicates. Nothing was created, try again."); return; }
       const dupe = findDupe((all || []) as Job[], { po: draft.job_number });
       if (dupe) {
         setAddOpen(false); await load();
         setOpenId(dupe.id); showDetailsFor(dupe.id);
-        flash(`PO ${draft.job_number.trim()} is already here${dupe.canceled ? " (canceled)" : ""} — opened it, nothing new was created`);
+        flash(`PO ${draft.job_number.trim()} is already here${dupe.canceled ? " (canceled)" : ""}. Opened it, nothing new was created.`);
         return;
       }
     }
@@ -953,7 +988,7 @@ export default function Pact() {
   const stampProposalSent = async (j: Job): Promise<void> => {
     if (j.proposal_sent) return;
     const { error } = await sb().from("pact_jobs").update({ proposal_sent: today() }).eq("id", j.id);
-    if (error) { if (/column|schema cache/i.test(error.message)) flash("Run supabase/upgrade_pact_proposal.sql to track proposals sent"); return; }
+    if (error) { if (/column|schema cache/i.test(error.message)) flash("Proposals sent can't be tracked until the database update is run (Settings → System check)"); return; }
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, proposal_sent: today() } : x)));
   };
 
@@ -965,7 +1000,7 @@ export default function Pact() {
     for (const file of files) {
       const path = `pact/${j.id}/${file.name}`;
       const { error } = await sb().storage.from("docs").upload(path, file, { upsert: true });
-      if (error) { setBusy(false); flash(/bucket/i.test(error.message) ? "Storage not set up — run supabase/upgrade_invoices_aging_docs.sql" : error.message); return []; }
+      if (error) { setBusy(false); flash(/bucket/i.test(error.message) ? "Storage isn't set up yet (Settings → System check)" : upgradeHint(error.message, "Couldn't upload")); return []; }
       added.push({ name: file.name, path });
     }
     // merge against the freshest row so multi-photo batches and other devices never lose files
@@ -974,7 +1009,7 @@ export default function Pact() {
       || jobs.find((x) => x.id === j.id)?.attachments || [];
     const list = [...existing.filter((a) => !added.some((b) => b.path === a.path)), ...added];
     const { error: e2 } = await sb().from("pact_jobs").update({ attachments: list }).eq("id", j.id);
-    if (e2) flash(e2.message);
+    if (e2) flash(upgradeHint(e2.message, "Couldn't save the file list"));
     else {
       setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, attachments: list } : x)));
       setAttachJob((prev) => (prev && prev.id === j.id ? { ...prev, attachments: list } : prev));
@@ -994,7 +1029,7 @@ export default function Pact() {
     setItems(j, next, true);
     const notes = `${(j.notes || "").trim()}${(j.notes || "").trim() ? "\n" : ""}${note}`;
     const { error } = await sb().from("pact_jobs").update({ notes }).eq("id", j.id);
-    if (error) { flash(error.message); return false; }
+    if (error) { flash(upgradeHint(error.message, "Couldn't save the note")); return false; }
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, notes } : x)));
     return true;
   };
@@ -1022,7 +1057,7 @@ export default function Pact() {
       }
       out.push(isImg(f.name) ? await shrinkImage(f) : f);
     }
-    if (out.length === 0) { flash("Nothing to attach in that — no pictures or documents found"); return; }
+    if (out.length === 0) { flash("Nothing to attach in that: no pictures or documents found"); return; }
     await attachFiles(j, out);
     if (zipped) flash(`${zipped} picture${zipped === 1 ? "" : "s"} unpacked from the zip and attached`);
   };
@@ -1037,16 +1072,20 @@ export default function Pact() {
   };
   const openAttachment = async (path: string) => {
     const { data, error } = await sb().storage.from("docs").createSignedUrl(path, 3600);
-    if (error || !data) { flash(error?.message || "Couldn't open"); return; }
+    if (error || !data) { flash("Couldn't open that file"); return; }
     window.open(data.signedUrl, "_blank");
   };
-  const removeAttachment = async (j: Job, path: string) => {
+  // deleting a photo or a file always asks first: there is no undo on the shelf
+  const removeAttachment = async (j: Job, path: string, name = path): Promise<boolean> => {
+    if (!window.confirm(isImg(name) ? "Delete this photo? It comes off the job for good." : "Delete this file? It comes off the job for good.")) return false;
     await sb().storage.from("docs").remove([path]);
     const cur = jobs.find((x) => x.id === j.id) || j;
     const list = (cur.attachments || []).filter((a) => a.path !== path);
     await sb().from("pact_jobs").update({ attachments: list }).eq("id", j.id);
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, attachments: list } : x)));
     setAttachJob((prev) => (prev && prev.id === j.id ? { ...prev, attachments: list } : prev));
+    setLightbox((prev) => (prev && prev.path === path ? null : prev));
+    return true;
   };
   useEffect(() => {
     const imgs = (attachJob?.attachments || []).filter((a) => isImg(a.name));
@@ -1074,13 +1113,13 @@ export default function Pact() {
       // one read up front: dupes and the partner lookup. No invoice numbers
       // here — those are given out as the invoices are made (below)
       const { data: priorRows, error: le } = await sb().from("pact_jobs").select(`partner,bill_to,${DUPE_COLS}`).limit(5000);
-      if (le) { flash(`Couldn't check for duplicates (${le.message.slice(0, 60)}) — nothing was created, try again`); return; }
+      if (le) { flash("Couldn't check for duplicates. Nothing was created, try again."); return; }
       const prior = (priorRows || []) as (Job & { partner: string; bill_to?: string })[];
       const made: Job[] = [];
       let skipped = 0, failed = 0, done = 0;
       for (const f of files) {
         done += 1;
-        flash(`Reading proposals… ${done} of ${files.length}`);
+        setProgress(`Reading proposals… ${done} of ${files.length}`);
         try {
           const parsed = parsePactProposalDocx(await f.arrayBuffer());
           if (!parsed.readable || parsed.rows.length === 0) { failed += 1; continue; }
@@ -1114,6 +1153,7 @@ export default function Pact() {
       setFolderResult({ made, skipped, failed });
       flash(`${made.length} proposal${made.length === 1 ? "" : "s"} added${skipped ? `, ${skipped} already here` : ""}${failed ? `, ${failed} couldn't be read` : ""}`);
     } finally {
+      setProgress("");
       setBusy(false);
     }
   };
@@ -1125,13 +1165,13 @@ export default function Pact() {
       const { data } = await sb().from("org").select("*").single();
       if (data) { theOrg = data as Org; setOrg(theOrg); }
     }
-    if (!theOrg) { flash("Company details haven't loaded — check your signal and try again"); return; }
+    if (!theOrg) { flash("Company details haven't loaded. Check your signal and try again."); return; }
     setBusy(true);
     try {
       const files: Record<string, Uint8Array> = {};
       let done = 0;
       for (const j0 of folderResult.made) {
-        flash(`Making invoices… ${++done} of ${folderResult.made.length}`);
+        setProgress(`Making invoices… ${++done} of ${folderResult.made.length}`);
         // whatever was corrected since the import is what gets billed — and
         // the invoice number is given out right here, in this order
         const j1 = jobs.find((x) => x.id === j0.id) || j0;
@@ -1146,7 +1186,7 @@ export default function Pact() {
         files[name] = bytes;
         await keepOnJob(j, bytes, invoiceFileName(j), "application/pdf");
       }
-      if (Object.keys(files).length === 0) { flash("No invoices could be built"); setBusy(false); return; }
+      if (Object.keys(files).length === 0) { flash("No invoices could be built"); setProgress(""); setBusy(false); return; }
       const { zipSync } = await import("fflate");
       const zipped = zipSync(files, { level: 1 });
       const ab = new ArrayBuffer(zipped.byteLength);
@@ -1163,8 +1203,9 @@ export default function Pact() {
         load();
       }
     } catch {
-      flash("Couldn't build the zip — check your signal and try again");
+      flash("Couldn't build the zip. Check your signal and try again.");
     }
+    setProgress("");
     setBusy(false);
   };
 
@@ -1215,7 +1256,7 @@ export default function Pact() {
       y -= 26;
 
       // invoice meta
-      ([["INVOICE #", j.invoice_number || j.po_number || "—"], ["DATE", prettyDate(today())], ["PURCHASE ORDER", j.po_number || j.job_number || "—"]] as [string, string][]).forEach(([k, v], i) => {
+      ([["INVOICE #", j.invoice_number || j.po_number || ""], ["DATE", prettyDate(today())], ["PURCHASE ORDER", j.po_number || j.job_number || ""]] as [string, string][]).forEach(([k, v], i) => {
         const x = L + i * 172;
         put(k, x, y, 7, bold, soft);
         put(v, x, y - 14, 10.5, bold);
@@ -1328,7 +1369,7 @@ export default function Pact() {
             const bytes = new Uint8Array(await (await fetch(data.signedUrl)).arrayBuffer());
             const img = bytes[0] === 0x89 ? await pkg.embedPng(bytes) : await pkg.embedJpg(bytes);
             const p = pkg.addPage([612, 792]);
-            p.drawText(`${kind.toUpperCase()} — ${a.name}`, { x: 48, y: 760, size: 11, font: bold });
+            p.drawText(`${kind.toUpperCase()} · ${a.name}`, { x: 48, y: 760, size: 11, font: bold });
             const maxW = 516, maxH = 680;
             const scale = Math.min(maxW / img.width, maxH / img.height, 1);
             p.drawImage(img, { x: (612 - img.width * scale) / 2, y: 740 - img.height * scale, width: img.width * scale, height: img.height * scale });
@@ -1357,7 +1398,7 @@ export default function Pact() {
   const buildPackage = async (j0: Job) => {
     let j = j0;
     const theOrg = await companyOrg();
-    if (!theOrg) { flash("Company details haven't loaded — check your signal and try again"); return; }
+    if (!theOrg) { flash("Company details haven't loaded. Check your signal and try again."); return; }
     setBusy(true);
     try {
       if (!hasLines(j)) { flash("Fill in the invoice lines first (open the job → Papers → Edit invoice)"); setBusy(false); return; }
@@ -1376,7 +1417,7 @@ export default function Pact() {
       // revoking right away can abort the download on iPhone — give it a minute
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
       if (!j.invoice_sent) patch(j, { invoice_sent: today() });
-      flash("Package downloaded — invoice, PO, and photos in one PDF");
+      flash("Package downloaded: invoice, PO and photos in one PDF");
     } catch {
       flash("Couldn't build the package");
     }
@@ -1394,17 +1435,62 @@ export default function Pact() {
     ...(canInvoice ? ([["INVOICED", !!j.invoice_sent], ["PAID", j.received]] as [string, boolean][]) : []),
   ];
 
-  // Until the profile answers, nothing renders — the money on this page must
-  // not flash at an account that isn't allowed to see it.
-  if (!role) return <div className="card p-4 text-sm text-inksoft">Checking your account…</div>;
+  // the list's shape, shimmering, while the first fetch is in flight
+  const skeletonRows = [0, 1, 2].map((i) => (
+    <div key={`sk${i}`} className="p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="skeleton h-4 w-32" />
+        <div className="skeleton h-4 w-16" />
+      </div>
+      <div className="skeleton mt-2 h-4 w-48" />
+    </div>
+  ));
+
+  // Until the profile answers, only the page's shape renders — the money on
+  // this page must not flash at an account that isn't allowed to see it.
+  if (!role) {
+    return (
+      <div>
+        <PageHeader title="PACT Billing" sub="POs, proposals, invoices" />
+        <div className="card divide-y divide-rulesoft">{skeletonRows}</div>
+      </div>
+    );
+  }
+
+  const testPosHere = jobs.some(isTestJob);
+  const emailLeft = emailJobsToClean().length;
+  // a row's thumbnail in the Documents dialog: a tap opens it big, the ✕ deletes it
+  const thumb = (j: Job, a: { name: string; path: string }) => (
+    <div key={a.path} className="relative">
+      <button type="button" className="block w-full transition-opacity active:opacity-80" onClick={() => setLightbox(a)} aria-label={`Open ${a.name}`}>
+        {photoUrls[a.path]
+          // eslint-disable-next-line @next/next/no-img-element
+          ? <img src={photoUrls[a.path]} alt={a.name} className="h-24 w-full rounded-sm border border-rulesoft object-cover" onLoad={(e) => e.currentTarget.classList.add("anim-fade")} />
+          : <span className="skeleton block h-24 w-full" />}
+      </button>
+      {canEdit && (
+        <button type="button" className="btn-icon absolute -right-1 -top-1 h-11 w-11 border-0 bg-transparent shadow-none text-paper" aria-label="Delete photo" onClick={() => removeAttachment(j, a.path, a.name)}>
+          <span className="rounded-sm bg-ink/70 px-1.5 text-xs">✕</span>
+        </button>
+      )}
+    </div>
+  );
 
   return (
     <div>
-      <PageHeader title="Billing" sub="PACT — POs, proposals, invoices">
-        {canPrice && (jobs.some(isTestJob)
-          ? <button className="btn btn-ghost" onClick={deleteTestPos} disabled={busy} title="Takes off the test POs and everything on them, nothing else" data-delete-test-pos>Delete test POs</button>
-          : <button className="btn btn-ghost" onClick={addTestPos} disabled={busy} title="Three throwaway POs to try texting, photos and square feet on" data-add-test-pos>+ Test POs</button>)}
-        <Link className="btn btn-ghost" href="/pact/schedule">📅 Schedule</Link>
+      <PageHeader title="PACT Billing" sub="POs, proposals, invoices"
+        primary={canEdit ? <button type="button" className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy}>📄 Upload PO or proposal</button> : undefined}
+        menu={[
+          { label: "Upload a folder of proposals", glyph: "📄", hidden: !canInvoice, disabled: busy, title: "Every letter in the folder becomes a job, then all the invoices download in one zip", onSelect: () => folderRef.current?.click() },
+          { label: "Proposal template (Word)", glyph: "⬇", hidden: !canInvoice, disabled: busy, title: "A blank letter in our layout. Fill it in and upload it back here to build the job", onSelect: blankProposal },
+          { label: "+ Type one in", glyph: "✎", hidden: !canEdit, onSelect: () => setAddOpen(!addOpen) },
+          { label: "Renumber invoices…", hidden: !canInvoice, disabled: busy, title: "Closes a hole in the numbers after deleted jobs, so they go up by one again", onSelect: renumberInvoices },
+          { label: "Add test POs", hidden: !canPrice || testPosHere, disabled: busy, title: "Three throwaway POs to try texting and photos on", onSelect: addTestPos },
+          // deleteTestPos and cleanupEmailJobs ask their own window.confirm, naming what goes
+          { label: "Delete test POs", hidden: !canPrice || !testPosHere, disabled: busy, destructive: true, title: "Takes the test POs and everything on them off, nothing else", onSelect: deleteTestPos },
+          { label: `Clean up old email imports… (${emailLeft})`, hidden: !canPrice || emailLeft === 0, disabled: busy, destructive: true, title: "Deletes the untouched jobs the old email intake made. Jobs with photos or real prices stay", onSelect: cleanupEmailJobs },
+        ]}>
+        <Link className="btn btn-ghost" href="/pact/schedule">📅 PACT Schedule</Link>
       </PageHeader>
       <input ref={poRef} type="file" accept="application/pdf,.pdf,.docx" className="hidden" onChange={handlePo} />
       {/* a folder (or multi-select) of proposal letters, read in one go */}
@@ -1418,149 +1504,124 @@ export default function Pact() {
         const billable = itemsOf(j).filter((it) => it.description.trim() && Number(it.qty) > 0);
         const priced = billable.some((it) => Number(it.unit_price) > 0);
         return (
-          <div className="card mb-3 border-work p-3.5">
-            <div className="font-display text-base font-bold uppercase">{oneShot.note} — {billable.length > 0 ? "papers ready" : "read, but nothing priced yet"}</div>
-            <div className="mt-1 text-xs text-inksoft">
+          <div className="card card-pad page-enter mb-3 border-work">
+            <div className="font-display text-base font-bold uppercase">{oneShot.note} · {billable.length > 0 ? "papers ready" : "read, but nothing priced yet"}</div>
+            <div className="mt-1 text-[12px] text-inksoft">
               {j.address || "This job"}{j.property_unit ? ` · Apt ${j.property_unit}` : ""}
               {" · "}{billable.length} work line{billable.length === 1 ? "" : "s"}
               {canPrice && Number(j.amount) > 0 ? ` · ${fmt(Number(j.amount))}` : ""}
               {canInvoice && j.invoice_number ? ` · invoice # ${j.invoice_number}` : ""}
               {billable.length === 0
-                ? ". Nothing on the price list matched this one — add the work lines below, then come back here."
-                : priced ? ". Check the lines below before you send anything."
-                  : ". The lines have no prices yet — fill them in below first."}
+                ? ". Nothing on the price list matched this one: add the work lines below, then come back here."
+                : priced ? ". Check the lines below. The crew is picked on the Schedule tab."
+                  : ". The lines have no prices yet: fill them in below first."}
             </div>
             <CardToolbar className="mt-3"
-              primary={canInvoice && billable.length > 0 ? (
-                <button className="btn btn-primary" disabled={busy} onClick={() => saveBoth(j)}>
-                  {busy ? "Working…" : "⬇ Proposal + invoice"}
-                </button>
+              primary={billable.length > 0 ? (
+                <button type="button" className="btn btn-primary" disabled={busy} onClick={() => saveBoth(j)}>⬇ Proposal + invoice</button>
               ) : undefined}
-              secondary={<button className="btn btn-ghost" disabled={busy} onClick={() => setOneShot(null)}>Done</button>}
-              menuLabel="Papers"
-              menu={[
-                { label: "View proposal", disabled: busy, title: "Read the proposal letter on screen first", onSelect: () => viewProposal(j) },
-                { label: "⬇ Proposal (PDF)", disabled: busy, title: "The proposal to send — opens the same everywhere", onSelect: () => saveProposalPdfFor(j) },
-                // this one saves the invoice PDF alone — the full zip lives on the job's Papers menu
-                { label: "⬇ Invoice (PDF)", hidden: !canInvoice, disabled: busy || billable.length === 0,
-                  title: billable.length === 0 ? "The job needs a work line first" : "Just the invoice, as a PDF",
-                  onSelect: () => saveInvoiceFor(j) },
-              ]} />
+              secondary={<button type="button" className="btn btn-ghost" disabled={busy} onClick={() => setOneShot(null)}>Done</button>} />
           </div>
         );
       })()}
 
       {folderResult && (
-        <div className="card mb-3 border-work p-3.5">
+        <div className="card card-pad page-enter mb-3 border-work">
           <div className="font-display text-base font-bold uppercase">{folderResult.made.length} proposal{folderResult.made.length === 1 ? "" : "s"} added</div>
-          <div className="mt-1 text-xs text-inksoft">
+          <div className="mt-1 text-[12px] text-inksoft">
             {folderResult.skipped > 0 && `${folderResult.skipped} skipped (already here). `}
-            {folderResult.failed > 0 && `${folderResult.failed} couldn't be read — upload those one at a time. `}
+            {folderResult.failed > 0 && `${folderResult.failed} couldn't be read. Upload those one at a time. `}
             {canInvoice && "Invoice numbers are given out as the invoices are made."}
           </div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {canInvoice && (
-              <button className="btn btn-primary" onClick={downloadFolderInvoices} disabled={busy || folderResult.made.length === 0}>
-                {busy ? "Making invoices…" : `⬇ Download all ${folderResult.made.length} invoices (zip)`}
-              </button>
-            )}
-            {canInvoice && (
-              <button className="btn" onClick={downloadFolderProposals} disabled={busy || folderResult.made.length === 0}>
-                {busy ? "Working…" : `⬇ Download all ${folderResult.made.length} proposals (zip)`}
-              </button>
-            )}
-            <button className="btn btn-ghost" disabled={busy} onClick={() => setFolderResult(null)}>Not now</button>
-          </div>
-        </div>
-      )}
-
-      {addOpen && (
-        <div className="card mb-3 border-work p-3.5">
-          <div className="grid grid-cols-2 gap-2.5 md:grid-cols-5">
-            <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">PACT partner</div>
-              <input className="field" list="partners" value={draft.partner} onChange={(e) => setDraft({ ...draft, partner: e.target.value })} />
-              <datalist id="partners">{partners.map((p) => <option key={p} value={p} />)}</datalist></div>
-            <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Development</div>
-              <input className="field" value={draft.development} onChange={(e) => setDraft({ ...draft, development: e.target.value })} /></div>
-            <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Job / PO #</div>
-              <input className="field" value={draft.job_number} onChange={(e) => setDraft({ ...draft, job_number: e.target.value })} /></div>
-            {canPrice && <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Amount</div>
-              <input className="field" inputMode="decimal" value={draft.amount} onChange={(e) => setDraft({ ...draft, amount: e.target.value })} /></div>}
-            <div className="col-span-2 md:col-span-1"><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Description</div>
-              <input className="field" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></div>
-          </div>
-          <div className="mt-3 flex gap-2">
-            <button className="btn btn-primary" onClick={addJob}>Add job</button>
-            <button className="btn btn-ghost" onClick={() => setAddOpen(false)}>Cancel</button>
-          </div>
+          <CardToolbar className="mt-3"
+            primary={canInvoice ? (
+              <button type="button" className="btn btn-primary" onClick={downloadFolderInvoices} disabled={busy || folderResult.made.length === 0}>⬇ All {folderResult.made.length} invoices (zip)</button>
+            ) : undefined}
+            secondary={<>
+              {canInvoice && <button type="button" className="btn btn-ghost" onClick={downloadFolderProposals} disabled={busy || folderResult.made.length === 0}>⬇ All {folderResult.made.length} proposals (zip)</button>}
+              <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => setFolderResult(null)}>Done</button>
+            </>} />
         </div>
       )}
 
       {jobs.length > 0 && canInvoice && (
         <div className="mb-3 grid grid-cols-3 gap-2">
-          {([["PACT total", fmt(tot), "text-ink"], ["Received", fmt(rec), "text-ok"], ["Outstanding", fmt(tot - rec), "text-work"]] as [string, string, string][]).map(([l, v, cls]) => (
-            <div key={l} className="card p-3">
-              <div className="text-[11px] uppercase tracking-[.12em] text-inksoft">{l}</div>
-              <div className={`font-mono text-base font-semibold ${cls}`}>{v}</div>
+          {([["PACT total", fmt(tot), "text-ink"], ["Paid", fmt(rec), "text-ok"], ["Outstanding", fmt(tot - rec), "text-work"]] as [string, string, string][]).map(([l, v, cls]) => (
+            <div key={l} className="card card-tight">
+              <div className="section-label">{l}</div>
+              <div className={`truncate font-mono text-[15px] font-semibold tabular-nums ${cls}`}>{v}</div>
             </div>
           ))}
         </div>
       )}
 
-      {canEdit && (
-        <div className="card mb-3 flex flex-wrap items-center justify-between gap-2 border-work p-3.5">
-          <div className="min-w-0 text-sm">
-            <b>Got a purchase order?</b>{" "}
-            <span className="text-inksoft">Upload the PDF — the job builds itself with the address, contacts, work lines and amount.</span>
-          </div>
-          <div className="flex shrink-0 flex-wrap gap-2">
-            <button className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy} title="A partner PO (PDF) or one of our proposal letters (Word)">📄 Upload PO / proposal</button>
-            <ActionMenu label="More ways to add" items={[
-              { label: "Upload a folder of proposals", hidden: !canInvoice, disabled: busy, title: "Pick a folder of proposal letters — every one becomes a job, then all the invoices download in one zip", onSelect: () => folderRef.current?.click() },
-              { label: "Proposal template", hidden: !canInvoice, disabled: busy, title: "A blank proposal letter in our layout — fill it in, and uploading it back here builds the job and the invoice", onSelect: blankProposal },
-              { label: "Add a job manually", onSelect: () => setAddOpen(!addOpen) },
-              { label: "Renumber invoices…", hidden: !canInvoice, disabled: busy, title: "Close a hole in the invoice numbers (after deleted jobs) so they go up by one again", onSelect: renumberInvoices },
-              { label: `Clean up old email imports… (${emailJobsToClean().length})`, hidden: !canPrice || emailJobsToClean().length === 0, disabled: busy, destructive: true, title: "Deletes the jobs the old email intake made that nobody has touched. Jobs with photos or real prices stay.", onSelect: cleanupEmailJobs },
-            ]} />
-          </div>
-        </div>
-      )}
-      <input className="field mb-3" placeholder="Search partner, address, PO #…" value={q} onChange={(e) => setQ(e.target.value)} />
+      <input type="search" enterKeyHint="search" autoComplete="off" className="field mb-3" placeholder="Search PO #, partner, address…" aria-label="Search POs" value={q} onChange={(e) => setQ(e.target.value)} />
 
-      <div className="card divide-y divide-rulesoft">
+      {addOpen && canEdit && (
+        <form className="card card-pad anim-open mb-3 border-work" onSubmit={(e) => { e.preventDefault(); addJob(); }}>
+          <div className="mb-2 font-display text-base font-bold uppercase">New PO by hand</div>
+          <div className="grid grid-cols-2 gap-2.5 md:grid-cols-5">
+            <div><label className="section-label mb-1" htmlFor="newpo-partner">PACT partner</label>
+              <input id="newpo-partner" className="field" list="partners" autoFocus value={draft.partner} onChange={(e) => setDraft({ ...draft, partner: e.target.value })} />
+              <datalist id="partners">{partners.map((p) => <option key={p} value={p} />)}</datalist></div>
+            <div><label className="section-label mb-1" htmlFor="newpo-po">PO #</label>
+              <input id="newpo-po" className="field" value={draft.job_number} onChange={(e) => setDraft({ ...draft, job_number: e.target.value })} /></div>
+            {canPrice && <div><label className="section-label mb-1" htmlFor="newpo-amount">Amount</label>
+              <input id="newpo-amount" className="field" inputMode="decimal" value={draft.amount} onChange={(e) => setDraft({ ...draft, amount: e.target.value })} /></div>}
+            <div className="col-span-2 md:col-span-1"><label className="section-label mb-1" htmlFor="newpo-desc">Description</label>
+              <input id="newpo-desc" className="field" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></div>
+            <div><label className="section-label mb-1" htmlFor="newpo-dev">Development</label>
+              <input id="newpo-dev" className="field" enterKeyHint="done" value={draft.development} onChange={(e) => setDraft({ ...draft, development: e.target.value })} /></div>
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button type="submit" className="btn btn-primary">Add PO</button>
+            <button type="button" className="btn btn-ghost" onClick={() => setAddOpen(false)}>Cancel</button>
+          </div>
+        </form>
+      )}
+
+      {!loaded ? (
+        <div className="card divide-y divide-rulesoft">{skeletonRows}</div>
+      ) : list.length === 0 ? (
+        <div className="empty">{jobs.length === 0 ? "No POs yet. Upload a partner PO and the job builds itself from it." : `Nothing matches “${q.trim()}”. Try a PO number, a partner or a street.`}</div>
+      ) : (
+      <div className="card anim-fade divide-y divide-rulesoft">
         {list.map((j) => (
-          <div key={j.id} className={`p-3.5 ${j.canceled ? "opacity-50" : ""}`} data-job-card={j.id}>
+          <div key={j.id} className={`card-pad ${openId === j.id ? "" : "transition-colors hover:bg-paper"} ${j.canceled ? "opacity-50" : ""}`} data-job-card={j.id}>
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <button className="min-w-0 text-left" onClick={() => setOpenId(openId === j.id ? null : j.id)}>
-                <div className={`text-[14px] font-semibold ${j.canceled ? "line-through" : ""}`}>
-                  {shortSite(j)}
-                  {(j.po_number || j.job_number) ? <span className="ml-1.5 font-mono text-xs text-inksoft">PO {j.po_number || j.job_number}</span> : null}
-                </div>
-                <div className="max-w-[340px] truncate text-[13px] text-inksoft">{[j.partner, shortWork(j)].filter(Boolean).join(" · ")}</div>
-                {!j.canceled && (() => {
-                  const stages = pipeline(j);
-                  const current = stages.findIndex(([, done]) => !done);
-                  return (
-                    <div className="mt-1 flex flex-wrap items-center gap-1">
-                      {stages.map(([l, done], i) => (
-                        <span key={l} className={`chip rounded-[2px] border px-1 py-px font-semibold ${done ? "border-ok bg-ok/10 text-ok" : i === current ? "border-work text-work" : "border-rulesoft text-rule"}`}>{l}</span>
-                      ))}
-                      {j.proposal_sent && !j.approved && <span className="chip ml-1 text-work">{days(j.proposal_sent)}d waiting</span>}
-                      {canInvoice && j.work_done && !j.invoice_sent && <span className="chip ml-1 text-work" data-ready-to-invoice>ready to invoice</span>}
-                      {canInvoice && j.invoice_sent && !j.received && <span className="chip ml-1 text-inksoft">{days(j.invoice_sent)}d out</span>}
-                    </div>
-                  );
-                })()}
+              <button type="button" className="flex min-w-0 flex-1 items-start gap-2 text-left" aria-expanded={openId === j.id} onClick={() => toggleOpen(j)}>
+                <span aria-hidden className={`mt-1 text-[11px] text-inksoft transition-transform duration-150 ${openId === j.id ? "rotate-90" : ""}`}>▸</span>
+                <span className="min-w-0 flex-1">
+                  <span className={`block text-[14px] font-semibold ${j.canceled ? "line-through" : ""}`}>
+                    {shortSite(j)}
+                    {(j.po_number || j.job_number) ? <span className="ml-1.5 font-mono text-xs text-inksoft">PO {j.po_number || j.job_number}</span> : null}
+                  </span>
+                  <span className="block truncate text-[13px] text-inksoft md:max-w-[640px]">{[j.partner, shortWork(j)].filter(Boolean).join(" · ")}</span>
+                  {!j.canceled && (() => {
+                    const stages = pipeline(j);
+                    const current = stages.findIndex(([, done]) => !done);
+                    return (
+                      <span className="mt-1 flex flex-wrap items-center gap-1">
+                        {stages.map(([l, done], i) => (
+                          <span key={l} className={`chip-outline ${done ? "border-ok bg-ok/10 text-ok" : i === current ? "border-work text-work" : "border-rulesoft text-rule"}`}>{l}</span>
+                        ))}
+                        {j.proposal_sent && !j.approved && <span className="chip-outline ml-1 border-work text-work">{days(j.proposal_sent)}D SINCE PROPOSAL</span>}
+                        {canInvoice && j.work_done && !j.invoice_sent && <span className="chip-outline ml-1 border-work text-work" data-ready-to-invoice>READY TO INVOICE</span>}
+                        {canInvoice && j.invoice_sent && !j.received && <span className="chip-outline ml-1 border-inksoft text-inksoft">{days(j.invoice_sent)}D UNPAID</span>}
+                      </span>
+                    );
+                  })()}
+                </span>
               </button>
               <div className="flex shrink-0 items-center gap-2">
-                {canPrice && <span className="font-mono text-sm font-semibold">{fmt(Number(j.amount) || invTotal(j))}</span>}
-                {(j.attachments || []).length > 0 && <span className="chip text-inksoft" title="Documents & photos">📎 {(j.attachments || []).length}</span>}
+                {canPrice && <span className="font-mono text-sm font-semibold tabular-nums">{fmt(Number(j.amount) || invTotal(j))}</span>}
+                {(j.attachments || []).length > 0 && <button type="button" className="btn-icon chip w-auto min-w-[44px] border-0 px-1.5 shadow-none text-inksoft" aria-label="Documents and photos" onClick={() => setAttachJob(j)}>📎 {(j.attachments || []).length}</button>}
                 <RowActions items={[
-                  { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },
-                  { label: "Photos PDF", glyph: "⬇", hidden: !(j.attachments || []).some((a) => isImg(a.name)), disabled: busy, title: "Before and after pictures on one PDF, with the job on top, to send out", onSelect: () => makePhotoPdf(j) },
+                  { label: "Documents", glyph: "📎", onSelect: () => setAttachJob(j) },
+                  { label: "Open on Schedule", glyph: "📅", href: `/pact/schedule?job=${j.id}` },
                   { label: "Restore", glyph: "↺", hidden: !canEdit || !j.canceled, onSelect: () => patch(j, { canceled: false }) },
                   // deleteJob asks its own window.confirm — no second prompt here
-                  { label: "Delete job…", hidden: !canEdit, destructive: true, onSelect: () => deleteJob(j) },
+                  { label: "Delete PO…", hidden: !canEdit, destructive: true, onSelect: () => deleteJob(j) },
                 ]} />
               </div>
             </div>
@@ -1568,31 +1629,35 @@ export default function Pact() {
               const beforeN = (j.attachments || []).filter((a) => isImg(a.name) && a.name.toLowerCase().startsWith("before")).length;
               const afterN = (j.attachments || []).filter((a) => isImg(a.name) && a.name.toLowerCase().startsWith("after")).length;
               const photoN = (j.attachments || []).filter((a) => isImg(a.name)).length;
+              const canReread = canPrice && (j.attachments || []).some((a) => /\.pdf$/i.test(a.name) && !isMade(a));
               return (
-              <div className="mt-3 border-t border-rulesoft pt-3">
+              <div className="anim-open mt-3 border-t border-rulesoft pt-3">
                 <div className="mb-2.5 flex flex-wrap items-center gap-2">
-                  {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "before")} disabled={busy}>📷 Before{beforeN > 0 ? ` · ${beforeN}` : ""}</button>}
-                  {canEdit && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => snapPhotos(j, "after")} disabled={busy}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}
-                  {photoN > 0 && <button className="btn min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => makePhotoPdf(j)} disabled={busy} title="Before and after pictures on one PDF, with the job on top, to send out" data-photo-pdf>Photos PDF</button>}
-                  <RowActions items={[
-                    { label: `Documents (📎 ${(j.attachments || []).length})`, onSelect: () => setAttachJob(j) },
-                    { label: "Re-read the PO", glyph: "🔁", hidden: !canPrice || !(j.attachments || []).some((a) => /\.pdf$/i.test(a.name) && !isMade(a)), disabled: busy, title: "Rebuild this job from its PDF: the reader, then the price list. Photos and documents stay.", confirm: "Re-read this PO? The partner, address, description, work lines and amount are replaced with what the PDF says. Photos and documents stay.", onSelect: async () => { setBusy(true); await rereadJob(j); setBusy(false); } },
-                  ]} />
+                  {canEdit && <button type="button" className="btn btn-ghost btn-sm" onClick={() => snapPhotos(j, "before")} disabled={busy}>📷 Before{beforeN > 0 ? ` · ${beforeN}` : ""}</button>}
+                  {canEdit && <button type="button" className="btn btn-ghost btn-sm" onClick={() => snapPhotos(j, "after")} disabled={busy}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}
+                  {photoN > 0 && <button type="button" className="btn btn-ghost btn-sm" onClick={() => makePhotoPdf(j)} disabled={busy} title="Before and after pictures on one PDF, with the job on top, to send out" data-photo-pdf>⬇ Photos (PDF)</button>}
+                  {canReread && (
+                    <button type="button" className="btn btn-ghost btn-sm" disabled={busy} title="Rebuilds this job from its PDF: the reader, then the price list. Photos and documents stay"
+                      onClick={async () => {
+                        if (!window.confirm("Re-read this PO? The partner, address, description, work lines and amount are replaced with what the PDF says. Photos and documents stay.")) return;
+                        setBusy(true); await rereadJob(j); setBusy(false);
+                      }}>Re-read the PO</button>
+                  )}
                 </div>
                 {canEdit && (
                 <div className="mb-2.5 flex flex-wrap gap-2">
-                  <button className="btn-stamp" onClick={() => patch(j, j.proposal_sent ? { proposal_sent: null } : { proposal_sent: today() })}><Stamp label={j.proposal_sent ? `PROPOSAL SENT ${prettyDate(j.proposal_sent)}` : "MARK PROPOSAL SENT"} tone={j.proposal_sent ? "ok" : "mute"} /></button>
-                  <button className="btn-stamp" onClick={() => patch(j, { approved: !j.approved })}><Stamp label={j.approved ? "APPROVED ✓" : "MARK APPROVED"} tone={j.approved ? "ok" : "mute"} /></button>
-                  <button className="btn-stamp" onClick={() => patch(j, { work_done: !j.work_done })}><Stamp label={j.work_done ? "WORK DONE ✓" : "MARK WORK DONE"} tone={j.work_done ? "ok" : "mute"} /></button>
-                  {canInvoice && <button className="btn-stamp" onClick={() => patch(j, j.received ? { received: false, paid_date: null } : { received: true, paid_date: today() })}><Stamp label={j.received ? `PAID ${prettyDate(j.paid_date)}` : "MARK PAID"} tone={j.received ? "ok" : "work"} /></button>}
+                  <button type="button" className="btn-stamp" title={j.proposal_sent ? "Tap to clear" : "Tap when the proposal has gone out"} onClick={() => patch(j, j.proposal_sent ? { proposal_sent: null } : { proposal_sent: today() })}><Stamp label={j.proposal_sent ? `PROPOSAL SENT · ${shortDay(j.proposal_sent)}` : "MARK PROPOSAL SENT"} tone={j.proposal_sent ? "ok" : "mute"} /></button>
+                  <button type="button" className="btn-stamp" title={j.approved ? "Tap to clear" : "Tap when the partner approves"} onClick={() => patch(j, { approved: !j.approved })}><Stamp label={j.approved ? "APPROVED ✓" : "MARK APPROVED"} tone={j.approved ? "ok" : "mute"} /></button>
+                  <button type="button" className="btn-stamp" title={j.work_done ? "Tap to clear" : "Tap when the work is done"} onClick={() => patch(j, { work_done: !j.work_done })}><Stamp label={j.work_done ? "WORK DONE ✓" : "MARK WORK DONE"} tone={j.work_done ? "ok" : "mute"} /></button>
+                  {canInvoice && <button type="button" className="btn-stamp" title={j.received ? "Tap to clear" : "Tap when the payment comes in"} onClick={() => patch(j, j.received ? { received: false, paid_date: null } : { received: true, paid_date: today() })}><Stamp label={j.received ? `PAID${j.paid_date ? ` · ${shortDay(j.paid_date)}` : ""}` : "MARK PAID"} tone={j.received ? "ok" : "mute"} /></button>}
                 </div>
                 )}
-                <Disclosure label="Job details" sublabel="partner, PO #, contact" open={!!detailsOpen[j.id]}
+                <Disclosure label="PO details" sublabel="partner, PO #, contact" open={!!detailsOpen[j.id]}
                   onToggle={() => setDetailsOpen((p) => ({ ...p, [j.id]: !p[j.id] }))}>
                 <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
-                  {([["partner", "Partner"], ["address", "Work address (ship to)"], ["po_number", "PO #"], ...(canInvoice ? [["invoice_number", "Invoice #"]] : []), ["property_unit", "Property unit"], ["contact", "Contact"], ["description", "Work description"]] as ["partner" | "address" | "po_number" | "invoice_number" | "property_unit" | "contact" | "description", string][]).map(([k, label]) => (
-                    <div key={k} className={k === "description" || k === "address" ? "col-span-2" : ""}><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">{label}</div>
-                      <input className="field" value={j[k] || ""} readOnly={!canEdit} onChange={(e) => canEdit && setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, [k]: e.target.value } : x)))}
+                  {([["partner", "Partner"], ["address", "Job address"], ["po_number", "PO #"], ...(canInvoice ? [["invoice_number", "Invoice #"]] : []), ["property_unit", "Apt / unit"], ["contact", "Contact"], ["description", "Work description"]] as ["partner" | "address" | "po_number" | "invoice_number" | "property_unit" | "contact" | "description", string][]).map(([k, label]) => (
+                    <div key={k} className={k === "description" || k === "address" ? "col-span-2" : ""}><label className="section-label mb-1" htmlFor={`${j.id}-${k}`}>{label}</label>
+                      <input id={`${j.id}-${k}`} className="field" value={j[k] || ""} readOnly={!canEdit} onChange={(e) => canEdit && setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, [k]: e.target.value } : x)))}
                         onFocus={(e) => { atFocus.current = e.target.value; }}
                         onBlur={(e) => { const v = k === "invoice_number" ? e.target.value.trim() : e.target.value; if (canEdit && v !== atFocus.current) patch(j, { [k]: v } as Partial<Job>); }} /></div>
                   ))}
@@ -1600,85 +1665,37 @@ export default function Pact() {
                 </Disclosure>
                 {/* the PO seeds one line — add more when the job runs past what's listed (excess materials etc.) */}
                 <div className="mt-3">
-                  <div className="mb-1.5 text-[11px] uppercase tracking-widest text-inksoft">Work lines — what gets billed for this job</div>
+                  <div className="section-label mb-1.5">Work lines · what gets billed for this job</div>
                   {!canEdit && itemsOf(j).map((it, i) => (
                     <div key={i} className="mb-1 flex flex-wrap items-center gap-2 text-[13px]">
-                      <span className="flex-1">{it.description || "—"}</span>
+                      <span className="flex-1">{it.description || "(no wording)"}</span>
                       <span className="font-mono text-inksoft">{it.qty} {it.unit}</span>
                     </div>
                   ))}
-                  {!canEdit && itemsOf(j).length === 0 && <div className="text-xs text-inksoft">No lines yet.</div>}
-                  {/* each line stacks: the description on its own row, the numbers
-                      in a fixed grid under it — nothing scrolls sideways */}
-                  {canEdit && itemsOf(j).map((it, i) => (
-                    <div key={i} className="mb-2 rounded-sm border border-rulesoft p-2">
-                      <div className="flex items-start gap-1.5">
-                        <input className="field flex-1" placeholder="What was done — door, plaster, paint…" value={it.description}
-                          onChange={(e) => {
-                            const next = [...itemsOf(j)];
-                            const auto = unitFor(e.target.value);
-                            next[i] = { ...it, description: e.target.value, unit: it.unit === unitFor(it.description) || !it.unit ? auto : it.unit };
-                            setItems(j, next);
-                          }}
-                          onBlur={() => setItems(j, itemsOf(j), true)} />
-                        <button className="btn-icon border-0 bg-transparent shadow-none text-alert" title="Remove line" onClick={() => setItems(j, itemsOf(j).filter((_, x) => x !== i), true)}>✕</button>
-                      </div>
-                      <div className={`mt-1.5 grid items-end gap-1.5 ${canPrice ? "grid-cols-4" : "grid-cols-2"}`}>
-                        <div><div className="text-[11px] uppercase text-inksoft">Qty</div>
-                          <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="decimal" title="Quantity"
-                            {...num(`${j.id}:wl${i}:q`, Number(it.qty) || 0,
-                              (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next); },
-                              (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next, true); })} /></div>
-                        <div><div className="text-[11px] uppercase text-inksoft">Unit</div>
-                          <input className="field px-1 py-1.5 text-center font-mono" title="Unit of measure" value={it.unit}
-                            onChange={(e) => { const next = [...itemsOf(j)]; next[i] = { ...it, unit: e.target.value }; setItems(j, next); }}
-                            onBlur={() => setItems(j, itemsOf(j), true)} /></div>
-                        {canPrice && (
-                          <div><div className="text-[11px] uppercase text-inksoft">Price</div>
-                            <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="decimal" title="Price per unit"
-                              {...num(`${j.id}:wl${i}:p`, Number(it.unit_price) || 0,
-                                (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next); },
-                                (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next, true); })} /></div>
-                        )}
-                        {canPrice && (
-                          <div><div className="text-[11px] uppercase text-inksoft">Total</div>
-                            <div className="py-1.5 text-right font-mono text-[13px]">{fmt((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</div></div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                  {!canEdit && itemsOf(j).length === 0 && <div className="empty">No lines yet.</div>}
                   {canEdit && (
-                    <div className="flex flex-wrap gap-2">
-                      <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" onClick={() => setItems(j, [...itemsOf(j), { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>
-                      {canPrice && <button className="btn btn-ghost min-h-[44px] px-3 py-1.5 text-[13px]" disabled={busy} title="Fill the lines and prices from the partner price list — plaster brings its primer and paint" onClick={() => fillFromList(j)}>Price from list</button>}
-                      {canPrice && (
-                        <label className="flex items-center gap-1 text-[12px] text-inksoft" title="The sales tax printed on the proposal and the invoice">
-                          Sales tax
-                          <input className="field w-16 px-1.5 py-1.5 text-right font-mono text-[12px]" inputMode="decimal"
-                            {...num(`${j.id}:tax`, taxRate(j), () => null, (n2) => {
-                              // the billed amount follows the rate — otherwise the
-                              // job keeps yesterday's total at today's tax
-                              const sub = invSubtotal(j);
-                              patch(j, sub > 0 ? { tax_pct: n2, amount: sub * (1 + n2 / 100) } : { tax_pct: n2 });
-                            }, { showZero: true })} />
-                          %
-                        </label>
-                      )}
-                    </div>
+                    <WorkLines items={itemsOf(j)} canPrice={canPrice} bufferKey={`${j.id}:wl`}
+                      onChange={(next) => setItems(j, next)} onCommit={(next) => setItems(j, next, true)}
+                      flashWithUndo={flashWithUndo}
+                      taxPct={canPrice ? taxRate(j) : undefined}
+                      onTax={canPrice ? (n2) => {
+                        // the billed amount follows the rate — otherwise the
+                        // job keeps yesterday's total at today's tax
+                        const sub = invSubtotal(j);
+                        patch(j, sub > 0 ? { tax_pct: n2, amount: sub * (1 + n2 / 100) } : { tax_pct: n2 });
+                      } : undefined}
+                      extra={canPrice ? <button type="button" className="btn btn-ghost btn-sm" disabled={busy} title="Fills the lines and prices from the partner price list. Plaster brings its primer and paint" onClick={() => fillFromList(j)}>Price from list</button> : undefined} />
                   )}
                 </div>
-                <CardToolbar className="mt-3 justify-end border-t border-rulesoft pt-3"
-                  primary={<button className="btn btn-primary" onClick={() => {
-                    (document.activeElement as HTMLElement | null)?.blur?.();
-                    setOpenId(null);
-                  }}>Save & close</button>}
+                <CardToolbar className="mt-3" align="end" sticky
+                  primary={<button type="button" className="btn btn-primary" onClick={() => toggleOpen(j)}>Done</button>}
                   menuLabel="Papers"
                   menu={canInvoice ? [
-                    { label: "⬇ Proposal + invoice", disabled: busy, title: "Both files in one tap — the proposal PDF and the invoice PDF", onSelect: () => saveBoth(j) },
-                    { label: "View proposal", disabled: busy, title: "Read the proposal letter on screen first", onSelect: () => viewProposal(j) },
-                    { label: "⬇ Proposal (PDF)", disabled: busy, title: "The proposal to send — opens the same everywhere", onSelect: () => makeProposalPdf(j) },
-                    { label: "⬇ Proposal (Word)", disabled: busy, title: "The same letter as a Word file, to edit before sending", onSelect: () => makeProposal(j) },
-                    { label: "⬇ Invoice package (zip)", disabled: busy, title: "Invoice, the PO and the before/after photos in one PDF", onSelect: () => buildPackage(j) },
+                    { label: "Proposal + invoice", glyph: "⬇", disabled: busy, title: "Both files in one tap: the proposal PDF and the invoice PDF", onSelect: () => saveBoth(j) },
+                    { label: "View proposal", disabled: busy, title: "Read the letter on screen first", onSelect: () => viewProposal(j) },
+                    { label: "Proposal (PDF)", glyph: "⬇", disabled: busy, title: "The proposal to send. Opens the same everywhere", onSelect: () => makeProposalPdf(j) },
+                    { label: "Proposal (Word)", glyph: "⬇", disabled: busy, title: "The same letter as a Word file, to edit before sending", onSelect: () => makeProposal(j) },
+                    { label: "Invoice package (PDF)", glyph: "⬇", disabled: busy, title: "The invoice, the PO and the before and after photos in one PDF", onSelect: () => buildPackage(j) },
                     { label: "Edit invoice", title: "The invoice lines, tax and total", onSelect: () => setInvJob(j) },
                   ] : []} />
               </div>
@@ -1686,8 +1703,8 @@ export default function Pact() {
             })()}
           </div>
         ))}
-        {list.length === 0 && <div className="p-5 text-sm text-inksoft">{jobs.length === 0 ? "No PACT jobs yet. Upload a partner PO — the job builds itself from it." : "Nothing matches."}</div>}
       </div>
+      )}
 
       {/* ---------- invoice editor ---------- */}
       {invJob && canInvoice && (() => {
@@ -1695,159 +1712,111 @@ export default function Pact() {
         const items = itemsOf(j);
         return (
           <Modal wide title={`Invoice · PO ${j.po_number || j.job_number}`} onClose={() => setInvJob(null)}
-            footer={<CardToolbar className="justify-end"
-              secondary={<button className="btn btn-ghost" disabled={busy} onClick={() => { setInvJob(null); buildPackage(j); }}>⬇ Invoice package (zip)</button>}
-              primary={<button className="btn btn-primary" onClick={() => {
-                (document.activeElement as HTMLElement | null)?.blur?.();
-                setInvJob(null);
-              }}>Save & close</button>} />}>
-              <div className="mb-3 text-[13px] text-inksoft">{j.partner} · {j.address}{j.property_unit ? ` · Unit ${j.property_unit}` : ""}</div>
+            primary={<button type="button" className="btn btn-primary" onClick={() => {
+              (document.activeElement as HTMLElement | null)?.blur?.();
+              setInvJob(null);
+            }}>Done</button>}
+            secondary={<button type="button" className="btn btn-ghost" disabled={busy} onClick={() => { setInvJob(null); buildPackage(j); }}>⬇ Invoice package (PDF)</button>}>
+              <div className="mb-3 text-[13px] text-inksoft">{j.partner} · {j.address}{j.property_unit ? ` · Apt ${j.property_unit}` : ""}</div>
               <div className="mb-3 grid grid-cols-2 gap-2.5 md:grid-cols-4">
-                <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Invoice #</div>
-                  <input className="field" value={j.invoice_number || ""} placeholder="given out when priced" title="The number comes on its own once the job is priced — or the moment its invoice is built"
+                <div><div className="section-label mb-1">Invoice #</div>
+                  <input className="field" aria-label="Invoice #" value={j.invoice_number || ""} placeholder="when priced"
                     onChange={(e) => { setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, invoice_number: e.target.value } : x))); setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, invoice_number: e.target.value } : prev)); }}
                     onFocus={(e) => { atFocus.current = e.target.value; }}
                     onBlur={(e) => { const v = e.target.value.trim(); if (v !== atFocus.current) patch(j, { invoice_number: v }); }} /></div>
-                <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Subtotal</div>
-                  <div className="field bg-paper font-mono">{fmt(invSubtotal(j))}</div></div>
-                <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Tax %</div>
-                  <input className="field text-right font-mono" inputMode="decimal"
+                <div><div className="section-label mb-1">Subtotal</div>
+                  <div className="field flex items-center bg-paper font-mono">{fmt(invSubtotal(j))}</div></div>
+                <div><div className="section-label mb-1">Sales tax %</div>
+                  <input className="field w-24 px-1.5 py-1.5 text-right font-mono" inputMode="decimal" aria-label="Sales tax %"
                     {...num(`${j.id}:tax`, taxRate(j),
                       (n) => setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, tax_pct: n } : x))),
                       (n) => { const j2 = { ...j, tax_pct: n }; const sub = invSubtotal(j2); patch(j2, sub > 0 ? { tax_pct: n, amount: sub * (1 + n / 100) } : { tax_pct: n }); },
                       { showZero: true })} /></div>
-                <div><div className="mb-1 text-[11px] uppercase tracking-widest text-inksoft">Total (with tax)</div>
-                  <div className="field bg-paper font-mono font-semibold">{fmt(invTotal(j))}</div></div>
+                <div><div className="section-label mb-1">Total (with tax)</div>
+                  <div className="field flex items-center bg-paper font-mono font-semibold">{fmt(invTotal(j))}</div></div>
               </div>
-              {items.map((it, i) => (
-                <div key={i} className="mb-2 rounded-sm border border-rulesoft p-2">
-                  <div className="flex items-start gap-2">
-                    <input className="field flex-1" placeholder="Work description (unit picks itself — door, plaster, paint…)" value={it.description}
-                      onChange={(e) => {
-                        const next = [...items];
-                        const auto = unitFor(e.target.value);
-                        next[i] = { ...it, description: e.target.value, unit: it.unit === unitFor(it.description) || !it.unit ? auto : it.unit };
-                        setItems(j, next);
-                      }}
-                      onBlur={() => setItems(j, items, true)} />
-                    <button className="btn-icon border-0 bg-transparent shadow-none text-alert" title="Remove line" onClick={() => setItems(j, items.filter((_, x) => x !== i), true)}>✕</button>
-                  </div>
-                  <div className="mt-2 grid grid-cols-4 gap-2">
-                    <div><div className="text-[11px] uppercase text-inksoft">Qty</div>
-                      <input className="field px-2 py-1.5 text-right font-mono" inputMode="decimal"
-                        {...num(`${j.id}:inv${i}:q`, Number(it.qty) || 0,
-                          (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next); },
-                          (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], qty: n }; setItems(j, next, true); })} /></div>
-                    <div><div className="text-[11px] uppercase text-inksoft">Unit</div>
-                      <input className="field px-2 py-1.5 text-center font-mono" value={it.unit}
-                        onChange={(e) => { const next = [...items]; next[i] = { ...it, unit: e.target.value }; setItems(j, next); }}
-                        onBlur={() => setItems(j, items, true)} /></div>
-                    <div><div className="text-[11px] uppercase text-inksoft">Unit price</div>
-                      <input className="field px-2 py-1.5 text-right font-mono" inputMode="decimal"
-                        {...num(`${j.id}:inv${i}:p`, Number(it.unit_price) || 0,
-                          (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next); },
-                          (n) => { const next = [...itemsOf(j)]; next[i] = { ...next[i], unit_price: n }; setItems(j, next, true); })} /></div>
-                    <div><div className="text-[11px] uppercase text-inksoft">Amount</div>
-                      <div className="field bg-paper px-2 py-1.5 text-right font-mono">{fmt((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</div></div>
-                  </div>
-                </div>
-              ))}
-              <button className="btn btn-ghost" onClick={() => setItems(j, [...items, { description: "", qty: 1, unit: "EACH", unit_price: 0 }], true)}>+ Add line</button>
+              <WorkLines items={items} canPrice bufferKey={`${j.id}:inv`}
+                onChange={(next) => setItems(j, next)} onCommit={(next) => setItems(j, next, true)} flashWithUndo={flashWithUndo} />
           </Modal>
         );
       })()}
 
-      {/* ---------- documents & photos ---------- */}
+      {/* ---------- the proposal letter, read on screen before it goes anywhere ---------- */}
       {viewJob && canInvoice && (() => {
         const { job: j, f } = viewJob;
         const sub = f.lines.reduce((t, l) => t + l.qty * l.unit_price, 0);
         const tax = Math.round(sub * f.taxPct) / 100;
         return (
-          <PrintShell title={`proposal ${f.poNumber || ""} ${(f.serviceAddress || "").split(",")[0]}`.trim()}>
-            <div className="fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5">
-              <div className="printable mx-auto max-w-3xl rounded-sm bg-white p-8 text-logo-ink">
-                {/* centered, matching the letter the PDF and Word file print */}
-                <div className="text-center">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src="/logo.png" alt="" className="mx-auto h-12 w-auto" />
-                  <div className="mt-1 font-display text-xl font-bold text-logo-brown">{COMPANY.letterhead.name}</div>
-                  <div className="text-[11px] text-logo-muted">{COMPANY.letterhead.address}</div>
-                  <div className="text-[11px] text-logo-muted">{COMPANY.letterhead.phones.replace(/^Phone:\s*/, "").replace(/\s*\|\s*/g, "  ·  ")}</div>
-                  <div className="text-[11px] text-logo-muted">{COMPANY.letterhead.emails.replace(/^Email:\s*/, "").replace(/\s*\|\s*Office Email:\s*/, "  ·  ")}</div>
-                  {/* the globe's two halves, ocean then land */}
-                  <div className="mt-2 flex h-[3px]"><div className="flex-1 bg-logo-teal" /><div className="flex-1 bg-logo-green" /></div>
-                </div>
-                {/* this is the letter they are about to send — it reads the same
-                    as the PDF and the Word file, down to the sign-off */}
-                <div className="mt-5 flex items-end justify-between pb-2">
-                  <div className="font-display text-2xl font-bold uppercase tracking-wide text-logo-brown">Proposal</div>
-                  <div className="text-right text-[12px] leading-tight">
-                    {f.poNumber && <div><span className="text-[10px] font-bold uppercase tracking-widest text-logo-tan">PO # </span><b>{f.poNumber}</b></div>}
-                    <div><span className="text-[10px] font-bold uppercase tracking-widest text-logo-tan">Date </span><b>{f.date}</b></div>
-                  </div>
-                </div>
-                <div className="mt-4 text-[13px] leading-relaxed">
-                  {f.attn && <div className="font-semibold">ATTN: {f.attn}</div>}
-                  {f.attnTitle && <div className="text-logo-muted">{f.attnTitle}</div>}
-                  {f.billTo.map((b, i) => <div key={i} className="text-logo-muted">{b}</div>)}
-                  <div className="mt-3">Dear {(f.attn || "").split(/[\s,]+/)[0] || "Sir or Madam"},</div>
-                  <div className="mt-2">
-                    {COMPANY.letterhead.name} is pleased to submit this proposal for the following work
-                    {(f.serviceAddress || "").split(",")[0].trim() ? ` at ${(f.serviceAddress || "").split(",")[0].trim()}` : ""}.
-                  </div>
-                </div>
-                <div className="mt-3 bg-logo-cream px-3 py-2 text-[13px]">
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-logo-tan">Service Address: </span>
-                  <b>{f.serviceAddress || "—"}</b>
-                </div>
-                <div className="mt-4 font-display text-[13px] font-bold uppercase tracking-widest text-logo-teal">Scope of Work</div>
-                <table className="mt-1 w-full border-collapse text-[12px]">
-                  <thead><tr className="border-b-2 border-logo-brown bg-logo-cream text-left font-display text-[10px] uppercase tracking-widest text-logo-tan">
-                    <th className="p-1.5">Description</th>
-                    <th className="p-1.5 text-center">Qty</th>
-                    <th className="p-1.5 text-right">Unit price</th>
-                    <th className="p-1.5 text-right">Amount</th>
-                  </tr></thead>
-                  <tbody>
-                    {f.lines.map((l, i) => (
-                      <tr key={i} className="align-top border-b border-logo-hair [&>td]:py-2">
-                        <td className="p-1.5">{l.description}</td>
-                        <td className="p-1.5 text-center font-mono text-logo-muted">{l.qty}{l.unit && l.unit.toUpperCase() !== "EACH" ? ` ${l.unit.toUpperCase()}` : ""}</td>
-                        <td className="p-1.5 text-right font-mono text-logo-muted">{fmt(l.unit_price)}</td>
-                        <td className="p-1.5 text-right font-mono font-semibold">{fmt(l.qty * l.unit_price)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <div className="mt-3 flex flex-col items-end gap-0.5 text-[13px] text-logo-muted">
-                  <div>Total Cost (labor and materials): <span className="font-mono text-logo-ink">{fmt(sub)}</span></div>
-                  <div>Sales Tax ({f.taxPct}%): <span className="font-mono text-logo-ink">{fmt(tax)}</span></div>
-                </div>
-                <div className="mt-2 flex items-center justify-end gap-4 bg-logo-brown px-3 py-2 text-white">
-                  <div className="font-display text-[13px] font-bold uppercase tracking-widest">Grand Total</div>
-                  <div className="font-mono text-base font-bold">{fmt(sub + tax)}</div>
-                </div>
-                <div className="mt-4 text-[13px]">Please sign and return a copy of this proposal to authorize the work.</div>
-                <div className="mt-8 flex gap-6 text-[10px] font-bold uppercase tracking-widest text-logo-tan">
-                  <div className="flex-1 border-t border-logo-hair pt-1">Accepted by</div>
-                  <div className="flex-1 border-t border-logo-hair pt-1">Date</div>
-                </div>
-                <div className="mt-6 text-[13px]">
-                  <div>Best regards,</div>
-                  <div className="mt-2 font-semibold">{COMPANY.letterhead.signer}</div>
-                  <div className="text-[12px] text-logo-muted">{COMPANY.letterhead.signerTitle}  ·  {COMPANY.letterhead.name}</div>
-                </div>
-                <div className="mt-6 border-t border-logo-hair pt-2 text-center text-[10px] text-logo-muted">{COMPANY.letterhead.footer}</div>
-              </div>
-              <div className="no-print mx-auto mt-3 flex max-w-3xl flex-wrap justify-end gap-2">
-                <button className="btn btn-primary" disabled={busy} onClick={() => saveProposalPdfFor(j)}>⬇ Proposal (PDF)</button>
-                <button className="btn btn-ghost bg-white" onClick={() => setViewJob(null)}>Close</button>
-                <ActionMenu label="⋯" items={[
-                  { label: "⬇ Proposal (Word)", disabled: busy, title: "The same letter as a Word file, to edit before sending", onSelect: () => saveProposalFor(j) },
-                  { label: "Print / Save as PDF", onSelect: () => window.print() },
-                ]} />
+          <PrintShell title={`proposal ${f.poNumber || ""} ${(f.serviceAddress || "").split(",")[0]}`.trim()} onClose={() => setViewJob(null)} sheetClass="text-logo-ink"
+            toolbar={<>
+              <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => saveProposalPdfFor(j)}>⬇ Proposal (PDF)</button>
+              <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => saveProposalFor(j)}>⬇ Proposal (Word)</button>
+            </>}>
+            {/* the name of what's on screen stays in view as the letter scrolls; never printed */}
+            <div className="no-print sticky top-0 z-10 -mx-8 -mt-8 mb-4 border-b border-rulesoft bg-white/95 px-8 py-2 font-display text-[13px] font-bold uppercase tracking-wide">Proposal · PO {f.poNumber}</div>
+            {/* centered, matching the letter the PDF and Word file print */}
+            <Letterhead />
+            {/* this is the letter they are about to send — it reads the same
+                as the PDF and the Word file, down to the sign-off */}
+            <div className="mt-5 flex items-end justify-between pb-2">
+              <div className="font-display text-2xl font-bold uppercase tracking-wide text-logo-brown">Proposal</div>
+              <div className="text-right text-[12px] leading-tight">
+                {f.poNumber && <div><span className="text-[11px] font-bold uppercase tracking-widest text-logo-tan">PO # </span><b>{f.poNumber}</b></div>}
+                <div><span className="text-[11px] font-bold uppercase tracking-widest text-logo-tan">Date </span><b>{f.date}</b></div>
               </div>
             </div>
+            <div className="mt-4 text-[13px] leading-relaxed">
+              {f.attn && <div className="font-semibold">ATTN: {f.attn}</div>}
+              {f.attnTitle && <div className="text-logo-muted">{f.attnTitle}</div>}
+              {f.billTo.map((b, i) => <div key={i} className="text-logo-muted">{b}</div>)}
+              <div className="mt-3">Dear {(f.attn || "").split(/[\s,]+/)[0] || "Sir or Madam"},</div>
+              <div className="mt-2">
+                {COMPANY.letterhead.name} is pleased to submit this proposal for the following work
+                {(f.serviceAddress || "").split(",")[0].trim() ? ` at ${(f.serviceAddress || "").split(",")[0].trim()}` : ""}.
+              </div>
+            </div>
+            <div className="mt-3 bg-logo-cream px-3 py-2 text-[13px]">
+              <span className="text-[11px] font-bold uppercase tracking-widest text-logo-tan">Service Address: </span>
+              <b>{f.serviceAddress || ""}</b>
+            </div>
+            <div className="mt-4 font-display text-[13px] font-bold uppercase tracking-widest text-logo-teal">Scope of Work</div>
+            <table className="mt-1 w-full border-collapse text-[12px]">
+              <thead><tr className="border-b-2 border-logo-brown bg-logo-cream text-left font-display text-[11px] uppercase tracking-widest text-logo-tan">
+                <th className="p-1.5">Description</th>
+                <th className="p-1.5 text-center">Qty</th>
+                <th className="p-1.5 text-right">Unit price</th>
+                <th className="p-1.5 text-right">Amount</th>
+              </tr></thead>
+              <tbody>
+                {f.lines.map((l, i) => (
+                  <tr key={i} className="align-top border-b border-logo-hair [&>td]:py-2">
+                    <td className="p-1.5">{l.description}</td>
+                    <td className="p-1.5 text-center font-mono text-logo-muted">{l.qty}{l.unit && l.unit.toUpperCase() !== "EACH" ? ` ${l.unit.toUpperCase()}` : ""}</td>
+                    <td className="p-1.5 text-right font-mono text-logo-muted">{fmt(l.unit_price)}</td>
+                    <td className="p-1.5 text-right font-mono font-semibold">{fmt(l.qty * l.unit_price)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="mt-3 flex flex-col items-end gap-0.5 text-[13px] text-logo-muted">
+              <div>Total Cost (labor and materials): <span className="font-mono text-logo-ink">{fmt(sub)}</span></div>
+              <div>Sales Tax ({f.taxPct}%): <span className="font-mono text-logo-ink">{fmt(tax)}</span></div>
+            </div>
+            <div className="mt-2 flex items-center justify-end gap-4 bg-logo-brown px-3 py-2 text-white">
+              <div className="font-display text-[13px] font-bold uppercase tracking-widest">Grand Total</div>
+              <div className="font-mono text-base font-bold">{fmt(sub + tax)}</div>
+            </div>
+            <div className="mt-4 text-[13px]">Please sign and return a copy of this proposal to authorize the work.</div>
+            <div className="mt-8 flex gap-6 text-[11px] font-bold uppercase tracking-widest text-logo-tan">
+              <div className="flex-1 border-t border-logo-hair pt-1">Accepted by</div>
+              <div className="flex-1 border-t border-logo-hair pt-1">Date</div>
+            </div>
+            <div className="mt-6 text-[13px]">
+              <div>Best regards,</div>
+              <div className="mt-2 font-semibold">{COMPANY.letterhead.signer}</div>
+              <div className="text-[12px] text-logo-muted">{COMPANY.letterhead.signerTitle}  ·  {COMPANY.letterhead.name}</div>
+            </div>
+            <div className="mt-6 border-t border-logo-hair pt-2 text-center text-[11px] text-logo-muted">{COMPANY.letterhead.footer}</div>
           </PrintShell>
         );
       })()}
@@ -1860,71 +1829,58 @@ export default function Pact() {
             onClose={() => setMeasureJob(null)} flash={flash} />
         );
       })()}
-      {attachJob && (
+
+      {/* ---------- documents & photos ---------- */}
+      {attachJob && (() => {
+        const photoN = (attachJob.attachments || []).filter((a) => isImg(a.name)).length;
+        // images that came in through "Upload files" have no before/after
+        // prefix — they still need to be viewable (and deletable) here
+        const loose = (attachJob.attachments || []).filter((a) => isImg(a.name) && !/^(before|after)/i.test(a.name));
+        return (
         <Modal title={`Documents · PO ${attachJob.po_number || attachJob.job_number || ""}`} onClose={() => setAttachJob(null)}
-          footer={(() => {
-            const photoN = (attachJob.attachments || []).filter((a) => isImg(a.name)).length;
-            return canEdit || photoN > 0 ? (
-              <div className="flex flex-wrap gap-2">
-                {canEdit && <button className="btn btn-ghost min-h-[44px]" onClick={() => snapPhotos(attachJob, "before")} disabled={busy}>📷 Before</button>}
-                {canEdit && <button className="btn btn-ghost min-h-[44px]" onClick={() => snapPhotos(attachJob, "after")} disabled={busy}>📷 After</button>}
-                {canEdit && <button className="btn btn-ghost min-h-[44px]" onClick={() => fileRef.current?.click()} disabled={busy} title="Pictures, a photos zip, or a document — several at once">Upload files</button>}
-                {photoN > 0 && <button className="btn btn-ghost min-h-[44px]" onClick={() => makePhotoPdf(attachJob)} disabled={busy} title="Before and after pictures on one PDF, with the job on top, to send out">Photos PDF</button>}
-              </div>
-            ) : undefined;
-          })()}>
+          primary={canEdit ? <button type="button" className="btn btn-primary" onClick={() => fileRef.current?.click()} disabled={busy} title="Pictures, a photos zip or a document, several at once">Upload files</button> : undefined}
+          secondary={canEdit ? <>
+            <button type="button" className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "before")} disabled={busy}>📷 Before</button>
+            <button type="button" className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "after")} disabled={busy}>📷 After</button>
+          </> : undefined}
+          menu={photoN > 0 ? [
+            { label: "Photos (PDF)", glyph: "⬇", disabled: busy, title: "Before and after pictures on one PDF, with the job on top, to send out", onSelect: () => makePhotoPdf(attachJob) },
+          ] : undefined}>
             {(["before", "after"] as const).map((kind) => {
               const photos = (attachJob.attachments || []).filter((a) => isImg(a.name) && a.name.toLowerCase().startsWith(kind));
               return (
                 <div key={kind} className="mb-3">
-                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-widest text-inksoft">{kind} ({photos.length})</div>
-                  {photos.length > 0 ? (
-                    <div className="grid grid-cols-3 gap-1.5">
-                      {photos.map((a) => (
-                        <div key={a.path} className="relative">
-                          <button className="block w-full" onClick={() => openAttachment(a.path)} title={a.name}>
-                            {photoUrls[a.path]
-                              // eslint-disable-next-line @next/next/no-img-element
-                              ? <img src={photoUrls[a.path]} alt={a.name} className="h-24 w-full rounded-sm border border-rulesoft object-cover" />
-                              : <div className="grid h-24 w-full place-items-center rounded-sm border border-rulesoft text-xs text-inksoft">…</div>}
-                          </button>
-                          {canEdit && <button className="absolute right-1 top-1 rounded-sm bg-ink/70 px-1.5 text-xs text-paper" onClick={() => removeAttachment(attachJob, a.path)}>✕</button>}
-                        </div>
-                      ))}
-                    </div>
-                  ) : <div className="text-xs text-inksoft">No {kind} photos yet.</div>}
+                  <div className="section-label mb-1">{kind} ({photos.length})</div>
+                  {photos.length > 0
+                    ? <div className="grid grid-cols-3 gap-1.5">{photos.map((a) => thumb(attachJob, a))}</div>
+                    : <div className="empty py-3">No {kind} photos yet.</div>}
                 </div>
               );
             })}
-            {(() => {
-              // images that came in through "Upload file" have no before/after
-              // prefix — they still need to be viewable (and deletable) here
-              const loose = (attachJob.attachments || []).filter((a) => isImg(a.name) && !/^(before|after)/i.test(a.name));
-              return loose.length > 0 ? (
-                <div className="mb-3">
-                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-widest text-inksoft">other photos ({loose.length})</div>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    {loose.map((a) => (
-                      <div key={a.path} className="relative">
-                        <button className="block w-full" onClick={() => openAttachment(a.path)} title={a.name}>
-                          {photoUrls[a.path]
-                            // eslint-disable-next-line @next/next/no-img-element
-                            ? <img src={photoUrls[a.path]} alt={a.name} className="h-24 w-full rounded-sm border border-rulesoft object-cover" />
-                            : <div className="grid h-24 w-full place-items-center rounded-sm border border-rulesoft text-xs text-inksoft">…</div>}
-                        </button>
-                        {canEdit && <button className="absolute right-1 top-1 rounded-sm bg-ink/70 px-1.5 text-xs text-paper" onClick={() => removeAttachment(attachJob, a.path)}>✕</button>}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null;
-            })()}
+            {loose.length > 0 && (
+              <div className="mb-3">
+                <div className="section-label mb-1">other photos ({loose.length})</div>
+                <div className="grid grid-cols-3 gap-1.5">{loose.map((a) => thumb(attachJob, a))}</div>
+              </div>
+            )}
             {(attachJob.attachments || []).filter((a) => !isImg(a.name)).map((a) => (
               <div key={a.path} className="mb-1.5 flex items-center gap-1">
-                <button className="block w-full rounded-sm border border-rulesoft p-2.5 text-left text-sm hover:border-work" onClick={() => openAttachment(a.path)}>📄 {a.name}</button>
-                {canEdit && <button className="shrink-0 px-1 text-xs text-alert" onClick={() => removeAttachment(attachJob, a.path)}>✕</button>}
+                <button type="button" className="row-btn rounded-sm border border-rulesoft p-2.5 text-sm hover:border-work active:border-work" onClick={() => openAttachment(a.path)}>📄 {a.name}</button>
+                {canEdit && <button type="button" className="btn-icon border-0 shadow-none text-alert" aria-label="Delete file" onClick={() => removeAttachment(attachJob, a.path, a.name)}>✕</button>}
               </div>
             ))}
+        </Modal>
+        );
+      })()}
+      {/* a photo, big: over the Documents dialog, closed with ✕, Escape or a tap outside */}
+      {attachJob && lightbox && (
+        <Modal wide title={/^before/i.test(lightbox.name) ? "Before photo" : /^after/i.test(lightbox.name) ? "After photo" : "Photo"} onClose={() => setLightbox(null)}
+          secondary={<button type="button" className="btn btn-ghost" onClick={() => openAttachment(lightbox.path)}>Open in a new tab</button>}>
+          {photoUrls[lightbox.path]
+            // eslint-disable-next-line @next/next/no-img-element
+            ? <img src={photoUrls[lightbox.path]} alt={lightbox.name} className="anim-fade mx-auto max-h-[70vh] w-auto max-w-full rounded-sm object-contain" />
+            : <div className="skeleton mx-auto h-64 w-full" />}
+          <div className="mt-2 truncate text-center text-[12px] text-inksoft">{lightbox.name}</div>
         </Modal>
       )}
       <input ref={fileRef} type="file" multiple className="hidden" onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length && attachJob) uploadFiles(attachJob, fs); e.target.value = ""; }} />
@@ -1933,8 +1889,8 @@ export default function Pact() {
       <input ref={photoRef} type="file" accept="image/*" multiple className="hidden"
         onChange={(e) => { const fs = Array.from(e.target.files || []); const t = photoTarget; const j = t ? jobs.find((x) => x.id === t.id) : null; if (fs.length && t && j) addPhotos(j, fs, t.kind); e.target.value = ""; }} />
 
-      {msg && <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink px-4 py-2 text-sm text-paper">{msg}</div>}
-      {busy && <div className="fixed bottom-14 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-ink/80 px-4 py-2 text-sm text-paper">Working…</div>}
+      <Toast msg={msg} progress={progress} action={action} />
+      {busy && <div className="busy-bar" aria-busy="true" aria-label="Working" />}
     </div>
   );
 }

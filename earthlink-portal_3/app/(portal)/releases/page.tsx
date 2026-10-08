@@ -1,12 +1,13 @@
 "use client";
-import { useDeferredValue, useEffect, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { matches } from "@/lib/search";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the SOS export
 // the export engine is heavy — it loads on demand, never with the page itself
 let XLSX!: typeof import("xlsx-js-style");
 const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import { sb } from "@/lib/supabase";
-import { myProfile } from "@/lib/profile";
+import { useProfile } from "@/lib/profile";
+import { cached, forget, onCacheUser, remember } from "@/lib/cache";
 import { fmt, parseNum, askFileName } from "@/lib/format";
 import Stamp from "@/components/Stamp";
 import type { Contract, Release } from "@/lib/types";
@@ -59,6 +60,18 @@ type PdfDocLite = {
 };
 type PriceRow = { code: string; category: string; description: string; unit: string; unit_price: number };
 type SosRow = { line: number; code: string; category: string; description: string; uom: string; qty: number; unit_price: number };
+// what this page remembers on the phone between opens (lib/cache): the contracts, the
+// contract that was open, its releases with their paperwork flags, and the logged hours
+const CACHE = {
+  contracts: "rel:contracts", active: "rel:active", logged: "rel:logged",
+  rows: (cid: string) => `rel:rows:${cid}`, ready: (cid: string) => `rel:ready:${cid}`,
+} as const;
+type ReadyCache = { ready: string[]; items: string[]; walks: string[] };
+// the columns the list reads: a 2,000-release contract no longer carries its crews, schedule
+// dates and the rest down to the phone (the import and duplicate tools still read whole rows)
+const LIST_COLS = "id,contract_id,rel_number,location,buildings,ticket,amount,received,payroll_done,canceled,labor_hours,labor_breakdown,invoice_sent,paid_date,attachments,date_completed,pre_check,address";
+// the remembered list lands before the first frame in the browser (a plain effect on the server, which has no frame)
+const useBeforePaint = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 // ---- read red-filled (canceled) rows straight out of the xlsx zip ----
 async function unzipEntries(buf: ArrayBuffer, names: string[]): Promise<Record<string, string>> {
@@ -216,55 +229,134 @@ export default function Releases() {
   // stays until dismissed: a toast is gone before it can be read
   const [result, setResult] = useState("");
   const numBuf = useNumBuffer();
-  // accountants can look but not touch — their writes would be silent no-ops under RLS
-  const [role, setRole] = useState("");
-  const readOnly = role === "accountant";
+  // accountants can look but not touch — their writes would be silent no-ops under RLS.
+  // The remembered profile answers first; the database's own corrects it when it lands
+  const { hint, fresh: me } = useProfile();
+  const readOnly = ((me || hint)?.role || "") === "accountant";
   const loadSeq = useRef(0); // drops stale loadRows responses after fast contract switches
+  // which answers came from the database on this visit (a remembered copy never overwrites one)
+  const fromDb = useRef({ contracts: false, logged: false });
+  const freshFor = useRef<string | null>(null); // the contract whose rows on screen came from the database
+  const rowsRef = useRef(rows); rowsRef.current = rows;
+  const rowsForRef = useRef(rowsFor); rowsForRef.current = rowsFor;
 
   const loadContracts = async () => {
-    const { data } = await sb().from("contracts").select("id,number,name").order("number");
+    const { data, error } = await sb().from("contracts").select("id,number,name").order("number");
+    if (error) { setContractsLoaded(true); return; } // bad signal: what is showing (remembered, or nothing) stays
     const list = (data || []) as Contract[];
+    fromDb.current.contracts = true;
+    remember(CACHE.contracts, list);
     setContracts(list);
     setContractsLoaded(true);
-    if (!active && list[0]) setActive(list[0].id);
+    // the contract that was open stays open while it still exists; otherwise the first one
+    setActive((cur) => (cur && list.some((c) => c.id === cur) ? cur : list[0]?.id || ""));
   };
+  // What this phone showed last time paints at once (as soon as the signed-in user is
+  // named: before the first frame on a tab-to-tab move, one cookie read after a cold
+  // open) and the database's answers, already on their way, replace it as they land.
+  // The contract that was open last time opens again, so its releases are asked for
+  // without waiting for the contracts list.
+  useBeforePaint(() => onCacheUser(() => {
+    const cs = cached<Contract[]>(CACHE.contracts);
+    if (cs && cs.length && !fromDb.current.contracts) { setContracts(cs); setContractsLoaded(true); }
+    const saved = cached<string>(CACHE.active);
+    const open = saved && (!cs || cs.some((c) => c.id === saved)) ? saved : cs?.[0]?.id || "";
+    if (open) setActive((cur) => cur || open);
+    const o = cached<Org>("org");
+    if (o) setOrg((prev) => prev || o);
+    const lg = cached<Record<string, number>>(CACHE.logged);
+    if (lg && !fromDb.current.logged) setLogged((prev) => prev || lg);
+  }), []);
   useEffect(() => {
     loadContracts();
     loadLogged();
-    sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
-    (async () => {
-      const prof = await myProfile();
-      setRole(prof?.role || "");
-    })();
+    sb().from("org").select("*").single().then(({ data }) => { if (data) { setOrg(data as Org); remember("org", data); } });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // one contract's releases: the first two pages of 1,000 leave together (a third only
+  // when the second comes back full). The columns are the ones the list reads; an older
+  // database without the newer ones is asked for whole rows instead
+  const wideRows = useRef(false);
+  type Page = { data: Release[] | null; error: { message: string } | null };
+  const fetchReleases = async (cid: string): Promise<Release[] | null> => {
+    const page = async (from: number): Promise<Page> => {
+      // the column list is picked at run time, which the client's typed select can't follow: typed here
+      const ask = async () => (await sb().from("releases").select(wideRows.current ? "*" : LIST_COLS).eq("contract_id", cid).order("id").range(from, from + 999)) as unknown as Page;
+      let res = await ask();
+      if (res.error && !wideRows.current && /column|schema cache/i.test(res.error.message)) { wideRows.current = true; res = await ask(); }
+      return res;
+    };
+    const all: Release[] = [];
+    const walk = async (from: number) => {
+      for (;; from += 1000) {
+        const p = await page(from);
+        const d = p.data || [];
+        all.push(...d);
+        if (p.error || d.length < 1000) break;
+      }
+    };
+    const [p1, p2] = await Promise.all([page(0), page(1000)]);
+    if (p1.error) return null;
+    all.push(...(p1.data || []));
+    all.push(...(p2.data || []));
+    if (!p2.error && all.length >= 2000) await walk(2000);
+    else if (p2.error && all.length === 1000) await walk(1000);
+    // the same row on two pages (a boundary that moved under an insert) is one row
+    const seen = new Set<string>();
+    return all.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
+  };
+
+  // the list on screen, patched, is what paints next time: only once it came from the
+  // database on this visit, and only while it is this contract's
+  const keepRows = (cid: string, patchRow?: (x: Release) => Release) => {
+    if (freshFor.current !== cid || rowsForRef.current !== cid) return;
+    remember(CACHE.rows(cid), patchRow ? rowsRef.current.map(patchRow) : rowsRef.current);
+  };
 
   const loadRows = async (cid: string, silent = false) => {
     if (!cid) { setRows([]); setRowsFor(cid); return; }
     const token = ++loadSeq.current; // a newer load makes this one throw its results away
-    if (!silent) setBusy(true);
-    const all: Release[] = [];
-    let from = 0;
-    for (;;) {
-      const { data } = await sb().from("releases").select("*").eq("contract_id", cid).order("id").range(from, from + 999);
-      if (!data || data.length === 0) break;
-      all.push(...(data as Release[]));
-      if (data.length < 1000) break;
-      from += 1000;
+    let painted = rowsForRef.current === cid; // something for this contract is already on screen
+    if (!silent) {
+      // what this contract showed last time paints at once; the database's answer is on its way
+      if (freshFor.current !== cid) {
+        const c = cached<Release[]>(CACHE.rows(cid));
+        if (c) {
+          setRows(c); setRowsFor(cid); painted = true;
+          const rd = cached<ReadyCache>(CACHE.ready(cid));
+          if (rd) { setSosReady(new Set(rd.ready)); setStageData({ items: new Set(rd.items), walks: new Set(rd.walks) }); }
+        }
+      }
+      setBusy(true);
     }
+    // the releases, the paperwork flags and the walk sheets need only the contract id,
+    // so all three are asked for in the same breath
+    const [all, wi, pr] = await Promise.all([
+      fetchReleases(cid),
+      // one tiny answer from the database (run supabase/upgrade_speed.sql) —
+      // otherwise fall back below to downloading a row id per line item
+      sb().rpc("releases_with_items", { cid }),
+      sb().from("proposals").select("release_number,qty_map").eq("contract_id", cid),
+    ]);
     if (token !== loadSeq.current) return;
+    if (!all) {
+      // bad signal: what is on screen stays (the remembered list, or the rows from before); nothing painted means an empty list, as before
+      if (!silent) setBusy(false);
+      if (!painted) { setRows([]); setRowsFor(cid); }
+      return;
+    }
     // sort numerically by release number when possible
     all.sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
+    freshFor.current = cid;
+    remember(CACHE.rows(cid), all);
     setRows(all);
     setRowsFor(cid);
     if (!silent) setBusy(false);
     // which releases can produce an SOS? those with imported line items,
     // or a walk sheet (with quantities) whose Release # matches
     const ready = new Set<string>();
-    // one tiny answer from the database (run supabase/upgrade_speed.sql) —
-    // otherwise fall back to downloading a row id per line item
-    const { data: withItems, error: wiErr } = await sb().rpc("releases_with_items", { cid });
-    if (!wiErr && Array.isArray(withItems)) {
-      (withItems as string[]).forEach((id) => ready.add(id));
+    if (!wi.error && Array.isArray(wi.data)) {
+      (wi.data as string[]).forEach((id) => ready.add(id));
     } else {
       const ids = all.map((r) => r.id);
       // all chunks fetch together — serially this scan alone took seconds on a big contract
@@ -278,13 +370,12 @@ export default function Releases() {
           if (!its || its.length < 1000) break;
         }
       }));
+      if (token !== loadSeq.current) return;
     }
-    const { data: props } = await sb().from("proposals").select("release_number,qty_map").eq("contract_id", cid);
-    if (token !== loadSeq.current) return;
     // "007" and "7" are the same release — compare with leading zeros stripped
     const relNorm = (v: unknown) => String(v ?? "").trim().replace(/^0+(?=\d)/, "");
     const walkNums = new Set(
-      ((props || []) as { release_number?: string; qty_map?: Record<string, number> | null }[])
+      ((pr.data || []) as { release_number?: string; qty_map?: Record<string, number> | null }[])
         .filter((p) => p.release_number && p.qty_map && Object.keys(p.qty_map).length > 0)
         .map((p) => relNorm(p.release_number))
     );
@@ -292,6 +383,7 @@ export default function Releases() {
     all.forEach((r) => { if (walkNums.has(relNorm(r.rel_number))) ready.add(r.id); });
     setSosReady(ready);
     setStageData({ items: itemsSet, walks: walkNums });
+    remember(CACHE.ready(cid), { ready: [...ready], items: [...itemsSet], walks: [...walkNums] } as ReadyCache);
   };
 
   // the release's paperwork at a glance: each stage lights up from data already
@@ -301,7 +393,8 @@ export default function Releases() {
     ["RELEASE PDF", stageData.items.has(r.id)],
     ["INVOICED", !!r.invoice_sent],
   ];
-  useEffect(() => { loadRows(active); }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
+  // the open contract is remembered, so the next open starts on it
+  useEffect(() => { if (active) remember(CACHE.active, active); loadRows(active); }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // live: releases, their items, walk sheets, contracts AND payroll hours refresh this page
   // enabled stays keyed to the contract only — flipping it with busy would tear
@@ -324,6 +417,8 @@ export default function Releases() {
     if (!error && Array.isArray(sums)) {
       const agg: Record<string, number> = {};
       (sums as { release_id: string; hours: number }[]).forEach((s) => { agg[s.release_id] = Number(s.hours) || 0; });
+      fromDb.current.logged = true;
+      remember(CACHE.logged, agg);
       setLogged(agg);
       return;
     }
@@ -340,34 +435,55 @@ export default function Releases() {
       if (!e.release_id) return;
       agg[e.release_id] = (agg[e.release_id] || 0) + (e.hours || []).reduce((s2, h) => s2 + (Number(h) || 0), 0);
     });
+    fromDb.current.logged = true;
+    remember(CACHE.logged, agg);
     setLogged(agg);
   };
 
-  const live = rows.filter((r) => !r.canceled);
-  const canceledRows = rows.filter((r) => r.canceled);
-  // same release number twice in one contract = something to clean up
-  const relCounts: Record<string, number> = {};
-  live.forEach((r) => { const k = String(r.rel_number).trim(); if (k) relCounts[k] = (relCounts[k] || 0) + 1; });
-  // chase = work done and payroll submitted, waiting on NYCHA's money
-  const notR = live.filter((r) => r.payroll_done && !r.received && Number(r.amount) > 0);
-  // payroll to submit = still open releases whose payroll isn't in yet
-  const prPend = live.filter((r) => !r.payroll_done && !r.received && Number(r.amount) > 0);
-  const tot = live.reduce((s, r) => s + Number(r.amount), 0);
-
-  const receivedRows = live.filter((r) => r.received);
-  // paid releases are done business — keep the working list clean
-  let list = live.filter((r) => !r.received);
-  if (filter === "chase") list = notR;
-  if (filter === "payroll") list = prPend;
-  if (filter === "received") list = receivedRows;
-  if (filter === "canceled") list = canceledRows;
-  if (dq) list = list.filter((r) => matches(dq, r.rel_number, r.location, r.buildings, r.ticket));
+  // everything the tabs, the totals and the list derive from the rows, figured once per
+  // change of rows, hours, search or tab (not again on every keystroke, toast tick or stamp)
+  const derived = useMemo(() => {
+    const live = rows.filter((r) => !r.canceled);
+    const canceledRows = rows.filter((r) => r.canceled);
+    // same release number twice in one contract = something to clean up
+    const relCounts: Record<string, number> = {};
+    live.forEach((r) => { const k = String(r.rel_number).trim(); if (k) relCounts[k] = (relCounts[k] || 0) + 1; });
+    // chase = work done and payroll submitted, waiting on NYCHA's money
+    const notR = live.filter((r) => r.payroll_done && !r.received && Number(r.amount) > 0);
+    // payroll to submit = still open releases whose payroll isn't in yet
+    const prPend = live.filter((r) => !r.payroll_done && !r.received && Number(r.amount) > 0);
+    const sum = (xs: Release[]) => xs.reduce((s, r) => s + Number(r.amount), 0);
+    const tot = sum(live);
+    const receivedRows = live.filter((r) => r.received);
+    // paid releases are done business — keep the working list clean
+    const openRows = live.filter((r) => !r.received);
+    let list = openRows;
+    if (filter === "chase") list = notR;
+    if (filter === "payroll") list = prPend;
+    if (filter === "received") list = receivedRows;
+    if (filter === "canceled") list = canceledRows;
+    if (dq) list = list.filter((r) => matches(dq, r.rel_number, r.location, r.buildings, r.ticket));
+    // the hours tab draws from this list — computed here so its Show more knows the full count
+    const hoursList = live.filter((r) => (Number(r.labor_hours) > 0 || (logged?.[r.id] || 0) > 0) && matches(dq, r.rel_number, r.location, r.buildings, r.ticket));
+    // the same release number twice in the open contract (canceled copies count too)
+    const numCounts = new Map<string, number>();
+    rows.forEach((r) => {
+      const k = String(r.rel_number || "").trim().replace(/^0+(?=\d)/, "");
+      if (k) numCounts.set(k, (numCounts.get(k) || 0) + 1);
+    });
+    const dupNums = [...numCounts.values()].filter((n) => n > 1).length;
+    return {
+      live, canceledRows, relCounts, notR, prPend, tot, receivedRows, list, hoursList, dupNums, openCount: openRows.length,
+      money: { rec: sum(receivedRows), outst: sum(openRows), chase: sum(notR), payroll: sum(prPend) },
+    };
+  }, [rows, logged, dq, filter]);
+  const { live, canceledRows, relCounts, notR, prPend, tot, receivedRows, list, hoursList, dupNums, openCount, money } = derived;
   const shown = list.slice(0, limit);
-  // the hours tab draws from this list — computed here so its Show more knows the full count
-  const hoursList = live.filter((r) => (Number(r.labor_hours) > 0 || (logged?.[r.id] || 0) > 0) && matches(dq, r.rel_number, r.location, r.buildings, r.ticket));
 
   const toggle = async (r: Release, patch: Partial<Release>) => {
+    const cid = r.contract_id || active;
     setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, ...patch } : x)));
+    forget(CACHE.rows(cid)); // a write half done is never what the next open paints
     let { error } = await sb().from("releases").update(patch).eq("id", r.id);
     if (error && /column/i.test(error.message)) {
       // database not upgraded yet — retry without the new aging columns
@@ -375,7 +491,8 @@ export default function Releases() {
       if (Object.keys(legacy).length > 0) ({ error } = await sb().from("releases").update(legacy).eq("id", r.id));
       else error = null;
     }
-    if (error) { failed(error); loadRows(active); }
+    if (error) { failed(error); loadRows(active); return; }
+    keepRows(cid, (x) => (x.id === r.id ? { ...x, ...patch } : x));
   };
 
   // ---------- invoice generator ----------
@@ -586,11 +703,13 @@ export default function Releases() {
       const existing = ((cur as { attachments?: { name: string; path: string }[] } | null)?.attachments)
         || r.attachments || [];
       const list = [...existing.filter((a) => !added.some((b) => b.path === a.path)), ...added];
+      forget(CACHE.rows(r.contract_id || active)); // a write half done is never what the next open paints
       const { error } = await sb().from("releases").update({ attachments: list }).eq("id", r.id);
       if (error) failed(error, "Couldn't attach the files. Check your signal and try again.");
       else {
         setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, attachments: list } : x)));
         setAttachRel((prev) => (prev && prev.id === r.id ? { ...prev, attachments: list } : prev));
+        keepRows(r.contract_id || active, (x) => (x.id === r.id ? { ...x, attachments: list } : x));
         flash(added.length === 1 ? `Attached ${added[0].name}` : `Attached ${added.length} files`);
       }
     }
@@ -612,11 +731,13 @@ export default function Releases() {
     // and the row updates first, so a failed write never orphans the entry
     const { data: cur } = await sb().from("releases").select("attachments").eq("id", r.id).single();
     const list = (((cur as Release | null)?.attachments) || r.attachments || []).filter((x) => x.path !== path);
+    forget(CACHE.rows(r.contract_id || active)); // a write half done is never what the next open paints
     const { error } = await sb().from("releases").update({ attachments: list }).eq("id", r.id);
     if (error) { failed(error, `Couldn't delete ${a.name}. Check your signal and try again.`); return; }
     await sb().storage.from("docs").remove([path]);
     setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, attachments: list } : x)));
     setAttachRel((prev) => (prev && prev.id === r.id ? { ...prev, attachments: list } : prev));
+    keepRows(r.contract_id || active, (x) => (x.id === r.id ? { ...x, attachments: list } : x));
     flash(`${a.name} deleted`);
   };
 
@@ -1853,17 +1974,10 @@ export default function Releases() {
 
   // what the header, the summary line and the empty states need to know about the open contract
   const activeContract = contracts.find((x) => x.id === active);
-  const openCount = live.filter((r) => !r.received).length;
   // the list is "loaded" once the contracts and the open contract's releases are both here
   const loaded = contractsLoaded && (!active || rowsFor === active);
-  // duplicates in the open contract: the same release number twice, or the contract listed twice
+  // duplicates in the open contract: the same release number twice (dupNums, above), or the contract listed twice
   const twinCount = activeContract ? contracts.filter((x) => contractKey(x.number) === contractKey(activeContract.number)).length : 1;
-  const numCounts = new Map<string, number>();
-  rows.forEach((r) => {
-    const k = String(r.rel_number || "").trim().replace(/^0+(?=\d)/, "");
-    if (k) numCounts.set(k, (numCounts.get(k) || 0) + 1);
-  });
-  const dupNums = [...numCounts.values()].filter((n) => n > 1).length;
   const hasDupes = twinCount > 1 || dupNums > 0;
   // the filter strip scrolls the picked tab into view (not on the first paint: that would scroll the page)
   const tabsRef = useRef<HTMLDivElement>(null);
@@ -2068,12 +2182,14 @@ export default function Releases() {
               );
             })()}
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <button type="button" className="btn btn-primary" disabled={busy || matched + creating === 0} onClick={runFolderAttach}>
-                {busy
-                  ? folderProgress || "Attaching…"
-                  : `Attach ${matched + creating} file${matched + creating === 1 ? "" : "s"}${creating > 0 ? ` · make ${creating} release${creating === 1 ? "" : "s"}` : ""}`}
+              {/* the label never changes (the width holds still under the finger): the kit's spinner says it is working, the line beside it says what it is doing */}
+              <button type="button" className={`btn btn-primary${busy ? " btn-busy" : ""}`} aria-busy={busy || undefined} disabled={busy || matched + creating === 0} onClick={runFolderAttach}>
+                {`Attach ${matched + creating} file${matched + creating === 1 ? "" : "s"}${creating > 0 ? ` · make ${creating} release${creating === 1 ? "" : "s"}` : ""}`}
               </button>
               <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => { setFolderPlan(null); setFolderEdit(new Set()); }}>Cancel</button>
+              {busy && folderProgress && (
+                <span className="text-[12px] text-inksoft" role="status">{folderProgress}</span>
+              )}
               {unmatched > 0 && !busy && (
                 <span className="text-[12px] text-inksoft">Files left blank are skipped. Nothing is deleted either way.</span>
               )}
@@ -2093,7 +2209,7 @@ export default function Releases() {
           </div>
           <div className="mb-3 text-[12px] text-inksoft">Releases already here are updated. Releases not on this sheet are removed (paid ones are kept).</div>
           <div className="flex flex-wrap gap-2">
-            <button type="submit" className="btn btn-primary" disabled={busy || !pending.guess.trim()}>Import</button>
+            <button type="submit" className={`btn btn-primary${busy ? " btn-busy" : ""}`} aria-busy={busy || undefined} disabled={busy || !pending.guess.trim()}>Import</button>
             <button type="button" className="btn btn-ghost" onClick={() => setPending(null)}>Cancel</button>
           </div>
         </form>
@@ -2170,7 +2286,7 @@ export default function Releases() {
             {Math.abs(pdfPending.items.reduce((sm, x) => sm + x.amount, 0) - pdfPending.amount) > 0.01 && <span className="text-alert"> · Lines don&apos;t add up to the release total</span>}
           </div>
           <div className="flex flex-wrap gap-2">
-            <button type="button" className="btn btn-primary" onClick={savePdfRelease} disabled={busy}>Save release</button>
+            <button type="button" className={`btn btn-primary${busy ? " btn-busy" : ""}`} aria-busy={busy || undefined} onClick={savePdfRelease} disabled={busy}>Save release</button>
             <button type="button" className="btn btn-ghost" onClick={() => propRef.current?.click()}>Attach walk sheet</button>
             <button type="button" className="btn btn-ghost" onClick={() => setPdfPending(null)}>Cancel</button>
           </div>
@@ -2196,13 +2312,11 @@ export default function Releases() {
       })()}
 
       {rows.length > 0 && (() => {
-        const rec = live.filter((r) => r.received).reduce((s, r) => s + Number(r.amount), 0);
-        const outst = live.filter((r) => !r.received).reduce((s, r) => s + Number(r.amount), 0);
-        const pct = tot > 0 ? Math.round((rec / tot) * 100) : 0;
+        const pct = tot > 0 ? Math.round((money.rec / tot) * 100) : 0;
         return (
           <div className="card card-tight mb-3">
             <div className="grid grid-cols-3 gap-x-3 gap-y-2 sm:grid-cols-5">
-              {([["Released", fmt(tot), "text-ink"], [`Received · ${pct}%`, fmt(rec), "text-ok"], ["Unpaid", fmt(outst), "text-work"], ["Chase", fmt(notR.reduce((s, r) => s + Number(r.amount), 0)), "text-work"], ["Payroll to do", fmt(prPend.reduce((s, r) => s + Number(r.amount), 0)), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
+              {([["Released", fmt(tot), "text-ink"], [`Received · ${pct}%`, fmt(money.rec), "text-ok"], ["Unpaid", fmt(money.outst), "text-work"], ["Chase", fmt(money.chase), "text-work"], ["Payroll to do", fmt(money.payroll), "text-alert"]] as [string, string, string][]).map(([l, v, cls]) => (
                 <div key={l} className={`min-w-0 ${cls}`}>
                   <div className="section-label truncate">{l}</div>
                   <b className="block truncate font-mono text-[15px] tabular-nums">{v}</b>
@@ -2219,10 +2333,11 @@ export default function Releases() {
       {/* the filter strip and the search stay in reach on a desk while a long list scrolls */}
       <div className="bg-paper sm:sticky sm:top-[101px] sm:z-[5]">
         <div ref={tabsRef} role="tablist" aria-label="Which releases" className="scroll-fade-paper mb-3 flex snap-x overflow-x-auto pb-1">
+          {/* the lit tab is painted by the kit from aria-selected (so its pressed state stays lit) */}
           <div className="seg min-w-max">
             {tabs.map(([f, l]) => (
               <button key={f} type="button" role="tab" aria-selected={filter === f}
-                className={`seg-item snap-start whitespace-nowrap ${filter === f ? "bg-ink text-paper" : ""}`}
+                className="seg-item snap-start whitespace-nowrap"
                 onClick={() => { setFilter(f); setLimit(100); if (f === "hours" && !logged) loadLogged(); }}>{l}</button>
             ))}
           </div>
@@ -2485,7 +2600,7 @@ export default function Releases() {
           setRelItems((prev) => (prev ? prev.map((x, j) => (j === i ? { ...x, ...patch } : x)) : prev));
         return (
           <Modal wide title={`Line items · Release #${itemsRel.rel_number}`} onClose={() => { setItemsRel(null); setRelItems(null); }}
-            primary={<button type="button" className="btn btn-primary" onClick={saveItems} disabled={busy || relItems === null}>Done</button>}
+            primary={<button type="button" className={`btn btn-primary${busy ? " btn-busy" : ""}`} aria-busy={busy || undefined} onClick={saveItems} disabled={busy || relItems === null}>Done</button>}
             secondary={<button type="button" className="btn btn-ghost" onClick={() => { setItemsRel(null); setRelItems(null); }}>Cancel</button>}>
             <div className="mb-3 text-[13px] text-inksoft">
               {itemsRel.location ? `${itemsRel.location} · ` : ""}these lines feed the SOS form and the invoice.

@@ -8,6 +8,7 @@
 // job a new day (then it clears by itself) or taps ✓ Got it. Admin and office
 // only — no money here.
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { sb } from "@/lib/supabase";
 import { useLive } from "@/lib/useLive";
 import { prettyPhone } from "@/lib/notify";
@@ -45,7 +46,13 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [picking, setPicking] = useState<string | null>(null); // the batch whose job is being picked
   const [lately, setLately] = useState(false);
+  // one flag turns every button off while a tap's work runs; `doing` names the
+  // button tapped, which spins over its own words (nothing reflows, and the
+  // eye knows what is working)
   const [busy, setBusy] = useState(false);
+  const [doing, setDoing] = useState("");
+  const spin = (key: string) => (doing === key ? " btn-busy" : "");
+  const busyOn = (key: string) => ({ "aria-busy": doing === key || undefined, disabled: busy });
 
   const load = async () => {
     const since = new Date(Date.now() - LATELY_DAYS * 86_400_000).toISOString();
@@ -94,6 +101,7 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
 
   const act = async (b: Batch, body: Record<string, string>) => {
     setBusy(true);
+    setDoing(`${b.id}:${body.action}`);
     try {
       const token = (await sb().auth.getSession()).data.session?.access_token || "";
       const res = await fetch("/api/texted-photos", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ id: b.id, ...body }) });
@@ -102,7 +110,7 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
       flash(body.action === "throw" ? "Photos thrown away ✓" : body.action === "seen" ? "Cleared from the list ✓" : `${photosN(j.n || 0)} on ${j.label} ✓`);
       setPicking(null);
       await load();
-    } finally { setBusy(false); }
+    } finally { setBusy(false); setDoing(""); }
   };
 
   const held = rows.filter((b) => b.status === "held");
@@ -154,8 +162,9 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
             <div className="text-[14px]"><b className="text-ok">✅ Work done</b> · <b>{at ? at.label : "a job"}</b>{at?.sub ? <span className="text-inksoft"> · {at.sub}</span> : null}</div>
             <div className="text-[12px] text-inksoft">{who(b)} sent the after photos · {when(b.created_at)} · ready to invoice</div>
             <div className="mt-2 flex flex-wrap gap-2">
-              {b.pact_job_id && <a className="btn btn-primary btn-sm" href={`/pact?job=${b.pact_job_id}`} data-open-billing>Open the job</a>}
-              <button type="button" className="btn btn-ghost btn-sm" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
+              {/* a client-side jump: a home-screen install never reloads the whole app for it */}
+              {b.pact_job_id && <Link className="btn btn-primary btn-sm" href={`/pact?job=${b.pact_job_id}`} data-open-billing>Open the job</Link>}
+              <button type="button" className={`btn btn-ghost btn-sm${spin(`${b.id}:seen`)}`} onClick={() => act(b, { action: "seen" })} {...busyOn(`${b.id}:seen`)} data-seen>✓ Got it</button>
             </div>
           </div>
         );
@@ -167,7 +176,7 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
             <div className="text-[14px]"><b>📏 {who(b)}</b> texted the square feet → <b>{at ? at.label : "a job"}</b>{at?.sub ? <span className="text-inksoft"> · {at.sub}</span> : null} · {when(b.created_at)}</div>
             <div className="text-[13px]" data-measure-note>{measured(b)}<span className="text-inksoft">: on the job&apos;s lines, the proposal and the invoice</span></div>
             {(b.body || "").trim() && measured(b) !== (b.body || "").trim() && <div className="text-[12px] text-inksoft [overflow-wrap:anywhere]">“{(b.body || "").trim()}”</div>}
-            <button type="button" className="btn btn-ghost btn-sm mt-1.5" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
+            <button type="button" className={`btn btn-ghost btn-sm mt-1.5${spin(`${b.id}:seen`)}`} onClick={() => act(b, { action: "seen" })} {...busyOn(`${b.id}:seen`)} data-seen>✓ Got it</button>
           </div>
         );
       })}
@@ -186,15 +195,15 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <label htmlFor={`newday-${b.id}`} className="section-label">New day</label>
                 <input id={`newday-${b.id}`} type="date" className="field w-auto font-mono text-[13px]" value={newDay[b.id] ?? tomorrow()} onChange={(e) => setNewDay((p) => ({ ...p, [b.id]: e.target.value }))} data-reschedule-day />
-                <button type="button" className="btn btn-primary btn-sm" disabled={busy || !(newDay[b.id] ?? tomorrow())} data-reschedule
-                  onClick={async () => { setBusy(true); try { await onReschedule(b, newDay[b.id] ?? tomorrow()); await load(); } finally { setBusy(false); } }}>Move it and text the crew</button>
+                <button type="button" className={`btn btn-primary btn-sm${spin(`${b.id}:move`)}`} aria-busy={doing === `${b.id}:move` || undefined} disabled={busy || !(newDay[b.id] ?? tomorrow())} data-reschedule
+                  onClick={async () => { setBusy(true); setDoing(`${b.id}:move`); try { await onReschedule(b, newDay[b.id] ?? tomorrow()); await load(); } finally { setBusy(false); setDoing(""); } }}>Move it and text the crew</button>
               </div>
             )}
             <div className="mt-2 flex flex-wrap gap-2">
               {onShow && (b.pact_job_id || b.release_id)
                 ? <button type="button" className={`btn ${onReschedule && b.pact_job_id ? "btn-ghost" : "btn-primary"} btn-sm`} onClick={() => onShow(b)} data-show-job>{onReschedule && b.pact_job_id ? "Open on the calendar" : "Pick the day on the calendar…"}</button>
                 : <span className="self-center text-[12px] text-inksoft" data-job-gone>That job isn&apos;t in the portal any more.</span>}
-              <button type="button" className="btn btn-ghost btn-sm" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
+              <button type="button" className={`btn btn-ghost btn-sm${spin(`${b.id}:seen`)}`} onClick={() => act(b, { action: "seen" })} {...busyOn(`${b.id}:seen`)} data-seen>✓ Got it</button>
             </div>
           </div>
         );
@@ -203,7 +212,7 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
         <div key={b.id} className="anim-row border-t border-rulesoft py-2.5" data-reply={b.id}>
           <div className="text-[14px]"><b>{who(b)}</b> texted “{(b.body || "").trim()}” · {when(b.created_at)}</div>
           {(b.note || "").trim() && <div className="text-[12px] text-inksoft">{(b.note || "").trim()}</div>}
-          <button type="button" className="btn btn-ghost btn-sm mt-1.5" onClick={() => act(b, { action: "seen" })} disabled={busy} data-seen>✓ Got it</button>
+          <button type="button" className={`btn btn-ghost btn-sm mt-1.5${spin(`${b.id}:seen`)}`} onClick={() => act(b, { action: "seen" })} {...busyOn(`${b.id}:seen`)} data-seen>✓ Got it</button>
         </div>
       ))}
       {held.map((b) => (
@@ -216,7 +225,7 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
             : (
               <div className="mt-2 flex flex-wrap gap-2">
                 <button type="button" className="btn btn-primary btn-sm" onClick={() => setPicking(b.id)} disabled={busy} data-pick-job>Put them on a job…</button>
-                <button type="button" className="btn btn-ghost btn-sm" onClick={() => { if (window.confirm(`Throw away ${photosN((b.photos || []).length)} from ${who(b)}?`)) act(b, { action: "throw" }); }} disabled={busy} data-throw>Throw away</button>
+                <button type="button" className={`btn btn-ghost btn-sm${spin(`${b.id}:throw`)}`} onClick={() => { if (window.confirm(`Throw away ${photosN((b.photos || []).length)} from ${who(b)}?`)) act(b, { action: "throw" }); }} {...busyOn(`${b.id}:throw`)} data-throw>Throw away</button>
               </div>
             )}
         </div>

@@ -7,9 +7,9 @@
    classes that must hold their shape whatever is written next to them (44px
    buttons and fields, 16px fields on phones) say so themselves. */
 body { @apply bg-paper text-ink font-body antialiased; }
-/* professional touch-feel: no gray tap flash, no double-tap zoom delay on controls */
+/* professional touch-feel: no gray tap flash, no double-tap zoom delay on controls (the calendar's day cells are div[role=button]) */
 * { -webkit-tap-highlight-color: transparent; }
-button, a, input, select, textarea, label { touch-action: manipulation; }
+button, a, input, select, textarea, label, [role=button] { touch-action: manipulation; }
 /* iPhones auto-zoom into any field under 16px, so on phones every field is 16px whatever size it asked for */
 @media (max-width: 640px) {
   input, select, textarea { font-size: 16px !important; }
@@ -32,6 +32,7 @@ body { padding-bottom: env(safe-area-inset-bottom); }
   --t-slow: 240ms;  /* a page arriving */
   --ease-out: cubic-bezier(0.2, 0, 0, 1);
   --bottom-bar: 0px; /* set to the height of a fixed bottom bar while one is mounted; the toast lifts above it */
+  --kb: 0px;         /* how much of the screen the phone's keyboard covers while a sheet is up (Modal keeps it current) */
   --color-work: #10728C;
   --color-alert: #B3261E;
 }
@@ -44,6 +45,7 @@ body { padding-bottom: env(safe-area-inset-bottom); }
   @keyframes k-toast { from { opacity: 0; transform: translate(-50%, 8px) } to { opacity: 1; transform: translate(-50%, 0) } }
   @keyframes k-stamp { from { transform: scale(1.12) } }
   @keyframes k-busy  { from { background-position: -40% 0 } to { background-position: 140% 0 } }
+  @keyframes k-spin  { to { transform: rotate(360deg) } }
   .page-enter { animation: pagein var(--t-slow) var(--ease-out); }
   .anim-fade  { animation: k-fade var(--t-base) var(--ease-out); }   /* skeleton -> content, calendar page/view change */
   .anim-pop   { animation: k-pop var(--t-base) var(--ease-out); }    /* modal panel */
@@ -59,10 +61,13 @@ body { padding-bottom: env(safe-area-inset-bottom); }
   .overlay { animation: k-fade var(--t-fast) var(--ease-out); }
   .overlay > .panel { animation: k-pop var(--t-base) var(--ease-out); }
 }
-/* on a phone a dialog is a sheet from the bottom, clear of the home indicator (mt-auto, not justify-end, so a tall panel still scrolls) */
+/* on a phone a dialog is a sheet from the bottom, clear of the home indicator (mt-auto, not justify-end, so a tall
+   panel still fits). The sheet is its own scroller: the title and the footer stay put, the body scrolls between
+   them, and the whole thing is sized to what the keyboard leaves visible (--kb), so the primary is always in reach */
 @media screen and (max-width: 640px) {
-  .overlay.sheet { @apply flex flex-col p-0; }
-  .overlay.sheet > .panel { @apply mt-auto w-full max-w-none rounded-b-none; padding-bottom: env(safe-area-inset-bottom); animation-name: k-sheet; }
+  .overlay.sheet { @apply flex flex-col p-0; padding-bottom: var(--kb, 0px); }
+  .overlay.sheet > .panel { @apply mt-auto w-full max-w-none rounded-b-none; padding-bottom: env(safe-area-inset-bottom); animation-name: k-sheet; display: flex; flex-direction: column; max-height: calc(100dvh - var(--kb, 0px)); }
+  .overlay.sheet > .panel > .panel-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 }
 /* the flash: one place, above any bottom bar, clear of the home indicator */
 .toast { @apply fixed left-1/2 z-[70] max-w-[calc(100vw-2rem)] rounded-sm bg-ink px-4 py-2.5 text-[14px] text-paper shadow-lg; bottom: calc(1.25rem + env(safe-area-inset-bottom) + var(--bottom-bar)); transform: translateX(-50%); }
@@ -73,19 +78,27 @@ body { padding-bottom: env(safe-area-inset-bottom); }
 /* popovers (typeahead results, pickers) share the menu's look and arrival */
 .popover { @apply card absolute inset-x-0 top-full z-20 mt-1 overflow-hidden shadow-lg; }
 @media screen { .popover { animation: k-rise var(--t-fast) var(--ease-out); } }
-/* a full-width row that is a button: feedback on tap, not just hover */
+/* a full-width row that is a button: feedback on tap, not just hover (hover only where a pointer hovers, so a tapped row lets go) */
 .row-btn { @apply block w-full min-h-[44px] text-left transition-colors; }
-.row-btn:hover { @apply bg-paper; }
+@media (hover: hover) and (pointer: fine) { .row-btn:hover { @apply bg-paper; } }
 .row-btn:active { @apply bg-rulesoft/60; }
-/* an underlined text button: one size, one hit area, pressed state */
+/* an underlined text button: one size, one hit area, pressed state, and a clearly-off disabled look */
 .btn-link { @apply inline-flex min-h-[44px] items-center px-1 text-[13px] underline underline-offset-2 decoration-rule transition-colors; }
 .btn-link:active { @apply bg-paper text-ink decoration-ink; }
+.btn-link:disabled { @apply cursor-not-allowed opacity-50 no-underline; }
 /* segmented control (EN | ES, Month | Week | Day, Spots | Whole wall) */
 .seg { @apply inline-flex rounded-sm border-[1.5px] border-ink; }
 .seg-item { @apply min-h-[44px] bg-white px-3 font-display text-[12px] font-semibold uppercase tracking-wider text-ink transition-colors; }
 .seg-item + .seg-item { @apply border-l-[1.5px] border-ink; }
 .seg-item[aria-checked="true"], .seg-item[aria-selected="true"] { @apply bg-ink text-white; }
-.seg-item:active { @apply bg-paper; }
+/* pressed: an unlit segment goes cream, the lit one brightens (never blanks to cream under white words) */
+.seg-item:active:not([aria-checked="true"]):not([aria-selected="true"]) { @apply bg-paper; }
+.seg-item[aria-checked="true"]:active, .seg-item[aria-selected="true"]:active { filter: brightness(1.3); }
+/* a switch nobody may flip: grey frame, grey lit segment */
+.seg:has(> .seg-item:disabled) { @apply border-rule; }
+.seg-item:disabled { @apply cursor-default text-inksoft; }
+.seg-item:disabled + .seg-item:disabled { @apply border-l-rule; }
+.seg-item:disabled[aria-checked="true"] { @apply bg-inksoft text-white; }
 /* horizontally scrolling strips (nav tabs, filter tabs) fade at the clipped edge */
 .scroll-fade { background: linear-gradient(90deg, #2B231B 30%, rgba(43,35,27,0)) left / 24px 100%, linear-gradient(270deg, #2B231B 30%, rgba(43,35,27,0)) right / 24px 100%; background-repeat: no-repeat; background-attachment: local, local; }
 .scroll-fade-paper { background: linear-gradient(90deg, #F6F2EA 30%, rgba(246,242,234,0)) left / 24px 100%, linear-gradient(270deg, #F6F2EA 30%, rgba(246,242,234,0)) right / 24px 100%; background-repeat: no-repeat; background-attachment: local, local; }
@@ -113,29 +126,59 @@ body { padding-bottom: env(safe-area-inset-bottom); }
   background-repeat: no-repeat;
   background-attachment: local, local, scroll, scroll;
 }
-/* ---- action menus: the one dropdown pattern for grouped actions ---- */
-.menu { @apply rounded-sm border-[1.5px] border-ink bg-white py-1 shadow-xl; min-width: 260px; max-width: calc(100vw - 2rem); }
+/* ---- action menus: the one dropdown pattern for grouped actions (wide enough for a one-line label and a one-line hint) ---- */
+.menu { @apply rounded-sm border-[1.5px] border-ink bg-white py-1 shadow-xl; min-width: 280px; max-width: min(340px, calc(100vw - 2rem)); }
 .menu-item { @apply block w-full min-h-[44px] px-4 py-2.5 text-left text-[15px] transition-colors hover:bg-paper active:bg-rulesoft/60 focus-visible:bg-paper disabled:opacity-50; }
 .menu-item-danger { @apply text-alert; }
-.btn-icon { @apply grid h-11 w-11 shrink-0 cursor-pointer select-none place-items-center rounded-sm border-[1.5px] border-ink bg-white shadow-sm disabled:cursor-not-allowed disabled:opacity-50; }
+/* an item that is off says so and gives no feedback under the pointer */
+.menu-item[aria-disabled="true"] { @apply cursor-not-allowed opacity-50; }
+.menu-item[aria-disabled="true"]:hover, .menu-item[aria-disabled="true"]:active { background-color: transparent; }
 /* small info chips (pipeline states, counts), never below 11px */
 .chip { @apply font-mono text-[11px] tracking-wide; }
 .chip-outline { @apply chip rounded-[2px] border px-1 py-px font-semibold; }
 /* a stamp that is really a button says so on touch, and is as tall as any other button */
 .btn-stamp { @apply inline-flex min-h-[44px] cursor-pointer select-none items-center hover:brightness-95; }
 .stamp { @apply inline-block border-2 rounded-sm px-2.5 py-0.5 font-display uppercase tracking-widest text-[12px] font-semibold; }
-.btn { @apply inline-flex min-h-[44px] items-center justify-center gap-1.5 cursor-pointer select-none rounded-sm border-[1.5px] border-ink bg-white px-4 py-2.5 font-display uppercase tracking-wider text-[15px] font-semibold shadow-sm hover:shadow disabled:cursor-not-allowed disabled:opacity-50; }
-.btn-sm { @apply px-3 py-1.5 text-[13px]; }
-/* every button presses the same way: a short settle on the look, a 1px dip on the tap */
+/* ---- buttons: one kit. Every button is 44px tall, pressed states are its own, hover is only for fine pointers ---- */
+.btn { @apply relative inline-flex min-h-[44px] items-center justify-center gap-1.5 cursor-pointer select-none rounded-sm border-[1.5px] border-ink bg-white px-4 py-2.5 font-display text-[15px] font-semibold uppercase tracking-wider leading-none text-ink; --btn-fg: theme('colors.ink'); box-shadow: 0 1px 2px rgb(43 35 27 / 0.10), inset 0 1px 0 rgb(255 255 255 / 0.7); }
 .btn, .btn-icon, .btn-stamp { transition: box-shadow var(--t-fast), background-color var(--t-fast), border-color var(--t-fast), color var(--t-fast), filter var(--t-fast), transform 60ms; }
-.btn:active, .btn-icon:active, .btn-stamp:active { transform: translateY(1px); box-shadow: none; }
-.btn-primary:active, .btn-stamp:active { filter: brightness(0.95); }
-/* a touch deeper than the accent orange: white text reads at 4.9:1 (AA) */
-/* the logo's ocean teal: white text reads at 5.5:1 (AA) */
-.btn-primary { @apply text-white hover:brightness-105; background-color: #10728C; border-color: #10728C; }
-.btn-ghost { @apply border-rule text-inksoft shadow-none hover:border-ink hover:text-ink hover:shadow-none; }
+@media (hover: hover) and (pointer: fine) { .btn:hover { box-shadow: 0 2px 4px rgb(43 35 27 / 0.14), inset 0 1px 0 rgb(255 255 255 / 0.7); } }
+.btn:active { transform: translateY(1px); box-shadow: inset 0 2px 3px rgb(43 35 27 / 0.16); }
+.btn-stamp:active { transform: translateY(1px); filter: brightness(0.95); }
+/* primary: the logo's ocean teal with a soft top light; white reads 4.95:1 at the lightest stop, 7.2:1 pressed */
+.btn-primary { --btn-fg: #fff; color: #fff; border-color: #0E6479; background: linear-gradient(180deg, #137A95 0%, #10728C 55%, #0E6A82 100%); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.22), 0 1px 2px rgb(43 35 27 / 0.20); }
+@media (hover: hover) and (pointer: fine) { .btn-primary:hover { filter: brightness(1.05); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.22), 0 2px 5px rgb(43 35 27 / 0.24); } }
+.btn-primary:active { background: #0D5F74; filter: none; box-shadow: inset 0 2px 3px rgb(0 0 0 / 0.28); }
+.btn-primary:focus-visible { outline: none; box-shadow: 0 0 0 2px #F6F2EA, 0 0 0 4px #2B231B; }
+/* ghost: a real edge (ink at 50%, 3.0:1 on the cream) and ink words; fills white under the pointer, dims on press */
+.btn-ghost { background: rgb(255 255 255 / 0.6); border-color: rgb(43 35 27 / 0.5); color: theme('colors.ink'); box-shadow: none; }
+@media (hover: hover) and (pointer: fine) { .btn-ghost:hover { background: #fff; border-color: theme('colors.ink'); box-shadow: none; } }
+.btn-ghost:active { background: theme('colors.rulesoft'); border-color: theme('colors.ink'); box-shadow: none; }
+/* danger: the one red button (Yes, remove all) */
+.btn-danger { border-color: theme('colors.alert'); color: theme('colors.alert'); }
+.btn-danger:active { background: rgb(179 38 30 / 0.08); }
+/* sizes: never under 44px; -sm is tighter type, -lg is the one big button on a page (Make payroll) */
+.btn-sm { @apply px-3 text-[13px]; }
+.btn-lg { @apply min-h-[52px] px-5 text-[17px]; }
+/* icon buttons: 44x44; -quiet is the bare ⋯ on list rows */
+.btn-icon { @apply relative grid h-11 w-11 shrink-0 cursor-pointer select-none place-items-center rounded-sm border-[1.5px] border-ink bg-white text-ink; --btn-fg: theme('colors.ink'); box-shadow: 0 1px 2px rgb(43 35 27 / 0.10); }
+.btn-icon:active { transform: translateY(1px); box-shadow: inset 0 2px 3px rgb(43 35 27 / 0.16); }
+.btn-icon-quiet { @apply border-0 bg-transparent text-inksoft shadow-none; }
+@media (hover: hover) and (pointer: fine) { .btn-icon-quiet:hover { @apply bg-paper text-ink; } }
+.btn-icon-quiet:active { @apply bg-rulesoft/60 text-ink; box-shadow: none; }
+/* loading: the label stays (width never moves, the name stays for a screen reader), a cover in the button's own background and a spinner on top */
+.btn-busy { pointer-events: none; cursor: progress; }
+.btn-busy::before { content: ""; position: absolute; inset: 0; border-radius: inherit; background: inherit; }
+.btn-busy::after { content: ""; position: absolute; left: 50%; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; border-radius: 50%; border: 2px solid var(--btn-fg); border-right-color: transparent; animation: k-spin 0.7s linear infinite; }
+.btn-sm.btn-busy::after { width: 14px; height: 14px; margin: -7px 0 0 -7px; }
+/* disabled: clearly off, not a paler live button (text 3.2:1 on the grey, no shadow, no press) */
+.btn:disabled:not(.btn-busy), .btn-icon:disabled { background: #EFEAE0; border-color: #D9D1C3; color: #8A8276; box-shadow: none; transform: none; cursor: not-allowed; opacity: 1; filter: none; }
+.btn.btn-busy:disabled { opacity: 1; cursor: progress; }
 /* min-h keeps a field a thumb tall even where a page trims its padding */
 .field { @apply w-full min-h-[44px] rounded-sm border border-rule bg-white px-3 py-3 text-base outline-none transition-[border-color,box-shadow] duration-150 focus:border-ink focus:ring-2 focus:ring-ink/10; }
+/* a select draws its own caret (iOS Safari draws none once a select has its own border), darker while it is open */
+select.field { appearance: none; -webkit-appearance: none; padding-right: 2rem; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%2370665A' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.75rem center; background-color: #fff; }
+select.field:focus { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%232B231B' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E"); }
 .card { @apply rounded-sm border border-rule bg-card shadow-sm; }
 .card-pad { @apply p-3.5 sm:p-4; }
 .card-tight { @apply p-2.5; }

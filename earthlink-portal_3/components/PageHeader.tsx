@@ -5,6 +5,11 @@ import ActionMenu, { type ActionItem } from "./ActionMenu";
 // Every page opens the same way: the title on the left, at most one primary
 // action and one overflow menu on the right. The eye always knows where to go.
 // An editor adds a "← Back" before the title and a status stamp beside it.
+// On a phone the actions take the full width in one fixed shape: the ghost
+// (stretched) and the ⋯ on the first row, the primary full width on the second,
+// nearest the thumb. From sm up they sit on one line as before.
+// the classes that stretch a child (a .btn, or an ActionMenu's wrapper and the .btn inside it) on phones only
+const STRETCH = "[&>*]:w-full [&_.btn]:w-full sm:[&>*]:w-auto sm:[&_.btn]:w-auto";
 export default function PageHeader({ title, sub, primary, menu, menuLabel = "⋯", back, stamp, children }: {
   title: string;
   sub?: string; // one quiet line under the title: plain words, no dashes (":" "," "." or " · " instead)
@@ -16,6 +21,7 @@ export default function PageHeader({ title, sub, primary, menu, menuLabel = "⋯
   children?: React.ReactNode; // at most one extra ghost link/button
 }) {
   const backLabel = `← ${back?.label || "Back"}`;
+  const hasMenu = !!menu && menu.length > 0;
   return (
     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
       <div className="flex min-w-0 items-center gap-3">
@@ -30,11 +36,13 @@ export default function PageHeader({ title, sub, primary, menu, menuLabel = "⋯
           {sub && <div className="text-[12px] text-inksoft">{sub}</div>}
         </div>
       </div>
-      <div className="flex flex-wrap items-center gap-2">
-        {children}
-        {primary}
-        {menu && menu.length > 0 && <ActionMenu label={menuLabel} items={menu} />}
-      </div>
+      {(children || primary || hasMenu) && (
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap">
+          {children && <div className={`flex min-w-0 flex-1 sm:flex-none ${STRETCH}`}>{children}</div>}
+          {primary && <div className={`order-last basis-full sm:order-none sm:basis-auto ${STRETCH}`}>{primary}</div>}
+          {hasMenu && <ActionMenu label={menuLabel} items={menu!} className="ml-auto shrink-0 sm:ml-0" />}
+        </div>
+      )}
     </div>
   );
 }

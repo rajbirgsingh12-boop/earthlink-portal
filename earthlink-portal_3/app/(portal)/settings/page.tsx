@@ -12,6 +12,7 @@ let XLSX!: typeof import("xlsx-js-style");
 const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import { useLive } from "@/lib/useLive";
 import { sb } from "@/lib/supabase";
+import { freshProfile } from "@/lib/profile";
 import { askFileName } from "@/lib/format";
 import { scrollTo } from "@/lib/motion";
 import type { Org } from "@/lib/docs";
@@ -68,39 +69,45 @@ export default function Settings() {
   const [me, setMe] = useState<Profile | null>(null);
   const [people, setPeople] = useState<Profile[]>([]);
   const [peopleLoaded, setPeopleLoaded] = useState(false);
+  const [usersOpen, setUsersOpen] = useState(false);
   const { msg, flash } = useFlash();
 
   // the email column arrives with supabase/upgrade_user_email.sql; until that is
   // run the page still works, it just cannot show anyone's address
   const [noEmailCol, setNoEmailCol] = useState(false);
-  const loadUsers = async () => {
-    const { data: { user } } = await sb().auth.getUser();
-    if (!user) return;
-    const { data: p } = await sb().from("profiles").select("id,name,role").eq("id", user.id).single();
-    setMe(p as Profile);
-    if ((p as Profile)?.role === "admin") {
-      const withEmail = await sb().from("profiles").select("id,name,role,email").order("name");
-      if (withEmail.error) {
-        setNoEmailCol(true);
-        const { data: all } = await sb().from("profiles").select("id,name,role").order("name");
-        setPeople((all || []) as Profile[]);
-      } else {
-        setNoEmailCol(false);
-        setPeople((withEmail.data || []) as Profile[]);
-      }
-      setPeopleLoaded(true);
-    }
+  // who is signed in: the one shared profile read every page makes (no auth
+  // round trip of this page's own). The database's answer, never the copy
+  // remembered on this device, decides which sections show: the PACT price
+  // list and the user list are Admin 1's alone
+  const loadMe = async () => {
+    const p = await freshProfile();
+    if (p) setMe({ id: p.id, name: p.name, role: p.role as Role });
   };
+  // the people list is read when Users & roles is opened (Admin 1 only), once;
+  // a change made elsewhere refreshes it only while it is on screen
+  const loadPeople = async () => {
+    const withEmail = await sb().from("profiles").select("id,name,role,email").order("name");
+    if (withEmail.error) {
+      setNoEmailCol(true);
+      const { data: all } = await sb().from("profiles").select("id,name,role").order("name");
+      setPeople((all || []) as Profile[]);
+    } else {
+      setNoEmailCol(false);
+      setPeople((withEmail.data || []) as Profile[]);
+    }
+    setPeopleLoaded(true);
+  };
+  useEffect(() => { if (usersOpen && me?.role === "admin" && !peopleLoaded) loadPeople(); }, [usersOpen, me, peopleLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
   const [contracts, setContracts] = useState<Contract[]>([]);
   useEffect(() => {
     sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
     sb().from("contracts").select("id,number,name").order("number").then(({ data }) => setContracts((data || []) as Contract[]));
-    loadUsers();
+    loadMe();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // live: user list and contract names stay current across devices
   useLive(["profiles", "contracts"], () => {
-    loadUsers();
+    if (peopleLoaded) loadPeople();
     sb().from("contracts").select("id,number,name").order("number").then(({ data }) => setContracts((data || []) as Contract[]));
   }, { skipWhileTyping: true });
 
@@ -130,8 +137,9 @@ export default function Settings() {
   };
   // English | Español, one tap
   const langPick = (value: Lang, onPick: (l: Lang) => void, disabled = false, name?: string) => <LangToggle value={value} onChange={onPick} disabled={disabled} full name={name} />;
-  useEffect(() => { loadEmps(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-  useLive(["employees"], loadEmps, { skipWhileTyping: true });
+  // the crew is read when its section opens (or #crew asks for it), once; live changes refresh it only once it is on screen
+  useEffect(() => { if (crewOpen && !empsLoaded) loadEmps(); }, [crewOpen, empsLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+  useLive(["employees"], loadEmps, { skipWhileTyping: true, enabled: empsLoaded });
   const savePhone = async (empId: string, raw: string) => {
     const phone = cleanPhone(raw) || raw.trim();
     const { error } = await sb().from("employees").update({ phone }).eq("id", empId);
@@ -139,22 +147,26 @@ export default function Settings() {
     setEmps((prev) => prev.map((e) => (e.id === empId ? { ...e, phone } : e)));
     flash("Phone number saved");
   };
+  const [addingWorker, setAddingWorker] = useState(false); // a second tap on Add while the first is saving does nothing
   const addWorker = async (ev?: React.FormEvent) => {
     ev?.preventDefault();
-    if (!crewDraft.name) return;
-    const row: Record<string, unknown> = { name: crewDraft.name, trade: crewDraft.trade, base_rate: 0 };
-    if (crewDraft.phone.trim()) row.phone = cleanPhone(crewDraft.phone) || crewDraft.phone.trim();
-    if (crewDraft.lang !== "en") row.lang = crewDraft.lang;
-    let { error } = await sb().from("employees").insert(row);
-    if (error && ("phone" in row || "lang" in row) && /column|schema cache/i.test(error.message)) {
-      // only the column the database says it lacks is left out: a phone typed beside a language is kept
-      const missing = /\blang\b/i.test(error.message) ? ["lang"] : /\bphone\b/i.test(error.message) ? ["phone"] : ["phone", "lang"];
-      for (const k of missing) delete row[k];
-      ({ error } = await sb().from("employees").insert(row));
-      if (!error) flash(`Run supabase/RUN_ME.sql so ${missing.includes("phone") && missing.includes("lang") ? "phone numbers and languages save" : missing[0] === "lang" ? "each worker's language saves. The phone number was kept" : "phone numbers save. The language was kept"}`);
-    }
-    if (error) { flash(`Couldn't add ${crewDraft.name} to the crew. Check your signal and try again.`); return; }
-    setCrewDraft({ name: "", trade: "", phone: "", lang: "en" }); loadEmps();
+    if (!crewDraft.name || addingWorker) return;
+    setAddingWorker(true);
+    try {
+      const row: Record<string, unknown> = { name: crewDraft.name, trade: crewDraft.trade, base_rate: 0 };
+      if (crewDraft.phone.trim()) row.phone = cleanPhone(crewDraft.phone) || crewDraft.phone.trim();
+      if (crewDraft.lang !== "en") row.lang = crewDraft.lang;
+      let { error } = await sb().from("employees").insert(row);
+      if (error && ("phone" in row || "lang" in row) && /column|schema cache/i.test(error.message)) {
+        // only the column the database says it lacks is left out: a phone typed beside a language is kept
+        const missing = /\blang\b/i.test(error.message) ? ["lang"] : /\bphone\b/i.test(error.message) ? ["phone"] : ["phone", "lang"];
+        for (const k of missing) delete row[k];
+        ({ error } = await sb().from("employees").insert(row));
+        if (!error) flash(`Run supabase/RUN_ME.sql so ${missing.includes("phone") && missing.includes("lang") ? "phone numbers and languages save" : missing[0] === "lang" ? "each worker's language saves. The phone number was kept" : "phone numbers save. The language was kept"}`);
+      }
+      if (error) { flash(`Couldn't add ${crewDraft.name} to the crew. Check your signal and try again.`); return; }
+      setCrewDraft({ name: "", trade: "", phone: "", lang: "en" }); loadEmps();
+    } finally { setAddingWorker(false); }
   };
 
   // ---- invoice-package wording per contract (stored with the package files) ----
@@ -162,16 +174,18 @@ export default function Settings() {
   const [pkgInfo, setPkgInfo] = useState<PkgInfo>({});
   const [pkgLoading, setPkgLoading] = useState(false);
   const [pkgSaving, setPkgSaving] = useState(false);
+  const [pkgOpen, setPkgOpen] = useState(false);
+  const pkgLoadedFor = useRef(""); // the contract whose wording is on screen: read once per contract, when the section is open
   useEffect(() => {
     if (!pkgSel && contracts[0]) setPkgSel(contracts[0].id);
   }, [contracts, pkgSel]);
   useEffect(() => {
-    if (!pkgSel) return;
+    if (!pkgOpen || !pkgSel || pkgLoadedFor.current === pkgSel) return;
     let stale = false;
     setPkgLoading(true);
-    loadPkgInfo(pkgSel).then((info) => { if (!stale) { setPkgInfo(info); setPkgLoading(false); } });
+    loadPkgInfo(pkgSel).then((info) => { if (!stale) { pkgLoadedFor.current = pkgSel; setPkgInfo(info); setPkgLoading(false); } });
     return () => { stale = true; };
-  }, [pkgSel]);
+  }, [pkgOpen, pkgSel]);
   const savePkgDetails = async () => {
     if (!pkgSel) return;
     setPkgSaving(true);
@@ -213,7 +227,10 @@ export default function Settings() {
       setPriceLoadErr(!ok);
     });
   };
-  useEffect(readList, []);
+  // the saved list is read when Line items & prices opens, once (the retry button reads it again)
+  const [priceOpen, setPriceOpen] = useState(false);
+  const priceAsked = useRef(false);
+  useEffect(() => { if (priceOpen && !priceAsked.current) { priceAsked.current = true; readList(); } }, [priceOpen]); // eslint-disable-line react-hooks/exhaustive-deps
   const ovOf = (key: string): PriceOverride => store.overrides[key] || {};
   const setOv = (key: string, patch: PriceOverride) => {
     setPriceTouched(true);
@@ -310,7 +327,9 @@ export default function Settings() {
   const setRole = async (id: string, role: Role) => {
     const { error } = await sb().from("profiles").update({ role }).eq("id", id);
     flash(error ? "Couldn't change the role. Check your signal and try again." : "Role saved");
-    loadUsers();
+    // your own new role takes effect on this page at once (sections you lost close)
+    if (!error && id === me?.id) setMe({ ...me, role });
+    loadPeople();
   };
   // changing your own role can lock you out of parts of this page, so it asks first
   const changeRole = (p: Profile, role: Role) => {
@@ -334,7 +353,7 @@ export default function Settings() {
     if (!data || data.length === 0) { flash("Didn't save. Only Admin 1 can rename people"); return; }
     setNameBuf((b) => { const n = { ...b }; delete n[p.id]; return n; });
     flash("Name saved");
-    loadUsers();
+    loadPeople();
   };
 
   // sending someone a reset link: the only way to change another person's
@@ -387,7 +406,7 @@ export default function Settings() {
     setAdding(false); setAddOpen(false);
     setNewUser({ name: "", email: "", password: "", role: "office" });
     flash(`Account created for ${email}.${roleWarn}`);
-    loadUsers();
+    loadPeople();
   };
 
   // ---------- full backup: the whole business in one workbook ----------
@@ -630,7 +649,7 @@ export default function Settings() {
               <input className="field" placeholder="Classification" autoComplete="off" value={crewDraft.trade} onChange={(e) => setCrewDraft({ ...crewDraft, trade: e.target.value })} />
               <input className="field" placeholder="Phone" inputMode="tel" enterKeyHint="done" autoComplete="off" value={crewDraft.phone} onChange={(e) => setCrewDraft({ ...crewDraft, phone: e.target.value })} />
               {langPick(crewDraft.lang, (l) => setCrewDraft({ ...crewDraft, lang: l }))}
-              <button type="submit" className="btn btn-primary">Add</button>
+              <button type="submit" className={`btn btn-primary${addingWorker ? " btn-busy" : ""}`} aria-busy={addingWorker || undefined} disabled={addingWorker}>Add</button>
             </form>
           )}
           <div className="mt-2 divide-y divide-rulesoft">
@@ -665,7 +684,7 @@ export default function Settings() {
       </Disclosure>
 
       {contracts.length > 0 && me?.role !== "accountant" && (
-        <Disclosure label="Invoice package details" sublabel="wording on the package documents" className="mt-4">
+        <Disclosure label="Invoice package details" sublabel="wording on the package documents" className="mt-4" open={pkgOpen} onToggle={() => setPkgOpen(!pkgOpen)}>
           <div className="card card-pad">
             <div className="mb-3 text-[12px] text-inksoft">
               What gets written onto the package documents (REP, Section 3 hiring summary, Equal Opportunity report)
@@ -702,7 +721,7 @@ export default function Settings() {
               </div>
             )}
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <button type="button" className="btn btn-primary" onClick={savePkgDetails} disabled={pkgSaving || pkgLoading}>{pkgSaving ? "Saving…" : "Save package details"}</button>
+              <button type="button" className={`btn btn-primary${pkgSaving ? " btn-busy" : ""}`} aria-busy={pkgSaving || undefined} onClick={savePkgDetails} disabled={pkgSaving || pkgLoading}>Save package details</button>
               <span className="text-[12px] text-inksoft">The affidavit and full replacement PDFs upload on the Invoice Package tab.</span>
             </div>
           </div>
@@ -712,7 +731,7 @@ export default function Settings() {
       {/* the PACT price book and addressee price every PACT paper: Admin 1's alone,
           same as the PACT tab itself */}
       {me && me.role === "admin" && (
-        <Disclosure label="Line items & prices" sublabel="what a PO turns into" className="mt-4">
+        <Disclosure label="Line items & prices" sublabel="what a PO turns into" className="mt-4" open={priceOpen} onToggle={() => setPriceOpen(!priceOpen)}>
           <div className="card card-pad">
             <div className="mb-2 text-[12px] text-inksoft">
               These are the lines a PO gets turned into: the prices quoted to Fairstead and Boulevard, plus anything you
@@ -742,7 +761,7 @@ export default function Settings() {
                           <input className="field w-full px-2 text-[13px]" value={o.description ?? p.description} aria-label={`Wording for ${p.description}`}
                             placeholder={p.description} onChange={(e) => setOv(p.key, { description: e.target.value })} />
                           <div className="mt-1.5 grid grid-cols-[96px_1fr_64px] items-center gap-2 md:grid-cols-[96px_1fr_1fr_64px]">
-                            <select className="field w-full px-1 text-center text-[13px]" aria-label="Unit"
+                            <select className="field w-full pr-6 pl-2 text-left text-[13px]" aria-label="Unit"
                               value={o.unit ?? p.unit} onChange={(e) => setOv(p.key, { unit: e.target.value })}>
                               {UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
                             </select>
@@ -776,7 +795,7 @@ export default function Settings() {
                         <input className="field w-full px-2 text-[13px]" value={c.description} aria-label="What the line says on the invoice"
                           placeholder="What the line says on the invoice" onChange={(e) => setCustom(c.key, { description: e.target.value })} />
                         <div className="mt-1.5 grid grid-cols-[96px_1fr_64px] items-center gap-2 md:grid-cols-[96px_1fr_1fr_64px]">
-                          <select className="field w-full px-1 text-center text-[13px]" aria-label="Unit"
+                          <select className="field w-full pr-6 pl-2 text-left text-[13px]" aria-label="Unit"
                             value={c.unit} onChange={(e) => setCustom(c.key, { unit: e.target.value })}>
                             {UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
                           </select>
@@ -833,7 +852,7 @@ export default function Settings() {
       )}
 
       {me?.role === "admin" && (
-        <Disclosure label="Users & roles" sublabel="who can sign in, and as what" className="mt-4">
+        <Disclosure label="Users & roles" sublabel="who can sign in, and as what" className="mt-4" open={usersOpen} onToggle={() => setUsersOpen(!usersOpen)}>
           {noEmailCol && (
             <div className="notice-work mb-2 text-inksoft">
               Run <span className="font-mono">supabase/upgrade_user_email.sql</span> in Supabase to see everyone&rsquo;s email address here.
@@ -858,7 +877,7 @@ export default function Settings() {
                       </select></div>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <button type="submit" className="btn btn-primary" disabled={adding}>{adding ? "Creating…" : "Create account"}</button>
+                    <button type="submit" className={`btn btn-primary${adding ? " btn-busy" : ""}`} aria-busy={adding || undefined} disabled={adding}>Create account</button>
                     <button type="button" className="btn btn-ghost" onClick={() => setAddOpen(false)}>Cancel</button>
                   </div>
                   <div className="mt-2 text-[12px] text-inksoft">Give them this email + password to sign in. You can change their role any time below.</div>
@@ -913,7 +932,7 @@ export default function Settings() {
             <div className="font-semibold">File storage</div>
             <div className="text-[12px] text-inksoft">How full the photo &amp; document storage is.</div>
           </div>
-          <button type="button" className="btn btn-ghost w-full whitespace-nowrap sm:w-auto" onClick={checkStorage} disabled={storageBusy}>{storageBusy ? "Measuring…" : "Check storage"}</button>
+          <button type="button" className={`btn btn-ghost w-full whitespace-nowrap sm:w-auto${storageBusy ? " btn-busy" : ""}`} aria-busy={storageBusy || undefined} onClick={checkStorage} disabled={storageBusy}>Check storage</button>
         </div>
         {storageBusy && <div className="skeleton mt-2.5 h-2 w-full" aria-hidden />}
         {storage === null && !storageBusy && (
@@ -953,7 +972,7 @@ export default function Settings() {
             <div className="font-semibold">Backup</div>
             <div className="text-[12px] text-inksoft">One Excel workbook with everything. Worth downloading every Friday and keeping somewhere safe.</div>
           </div>
-          <button type="button" className="btn btn-ghost w-full whitespace-nowrap sm:w-auto" onClick={downloadBackup} disabled={backingUp}>{backingUp ? "Building…" : "⬇ Full backup (Excel)"}</button>
+          <button type="button" className={`btn btn-ghost w-full whitespace-nowrap sm:w-auto${backingUp ? " btn-busy" : ""}`} aria-busy={backingUp || undefined} onClick={downloadBackup} disabled={backingUp}>⬇ Full backup (Excel)</button>
         </div>
       </div>
 
@@ -963,7 +982,7 @@ export default function Settings() {
             <div className="text-[14px] font-semibold">System check</div>
             <div className="text-[12px] text-inksoft">Verifies the database has every upgrade in place.</div>
           </div>
-          <button type="button" className="btn btn-ghost w-full whitespace-nowrap sm:w-auto" onClick={runSystemCheck} disabled={checking}>{checking ? "Checking…" : "Run system check"}</button>
+          <button type="button" className={`btn btn-ghost w-full whitespace-nowrap sm:w-auto${checking ? " btn-busy" : ""}`} aria-busy={checking || undefined} onClick={runSystemCheck} disabled={checking}>Run system check</button>
         </div>
         {me?.role === "admin" && (
           <div className="mt-3 flex flex-col gap-3 border-t border-rulesoft pt-3 sm:flex-row sm:items-center sm:justify-between">
@@ -971,7 +990,7 @@ export default function Settings() {
               <div className="text-[14px] font-semibold">PO descriptions</div>
               <div className="text-[12px] text-inksoft">Jobs whose description was cut short when the PO was read (120 characters) get it read again from the PDF on the job. Nothing else on the job changes.</div>
             </div>
-            <button type="button" className="btn btn-ghost w-full whitespace-nowrap sm:w-auto" onClick={fixDescriptions} disabled={fixingDesc} data-fix-descriptions>{fixingDesc ? "Reading…" : "Re-read descriptions"}</button>
+            <button type="button" className={`btn btn-ghost w-full whitespace-nowrap sm:w-auto${fixingDesc ? " btn-busy" : ""}`} aria-busy={fixingDesc || undefined} onClick={fixDescriptions} disabled={fixingDesc} data-fix-descriptions>Re-read descriptions</button>
           </div>
         )}
         {descReport && (

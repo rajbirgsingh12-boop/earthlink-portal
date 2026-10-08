@@ -1,12 +1,13 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { matches } from "@/lib/search";
+import { cached, onCacheUser, remember } from "@/lib/cache";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the export
 // the export engine is heavy — it loads on demand, never with the page itself
 let XLSX!: typeof import("xlsx-js-style");
 const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import { sb } from "@/lib/supabase";
-import { myProfile } from "@/lib/profile";
+import { useProfile } from "@/lib/profile";
 import { fmt, askFileName } from "@/lib/format";
 import { Org, prettyDate, localISO, invoiceNumberOf } from "@/lib/docs";
 import type { Contract, Release } from "@/lib/types";
@@ -21,6 +22,11 @@ import { PKG_SLOTS, type PkgSlot, listPkgOverrides, uploadPkgOverride, removePkg
 import PrintShell from "@/components/PrintShell";
 import Toast, { useFlash } from "@/components/Toast";
 
+// what this phone showed last time paints before the first frame (on the server there is no frame to paint before)
+const useBeforePaint = typeof window === "undefined" ? useEffect : useLayoutEffect;
+// what is remembered on this phone for the next open: the contracts with a balance, the one that was open, and each one's statement
+const CACHE = { contracts: "pkg:contracts", active: "pkg:active", rows: (cid: string) => `pkg:rows:${cid}` };
+type StatementCache = { rows: Release[]; stubs: Release[] };
 // the aging buckets: the keys stay short, the words a person reads say "to"
 const BUCKET_LABEL: Record<string, string> = { "0-30": "0 to 30 days", "31-60": "31 to 60 days", "61-90": "61 to 90 days", "90+": "90+ days" };
 
@@ -39,10 +45,14 @@ export default function InvoicePackage() {
   const [rowsFor, setRowsFor] = useState("");
   const { msg, flash, progress, setProgress } = useFlash();
   // the accountant can read everything here but the database won't accept their
-  // writes — keep the dates view-only for them instead of edits that don't save
-  const [role, setRole] = useState("");
-  const readOnly = role === "accountant";
+  // writes — keep the dates view-only for them instead of edits that don't save.
+  // The remembered profile answers first; the database's own corrects it when it lands
+  const { hint, fresh: me } = useProfile();
+  const readOnly = ((me || hint)?.role || "") === "accountant";
   const today = localISO();
+  // which answers came from the database on this visit (a remembered copy never overwrites one)
+  const got = useRef({ contracts: false });
+  const freshFor = useRef(""); // the contract whose statement on screen came from the database
 
   const genInvoice = async (r: Release) => {
     const c = contracts.find((x) => x.id === sel);
@@ -73,12 +83,11 @@ export default function InvoicePackage() {
         }
         return rel;
       };
-      const [prof, { data }, rel] = await Promise.all([
-        myProfile(),
+      const [{ data, error }, rel] = await Promise.all([
         sb().from("contracts").select("id,number,name").order("number"),
         fetchRel(),
       ]);
-      setRole(prof?.role || "");
+      if (error) { setBooted(true); return; } // bad signal: what is showing (remembered, or nothing) stays
       const cs = (data || []) as Contract[];
       // only contracts with an active statement (something still owed)
       const open = new Set(
@@ -87,12 +96,35 @@ export default function InvoicePackage() {
           .map((r) => r.contract_id)
       );
       const activeContracts = cs.filter((c) => open.has(c.id));
+      got.current.contracts = true;
+      remember(CACHE.contracts, activeContracts);
       setContracts(activeContracts);
-      if (activeContracts[0]) setSel(activeContracts[0].id);
+      // the contract that was open stays open while it still has a balance; otherwise the first one
+      setSel((cur) => (cur && activeContracts.some((c) => c.id === cur) ? cur : activeContracts[0]?.id || ""));
       setBooted(true);
     })();
-    sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
+    sb().from("org").select("*").single().then(({ data }) => { if (data) { setOrg(data as Org); remember("org", data); } });
   }, []);
+  // What this phone showed last time paints at once (as soon as the signed-in
+  // user is named; before the first paint when they already are) and the
+  // database's answers, already on their way, replace it as they land. The
+  // contract that was open last time opens again, so its statement is asked
+  // for without waiting for the contracts list.
+  useBeforePaint(() => onCacheUser(() => {
+    if (!got.current.contracts) {
+      const cs = cached<Contract[]>(CACHE.contracts);
+      if (cs && cs.length) {
+        setContracts(cs);
+        setBooted(true);
+        const saved = cached<string>(CACHE.active);
+        setSel((cur) => cur || (saved && cs.some((c) => c.id === saved) ? saved : cs[0].id));
+      }
+    }
+    const o = cached<Org>("org");
+    if (o) setOrg((prev) => prev || o);
+  }), []);
+  // the open contract is remembered, so the next open starts on it
+  useEffect(() => { if (sel) remember(CACHE.active, sel); }, [sel]);
 
   // live: releases, their items and walk sheets refresh the statement
   useLive(["releases", "release_items", "proposals", "contracts"], () => setReloadTick((t) => t + 1), { enabled: !!sel });
@@ -100,6 +132,11 @@ export default function InvoicePackage() {
   const selRef = useRef(sel); selRef.current = sel;
   useEffect(() => {
     if (!sel) { setRows([]); setStubs([]); return; }
+    // nothing from the database for this contract yet on this visit: last time's statement paints at once
+    if (freshFor.current !== sel) {
+      const c = cached<StatementCache>(CACHE.rows(sel));
+      if (c && Array.isArray(c.rows) && Array.isArray(c.stubs)) { setRows(c.rows); setStubs(c.stubs); setRowsFor(sel); }
+    }
     (async () => {
       const pages: Release[] = [];
       for (let from = 0; ; from += 1000) { // paginated — an unranged select stops silently at 1000
@@ -143,6 +180,7 @@ export default function InvoicePackage() {
       const connected = all.filter((r) => ready.has(r.id) || walkNums.has(relNorm(r.rel_number)));
       connected.sort((a, b) => (parseFloat(a.rel_number) || 0) - (parseFloat(b.rel_number) || 0));
       if (sel !== selRef.current) return; // another contract was picked while this one loaded
+      freshFor.current = sel;
       setRows(connected);
       // open money the statement can't show yet, so "all square" is never a lie
       setStubs(all.filter((r) => !ready.has(r.id) && !walkNums.has(relNorm(r.rel_number))));
@@ -150,6 +188,9 @@ export default function InvoicePackage() {
     })();
   }, [sel, reloadTick]);
   const rowsLoaded = rowsFor === sel;
+  // the statement on screen, as the database sent it and as the page has since marked it
+  // (invoice dates), is what paints next time: only while it is the picked contract's
+  useEffect(() => { if (sel && rowsFor === sel) remember(CACHE.rows(sel), { rows, stubs } as StatementCache); }, [rows, stubs, rowsFor, sel]);
 
   const contract = contracts.find((c) => c.id === sel);
   const days = (r: Release) => (r.invoice_sent ? Math.max(0, Math.floor((new Date(today + "T00:00:00").getTime() - new Date(r.invoice_sent + "T00:00:00").getTime()) / 86400000)) : null);
@@ -421,7 +462,7 @@ export default function InvoicePackage() {
                       <td className="p-1.5 text-right">
                         <RowActions items={[
                           { label: "Invoice", title: "Make the NYCHA invoice", onSelect: () => genInvoice(r) },
-                          { label: pkgBusy === r.id ? "Making…" : "Invoice package (PDF)", glyph: "⬇", disabled: !!pkgBusy,
+                          { label: "Invoice package (PDF)", glyph: "⬇", disabled: !!pkgBusy,
                             title: "Invoice + affidavit + REP + hiring summary + equal opportunity report, one PDF",
                             onSelect: () => downloadPackage(r) },
                         ]} />
@@ -449,14 +490,14 @@ export default function InvoicePackage() {
               </div>
               <CardToolbar className="mt-3.5"
                 primary={
-                  <button type="button" className="btn btn-primary" onClick={downloadAllPackages} disabled={allPkgBusy} title="One zip with every outstanding release's package PDF">
-                    {allPkgBusy ? "Making packages…" : `⬇ All packages (${sorted.length}, zip)`}
+                  <button type="button" className={`btn btn-primary${allPkgBusy ? " btn-busy" : ""}`} aria-busy={allPkgBusy || undefined} onClick={downloadAllPackages} disabled={allPkgBusy} title="One zip with every outstanding release's package PDF">
+                    ⬇ All packages ({sorted.length}, zip)
                   </button>
                 }
                 secondary={<button type="button" className="btn btn-ghost" onClick={() => { setInvPreview(null); setPrintOpen(true); }}>Preview statement</button>}
                 menu={[
                   { label: "Statement (Excel)", glyph: "⬇", onSelect: downloadExcel },
-                  { label: zipBusy ? "Making invoices…" : `All invoices (${sorted.length}) as Excel`, glyph: "⬇", disabled: zipBusy,
+                  { label: `All invoices (${sorted.length}) as Excel`, glyph: "⬇", disabled: zipBusy,
                     title: "Every outstanding invoice on this contract, regenerated in the template format, in one zip",
                     onSelect: downloadAllInvoices },
                 ]} />

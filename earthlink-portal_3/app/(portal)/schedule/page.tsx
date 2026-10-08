@@ -2,10 +2,12 @@
 // Day-by-day crew schedule: pick a day, add a release, add the workers, then
 // "Text crew" messages the whole crew at once (from the company number, or a
 // prefilled group text on this phone), the location and the work already written.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { matches } from "@/lib/search";
 import { sb } from "@/lib/supabase";
-import { myProfile } from "@/lib/profile";
+import { useProfile } from "@/lib/profile";
+import { cached, onCacheUser, remember } from "@/lib/cache";
 import { prettyDate, addDays, localISO } from "@/lib/docs";
 import { scrollTo } from "@/lib/motion";
 import Stamp from "@/components/Stamp";
@@ -38,8 +40,23 @@ const SAVE_FAILED = "Couldn't save. Check your signal and try again.";
 const upgradeMsg = "This day can't load until the database update is run (Settings → System check)";
 const addrUpgradeMsg = "The address can't be saved until the database update is run (Settings → System check)";
 
+// the crew, the releases and the contracts as last seen on this device: painted
+// at once on the next open, replaced by the database's answer one round trip later
+type Lists = { emps: Emp[]; rels: RelRow[]; contracts: Contract[] };
+const LISTS_KEY = "sched:lists";
+// the catch-up for texts set up for later: asked once in five minutes per device
+// (the stamp is shared with the PACT calendar and every tab), not on every open
+const DUE_KEY = "elgc-text-due-at";
+const DUE_EVERY = 5 * 60_000;
+const useBeforePaint = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
 export default function Schedule() {
-  const [role, setRole] = useState("");
+  const router = useRouter();
+  // the remembered profile paints the page at once; the confirmed one replaces it.
+  // Nothing here shows money: the edit controls follow the best known role and
+  // the database enforces every write regardless
+  const { hint, fresh } = useProfile();
+  const role = (fresh || hint)?.role || "";
   const canEdit = role === "admin" || role === "office";
   // the day is read after mount (today, or ?day= from the calendar), so the
   // first paint never shows the server's idea of today for a blink
@@ -70,10 +87,17 @@ export default function Schedule() {
   useEffect(() => { textMachineReady().then(setMachine); }, []);
   // anything set up for later whose time has come goes out now. With the
   // timer set up it has gone already; this is the catch-up for when it
-  // isn't, and it costs one small call whenever the schedule is open.
+  // isn't. It waits for the page's own reads, and asks once in five minutes
+  // per device, not on every open.
   useEffect(() => {
     let stop = false;
+    let first: ReturnType<typeof setTimeout> | null = null;
+    let every: ReturnType<typeof setInterval> | null = null;
     const tick = async () => {
+      try {
+        if (Date.now() - Number(localStorage.getItem(DUE_KEY) || 0) < DUE_EVERY - 1000) return;
+        localStorage.setItem(DUE_KEY, String(Date.now()));
+      } catch { /* private mode: ask every time */ }
       const out = await sendDueNow();
       if (stop || !out) return;
       if (out.sent > 0) flash(`${out.sent} text${out.sent === 1 ? "" : "s"} that ${out.sent === 1 ? "was" : "were"} set up just went out ✓`);
@@ -81,11 +105,15 @@ export default function Schedule() {
       else if (out.missed > 0) flash(`${out.missed} text${out.missed === 1 ? "" : "s"} set up for earlier didn't go out (no number, or that day has passed). The crew shows as not told`);
       if (out.sent > 0 || out.missed > 0 || out.failed > 0) load();
     };
-    tick();
-    const t = setInterval(tick, 5 * 60_000);
-    return () => { stop = true; clearInterval(t); };
+    void load().finally(() => {
+      if (stop) return;
+      first = setTimeout(() => { void tick(); every = setInterval(tick, DUE_EVERY); }, 0);
+    });
+    return () => { stop = true; if (first) clearTimeout(first); if (every) clearInterval(every); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // the database's lists have landed on this visit (a remembered copy never paints over them)
+  const got = useRef(false);
   const load = async () => {
     // independent reads go out together; releases only carry the columns the
     // pickers and texts use, not attachments and money details
@@ -109,12 +137,29 @@ export default function Schedule() {
       fetchRels(),
       sb().from("contracts").select("id,number,name").order("number"),
     ]);
-    setEmps(((e || []) as Emp[]).filter((x) => x.active !== false));
-    setRels(allR.sort((x, y) => (parseFloat(x.rel_number) || 0) - (parseFloat(y.rel_number) || 0)));
-    setContracts((c || []) as Contract[]);
+    const lists: Lists = {
+      emps: ((e || []) as Emp[]).filter((x) => x.active !== false),
+      rels: allR.sort((x, y) => (parseFloat(x.rel_number) || 0) - (parseFloat(y.rel_number) || 0)),
+      contracts: (c || []) as Contract[],
+    };
+    got.current = true;
+    remember(LISTS_KEY, lists);
+    setEmps(lists.emps);
+    setRels(lists.rels);
+    setContracts(lists.contracts);
     setListsLoaded(true);
   };
-  useEffect(() => { myProfile().then((p) => setRole(p?.role || "")); load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // the remembered lists paint the moment the signed-in user is known (at once
+  // on a tab-to-tab move, one session read after a cold open); the database's
+  // answer, already on its way, replaces them as it lands
+  useBeforePaint(() => onCacheUser(() => {
+    const c = cached<Lists>(LISTS_KEY);
+    if (!c || got.current) return;
+    setEmps(c.emps);
+    setRels(c.rels);
+    setContracts(c.contracts);
+    setListsLoaded(true);
+  }), []);
   // the calendar links here with ?day=YYYY-MM-DD; without it, today
   useEffect(() => {
     const qs = new URLSearchParams(window.location.search);
@@ -345,7 +390,8 @@ export default function Schedule() {
         <input type="date" className="field w-44 font-mono" aria-label="Day" value={day} onChange={(e) => e.target.value && setDay(e.target.value)} />
       </div>
       <TextedPhotos canEdit={canEdit} flash={flash} onShow={(b) => {
-        if (b.pact_job_id) { window.location.href = `/pact/schedule?job=${b.pact_job_id}`; return; }
+        // a PACT job opens on the PACT calendar without a full reload (it reads ?job= as it mounts)
+        if (b.pact_job_id) { router.push(`/pact/schedule?job=${b.pact_job_id}`); return; }
         if (!b.release_id) return;
         const d = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(b.created_at));
         showRelease(b.release_id, d);
@@ -488,8 +534,8 @@ export default function Schedule() {
               <>
               <CardToolbar className="mt-2"
                 primary={assigned.length > 0 ? (
-                  <button type="button" className="btn btn-primary" disabled={sending === rel.id} onClick={() => textCrew(rel)}>
-                    {sending === rel.id ? "Sending…" : assigned.length === 1 ? "📱 Text worker" : `📱 Text crew (${assigned.length})`}
+                  <button type="button" className={`btn btn-primary${sending === rel.id ? " btn-busy" : ""}`} aria-busy={sending === rel.id || undefined} disabled={sending === rel.id} onClick={() => textCrew(rel)}>
+                    {assigned.length === 1 ? "📱 Text worker" : `📱 Text crew (${assigned.length})`}
                   </button>
                 ) : undefined}
                 secondary={<>

@@ -1,9 +1,9 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import { sb } from "@/lib/supabase";
-import { myProfile, clearMyProfile } from "@/lib/profile";
+import { myProfile, useProfile, clearMyProfile } from "@/lib/profile";
 import { ROLE_LABEL } from "@/lib/roles";
 import type { Profile } from "@/lib/types";
 
@@ -21,13 +21,21 @@ const TITLES: [string, string][] = [
 ];
 
 export default function PortalLayout({ children }: { children: React.ReactNode }) {
-  const [profile, setProfile] = useState<Profile | null>(null);
+  // the remembered profile paints the right tabs the moment the page is up; the
+  // database's answer corrects them if the role changed
+  const { hint, fresh } = useProfile();
+  const profile = (fresh || hint) as Profile | null;
   const [menu, setMenu] = useState<"nycha" | "pact" | null>(null);
   const [menuX, setMenuX] = useState(8);
   const [out, setOut] = useState(false);
   // a hover-opened panel closes a beat after the mouse leaves, not the instant it strays
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // the tab under the mouse opened its panel by hovering: the click that follows keeps it open
+  const byHover = useRef(false);
+  // the panel was opened by a finger: a tap anywhere else closes it and does nothing more
+  const touchOpen = useRef(false);
   const path = usePathname();
+  const router = useRouter();
   // a page is under a tab when it is that route or one beneath it (Certified payroll lights Payroll)
   const under = (h: string) => path === h || (h !== "/home" && path.startsWith(h + "/"));
   useEffect(() => {
@@ -36,7 +44,8 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [menu]);
-  // tapping anywhere outside the nav closes an open menu (phones have no hover-out)
+  // a click anywhere outside the nav closes an open menu (a finger's tap lands
+  // on the backdrop below instead, so nothing under it fires)
   useEffect(() => {
     if (!menu) return;
     const close = (e: MouseEvent) => {
@@ -48,14 +57,8 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
   }, [menu]);
 
   useEffect(() => {
-    // last-known profile paints the right tabs immediately on a reload; the
-    // fresh fetch still corrects it if the role changed
-    try { const saved = JSON.parse(localStorage.getItem("elgc-profile") || "null"); if (saved) setProfile(saved as Profile); } catch {}
-    myProfile().then((p) => {
-      if (!p) { window.location.href = "/login"; return; }
-      setProfile(p as Profile);
-      try { localStorage.setItem("elgc-profile", JSON.stringify(p)); } catch {}
-    });
+    // truly signed out: back to the door
+    myProfile().then((p) => { if (!p) window.location.href = "/login"; });
   }, []);
 
   // the browser tab carries the page's name (a print preview takes it over while it is up)
@@ -90,12 +93,30 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
   }
   entries.push(["link", "/help", "Help"]);
 
+  // every page this role can reach is fetched ahead once the page is idle (the
+  // group menus' links only exist while a menu is open, and the tabs off the
+  // edge of a phone's strip are never seen, so Next's own prefetch misses them):
+  // the first tap into Billing, Schedule, Settings or Help then has its chunks
+  // and its shell already here
+  useEffect(() => {
+    if (!role) return;
+    const hrefs = entries.flatMap((e) => (e[0] === "link" ? [e[1]] : e[1].items.map(([h]) => h))).filter((h) => h !== path);
+    const go = () => { for (const h of hrefs) router.prefetch(h); };
+    if (typeof window.requestIdleCallback === "function") {
+      const t = window.requestIdleCallback(go, { timeout: 2500 });
+      return () => window.cancelIdleCallback(t);
+    }
+    const t = setTimeout(go, 800);
+    return () => clearTimeout(t);
+  }, [role]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const groupActive = (g: Group) => g.items.some(([h]) => under(h));
   // the panel sits under its own tab; the position is measured when it opens
   const openAt = (key: "nycha" | "pact", el: HTMLElement) => {
     const wrap = el.closest("[data-navwrap]") as HTMLElement | null;
     const x = wrap ? el.getBoundingClientRect().left - wrap.getBoundingClientRect().left : 8;
-    setMenuX(Math.max(8, Math.min(x, (typeof window !== "undefined" ? window.innerWidth : 9999) - 268)));
+    // the panel is 280px wide (.menu): it never runs off the right edge of a phone
+    setMenuX(Math.max(8, Math.min(x, (typeof window !== "undefined" ? window.innerWidth : 9999) - 288)));
     setMenu(key);
   };
   const cancelClose = () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } };
@@ -108,8 +129,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
 
   const signOut = async () => {
     setOut(true);
-    clearMyProfile();
-    try { localStorage.removeItem("elgc-profile"); } catch {}
+    clearMyProfile(); // the remembered profile and everything cached for this sign-in go too
     try { await sb().auth.signOut(); } catch {}
     window.location.href = "/login";
   };
@@ -119,13 +139,15 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
       <a href="#main" className="btn sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50">Skip to content</a>
       <div className="sticky top-0 z-20 bg-ink px-4 py-3 text-paper">
         <div className="mx-auto flex max-w-5xl items-baseline justify-between">
-          <Link href="/home" aria-label="Home" className="block">
+          {/* a 44px tap target (4px of padding each side, taken back by the margin so the header never moves) */}
+          <Link href="/home" aria-label="Home" className="-my-1 block py-1">
             <div className="font-display text-2xl font-bold uppercase leading-none">Earth Link</div>
             <div className="text-[11px] uppercase tracking-[.25em] text-papersoft">Field Office</div>
           </Link>
           <div className="flex items-center gap-3 text-xs text-papersoft">
             {profile && <span>{[profile.name, ROLE_LABEL[profile.role] || profile.role].filter(Boolean).join(" · ")}</span>}
-            <button type="button" className="btn-link text-papersoft" disabled={out} onClick={signOut}>{out ? "Signing out…" : "Sign out"}</button>
+            {/* the label stays; the kit dims a disabled text button and a screen reader hears "busy" */}
+            <button type="button" className="btn-link text-papersoft" disabled={out} aria-busy={out || undefined} onClick={signOut}>Sign out</button>
           </div>
         </div>
       </div>
@@ -149,12 +171,17 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
                   );
                 }
                 const g = e[1];
-                // a tap (phones have no hover) toggles the menu; hover opens it
+                // a tap (phones have no hover) toggles the menu; hover opens it, and
+                // the click a mouse makes on the way keeps what hovering opened
                 return (
                   <button key={g.key} type="button" className={`${tabCls(groupActive(g))} inline-flex items-center gap-1.5 active:bg-paper`}
                     aria-expanded={menu === g.key} aria-haspopup="menu"
                     onPointerEnter={(ev) => { if (ev.pointerType === "mouse") { cancelClose(); openAt(g.key, ev.currentTarget); } }}
-                    onClick={(ev) => (menu === g.key ? setMenu(null) : openAt(g.key, ev.currentTarget))}>
+                    onPointerDown={(ev) => { byHover.current = ev.pointerType === "mouse" && menu === g.key; touchOpen.current = ev.pointerType !== "mouse"; }}
+                    onClick={(ev) => {
+                      if (byHover.current) { byHover.current = false; return; }
+                      if (menu === g.key) setMenu(null); else openAt(g.key, ev.currentTarget);
+                    }}>
                     {g.label}
                     <span aria-hidden className={`text-[11px] transition-transform duration-150 ${menu === g.key ? "rotate-180" : ""}`}>▾</span>
                   </button>
@@ -162,6 +189,8 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
               })}
           </div>
         </div>
+        {/* opened by a finger: the tap that closes it lands here, so a field or a row under it never fires */}
+        {openGroup && touchOpen.current && <div aria-hidden className="fixed inset-0 z-20" onClick={() => setMenu(null)} />}
         {openGroup && (
           /* floating panel anchored under its tab: the page never shifts and a
              tap outside (or Esc, or picking a page) dismisses it */

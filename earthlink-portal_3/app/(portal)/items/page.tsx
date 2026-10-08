@@ -69,18 +69,23 @@ export default function Items() {
     sb().from("contracts").select("id,number,name").order("number").then(({ data }) => setContracts((data || []) as Contract[]));
   }, { skipWhileTyping: true });
 
+  // one line per tap: a second tap (or Enter) while the first insert is in flight does nothing
+  const [adding, setAdding] = useState(false);
   const add = async () => {
-    if (!draft.description) return;
-    const { error } = isContract
-      ? await sb().from("contract_items").insert({
-          contract_id: sel, line: (items.reduce((mx, it) => Math.max(mx, it.line || 0), 0) + 1),
-          code: draft.code, category: draft.category, description: draft.description, uom: draft.unit, unit_price: parseNum(draft.unit_price),
-        })
-      : await sb().from("price_items").insert({ ...draft, unit_price: parseNum(draft.unit_price) });
-    if (error) { flash(dbMsg(error.message, "add the line")); return; }
-    setDraft({ code: "", description: "", unit: "EA", unit_price: "", category: "" });
-    flash("Line added");
-    load();
+    if (!draft.description || adding) return;
+    setAdding(true);
+    try {
+      const { error } = isContract
+        ? await sb().from("contract_items").insert({
+            contract_id: sel, line: (items.reduce((mx, it) => Math.max(mx, it.line || 0), 0) + 1),
+            code: draft.code, category: draft.category, description: draft.description, uom: draft.unit, unit_price: parseNum(draft.unit_price),
+          })
+        : await sb().from("price_items").insert({ ...draft, unit_price: parseNum(draft.unit_price) });
+      if (error) { flash(dbMsg(error.message, "add the line")); return; }
+      setDraft({ code: "", description: "", unit: "EA", unit_price: "", category: "" });
+      flash("Line added");
+      load();
+    } finally { setAdding(false); }
   };
   const del = async (id: string) => {
     const { error } = await sb().from(isContract ? "contract_items" : "price_items").delete().eq("id", id);
@@ -223,7 +228,7 @@ export default function Items() {
         <div className="card card-pad anim-open mb-3 border-alert">
           <div className="mb-2 text-sm">Delete all <b>{items.length}</b> lines from {bookName}? This can&apos;t be undone. Walk sheets and invoices already made keep their own copies of the lines.</div>
           <div className="flex gap-2">
-            <button type="button" className="btn border-alert text-alert" onClick={removeAll} disabled={busy}>Yes, remove all</button>
+            <button type="button" className={`btn btn-danger${busy ? " btn-busy" : ""}`} aria-busy={busy || undefined} onClick={removeAll} disabled={busy}>Yes, remove all</button>
             <button type="button" className="btn btn-ghost" onClick={() => setConfirmWipe(false)}>Cancel</button>
           </div>
         </div>
@@ -236,7 +241,7 @@ export default function Items() {
           <input className="field" placeholder="Category" value={draft.category} onChange={(e) => setDraft({ ...draft, category: e.target.value })} />
           <input className="field" placeholder="Unit" autoCapitalize="characters" spellCheck={false} value={draft.unit} onChange={(e) => setDraft({ ...draft, unit: e.target.value })} />
           <input className="field" placeholder="Price" inputMode="decimal" enterKeyHint="done" value={draft.unit_price} onChange={(e) => setDraft({ ...draft, unit_price: e.target.value })} />
-          <button type="submit" className="btn btn-primary">Add line</button>
+          <button type="submit" className={`btn btn-primary${adding ? " btn-busy" : ""}`} aria-busy={adding || undefined} disabled={adding}>Add line</button>
         </form>
       )}
       <input type="search" enterKeyHint="search" autoComplete="off" className="field mb-1" placeholder="Search line #, code, description…" value={q} onChange={(e) => setQ(e.target.value)} />
@@ -266,7 +271,8 @@ export default function Items() {
       ) : (
         <div className="card overflow-x-auto">
           <table className="w-full border-collapse text-sm" style={{ minWidth: 560 }}>
-            <thead className="sticky top-[105px] bg-card"><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
+            {/* not sticky: the card is the scrolling box (overflow-x-auto), so a stuck header would float mid-table */}
+            <thead><tr className="border-b-[1.5px] border-ink text-left font-display text-xs uppercase tracking-widest text-inksoft">
               <th className="p-2.5">Line</th><th className="p-2.5">Code</th><th className="p-2.5">Description</th><th className="p-2.5">UOM</th><th className="p-2.5 text-right">Price</th><th></th></tr></thead>
             <tbody>
               {list.map((it) => (

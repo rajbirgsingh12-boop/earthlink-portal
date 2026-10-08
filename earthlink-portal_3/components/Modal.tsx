@@ -57,6 +57,18 @@ export default function Modal({ title, onClose, footer, children, wide = false, 
       before?.focus?.({ preventScroll: true });
     };
   }, []);
+  useEffect(() => {
+    // the phone's keyboard covers the bottom of the screen without shrinking
+    // the page: --kb says how much, and the sheet (globals.css) sizes itself to
+    // what is left, so its footer stays in reach while a field is being typed in
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const f = () => document.documentElement.style.setProperty("--kb", Math.max(0, window.innerHeight - vv.height - vv.offsetTop) + "px");
+    vv.addEventListener("resize", f);
+    vv.addEventListener("scroll", f);
+    f();
+    return () => { vv.removeEventListener("resize", f); vv.removeEventListener("scroll", f); document.documentElement.style.setProperty("--kb", "0px"); };
+  }, []);
   const toolbar = !footer && (primary || secondary || (menu && menu.length > 0));
   return (
     <div className="overlay sheet" onClick={(e) => { if (e.target === e.currentTarget && dismissOnBackdrop) tryClose(); }}>
@@ -64,9 +76,10 @@ export default function Modal({ title, onClose, footer, children, wide = false, 
         className={`panel mx-auto ${wide ? "max-w-3xl" : "max-w-xl"} card border-t-4 border-t-ink bg-white outline-none`}>
         <div className="flex items-center justify-between gap-3 border-b border-rulesoft py-2 pl-4 pr-2">
           <h2 id={titleId} className="font-display text-lg font-bold uppercase tracking-wide">{title}</h2>
-          <button type="button" aria-label="Close" className="btn-icon border-0 shadow-none text-lg text-inksoft hover:text-ink" onClick={tryClose}>✕</button>
+          <button type="button" aria-label="Close" className="btn-icon btn-icon-quiet text-lg" onClick={tryClose}>✕</button>
         </div>
-        <div ref={body} className="p-4">{children}</div>
+        {/* panel-body: on a phone this is the sheet's scroller (globals.css); the title and the footer stay put */}
+        <div ref={body} className="panel-body p-4">{children}</div>
         {footer && <div className="border-t border-rulesoft px-4 py-3">{footer}</div>}
         {toolbar && <div className="border-t border-rulesoft px-4 py-3"><CardToolbar align="end" primary={primary} secondary={secondary} menu={menu} /></div>}
       </div>

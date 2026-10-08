@@ -1,10 +1,11 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { matches } from "@/lib/search";
 import Link from "next/link";
 // pdf-lib is heavy — loaded only when a package PDF is actually built
 import { sb } from "@/lib/supabase";
-import { myProfile } from "@/lib/profile";
+import { useProfile } from "@/lib/profile";
+import { cached, remember, onCacheUser } from "@/lib/cache";
 import { fmt, parseNum, askFileName } from "@/lib/format";
 import { prettyDate, localISO, type Org } from "@/lib/docs";
 import Stamp from "@/components/Stamp";
@@ -27,7 +28,10 @@ import { COMPANY } from "@/lib/company";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { parsePactPoText, type PactPoFields, type PoItem } from "@/lib/parsePactPo";
-import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, attnFrom, DEFAULT_ATTN, type PriceItem, cleanLineWording, unitFor, mergePricedLines, linesFromPoRead, PRICE_BOOK } from "@/lib/priceBook";
+import { priceLinesFor, soleKey, keysIn, normUnit, loadPrices, attnFrom, DEFAULT_ATTN, type PriceItem, type PriceStore, cleanLineWording, unitFor, mergePricedLines, linesFromPoRead, PRICE_BOOK } from "@/lib/priceBook";
+
+// the remembered rows go in before the first paint (on the server there is no paint to beat)
+const useBeforePaint = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 // `base` is a PO row's wording before its wrapped line was added — a wrap can
 // name a second trade ("…and paint"), and then the row no longer reads as the
@@ -54,7 +58,13 @@ export default function Pact() {
   // Admin 1 (admin) sees everything. Admin 2 (office) works the field side —
   // POs in, photos, square feet — and never sees a price, an amount, an
   // invoice or a proposal. Accountants can look but not edit.
-  const [role, setRole] = useState("");
+  // The profile remembered on this phone (hint) only decides WHEN the list
+  // paints; every right, and every dollar, comes from the database's own
+  // answer on this load (fresh), so a copy that is out of date can hide money
+  // for a moment but never show it.
+  const { hint, fresh: confirmed } = useProfile();
+  const role = confirmed?.role || "";
+  const paintRole = hint?.role || role;
   const canInvoice = role === "admin";
   const canEdit = role === "admin" || role === "office";
   // prices, totals and the sales tax are Admin 1's alone
@@ -92,7 +102,14 @@ export default function Pact() {
   };
   // a stamp's date, short: the year is on the job, not in a list
   const shortDay = (iso?: string | null) => (iso ? new Date(iso + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "");
-  const [busy, setBusy] = useState(false);
+  // one flag for "something is running" (every button is off, the busy bar
+  // shows) and the name of the button whose work it is: that one spins over
+  // its own words, so nothing reflows and the eye knows what is working
+  const [busy, setBusyFlag] = useState(false);
+  const [doing, setDoing] = useState("");
+  const setBusy = (on: boolean, key?: string) => { setBusyFlag(on); setDoing(on ? (d) => key ?? d : ""); };
+  const spin = (key: string) => (doing === key ? " btn-busy" : "");
+  const busyOn = (key: string) => ({ "aria-busy": doing === key || undefined, disabled: busy });
   // the first fetch: skeleton rows until it answers, the empty words only after
   const [loaded, setLoaded] = useState(false);
   const { msg, flash, progress, setProgress, action, flashWithUndo } = useFlash();
@@ -138,28 +155,72 @@ export default function Pact() {
   const invTax = (j: Job) => invSubtotal(j) * taxRate(j) / 100;
   const invTotal = (j: Job) => invSubtotal(j) + invTax(j);
 
+  // ---------- the partner price list ----------
+  // the line items as Settings has them now — re-read rather than remembered,
+  // so a price changed on another phone is used on the very next PO (a folder
+  // of proposals still only reads it once). The copy kept on this phone is only
+  // a fallback for when the read fails.
+  const [book, setBook] = useState<{ items: PriceItem[]; at: number } | null>(null);
+  // who proposals are addressed to, as set in Settings — a partner's PO prints
+  // their office, not the person at it
+  const [attnSaved, setAttnSaved] = useState<{ name: string; title: string }>(DEFAULT_ATTN);
+  // a good read of the list: on the page now, and remembered for the next open
+  // (`at` 0 means "read it again before pricing", the way the mount read is used)
+  const keepBook = (items: PriceItem[], store: PriceStore, at: number) => {
+    const attn = attnFrom(store);
+    setAttnSaved(attn); remember("pact:attn", attn);
+    setBook({ items, at }); remember("pact:book", items);
+  };
+  useEffect(() => { loadPrices().then(({ store, ok, items }) => { if (ok) keepBook(items, store, 0); }).catch(() => null); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // the database's list has landed on this visit: from here on what the page shows is what is remembered
+  const freshRows = useRef(false);
   const load = async () => {
     const { data, error } = await sb().from("pact_jobs").select("*").order("created_at", { ascending: false });
     setLoaded(true);
     if (error) { flash(upgradeHint(error.message, "Couldn't load the POs")); return; }
-    setJobs((data || []) as Job[]);
+    const rows = (data || []) as Job[];
+    freshRows.current = true;
+    remember("pact:jobs", rows);
+    setJobs(rows);
   };
+  // What this phone showed last time paints at once (as soon as the signed-in
+  // user is named; before the first paint when they already are) and the fetch
+  // replaces it one round trip later. The company details and the price list
+  // come back the same way. Nothing here decides who sees money: that is the
+  // fresh role above, and the cache is the user's own.
+  useBeforePaint(() => onCacheUser(() => {
+    if (freshRows.current) return;
+    const rows = cached<Job[]>("pact:jobs");
+    if (rows && rows.length) { setJobs(rows); setLoaded(true); }
+    const o = cached<Org>("org");
+    if (o) setOrg((prev) => prev || o);
+    const attn = cached<{ name: string; title: string }>("pact:attn");
+    if (attn) setAttnSaved(attn);
+    const items = cached<PriceItem[]>("pact:book");
+    if (items && items.length) setBook((prev) => prev || { items, at: 0 });
+  }), []);
   useEffect(() => {
     load();
-    sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
-    myProfile().then((p) => setRole(p?.role || ""));
+    sb().from("org").select("*").single().then(({ data }) => { if (data) { setOrg(data as Org); remember("org", data); } });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // after every write the list on screen is what paints next time (a run of keystrokes is one write)
+  useEffect(() => {
+    if (!freshRows.current) return;
+    const t = setTimeout(() => remember("pact:jobs", jobs), 600);
+    return () => clearTimeout(t);
+  }, [jobs]);
   // ?job=<id> (the "Open the job" button on a From-the-crew notice): that job, open and in view
   const jobParamDone = useRef(false);
   useEffect(() => {
-    if (jobParamDone.current || jobs.length === 0 || !role) return;
+    if (jobParamDone.current || jobs.length === 0 || !paintRole) return;
     jobParamDone.current = true;
     const id = new URLSearchParams(window.location.search).get("job") || "";
     if (!id || !jobs.some((j) => j.id === id)) return;
     setOpenId(id);
     showDetailsFor(id);
     setTimeout(() => scrollTo(document.querySelector(`[data-job-card="${id}"]`), "center"), 250);
-  }, [jobs, role]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [jobs, paintRole]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // live: PACT jobs changing anywhere refresh the list without a reload
   useLive(["pact_jobs"], () => load(), { skipWhileTyping: true });
@@ -211,15 +272,6 @@ export default function Pact() {
   // quirks); if the server can't be reached, the browser reads it as a backup.
   // Either way the upload always completes — worst case a blank job with the
   // PDF attached and a note to type the details.
-  // ---------- the partner price list ----------
-  // the line items as Settings has them now — re-read rather than remembered,
-  // so a price changed on another phone is used on the very next PO (a folder
-  // of proposals still only reads it once)
-  const [book, setBook] = useState<{ items: PriceItem[]; at: number } | null>(null);
-  // who proposals are addressed to, as set in Settings — a partner's PO prints
-  // their office, not the person at it
-  const [attnSaved, setAttnSaved] = useState<{ name: string; title: string }>(DEFAULT_ATTN);
-  useEffect(() => { loadPrices().then(({ store, ok }) => { if (ok) setAttnSaved(attnFrom(store)); }).catch(() => null); }, []);
   // Their partner's purchase orders price every line at $1.00 — that is the
   // form's placeholder, not an agreement. A dollar is not a price.
   const PLACEHOLDER = 1;
@@ -245,15 +297,14 @@ export default function Pact() {
   const priceBook = async (): Promise<PriceItem[]> => {
     if (book && Date.now() - book.at < 30_000) return book.items;
     const { items, ok, store } = await loadPrices();
-    if (ok) setAttnSaved(attnFrom(store));
     if (!ok) {
       // the saved list couldn't be read: say so rather than quietly pricing
       // from the standard sheet with their own line items missing
       flash("Couldn't read your saved line items. Using the standard sheet, so check the prices before sending anything.");
-      if (book) return book.items; // the last good copy beats the fallback
+      if (book) return book.items; // the last good copy (this visit's, or the one kept on this phone) beats the fallback
       return items;
     }
-    setBook({ items, at: Date.now() });
+    keepBook(items, store, Date.now());
     return items;
   };
 
@@ -267,7 +318,7 @@ export default function Pact() {
 
   // "Price from list" on a job already here
   const fillFromList = async (j: Job, auto = false) => {
-    if (!auto) setBusy(true);
+    if (!auto) setBusy(true, `price:${j.id}`);
     try {
       // Price against the database's copy, never this page's. A tab that sat
       // open while the other admin entered lines holds an old array — saving
@@ -386,7 +437,7 @@ export default function Pact() {
   const makePhotoPdf = async (j: Job) => {
     const imgs = (j.attachments || []).filter((a) => isImg(a.name));
     if (imgs.length === 0) { flash("No photos on this job yet"); return; }
-    setBusy(true);
+    setBusy(true, `photopdf:${j.id}`);
     try {
       const { data, error } = await sb().storage.from("docs").createSignedUrls(imgs.map((a) => a.path), 600);
       if (error || !data) throw new Error(error?.message || "couldn't reach the photos");
@@ -600,7 +651,7 @@ export default function Pact() {
   };
 
   const saveBoth = async (j: Job) => {
-    setBusy(true);
+    setBusy(true, `both:${j.id}`);
     try {
       const p = await saveProposalPdfFor(j, true);
       await new Promise((r) => setTimeout(r, 600)); // let the first download land
@@ -617,7 +668,7 @@ export default function Pact() {
     if (!folderResult || folderResult.made.length === 0 || busy) return;
     const fname = askFileName(`proposals_${today()}.zip`);
     if (!fname) return;
-    setBusy(true);
+    setBusy(true, "zip:prop");
     try {
       const { zipSync } = await import("fflate");
       const files: Record<string, Uint8Array> = {};
@@ -847,7 +898,7 @@ export default function Pact() {
     e.target.value = "";
     if (!file) return;
     setOneShot(null); // whatever was offered for the last PO no longer applies
-    setBusy(true);
+    setBusy(true, "po");
     try {
       const out = await intakePoFile(file, priceBook);
       setBusy(false);
@@ -885,29 +936,35 @@ export default function Pact() {
     }
   };
 
+  // one PO per tap: a second tap (or Enter) while the insert runs does nothing
+  const [adding, setAdding] = useState(false);
   const addJob = async () => {
-    if (!draft.partner.trim() || !draft.description.trim()) { flash("Type a partner and a description first"); return; }
-    // a typed PO number that's already a job opens that job instead
-    if (draft.job_number.trim()) {
-      const { data: all, error: le } = await sb().from("pact_jobs").select(DUPE_COLS).limit(5000);
-      if (le) { flash("Couldn't check for duplicates. Nothing was created, try again."); return; }
-      const dupe = findDupe((all || []) as Job[], { po: draft.job_number });
-      if (dupe) {
-        setAddOpen(false); await load();
-        setOpenId(dupe.id); showDetailsFor(dupe.id);
-        flash(`PO ${draft.job_number.trim()} is already here${dupe.canceled ? " (canceled)" : ""}. Opened it, nothing new was created.`);
-        return;
+    if (adding) return;
+    setAdding(true);
+    try {
+      if (!draft.partner.trim() || !draft.description.trim()) { flash("Type a partner and a description first"); return; }
+      // a typed PO number that's already a job opens that job instead
+      if (draft.job_number.trim()) {
+        const { data: all, error: le } = await sb().from("pact_jobs").select(DUPE_COLS).limit(5000);
+        if (le) { flash("Couldn't check for duplicates. Nothing was created, try again."); return; }
+        const dupe = findDupe((all || []) as Job[], { po: draft.job_number });
+        if (dupe) {
+          setAddOpen(false); await load();
+          setOpenId(dupe.id); showDetailsFor(dupe.id);
+          flash(`PO ${draft.job_number.trim()} is already here${dupe.canceled ? " (canceled)" : ""}. Opened it, nothing new was created.`);
+          return;
+        }
       }
-    }
-    const { error } = await insertJob({
-      partner: draft.partner.trim(), development: draft.development.trim(), job_number: draft.job_number.trim(),
-      description: draft.description.trim(), amount: parseNum(draft.amount),
-      // no invoice number yet — it is given out when the job is priced
-      // no lines yet — a baseline of 0, so a line typed later at no price leaves it unpriced
-      list_subtotal: 0,
-    });
-    if (error) { flash(upgradeHint(error.message)); return; }
-    setDraft({ ...BLANK }); setAddOpen(false); load();
+      const { error } = await insertJob({
+        partner: draft.partner.trim(), development: draft.development.trim(), job_number: draft.job_number.trim(),
+        description: draft.description.trim(), amount: parseNum(draft.amount),
+        // no invoice number yet — it is given out when the job is priced
+        // no lines yet — a baseline of 0, so a line typed later at no price leaves it unpriced
+        list_subtotal: 0,
+      });
+      if (error) { flash(upgradeHint(error.message)); return; }
+      setDraft({ ...BLANK }); setAddOpen(false); load();
+    } finally { setAdding(false); }
   };
 
   // ---------- invoice items ----------
@@ -1038,32 +1095,35 @@ export default function Pact() {
   // before_/after_ names survive the round trip, so they land in the right
   // rows — and anything else (a PO, a letter) is attached as it is
   const uploadFiles = async (j: Job, files: File[]) => {
-    const out: File[] = [];
-    let zipped = 0;
-    for (const f of files) {
-      if (/\.zip$/i.test(f.name)) {
-        try {
-          const { unzipSync } = await import("fflate");
-          const entries = unzipSync(new Uint8Array(await f.arrayBuffer()));
-          for (const [name, bytes] of Object.entries(entries)) {
-            const base = name.split("/").pop() || "";
-            if (!base || !isImg(base) || bytes.length === 0) continue; // folders, junk, non-pictures
-            const ab = new ArrayBuffer(bytes.byteLength); new Uint8Array(ab).set(bytes);
-            out.push(new File([ab], base, { type: /png$/i.test(base) ? "image/png" : "image/jpeg" }));
-            zipped += 1;
-          }
-        } catch { flash(`${f.name} isn't a zip this phone can open`); }
-        continue;
+    setBusy(true, "upload");
+    try {
+      const out: File[] = [];
+      let zipped = 0;
+      for (const f of files) {
+        if (/\.zip$/i.test(f.name)) {
+          try {
+            const { unzipSync } = await import("fflate");
+            const entries = unzipSync(new Uint8Array(await f.arrayBuffer()));
+            for (const [name, bytes] of Object.entries(entries)) {
+              const base = name.split("/").pop() || "";
+              if (!base || !isImg(base) || bytes.length === 0) continue; // folders, junk, non-pictures
+              const ab = new ArrayBuffer(bytes.byteLength); new Uint8Array(ab).set(bytes);
+              out.push(new File([ab], base, { type: /png$/i.test(base) ? "image/png" : "image/jpeg" }));
+              zipped += 1;
+            }
+          } catch { flash(`${f.name} isn't a zip this phone can open`); }
+          continue;
+        }
+        out.push(isImg(f.name) ? await shrinkImage(f) : f);
       }
-      out.push(isImg(f.name) ? await shrinkImage(f) : f);
-    }
-    if (out.length === 0) { flash("Nothing to attach in that: no pictures or documents found"); return; }
-    await attachFiles(j, out);
-    if (zipped) flash(`${zipped} picture${zipped === 1 ? "" : "s"} unpacked from the zip and attached`);
+      if (out.length === 0) { flash("Nothing to attach in that: no pictures or documents found"); return; }
+      await attachFiles(j, out);
+      if (zipped) flash(`${zipped} picture${zipped === 1 ? "" : "s"} unpacked from the zip and attached`);
+    } finally { setBusy(false); }
   };
   const addPhotos = async (j: Job, files: File[], kind: "before" | "after") => {
     const stamp = new Date().toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "");
-    setBusy(true);
+    setBusy(true, `photo:${j.id}:${kind}`);
     const shrunk = await Promise.all(files.map((f) => shrinkImage(f)));
     await attachFiles(j, shrunk.map((f, i) => {
       const ext = (f.name.match(/\.\w+$/) || [".jpg"])[0];
@@ -1166,7 +1226,7 @@ export default function Pact() {
       if (data) { theOrg = data as Org; setOrg(theOrg); }
     }
     if (!theOrg) { flash("Company details haven't loaded. Check your signal and try again."); return; }
-    setBusy(true);
+    setBusy(true, "zip:inv");
     try {
       const files: Record<string, Uint8Array> = {};
       let done = 0;
@@ -1387,6 +1447,7 @@ export default function Pact() {
     const { data } = await sb().from("org").select("*").single();
     if (!data) return null;
     setOrg(data as Org);
+    remember("org", data);
     return data as Org;
   };
 
@@ -1446,9 +1507,10 @@ export default function Pact() {
     </div>
   ));
 
-  // Until the profile answers, only the page's shape renders — the money on
-  // this page must not flash at an account that isn't allowed to see it.
-  if (!role) {
+  // Until a role is known (the remembered one will do for the list's shape),
+  // only the page's shape renders. The money waits for the fresh role above:
+  // it must not flash at an account that isn't allowed to see it.
+  if (!paintRole) {
     return (
       <div>
         <PageHeader title="PACT Billing" sub="POs, proposals, invoices" />
@@ -1469,7 +1531,7 @@ export default function Pact() {
           : <span className="skeleton block h-24 w-full" />}
       </button>
       {canEdit && (
-        <button type="button" className="btn-icon absolute -right-1 -top-1 h-11 w-11 border-0 bg-transparent shadow-none text-paper" aria-label="Delete photo" onClick={() => removeAttachment(j, a.path, a.name)}>
+        <button type="button" className="btn-icon btn-icon-quiet absolute -right-1 -top-1 text-paper hover:bg-transparent active:bg-transparent active:text-paper" aria-label="Delete photo" onClick={() => removeAttachment(j, a.path, a.name)}>
           <span className="rounded-sm bg-ink/70 px-1.5 text-xs">✕</span>
         </button>
       )}
@@ -1479,16 +1541,17 @@ export default function Pact() {
   return (
     <div>
       <PageHeader title="PACT Billing" sub="POs, proposals, invoices"
-        primary={canEdit ? <button type="button" className="btn btn-primary" onClick={() => poRef.current?.click()} disabled={busy}>📄 Upload PO or proposal</button> : undefined}
+        primary={canEdit ? <button type="button" className={`btn btn-primary${spin("po")}`} onClick={() => poRef.current?.click()} {...busyOn("po")}>📄 Upload PO or proposal</button> : undefined}
         menu={[
-          { label: "Upload a folder of proposals", glyph: "📄", hidden: !canInvoice, disabled: busy, title: "Every letter in the folder becomes a job, then all the invoices download in one zip", onSelect: () => folderRef.current?.click() },
-          { label: "Proposal template (Word)", glyph: "⬇", hidden: !canInvoice, disabled: busy, title: "A blank letter in our layout. Fill it in and upload it back here to build the job", onSelect: blankProposal },
+          // hints are one short line (38 characters at most) so no item ever wraps
+          { label: "Upload a folder of proposals", glyph: "📄", hidden: !canInvoice, disabled: busy, title: "One job per letter, invoices in a zip", onSelect: () => folderRef.current?.click() },
+          { label: "Proposal template (Word)", glyph: "⬇", hidden: !canInvoice, disabled: busy, title: "Blank letter, fill in and upload back", onSelect: blankProposal },
           { label: "+ Type one in", glyph: "✎", hidden: !canEdit, onSelect: () => setAddOpen(!addOpen) },
-          { label: "Renumber invoices…", hidden: !canInvoice, disabled: busy, title: "Closes a hole in the numbers after deleted jobs, so they go up by one again", onSelect: renumberInvoices },
-          { label: "Add test POs", hidden: !canPrice || testPosHere, disabled: busy, title: "Three throwaway POs to try texting and photos on", onSelect: addTestPos },
+          { label: "Renumber invoices…", hidden: !canInvoice, disabled: busy, title: "Closes gaps after deleted jobs", onSelect: renumberInvoices },
+          { label: "Add test POs", hidden: !canPrice || testPosHere, disabled: busy, title: "Three throwaway POs to try texting", onSelect: addTestPos },
           // deleteTestPos and cleanupEmailJobs ask their own window.confirm, naming what goes
-          { label: "Delete test POs", hidden: !canPrice || !testPosHere, disabled: busy, destructive: true, title: "Takes the test POs and everything on them off, nothing else", onSelect: deleteTestPos },
-          { label: `Clean up old email imports… (${emailLeft})`, hidden: !canPrice || emailLeft === 0, disabled: busy, destructive: true, title: "Deletes the untouched jobs the old email intake made. Jobs with photos or real prices stay", onSelect: cleanupEmailJobs },
+          { label: "Delete test POs", hidden: !canPrice || !testPosHere, disabled: busy, destructive: true, title: "Takes the test POs off, nothing else", onSelect: deleteTestPos },
+          { label: `Clean up old email imports… (${emailLeft})`, hidden: !canPrice || emailLeft === 0, disabled: busy, destructive: true, title: "Deletes untouched email imports", onSelect: cleanupEmailJobs },
         ]}>
         <Link className="btn btn-ghost" href="/pact/schedule">📅 PACT Schedule</Link>
       </PageHeader>
@@ -1518,7 +1581,7 @@ export default function Pact() {
             </div>
             <CardToolbar className="mt-3"
               primary={billable.length > 0 ? (
-                <button type="button" className="btn btn-primary" disabled={busy} onClick={() => saveBoth(j)}>⬇ Proposal + invoice</button>
+                <button type="button" className={`btn btn-primary${spin(`both:${j.id}`)}`} {...busyOn(`both:${j.id}`)} onClick={() => saveBoth(j)}>⬇ Proposal + invoice</button>
               ) : undefined}
               secondary={<button type="button" className="btn btn-ghost" disabled={busy} onClick={() => setOneShot(null)}>Done</button>} />
           </div>
@@ -1535,10 +1598,10 @@ export default function Pact() {
           </div>
           <CardToolbar className="mt-3"
             primary={canInvoice ? (
-              <button type="button" className="btn btn-primary" onClick={downloadFolderInvoices} disabled={busy || folderResult.made.length === 0}>⬇ All {folderResult.made.length} invoices (zip)</button>
+              <button type="button" className={`btn btn-primary${spin("zip:inv")}`} onClick={downloadFolderInvoices} aria-busy={doing === "zip:inv" || undefined} disabled={busy || folderResult.made.length === 0}>⬇ All {folderResult.made.length} invoices (zip)</button>
             ) : undefined}
             secondary={<>
-              {canInvoice && <button type="button" className="btn btn-ghost" onClick={downloadFolderProposals} disabled={busy || folderResult.made.length === 0}>⬇ All {folderResult.made.length} proposals (zip)</button>}
+              {canInvoice && <button type="button" className={`btn btn-ghost${spin("zip:prop")}`} onClick={downloadFolderProposals} aria-busy={doing === "zip:prop" || undefined} disabled={busy || folderResult.made.length === 0}>⬇ All {folderResult.made.length} proposals (zip)</button>}
               <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => setFolderResult(null)}>Done</button>
             </>} />
         </div>
@@ -1574,7 +1637,7 @@ export default function Pact() {
               <input id="newpo-dev" className="field" enterKeyHint="done" value={draft.development} onChange={(e) => setDraft({ ...draft, development: e.target.value })} /></div>
           </div>
           <div className="mt-3 flex gap-2">
-            <button type="submit" className="btn btn-primary">Add PO</button>
+            <button type="submit" className={`btn btn-primary${adding ? " btn-busy" : ""}`} aria-busy={adding || undefined} disabled={adding}>Add PO</button>
             <button type="button" className="btn btn-ghost" onClick={() => setAddOpen(false)}>Cancel</button>
           </div>
         </form>
@@ -1615,7 +1678,7 @@ export default function Pact() {
               </button>
               <div className="flex shrink-0 items-center gap-2">
                 {canPrice && <span className="font-mono text-sm font-semibold tabular-nums">{fmt(Number(j.amount) || invTotal(j))}</span>}
-                {(j.attachments || []).length > 0 && <button type="button" className="btn-icon chip w-auto min-w-[44px] border-0 px-1.5 shadow-none text-inksoft" aria-label="Documents and photos" onClick={() => setAttachJob(j)}>📎 {(j.attachments || []).length}</button>}
+                {(j.attachments || []).length > 0 && <button type="button" className="btn-icon btn-icon-quiet chip w-auto min-w-[44px] px-1.5" aria-label="Documents and photos" onClick={() => setAttachJob(j)}>📎 {(j.attachments || []).length}</button>}
                 <RowActions items={[
                   { label: "Documents", glyph: "📎", onSelect: () => setAttachJob(j) },
                   { label: "Open on Schedule", glyph: "📅", href: `/pact/schedule?job=${j.id}` },
@@ -1633,14 +1696,14 @@ export default function Pact() {
               return (
               <div className="anim-open mt-3 border-t border-rulesoft pt-3">
                 <div className="mb-2.5 flex flex-wrap items-center gap-2">
-                  {canEdit && <button type="button" className="btn btn-ghost btn-sm" onClick={() => snapPhotos(j, "before")} disabled={busy}>📷 Before{beforeN > 0 ? ` · ${beforeN}` : ""}</button>}
-                  {canEdit && <button type="button" className="btn btn-ghost btn-sm" onClick={() => snapPhotos(j, "after")} disabled={busy}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}
-                  {photoN > 0 && <button type="button" className="btn btn-ghost btn-sm" onClick={() => makePhotoPdf(j)} disabled={busy} title="Before and after pictures on one PDF, with the job on top, to send out" data-photo-pdf>⬇ Photos (PDF)</button>}
+                  {canEdit && <button type="button" className={`btn btn-ghost btn-sm${spin(`photo:${j.id}:before`)}`} onClick={() => snapPhotos(j, "before")} {...busyOn(`photo:${j.id}:before`)}>📷 Before{beforeN > 0 ? ` · ${beforeN}` : ""}</button>}
+                  {canEdit && <button type="button" className={`btn btn-ghost btn-sm${spin(`photo:${j.id}:after`)}`} onClick={() => snapPhotos(j, "after")} {...busyOn(`photo:${j.id}:after`)}>📷 After{afterN > 0 ? ` · ${afterN}` : ""}</button>}
+                  {photoN > 0 && <button type="button" className={`btn btn-ghost btn-sm${spin(`photopdf:${j.id}`)}`} onClick={() => makePhotoPdf(j)} {...busyOn(`photopdf:${j.id}`)} title="Before and after pictures on one PDF, with the job on top, to send out" data-photo-pdf>⬇ Photos (PDF)</button>}
                   {canReread && (
-                    <button type="button" className="btn btn-ghost btn-sm" disabled={busy} title="Rebuilds this job from its PDF: the reader, then the price list. Photos and documents stay"
+                    <button type="button" className={`btn btn-ghost btn-sm${spin(`reread:${j.id}`)}`} {...busyOn(`reread:${j.id}`)} title="Rebuilds this job from its PDF: the reader, then the price list. Photos and documents stay"
                       onClick={async () => {
                         if (!window.confirm("Re-read this PO? The partner, address, description, work lines and amount are replaced with what the PDF says. Photos and documents stay.")) return;
-                        setBusy(true); await rereadJob(j); setBusy(false);
+                        setBusy(true, `reread:${j.id}`); await rereadJob(j); setBusy(false);
                       }}>Re-read the PO</button>
                   )}
                 </div>
@@ -1684,19 +1747,20 @@ export default function Pact() {
                         const sub = invSubtotal(j);
                         patch(j, sub > 0 ? { tax_pct: n2, amount: sub * (1 + n2 / 100) } : { tax_pct: n2 });
                       } : undefined}
-                      extra={canPrice ? <button type="button" className="btn btn-ghost btn-sm" disabled={busy} title="Fills the lines and prices from the partner price list. Plaster brings its primer and paint" onClick={() => fillFromList(j)}>Price from list</button> : undefined} />
+                      extra={canPrice ? <button type="button" className={`btn btn-ghost btn-sm${spin(`price:${j.id}`)}`} {...busyOn(`price:${j.id}`)} title="Fills the lines and prices from the partner price list. Plaster brings its primer and paint" onClick={() => fillFromList(j)}>Price from list</button> : undefined} />
                   )}
                 </div>
                 <CardToolbar className="mt-3" align="end" sticky
                   primary={<button type="button" className="btn btn-primary" onClick={() => toggleOpen(j)}>Done</button>}
                   menuLabel="Papers"
                   menu={canInvoice ? [
-                    { label: "Proposal + invoice", glyph: "⬇", disabled: busy, title: "Both files in one tap: the proposal PDF and the invoice PDF", onSelect: () => saveBoth(j) },
-                    { label: "View proposal", disabled: busy, title: "Read the letter on screen first", onSelect: () => viewProposal(j) },
-                    { label: "Proposal (PDF)", glyph: "⬇", disabled: busy, title: "The proposal to send. Opens the same everywhere", onSelect: () => makeProposalPdf(j) },
-                    { label: "Proposal (Word)", glyph: "⬇", disabled: busy, title: "The same letter as a Word file, to edit before sending", onSelect: () => makeProposal(j) },
-                    { label: "Invoice package (PDF)", glyph: "⬇", disabled: busy, title: "The invoice, the PO and the before and after photos in one PDF", onSelect: () => buildPackage(j) },
-                    { label: "Edit invoice", title: "The invoice lines, tax and total", onSelect: () => setInvJob(j) },
+                    // hints are one short line (38 characters at most) so no item ever wraps
+                    { label: "Proposal + invoice", glyph: "⬇", disabled: busy, title: "Both PDFs in one tap", onSelect: () => saveBoth(j) },
+                    { label: "View proposal", disabled: busy, title: "Read the letter on screen", onSelect: () => viewProposal(j) },
+                    { label: "Proposal (PDF)", glyph: "⬇", disabled: busy, title: "The letter to send", onSelect: () => makeProposalPdf(j) },
+                    { label: "Proposal (Word)", glyph: "⬇", disabled: busy, title: "The letter, editable", onSelect: () => makeProposal(j) },
+                    { label: "Invoice package (PDF)", glyph: "⬇", disabled: busy, title: "Invoice, PO and photos in one PDF", onSelect: () => buildPackage(j) },
+                    { label: "Edit invoice", title: "Lines, tax and total", onSelect: () => setInvJob(j) },
                   ] : []} />
               </div>
               );
@@ -1838,13 +1902,13 @@ export default function Pact() {
         const loose = (attachJob.attachments || []).filter((a) => isImg(a.name) && !/^(before|after)/i.test(a.name));
         return (
         <Modal title={`Documents · PO ${attachJob.po_number || attachJob.job_number || ""}`} onClose={() => setAttachJob(null)}
-          primary={canEdit ? <button type="button" className="btn btn-primary" onClick={() => fileRef.current?.click()} disabled={busy} title="Pictures, a photos zip or a document, several at once">Upload files</button> : undefined}
+          primary={canEdit ? <button type="button" className={`btn btn-primary${spin("upload")}`} onClick={() => fileRef.current?.click()} {...busyOn("upload")} title="Pictures, a photos zip or a document, several at once">Upload files</button> : undefined}
           secondary={canEdit ? <>
-            <button type="button" className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "before")} disabled={busy}>📷 Before</button>
-            <button type="button" className="btn btn-ghost" onClick={() => snapPhotos(attachJob, "after")} disabled={busy}>📷 After</button>
+            <button type="button" className={`btn btn-ghost${spin(`photo:${attachJob.id}:before`)}`} onClick={() => snapPhotos(attachJob, "before")} {...busyOn(`photo:${attachJob.id}:before`)}>📷 Before</button>
+            <button type="button" className={`btn btn-ghost${spin(`photo:${attachJob.id}:after`)}`} onClick={() => snapPhotos(attachJob, "after")} {...busyOn(`photo:${attachJob.id}:after`)}>📷 After</button>
           </> : undefined}
           menu={photoN > 0 ? [
-            { label: "Photos (PDF)", glyph: "⬇", disabled: busy, title: "Before and after pictures on one PDF, with the job on top, to send out", onSelect: () => makePhotoPdf(attachJob) },
+            { label: "Photos (PDF)", glyph: "⬇", disabled: busy, title: "Before and after photos on one PDF", onSelect: () => makePhotoPdf(attachJob) },
           ] : undefined}>
             {(["before", "after"] as const).map((kind) => {
               const photos = (attachJob.attachments || []).filter((a) => isImg(a.name) && a.name.toLowerCase().startsWith(kind));
@@ -1866,7 +1930,7 @@ export default function Pact() {
             {(attachJob.attachments || []).filter((a) => !isImg(a.name)).map((a) => (
               <div key={a.path} className="mb-1.5 flex items-center gap-1">
                 <button type="button" className="row-btn rounded-sm border border-rulesoft p-2.5 text-sm hover:border-work active:border-work" onClick={() => openAttachment(a.path)}>📄 {a.name}</button>
-                {canEdit && <button type="button" className="btn-icon border-0 shadow-none text-alert" aria-label="Delete file" onClick={() => removeAttachment(attachJob, a.path, a.name)}>✕</button>}
+                {canEdit && <button type="button" className="btn-icon btn-icon-quiet text-alert" aria-label="Delete file" onClick={() => removeAttachment(attachJob, a.path, a.name)}>✕</button>}
               </div>
             ))}
         </Modal>

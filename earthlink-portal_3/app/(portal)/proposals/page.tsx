@@ -1,6 +1,7 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { matches } from "@/lib/search";
+import { cached, forget, onCacheUser, remember } from "@/lib/cache";
 import { useDebounced } from "@/lib/useDebounced";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the export
 // the export engine is heavy — it loads on demand, never with the page itself
@@ -46,6 +47,10 @@ const fileSafe = (s: string) => s.replace(/[\\/:*?"<>|]/g, "-").slice(0, 120);
 // plain "try again" (never the database's own words)
 const UPGRADE_MSG = "The portal's database needs an upgrade before this works (Settings → System check).";
 const needsUpgrade = (m: string) => /column|schema|relation|qty_map/i.test(m);
+// what this phone showed last time paints before the first frame (on the server there is no frame to paint before)
+const useBeforePaint = typeof window === "undefined" ? useEffect : useLayoutEffect;
+// what is remembered on this phone for the next open: the list, the contracts and each contract's price book
+const CACHE = { list: "prop:list", contracts: "prop:contracts", catalog: (cid: string) => `prop:catalog:${cid}` };
 const HEAD_FIELDS = [
   ["development", "Development"], ["apt", "Apt"], ["stairhall", "Stairhall"],
   ["nycha_staff", "NYCHA staff"], ["vendor_staff", "Vendor staff"], ["walk_date", "Walk date"],
@@ -86,6 +91,8 @@ export default function Proposals() {
   const sheetRef = useRef<HTMLInputElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const upgradeHint = (m: string, what = "save") => (needsUpgrade(m) ? UPGRADE_MSG : `Couldn't ${what}. Check your signal and try again.`);
+  // which answers came from the database on this visit (a remembered copy never overwrites one)
+  const got = useRef({ list: false, contracts: false });
 
   const load = async () => {
     // the list never shows quantities — leaving qty_map out cuts the payload
@@ -94,22 +101,52 @@ export default function Proposals() {
       .select("id,number,client_name,job,date,tax_pct,status,notes,contract_id,development,address,apt,stairhall,walk_date,release_number,nycha_staff,vendor_staff,start_date,finish_date,total,created_at")
       .order("created_at", { ascending: false });
     if (error) { // older database without some columns — fall back to full rows
-      const { data: d2 } = await sb().from("proposals").select("*").order("created_at", { ascending: false });
-      setList((d2 || []) as Proposal[]);
+      const { data: d2, error: e2 } = await sb().from("proposals").select("*").order("created_at", { ascending: false });
+      if (e2) { setListLoaded(true); return; } // bad signal: what is showing (remembered, or nothing) stays
+      const rows = (d2 || []) as Proposal[];
+      got.current.list = true;
+      remember(CACHE.list, rows);
+      setList(rows);
       setListLoaded(true);
       return;
     }
-    setList((data || []) as Proposal[]);
+    const rows = (data || []) as Proposal[];
+    got.current.list = true;
+    remember(CACHE.list, rows);
+    setList(rows);
     setListLoaded(true);
   };
+  const loadContracts = async () => {
+    const { data, error } = await sb().from("contracts").select("id,number,name").order("number");
+    if (error) return;
+    const cs = (data || []) as Contract[];
+    got.current.contracts = true;
+    remember(CACHE.contracts, cs);
+    setContracts(cs);
+    if (cs[0]) setPickId((cur) => cur || cs[0].id);
+    // a remembered contract that no longer exists is let go of, so the chooser below picks again
+    setListContract((cur) => (cur && cur !== "all" && cur !== "none" && !cs.some((c) => c.id === cur) ? "" : cur));
+  };
+  // What this phone showed last time paints at once (as soon as the signed-in
+  // user is named; before the first paint when they already are) and the
+  // database's answers, already on their way, replace it as they land.
+  useBeforePaint(() => onCacheUser(() => {
+    if (!got.current.list) {
+      const rows = cached<Proposal[]>(CACHE.list);
+      if (rows && rows.length) { setList(rows); setListLoaded(true); }
+    }
+    if (!got.current.contracts) {
+      const cs = cached<Contract[]>(CACHE.contracts);
+      if (cs && cs.length) { setContracts(cs); setPickId((cur) => cur || cs[0].id); }
+    }
+    const o = cached<Org>("org");
+    if (o) setOrg((prev) => prev || o);
+  }), []);
   useEffect(() => {
     load();
-    sb().from("org").select("*").single().then(({ data }) => data && setOrg(data as Org));
-    sb().from("contracts").select("id,number,name").order("number").then(({ data }) => {
-      const cs = (data || []) as Contract[];
-      setContracts(cs); if (cs[0]) setPickId(cs[0].id);
-    });
-  }, []);
+    sb().from("org").select("*").single().then(({ data }) => { if (data) { setOrg(data as Org); remember("org", data); } });
+    loadContracts();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   // which contract opens first: the one picked last time, else the one the
   // newest walk sheet is on, else the first contract
   useEffect(() => {
@@ -133,18 +170,31 @@ export default function Proposals() {
   // live: walk sheets, contracts and price books refresh without a reload
   useLive(["proposals", "contracts", "contract_items"], () => {
     load();
-    sb().from("contracts").select("id,number,name").order("number").then(({ data }) => setContracts((data || []) as Contract[]));
+    loadContracts();
     if (doc?.contract_id) {
-      sb().from("contract_items").select("*").eq("contract_id", doc.contract_id).order("line")
-        .then(({ data }) => setCatalog((data || []) as ContractItem[]));
+      const cid = doc.contract_id;
+      sb().from("contract_items").select("*").eq("contract_id", cid).order("line")
+        .then(({ data, error }) => { if (error) return; const rows = (data || []) as ContractItem[]; remember(CACHE.catalog(cid), rows); setCatalog(rows); });
     }
   }, { skipWhileTyping: true });
 
-  // load the contract's catalog whenever the open walk sheet's contract changes
+  // load the contract's catalog whenever the open walk sheet's contract changes:
+  // the book this phone showed last time (a couple of thousand lines) is on
+  // screen at once, the database's copy replaces it one round trip later
   useEffect(() => {
-    if (!doc?.contract_id) { setCatalog(null); return; }
-    sb().from("contract_items").select("*").eq("contract_id", doc.contract_id).order("line")
-      .then(({ data }) => setCatalog((data || []) as ContractItem[]));
+    const cid = doc?.contract_id;
+    if (!cid) { setCatalog(null); return; }
+    setCatalog(cached<ContractItem[]>(CACHE.catalog(cid)));
+    let live = true; // a sheet on another contract opened meanwhile: this answer is not for it
+    sb().from("contract_items").select("*").eq("contract_id", cid).order("line")
+      .then(({ data, error }) => {
+        if (!live) return;
+        if (error) { setCatalog((prev) => prev || []); return; } // bad signal: the remembered book stays
+        const rows = (data || []) as ContractItem[];
+        remember(CACHE.catalog(cid), rows);
+        setCatalog(rows);
+      });
+    return () => { live = false; };
   }, [doc?.contract_id]);
 
   // ---------- open / create ----------
@@ -174,19 +224,27 @@ export default function Proposals() {
     }
     if (openDocId.current === p.id) setQty(m);
   };
+  // a double tap makes one sheet, not two (the ref catches a second tap that lands before the state does)
+  const creatingNow = useRef(false);
+  const [creating, setCreating] = useState(false);
   const newWalkSheet = async () => {
     if (contracts.length === 0) { flash("No contracts yet. Upload a release sheet or release PDF first"); return; }
     if (contracts.length > 1 && !pickOpen) { setPickOpen(true); return; }
-    setPickOpen(false);
-    const number = await nextNumber("proposals", "PROP");
-    const { data, error } = await sb().from("proposals").insert({
-      number, client_name: "New York City Housing Authority", contract_id: pickId || contracts[0].id,
-    }).select().single();
-    if (error) { flash(upgradeHint(error.message, "make the walk sheet")); return; }
-    // the list follows the new sheet's contract, so it is on screen when the editor closes
-    const made = data as Proposal;
-    if (made.contract_id && listContract !== "all" && listContract !== made.contract_id) pickListContract(made.contract_id);
-    await load(); openEditor(made);
+    if (creatingNow.current) return;
+    creatingNow.current = true; setCreating(true);
+    try {
+      setPickOpen(false);
+      const number = await nextNumber("proposals", "PROP");
+      forget(CACHE.list); // a write half done is never what the next open paints
+      const { data, error } = await sb().from("proposals").insert({
+        number, client_name: "New York City Housing Authority", contract_id: pickId || contracts[0].id,
+      }).select().single();
+      if (error) { flash(upgradeHint(error.message, "make the walk sheet")); return; }
+      // the list follows the new sheet's contract, so it is on screen when the editor closes
+      const made = data as Proposal;
+      if (made.contract_id && listContract !== "all" && listContract !== made.contract_id) pickListContract(made.contract_id);
+      await load(); openEditor(made);
+    } finally { creatingNow.current = false; setCreating(false); }
   };
 
   // ---------- the survey PDF ----------
@@ -282,6 +340,7 @@ export default function Proposals() {
     const number = await nextNumber("proposals", "PROP");
     const qty_map: Record<string, number> = {};
     keep.forEach((l) => { qty_map[l.code] = (qty_map[l.code] || 0) + l.qty; });
+    forget(CACHE.list); // a write half done is never what the next open paints
     const { data, error: pe } = await sb().from("proposals").insert({
       number, client_name: "New York City Housing Authority", contract_id: plan.cid,
       job: plan.sv.kind || "Move-out", address: plan.sv.address, apt: plan.sv.apt, walk_date: localISO(), qty_map, total, notes: noteLines.join("\n"),
@@ -330,6 +389,7 @@ export default function Proposals() {
         bookNote = `${missing.length} line${missing.length === 1 ? "" : "s"} from release ${MOVEOUT_RELEASE} added to this contract's price book`;
       }
     }
+    remember(CACHE.catalog(cid), catalog); // the same book the editor opens with
     return { catalog, bookNote };
   };
   const handleSurveyPdf = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -581,6 +641,7 @@ export default function Proposals() {
         const repeats = rows.filter((r) => { if (codesSeen.has(r.code)) return true; codesSeen.add(r.code); return false; }).length;
         const uniq = rows.filter((r, i) => rows.findIndex((x) => x.code === r.code) === i);
         if (uniq.length === 0) { flash("No lines found on that sheet"); return; }
+        forget(CACHE.catalog(doc.contract_id!)); // a book half replaced is never what the next open paints
         const { error: de } = await sb().from("contract_items").delete().eq("contract_id", doc.contract_id!);
         if (de) { flash(upgradeHint(de.message, "replace the price book")); return; }
         for (let i = 0; i < uniq.length; i += 500) {
@@ -589,7 +650,9 @@ export default function Proposals() {
           if (error) { flash(needsUpgrade(error.message) ? UPGRADE_MSG : `Upload stopped partway: only ${i} of ${uniq.length} lines made it. Upload the sheet again to finish the book`); return; }
         }
         const { data } = await sb().from("contract_items").select("*").eq("contract_id", doc.contract_id!).order("line");
-        setCatalog((data || []) as ContractItem[]);
+        const book = (data || []) as ContractItem[];
+        remember(CACHE.catalog(doc.contract_id!), book);
+        setCatalog(book);
         flash(`Loaded ${uniq.length} price book lines for this contract${repeats ? ` (${repeats} repeated code${repeats === 1 ? "" : "s"} skipped)` : ""}`);
       } catch { flash("Couldn't read that sheet. Save it as .xlsx or .csv"); }
     };
@@ -766,6 +829,7 @@ export default function Proposals() {
     // try the proposal itself first — if that fails for any reason, nothing
     // else has been touched. Old-style invoices block it via foreign key, so
     // only then clear them (and their lines) and try once more.
+    forget(CACHE.list); // a write half done is never what the next open paints
     let { error } = await sb().from("proposals").delete().eq("id", p.id);
     if (error) {
       const { data: invs } = await sb().from("invoices").select("id").eq("proposal_id", p.id);
@@ -826,7 +890,7 @@ export default function Proposals() {
           </>}
           menu={[
             { label: "Preview and print", onSelect: () => setPrintOpen(true) },
-            { label: pdfBusy ? "Making the PDF…" : "Download PDF", glyph: "⬇", disabled: !!pdfBusy, onSelect: () => downloadPdf(doc) },
+            { label: "Download PDF", glyph: "⬇", disabled: !!pdfBusy, onSelect: () => downloadPdf(doc) },
             { label: "Walk sheet (Excel)", glyph: "⬇", onSelect: exportWalkSheet },
           ]} />
         <input ref={sheetRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleContractSheet} />
@@ -1026,9 +1090,9 @@ export default function Proposals() {
     <div key="list" className="page-enter">
       {(surveyBusy || pasteBusy || !!pdfBusy) && <div className="busy-bar" aria-busy="true" aria-label="Working" />}
       <PageHeader title="Proposals" sub="NYCHA walk sheets, priced from the contract's price book"
-        primary={<button type="button" className="btn btn-primary" onClick={newWalkSheet}>+ New walk sheet</button>}
+        primary={<button type="button" className={`btn btn-primary${creating ? " btn-busy" : ""}`} aria-busy={creating || undefined} disabled={creating} onClick={newWalkSheet}>+ New walk sheet</button>}
         menu={[
-          { label: surveyBusy ? "Reading the survey…" : "Upload survey PDF", glyph: "📄", disabled: surveyBusy, title: "Reads a survey PDF into a walk sheet", onSelect: uploadSurvey },
+          { label: "Upload survey PDF", glyph: "📄", disabled: surveyBusy, title: "Reads a survey PDF into a walk sheet", onSelect: uploadSurvey },
           { label: "Blank survey form (PDF)", glyph: "⬇", title: "The blank survey form to fill on site", onSelect: downloadSurveyForm },
         ]}>
         <button type="button" className="btn btn-ghost" data-paste-notes onClick={openPasteNotes} disabled={surveyBusy || pasteBusy} title="One walk sheet per apartment from a pasted note">📝 Paste notes</button>
@@ -1036,11 +1100,13 @@ export default function Proposals() {
       <input ref={surveyRef} type="file" accept="application/pdf,.pdf" className="hidden" onChange={handleSurveyPdf} />
       {pasteOpen && (
         <Modal title="Paste the note" onClose={() => { if (!pasteBusy) setPasteOpen(false); }}
-          primary={<button type="button" className="btn btn-primary" data-paste-read onClick={readPastedNotes} disabled={pasteBusy || !pasteText.trim()}>{pasteBusy ? "Reading…" : "Read the note"}</button>}
+          primary={<button type="button" className={`btn btn-primary${pasteBusy ? " btn-busy" : ""}`} aria-busy={pasteBusy || undefined} data-paste-read onClick={readPastedNotes} disabled={pasteBusy || !pasteText.trim()}>Read the note</button>}
           secondary={<button type="button" className="btn btn-ghost" onClick={() => setPasteOpen(false)} disabled={pasteBusy}>Cancel</button>}>
           <div className="mb-2 text-[13px] text-inksoft">Start each apartment with its building and apartment on one line (Building 3 11K), then one item per line. The first line can name the development.</div>
-          {/* 16px type: iOS zooms in on anything smaller when it gets the focus */}
-          <textarea data-paste-text className="field text-[16px]" rows={12} value={pasteText} onChange={(e) => setPasteText(e.target.value)} disabled={pasteBusy} autoFocus
+          {/* 16px type: iOS zooms in on anything smaller when it gets the focus. The box never grows past what the
+              phone's keyboard leaves of the sheet (title, this line and the Read button take about 16rem), so the
+              note scrolls inside it and the Read button stays in reach; on a desk the rows decide */}
+          <textarea data-paste-text className="field min-h-[7rem] text-[16px]" style={{ maxHeight: "calc(100dvh - var(--kb, 0px) - 16rem)" }} rows={12} value={pasteText} onChange={(e) => setPasteText(e.target.value)} disabled={pasteBusy} autoFocus
             placeholder={"Grant houses Moveout\nBuilding 3 11K\n42 + 24 B and W\n2 24s door sliding closet\n\nB1 5K\n1 24 inch door privacy"} />
         </Modal>
       )}
@@ -1068,9 +1134,9 @@ export default function Proposals() {
               <span className={`font-mono text-base font-semibold ${over > 0 ? "text-alert" : "text-ok"}`}>{fmt(now)} {over > 0 ? `· ${fmt(over)} over the ${fmt(DEFAULT_CAP)} cap` : `· under the ${fmt(DEFAULT_CAP)} cap ✓`}</span>
               <div className="flex flex-wrap gap-2">
                 {pasteQueue && <button type="button" className="btn btn-ghost" data-skip-apartment disabled={surveyBusy} onClick={() => nextInQueue(pasteQueue, false)}>Skip this apartment</button>}
-                <button type="button" className="btn btn-primary" disabled={over > 0 || nothing || surveyBusy} title={over > 0 ? "Take more off first" : nothing ? "Nothing left on the sheet" : ""}
+                <button type="button" className={`btn btn-primary${surveyBusy ? " btn-busy" : ""}`} aria-busy={surveyBusy || undefined} disabled={over > 0 || nothing || surveyBusy} title={over > 0 ? "Take more off first" : nothing ? "Nothing left on the sheet" : ""}
                   onClick={async () => { setSurveyBusy(true); try { await makeSheet(plan, off); } finally { setSurveyBusy(false); } }}>
-                  {surveyBusy ? "Making…" : "Make the walk sheet"}
+                  Make the walk sheet
                 </button>
               </div>
             </div>}>
@@ -1107,7 +1173,7 @@ export default function Proposals() {
       })()}
       {pickOpen && (
         <Modal title="New walk sheet" onClose={() => setPickOpen(false)}
-          primary={<button type="button" className="btn btn-primary" onClick={newWalkSheet}>Start walk sheet</button>}
+          primary={<button type="button" className={`btn btn-primary${creating ? " btn-busy" : ""}`} aria-busy={creating || undefined} disabled={creating} onClick={newWalkSheet}>Start walk sheet</button>}
           secondary={<button type="button" className="btn btn-ghost" onClick={() => setPickOpen(false)}>Cancel</button>}>
           <div className="section-label mb-1">Contract</div>
           <ContractPicker contracts={contracts} value={pickId} onChange={setPickId} />
@@ -1171,7 +1237,7 @@ export default function Proposals() {
               </div>
             </button>
             <RowActions items={[
-              { label: pdfBusy === p.id ? "Making the PDF…" : "Download PDF", glyph: "⬇", disabled: !!pdfBusy, onSelect: () => downloadPdf(p) },
+              { label: "Download PDF", glyph: "⬇", disabled: !!pdfBusy, onSelect: () => downloadPdf(p) },
               { label: "Add to release…", hidden: !p.contract_id, onSelect: () => addToRelease(p) },
               { label: "Delete…", destructive: true, onSelect: () => deleteProposal(p) }, // deleteProposal keeps its own confirm
             ]} />

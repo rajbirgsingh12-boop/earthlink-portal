@@ -76,7 +76,7 @@ export default function WorkLines({ items, canPrice, bufferKey, onChange, onComm
               update(i, { description: e.target.value, unit: it.unit === unitFor(it.description) || !it.unit ? auto : it.unit });
             }}
             onBlur={() => onCommit(items)} />
-          <button type="button" className="btn-icon border-0 shadow-none text-alert" aria-label="Remove line" onClick={() => remove(i)}>✕</button>
+          <button type="button" className="btn-icon btn-icon-quiet text-alert" aria-label="Remove line" onClick={() => remove(i)}>✕</button>
           <div className={`grid basis-full items-start gap-1.5 ${canPrice ? "grid-cols-4" : "grid-cols-2"}`}>
             <div><div className="section-label">Qty</div>
               <input className="field px-1.5 py-1.5 text-right font-mono" inputMode="decimal" aria-label="Quantity"

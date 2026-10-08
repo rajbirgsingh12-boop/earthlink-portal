@@ -7,7 +7,7 @@ let XLSX!: typeof import("xlsx-js-style");
 const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import Link from "next/link";
 import { sb } from "@/lib/supabase";
-import { myProfile } from "@/lib/profile";
+import { useProfile } from "@/lib/profile";
 import { askFileName } from "@/lib/format";
 import { prettyDate, addDays, localISO } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged, type LaborResult } from "@/lib/labor";
@@ -78,7 +78,7 @@ export default function Payroll() {
   const [pickDate, setPickDate] = useState(""); // calendar for opening any week
   const [loaded, setLoaded] = useState(false); // the first read of the weeks list is back: skeleton rows until then
   const [loadingWeek, setLoadingWeek] = useState(false); // an opened week's hours are on their way: skeleton cards until then
-  const [making, setMaking] = useState(false); // Make payroll is busy, so the button reads "Opening…" and can't be tapped again
+  const [making, setMaking] = useState(false); // Make payroll is busy, so the button shows its spinner and can't be tapped again
   // release-first entry: the week is organized as one card per release
   const [extraSections, setExtraSections] = useState<{ release_id: string | null; label: string }[]>([]);
   const [relPickQ, setRelPickQ] = useState(""); // the "+ Add a release" search
@@ -93,12 +93,10 @@ export default function Payroll() {
   const weekRef = useRef<Week | null>(null); // the open week as of right now, for queued saves
   const num = useNumBuffer();
   // the accountant can read everything here but the database won't accept their
-  // writes — show a view-only page instead of edits that silently don't save
-  const [role, setRole] = useState("");
-  const readOnly = role === "accountant";
-  useEffect(() => {
-    myProfile().then((p) => setRole(p?.role || ""));
-  }, []);
+  // writes — show a view-only page instead of edits that silently don't save.
+  // The remembered profile answers first; the database's own corrects it when it lands
+  const { hint, fresh: me } = useProfile();
+  const readOnly = ((me || hint)?.role || "") === "accountant";
 
   const load = async (only?: string[]) => {
     // the four reads don't depend on each other — they go out together; a
@@ -383,7 +381,7 @@ export default function Payroll() {
     // ---- Total Hours tab: every worker's real day totals across all contracts ----
     {
       const aoa: (string | number)[][] = [];
-      aoa.push(["Earth Link General Construction — Total Hours"]);
+      aoa.push(["Earth Link General Construction · Total Hours"]);
       aoa.push([]);
       aoa.push(["Week ending", prettyDate(openWeek.week_ending)]);
       aoa.push([]);
@@ -445,7 +443,7 @@ export default function Payroll() {
       aoa.push([`Earth Link General Construction`]);
       aoa.push([]);
       // contract number stays a text cell — a numeric cell shows long NYCHA numbers in scientific notation
-      const contractText = c ? (c.name && c.name !== c.number ? `${c.number} — ${c.name}` : String(c.number)) : "(no release linked)";
+      const contractText = c ? (c.name && c.name !== c.number ? `${c.number} · ${c.name}` : String(c.number)) : "(no release linked)";
       aoa.push(["Contract", contractText, "", "", "Week ending", prettyDate(openWeek.week_ending)]);
       aoa.push([]);
       const bandRows: number[] = [];
@@ -457,7 +455,7 @@ export default function Payroll() {
         // a canceled release is no longer in the picker list, but hours already
         // punched on it keep its name on the sheet instead of melting into "No release"
         const gone = rid ? byRel.get(rid)![0]?.job_label : "";
-        aoa.push([rel ? `Release #${rel.rel_number} — ${rel.location}${rel.canceled ? " (canceled)" : ""}` : gone ? `${gone} (deleted release)` : "No release (shop, misc…)"]);
+        aoa.push([rel ? `Release #${rel.rel_number} · ${rel.location}${rel.canceled ? " (canceled)" : ""}` : gone ? `${gone} (deleted release)` : "No release (shop, misc…)"]);
         headerRows.push(aoa.length);
         aoa.push(["Worker", "", "", ...dayHeads, "Category", "Total Hrs"]);
         const by: Record<string, number[]> = {};
@@ -561,7 +559,7 @@ export default function Payroll() {
       : [];
     // a picked release gets its own card, opened on the worker box
     const pickRel = (r: RelRow) => {
-      setExtraSections((prev) => (prev.some((x) => x.release_id === r.id) ? prev : [...prev, { release_id: r.id, label: `#${r.rel_number} — ${r.location}` }]));
+      setExtraSections((prev) => (prev.some((x) => x.release_id === r.id) ? prev : [...prev, { release_id: r.id, label: `#${r.rel_number} · ${r.location}` }]));
       setRelPickQ(""); setAddFor(r.id); setAddQ("");
     };
     const pickNoRelease = () => {
@@ -658,7 +656,7 @@ export default function Payroll() {
             const check = sec.release_id ? weekCheck.find((wc) => wc.rel.id === sec.release_id) : null;
             // how many hours the release is still short, by class or in total, whichever is bigger
             const short = check ? Math.max(check.result.totalRequired - check.result.totalLogged, check.result.shorts.reduce((s, r) => s + (r.required - r.logged), 0)) : 0;
-            const relInfo = rel ? { id: rel.id as string | null, label: `#${rel.rel_number} — ${rel.location}` } : { id: null as string | null, label: "" };
+            const relInfo = rel ? { id: rel.id as string | null, label: `#${rel.rel_number} · ${rel.location}` } : { id: null as string | null, label: "" };
             const inSection = new Set(ents.map((e) => e.employee_id));
             const query = addQ.trim().toLowerCase();
             // full roster — the dropdown scrolls, so never hide anyone behind a cap
@@ -830,8 +828,8 @@ export default function Payroll() {
 
       {!readOnly && (
         <div className="card mb-3 card-pad">
-          <button type="button" className="btn btn-primary w-full py-3.5 text-base" disabled={making} onClick={() => makePayroll()}>
-            {making ? "Opening…" : `Make payroll · ${weekRange(thisWeek)}`}
+          <button type="button" className={`btn btn-primary btn-lg w-full${making ? " btn-busy" : ""}`} aria-busy={making || undefined} disabled={making} onClick={() => makePayroll()}>
+            Make payroll · {weekRange(thisWeek)}
           </button>
           <Disclosure label="Open a different week" className="mt-1.5">
             <form className="flex flex-wrap items-center gap-2 pb-1.5" onSubmit={(e) => { e.preventDefault(); if (pickDate) makePayroll(pickDate); }}>
@@ -839,7 +837,7 @@ export default function Payroll() {
                 Pick any day in the week
                 <input type="date" className="field w-44 min-h-[44px]" value={pickDate} onChange={(e) => setPickDate(e.target.value)} />
               </label>
-              <button type="submit" className="btn" disabled={!pickDate || making}>Open that week</button>
+              <button type="submit" className={`btn${making ? " btn-busy" : ""}`} aria-busy={making || undefined} disabled={!pickDate || making}>Open that week</button>
             </form>
           </Disclosure>
         </div>

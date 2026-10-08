@@ -30,6 +30,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   const [q, setQ] = useState("");
   const [adding, setAdding] = useState(false);
   const [sending, setSending] = useState(false);
+  const sendingNow = useRef(false); // guards a double tap on Text crew: nobody is texted twice
   // "Send it later": whether the picker is open
   const [later, setLaterOpen] = useState(false);
   const [onItsOwn, setOnItsOwn] = useState<boolean | null>(null); // does the timer send it, or the open portal?
@@ -145,28 +146,31 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   };
   // rows that need a text: a worker told a different day is told again as a move
   const send = async (only?: CrewRow) => {
-    const targets = await Promise.all((only ? [only] : need).map(async (r) => {
-      const e = emps.find((x) => x.id === r.employee_id);
-      const first = (e?.name || "").split(" ")[0];
-      const moved = r.texted && r.day !== day ? { from: r.day, to: day } : undefined;
-      return { rowId: r.id, to: e?.phone || "", body: await crewMessageFor(job, first, work.trim(), moved, e?.lang), first, lang: e?.lang };
-    }));
-    if (targets.some((t) => !cleanPhone(t.to))) { flash("Someone here has no number. Add it in the box beside their name"); return; }
+    if (sendingNow.current) return;
+    sendingNow.current = true;
     setSending(true);
-    // a worker told a different day carries a stale TEXTED mark until RUN_ME's
-    // trigger clears it; clear it here too, so the server doesn't skip them
-    const stale = (only ? [only] : need).filter((r) => r.texted).map((r) => r.id);
-    if (stale.length) await stampRows(stale, false);
-    const out = await textRows(targets);
-    setSending(false);
-    if (out.status === "fallback") {
-      setTimeout(async () => {
-        if (window.confirm(`Did the text${targets.length > 1 ? "s" : ""} send? OK marks ${targets.map((t) => t.first).join(", ")} TEXTED ✓`)) { await stampRows(out.rowIds); await onChange(); }
-      }, 600);
-      flash(out.message); return;
-    }
-    flash(out.message);
-    await onChange();
+    try {
+      const targets = await Promise.all((only ? [only] : need).map(async (r) => {
+        const e = emps.find((x) => x.id === r.employee_id);
+        const first = (e?.name || "").split(" ")[0];
+        const moved = r.texted && r.day !== day ? { from: r.day, to: day } : undefined;
+        return { rowId: r.id, to: e?.phone || "", body: await crewMessageFor(job, first, work.trim(), moved, e?.lang), first, lang: e?.lang };
+      }));
+      if (targets.some((t) => !cleanPhone(t.to))) { flash("Someone here has no number. Add it in the box beside their name"); return; }
+      // a worker told a different day carries a stale TEXTED mark until RUN_ME's
+      // trigger clears it; clear it here too, so the server doesn't skip them
+      const stale = (only ? [only] : need).filter((r) => r.texted).map((r) => r.id);
+      if (stale.length) await stampRows(stale, false);
+      const out = await textRows(targets);
+      if (out.status === "fallback") {
+        setTimeout(async () => {
+          if (window.confirm(`Did the text${targets.length > 1 ? "s" : ""} send? OK marks ${targets.map((t) => t.first).join(", ")} TEXTED ✓`)) { await stampRows(out.rowIds); await onChange(); }
+        }, 600);
+        flash(out.message); return;
+      }
+      flash(out.message);
+      await onChange();
+    } finally { sendingNow.current = false; setSending(false); }
   };
   // the preview, as the first worker on the job gets it (the thread's ask goes
   // on the end once photos texted back land on the job; the server leaves the
@@ -180,7 +184,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
     <div className="rounded-sm border border-rulesoft bg-paper p-3">
       <div className="mb-1.5 flex items-center justify-between gap-2">
         <div className="section-label">Who's going? {day ? `· ${prettyDate(day)}` : "· no day yet"}</div>
-        {onClose && <button type="button" className="btn-icon border-0 text-inksoft" aria-label="Close" onClick={onClose}>✕</button>}
+        {onClose && <button type="button" className="btn-icon btn-icon-quiet" aria-label="Close" onClick={onClose}>✕</button>}
       </div>
       {!day && <div className="notice-alert mb-2">No day yet. Put the job on a day first; the crew is texted the day.</div>}
       <input className="field mb-2" placeholder="The work: what should they do there?" value={work} readOnly={!canEdit}
@@ -247,9 +251,10 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
             </div>
           )}
           <div className="mt-2 flex flex-wrap items-center gap-2">
+            {/* the words stay while it sends (the kit draws the spinner over them, so the row never shifts under the finger) */}
             {need.length > 0 ? (
-              <button type="button" className="btn btn-primary" disabled={sending || !day} onClick={() => send()}>
-                {sending ? "Sending…" : need.length === 1 ? "📱 Text worker" : `📱 Text crew (${need.length})`}
+              <button type="button" className={`btn btn-primary${sending ? " btn-busy" : ""}`} aria-busy={sending || undefined} disabled={sending || !day} onClick={() => send()}>
+                {need.length === 1 ? "📱 Text worker" : `📱 Text crew (${need.length})`}
               </button>
             ) : rows.length > 0 ? <Stamp label="CREW UP TO DATE ✓" tone="ok" /> : null}
             {machine && need.length > 0 && !later && (

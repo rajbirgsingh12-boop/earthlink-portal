@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { addDays, localISO, prettyDate } from "@/lib/docs";
 
 // The days on a job, built for a business where the tenant doesn't open the
@@ -36,12 +36,21 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true, crew,
   const [tellCrew, setTellCrew] = useState(true);
   // the Finish box is shown once there is a finish day, the work is done, or somebody asked for it
   const [finishOpen, setFinishOpen] = useState(false);
+  // a move or a clear in flight: the button shows it, and a second tap writes no second note
+  const [saving, setSaving] = useState(false);
+  const savingNow = useRef(false);
+  const once = async (f: () => Promise<void>) => {
+    if (savingNow.current) return;
+    savingNow.current = true;
+    setSaving(true);
+    try { await f(); } finally { savingNow.current = false; setSaving(false); }
+  };
   const today = localISO(new Date());
   const trips = noAccessCount(job.notes);
   const base = job.start_date || today;
 
   const openMove = () => { setTo(addDays(base, 7)); setWhy(MOVE_REASONS[0]); setNote(""); setTellCrew(!!crew?.told); setMoving(true); };
-  const move = async () => {
+  const move = () => once(async () => {
     const was = job.start_date ? ` (was ${prettyDate(job.start_date)})` : "";
     const next = to ? `moved to ${prettyDate(to)}` : "needs a new day";
     const line = `⛔ ${why} · ${prettyDate(today)}: ${next}${was}${note.trim() ? ` · ${note.trim()}` : ""}`;
@@ -51,12 +60,12 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true, crew,
     if (ok === false) return; // refused: the box stays open, the page said why
     setMoving(false);
     if (tellCrew && to && to !== (job.start_date || "") && crew?.names.length && onMoved) await onMoved(job.start_date || "", to);
-  };
+  });
   // off the calendar, with its own note; the crew rows follow through the same trigger
-  const clear = async () => {
+  const clear = () => once(async () => {
     const ok = await onSave({ start_date: "", notes: appendNote(job.notes, `📅 Day cleared ${prettyDate(today)}${job.start_date ? ` (was ${prettyDate(job.start_date)})` : ""}, off the calendar until it gets a day`) });
     if (ok !== false) setMoving(false);
-  };
+  });
 
   const dateBox = "rounded-sm border border-rulesoft bg-white px-2 py-1.5 font-mono text-[12px] min-h-[44px]";
   const quick = "btn btn-ghost btn-sm min-h-[44px]";
@@ -96,7 +105,7 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true, crew,
           <div className="mb-2 flex flex-wrap gap-1.5">
             <button type="button" className={quick} onClick={() => setTo(addDays(base, 1))}>+1 day</button>
             <button type="button" className={quick} onClick={() => setTo(addDays(base, 7))}>+1 week</button>
-            {job.start_date && <button type="button" className={quick} onClick={clear}>Clear the day</button>}
+            {job.start_date && <button type="button" className={quick} disabled={saving} onClick={clear}>Clear the day</button>}
             {!showFinish && <button type="button" className={quick} onClick={() => setFinishOpen(true)}>Set the finish day</button>}
           </div>
           <input className="field mb-2" placeholder="Note (optional): who you spoke to, what they said" value={note} onChange={(e) => setNote(e.target.value)} />
@@ -107,7 +116,7 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true, crew,
             </label>
           )}
           <div className="flex gap-2">
-            <button type="button" className="btn btn-primary" onClick={move}>{to ? `Move to ${prettyDate(to)}` : "Log it, no day"}</button>
+            <button type="button" className={`btn btn-primary${saving ? " btn-busy" : ""}`} aria-busy={saving || undefined} disabled={saving} onClick={move}>{to ? `Move to ${prettyDate(to)}` : "Log it, no day"}</button>
             <button type="button" className="btn btn-ghost" onClick={() => setMoving(false)}>Cancel</button>
           </div>
         </div>

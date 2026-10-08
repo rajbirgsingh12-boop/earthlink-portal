@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { addDays, localISO } from "@/lib/docs";
 
 // The calendar, the way a calendar is supposed to look: Month, Week and Day
@@ -25,7 +25,7 @@ const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const monthOf = (iso: string) => iso.slice(0, 7);
 const weekStart = (iso: string) => { const d = new Date(iso + "T00:00:00"); return addDays(iso, -d.getDay()); };
 const fmt = (iso: string, opts: Intl.DateTimeFormatOptions) => new Date(iso + "T00:00:00").toLocaleDateString("en-US", opts);
-// "PO 116843" before "PO 116850", the way numbers read — never "PO 9" after "PO 10"
+// "PO 116843" before "PO 116850", the way numbers read: never "PO 9" after "PO 10"
 const byNumber = (a: CalEvent, b: CalEvent) => (a.short || a.title).localeCompare(b.short || b.title, undefined, { numeric: true });
 
 export const KIND_LABEL: Record<CalEvent["kind"], string> = { pact: "PACT job", nycha: "NYCHA release" };
@@ -33,8 +33,9 @@ export const KIND_LABEL: Record<CalEvent["kind"], string> = { pact: "PACT job", 
 const barCls = (e: CalEvent) =>
   `${e.kind === "pact" ? "border-l-work" : "border-l-carbon"} ${e.done ? "bg-paper text-inksoft line-through decoration-rulesoft" : e.kind === "pact" ? "bg-work/10 text-ink" : "bg-carbon/10 text-ink"}`;
 
-// a drag in flight: the bar, where the pointer is, the day under it
-type Drag = { e: CalEvent; x: number; y: number; over: string | null };
+// a drag in flight: the bar and the day under it (where the pointer is lives
+// in a ref: the ghost follows it by hand, so a move never re-renders the grid)
+type Drag = { e: CalEvent; over: string | null };
 // the day cell under a point on the screen
 const dayAt = (x: number, y: number): string | null =>
   (typeof document === "undefined" ? null : document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-day]")?.dataset.day) || null;
@@ -50,7 +51,7 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
   anchor: string; onAnchor: (iso: string) => void;     // the day the view is centered on
   selected: string; onSelect: (iso: string) => void;  // the day whose agenda is open
   onOpen?: (e: CalEvent) => void;                     // tap a bar
-  onMove?: (e: CalEvent, day: string) => void | Promise<void>; // a bar dropped on another day — when set, bars can be dragged
+  onMove?: (e: CalEvent, day: string) => void | Promise<void>; // a bar dropped on another day: when set, bars can be dragged
   renderDay?: (iso: string, events: CalEvent[]) => React.ReactNode; // the Day view's body (the cards)
 }) {
   const today = localISO(new Date());
@@ -69,25 +70,51 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
   const press = useRef<{ e: CalEvent; id: number; sx: number; sy: number; timer: ReturnType<typeof setTimeout> | null; live: boolean; el: HTMLElement; off: () => void } | null>(null);
   const dragging = useRef(false);      // a bar is loose right now (read by the scroll blocker)
   const edge = useRef(0);              // -1 / 1 while the pointer rides the week's left / right edge
+  const root = useRef<HTMLDivElement | null>(null);
   const weekScroll = useRef<HTMLDivElement | null>(null);
   const swallowClick = useRef(false); // the click that follows a drop is not a tap
+  const pt = useRef({ x: 0, y: 0 });   // where the pointer is, for the ghost and the edge scroller
+  const ghost = useRef<HTMLDivElement | null>(null);
+  const frame = useRef(0);             // the animation frame that will place the ghost (moves coalesce into it)
   useEffect(() => {
-    // registered once, up front: iPhone Safari decides at the first touch
-    // whether the page may scroll under a finger, so a blocker added only
-    // when the bar comes loose would come too late. It blocks nothing until then.
+    // registered once, up front, on the calendar itself: iPhone Safari decides
+    // at the first touch whether the page may scroll under a finger, so a
+    // blocker added only when the bar comes loose would come too late. It
+    // blocks nothing until then, and the rest of the page never waits on it.
+    const el = root.current;
+    if (!el) return;
     const block = (ev: TouchEvent) => { if (dragging.current) ev.preventDefault(); };
-    document.addEventListener("touchmove", block, { passive: false });
-    return () => { document.removeEventListener("touchmove", block); press.current?.off(); dragging.current = false; };
+    el.addEventListener("touchmove", block, { passive: false });
+    return () => { el.removeEventListener("touchmove", block); press.current?.off(); dragging.current = false; if (frame.current) cancelAnimationFrame(frame.current); };
   }, []);
+  // the ghost rides just above the finger or the pointer, moved by hand once a
+  // frame (no render): on the left half of the screen it hangs to the right of
+  // the pointer, on the right half to its left, and it never leaves the screen
+  const placeGhost = () => {
+    frame.current = 0;
+    const g = ghost.current;
+    if (!g) return;
+    const { x, y } = pt.current;
+    const vw = window.innerWidth, w = g.offsetWidth;
+    const gx = x > vw / 2 ? Math.min(vw - 4, x + 40) - w : Math.max(4, x - 40);
+    g.style.transform = `translate(${Math.round(gx)}px, ${Math.round(Math.max(4, y - 52))}px)`;
+  };
+  const moveGhost = () => { if (!frame.current) frame.current = requestAnimationFrame(placeGhost); };
+  // a freshly mounted ghost, or one whose words changed width, is placed before it paints
+  useLayoutEffect(() => { if (drag) placeGhost(); }, [drag]);
+  // the grid re-renders only when the day under the pointer changes
+  const hover = (over: string | null) => setDrag((d) => (d && d.over !== over ? { ...d, over } : d));
   const follow = (x: number, y: number) => {
     const p = press.current;
     if (!p || !p.live) return;
+    pt.current = { x, y };
     // on a phone the week is wider than the screen: a bar held at its edge
     // scrolls it, so a day off the screen is still a drop away
     const sc = weekScroll.current;
     if (sc && sc.scrollWidth > sc.clientWidth) { const r = sc.getBoundingClientRect(); edge.current = x < r.left + EDGE ? -1 : x > r.right - EDGE ? 1 : 0; }
     else edge.current = 0;
-    setDrag({ e: p.e, x, y, over: dayAt(x, y) });
+    moveGhost();
+    hover(dayAt(x, y));
   };
   const loosen = () => {
     const p = press.current;
@@ -109,13 +136,14 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
       const sc = weekScroll.current;
       if (edge.current && sc) {
         sc.scrollLeft += edge.current * EDGE_STEP;
-        setDrag((d) => (d ? { ...d, over: dayAt(d.x, d.y) } : d));
+        hover(dayAt(pt.current.x, pt.current.y));
       }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     p.off = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); window.removeEventListener("pointercancel", cancel); cancelAnimationFrame(raf); };
-    setDrag({ e: p.e, x: p.sx, y: p.sy, over: p.e.day });
+    pt.current = { x: p.sx, y: p.sy };
+    setDrag({ e: p.e, over: p.e.day });
   };
   const letGo = (drop: boolean, x: number, y: number) => {
     const p = press.current;
@@ -125,9 +153,10 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
     p.off();
     dragging.current = false;
     edge.current = 0;
+    if (frame.current) { cancelAnimationFrame(frame.current); frame.current = 0; }
     try { p.el.releasePointerCapture(p.id); } catch { /* fine */ }
-    if (!p.live) return; // a tap — the click does its usual work
-    // the click that follows a drop is not a tap — and when no click follows
+    if (!p.live) return; // a tap: the click does its usual work
+    // the click that follows a drop is not a tap, and when no click follows
     // (a finger's long press ends without one), the next tap must not pay for it
     swallowClick.current = true;
     setTimeout(() => { swallowClick.current = false; }, 150);
@@ -139,9 +168,9 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
     if (!onMove || e.done || ev.button !== 0 || press.current) return;
     const p = { e, id: ev.pointerId, sx: ev.clientX, sy: ev.clientY, timer: null as ReturnType<typeof setTimeout> | null, live: false, el: ev.currentTarget as HTMLElement, off: () => {} };
     press.current = p;
-    // the bar keeps hearing this pointer wherever it goes from here — a quick
+    // the bar keeps hearing this pointer wherever it goes from here: a quick
     // mouse leaves a small bar before its first move would otherwise land on it
-    try { p.el.setPointerCapture(p.id); } catch { /* an old browser — the moves still arrive while the pointer is on the bar */ }
+    try { p.el.setPointerCapture(p.id); } catch { /* an old browser: the moves still arrive while the pointer is on the bar */ }
     // a finger holds the bar for a moment first (a swipe is the page scrolling); a mouse just drags
     if (ev.pointerType !== "mouse") p.timer = setTimeout(loosen, HOLD_MS);
   };
@@ -175,6 +204,8 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
     : fmt(anchor, { weekday: "long", month: "long", day: "numeric", year: "numeric" });
 
   // size: "bar" on a desk and in the week, "compact" in a desk's month cell, "chip" in a phone's month cell (the number alone).
+  // A chip is 28px tall, the one documented exception to the 44px rule (the
+  // whole 64px cell is still the tap that opens the day); a bar is 32px.
   // A plain function, not a component: the button stays the same element from
   // render to render, so the pointer it captured on the way down stays captured
   const bar = (e: CalEvent, size: "bar" | "compact" | "chip" = "bar") => {
@@ -187,9 +218,9 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
         style={movable ? { WebkitUserSelect: "none", userSelect: "none", WebkitTouchCallout: "none" } : undefined}
         title={[e.title, e.subtitle, e.flag, movable ? "drag to another day to move it" : ""].filter(Boolean).join(" · ")}
         data-po-bar={e.id}
-        className={`anim-row block w-full rounded-[3px] border-l-[3px] text-left transition-opacity duration-100 hover:brightness-95 active:brightness-90 ${size === "chip" ? "min-h-[20px] px-[2px] py-[1px] font-mono text-[11px] leading-[18px] tracking-tight" : size === "compact" ? "px-1 py-[1px] text-[11px] leading-[1.25]" : "px-2 py-1 text-[12px] leading-snug"} ${barCls(e)} ${lifted ? "opacity-40" : ""} ${movable ? "cursor-grab active:cursor-grabbing" : ""}`}>
-        {/* a phone's chip has no room for the ⚠ — the flag turns the number red
-            instead — and a number too long for it keeps its last digits, the ones
+        className={`anim-row block w-full rounded-[3px] border-l-[3px] text-left transition-opacity duration-100 hover:brightness-95 active:brightness-90 ${size === "chip" ? "min-h-[28px] px-1 font-mono text-[11px] leading-[26px] tracking-tight" : size === "compact" ? "min-h-[28px] px-1 py-1 text-[11px] leading-[1.25]" : "min-h-[32px] px-2 py-1.5 text-[12px] leading-snug"} ${barCls(e)} ${lifted ? "opacity-40" : ""} ${movable ? "cursor-grab active:cursor-grabbing" : ""}`}>
+        {/* a phone's chip has no room for the ⚠ (the flag turns the number red
+            instead) and a number too long for it keeps its last digits, the ones
             that tell two POs apart (the cut lands at the front: right-to-left flow) */}
         <span className={`block truncate font-semibold ${size === "chip" ? "text-left [direction:rtl]" : ""} ${size === "chip" && e.flag ? "text-alert" : ""}`}>{e.flag && size !== "chip" ? "⚠ " : ""}{size === "chip" ? e.short || e.title : e.title}</span>
         {size === "bar" && e.subtitle && <span className="block truncate text-[11px] text-inksoft">{e.subtitle}</span>}
@@ -223,7 +254,7 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
             return (
               <div key={iso} role="button" tabIndex={0} data-day={iso} onClick={() => onSelect(iso)} onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); onSelect(iso); } }}
                 aria-label={`${fmt(iso, { weekday: "long", month: "long", day: "numeric" })}${evs.length ? `, ${evs.length} job${evs.length === 1 ? "" : "s"}` : ""}`}
-                className={`flex min-h-[52px] flex-col gap-[2px] border-r border-rulesoft p-[2px] md:min-h-[96px] md:p-1 ${cellMotion} ${lastRow ? "" : "border-b"} ${i % 7 === 6 ? "border-r-0" : ""} ${inMonth ? "bg-white" : "bg-paper/60"} ${isSel ? "outline outline-2 -outline-offset-2 outline-ink" : ""} ${dropCls(iso)}`}>
+                className={`flex min-h-[64px] flex-col gap-[2px] border-r border-rulesoft p-[2px] md:min-h-[104px] md:p-1 ${cellMotion} ${lastRow ? "" : "border-b"} ${i % 7 === 6 ? "border-r-0" : ""} ${inMonth ? "bg-white" : "bg-paper/60"} ${isSel ? "outline outline-2 -outline-offset-2 outline-ink" : ""} ${dropCls(iso)}`}>
                 <div className="flex items-center justify-between">
                   <span className={`grid h-6 w-6 place-items-center rounded-full font-mono text-[12px] ${isToday ? "bg-work font-bold text-white" : inMonth ? "text-ink" : "text-inksoft"}`}>{Number(iso.slice(-2))}</span>
                   {evs.length > 0 && <span className="hidden font-mono text-[11px] text-inksoft md:inline">{evs.length}</span>}
@@ -287,7 +318,7 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
   };
 
   return (
-    <div>
+    <div ref={root}>
       {/* the bar: Today ‹ › · title · Month | Week | Day */}
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <button type="button" className="btn btn-ghost btn-sm" onClick={() => { onAnchor(today); onSelect(today); }}>Today</button>
@@ -312,10 +343,11 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
         <span className="inline-flex items-center gap-1">⚠ crew not told</span>
         {onMove && <span className="inline-flex items-center gap-1">→ drag a PO to another day to move it <span className="md:hidden">(hold it first)</span></span>}
       </div>}
-      {/* the bar in flight, riding just above the finger or the pointer */}
+      {/* the bar in flight, riding just above the finger or the pointer: placed by
+          hand through its ref (placeGhost), parked off-screen until the first placement */}
       {drag && (
-        <div className="pointer-events-none fixed z-[60] max-w-[calc(100vw-8px)]" data-drag-ghost
-          style={{ top: Math.max(4, drag.y - 52), ...(drag.x > window.innerWidth / 2 ? { right: Math.max(4, window.innerWidth - drag.x - 40) } : { left: Math.max(4, drag.x - 40) }) }} aria-hidden>
+        <div ref={ghost} className="pointer-events-none fixed left-0 top-0 z-[60] max-w-[calc(100vw-8px)] will-change-transform" data-drag-ghost aria-hidden
+          style={{ transform: "translate(-9999px, 0)" }}>
           <div className={`whitespace-nowrap rounded-sm border-[1.5px] border-ink bg-white px-2.5 py-1.5 text-[13px] font-semibold shadow-lg ${drag.over && drag.over !== drag.e.day ? "" : "text-inksoft"}`}>
             {drag.e.title} → {drag.over && drag.over !== drag.e.day ? fmt(drag.over, { weekday: "short", month: "short", day: "numeric" }) : "drop it on a day"}
           </div>

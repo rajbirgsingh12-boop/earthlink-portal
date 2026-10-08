@@ -2,9 +2,9 @@
 
 // Browser-side hardening: these headers ride on every response.
 // The CSP only lets the page talk to itself, Supabase, Google Fonts, and the
-// Google Maps embed — a script sneaking in from anywhere else is dead on arrival.
+// Google Maps embed: a script sneaking in from anywhere else is dead on arrival.
 // pin the CSP to this project's own Supabase host when the env is present at
-// build time (Vercel) — the wildcard only remains for local fake-env builds
+// build time (Vercel): the wildcard only remains for local fake-env builds
 const SUPA = (() => {
   try { return new URL(process.env.NEXT_PUBLIC_SUPABASE_URL || "").host; } catch { return ""; }
 })();
@@ -40,9 +40,14 @@ const nextConfig = {
   async headers() {
     return [
       { source: "/(.*)", headers: securityHeaders },
+      // the logo rides in every PDF and Word document the portal builds and the
+      // icons in every launch: a day in the browser's cache, a week of serving
+      // the old copy while the new one downloads, instead of a check on every use
+      { source: "/(logo|icon|apple-icon).png", headers: [{ key: "Cache-Control", value: "public, max-age=86400, stale-while-revalidate=604800" }] },
+      { source: "/manifest.webmanifest", headers: [{ key: "Cache-Control", value: "public, max-age=3600, stale-while-revalidate=86400" }] },
       // the portal stays out of search results; the public company page and the
       // privacy/SMS terms are left indexable so the business can be verified
-      // the portal only — the public company page, sign-in and legal page stay indexable
+      // the portal only: the public company page, sign-in and legal page stay indexable
       ...["home", "releases", "payroll", "pact", "schedule", "items", "proposals", "statements", "settings", "admin", "reset", "help"]
         .flatMap((p) => [`/${p}`, `/${p}/:path*`])
         .map((source) => ({ source, headers: [{ key: "X-Robots-Tag", value: "noindex, nofollow, noarchive" }] })),

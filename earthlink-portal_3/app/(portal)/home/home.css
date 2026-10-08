@@ -1,0 +1,25 @@
+/* Home's additions to the motion kit in app/globals.css (same speeds, same curve,
+   enter-only). The keyframes k-rise and shimmer and the --t-* and --ease-out
+   variables come from the kit; this file only adds to it. */
+@media screen {
+  /* children arrive one after another: hidden until their turn (backwards, never
+     both: a transform that stays applied would make the wrapper the containing
+     block for any fixed dialog inside it), then let go */
+  .anim-stagger > * { animation: k-rise var(--t-base) var(--ease-out) backwards; animation-delay: calc(var(--i, 0) * 50ms); }
+  /* the aging strip's segments grow from the left */
+  @keyframes k-grow-x { from { transform: scaleX(0) } }
+  .anim-grow-x { animation: k-grow-x var(--t-slow) var(--ease-out) backwards; transform-origin: left; }
+}
+/* reduced motion: the kit's global switch zeroes durations; staggered items must not wait their delay either */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-delay: 0s !important; }
+}
+/* the shimmer on a dark surface (the Home band) */
+.skeleton-dark { position: relative; overflow: hidden; border-radius: 2px; background: rgba(246, 242, 234, .14); }
+.skeleton-dark::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%); background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .18), transparent); animation: shimmer 1.2s infinite; }
+/* the Home band: the logo's three colors as a stripe along the top edge (ocean, land,
+   copper), a faint globe arc behind the greeting; both decoration, both behind the words */
+.hero-band { position: relative; overflow: hidden; }
+.hero-band::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 4px; background: linear-gradient(90deg, #10728C 0 46%, #516F11 46% 78%, #8A633C 78% 100%); }
+.hero-band::after { content: ""; position: absolute; right: -70px; top: -110px; width: 260px; height: 260px; border-radius: 50%; border: 22px solid rgba(246, 242, 234, .05); pointer-events: none; }
+.hero-band > * { position: relative; }

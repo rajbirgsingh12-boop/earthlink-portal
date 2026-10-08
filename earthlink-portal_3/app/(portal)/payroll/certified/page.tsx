@@ -284,8 +284,8 @@ export default function CertifiedPayroll() {
       {busy && <div className="busy-bar" aria-busy="true" aria-label="Working" />}
       <PageHeader title="Certified payroll" sub="Turns the payroll company's PDFs into the CSV eComply takes. Nothing on this page is saved."
         primary={
-          <button type="button" className="btn btn-primary whitespace-nowrap" onClick={() => fileRef.current?.click()} disabled={busy}>
-            {busy ? "Reading…" : "Upload payroll PDFs"}
+          <button type="button" className={`btn btn-primary whitespace-nowrap${busy ? " btn-busy" : ""}`} aria-busy={busy || undefined} onClick={() => fileRef.current?.click()} disabled={busy}>
+            Upload payroll PDFs
           </button>
         }>
         <button type="button" className="btn btn-ghost whitespace-nowrap" onClick={() => setReports((p) => [...p, tagReport(emptyReport())])}>+ Type a week in</button>

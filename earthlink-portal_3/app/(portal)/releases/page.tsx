@@ -11,7 +11,7 @@ import { fmt, parseNum, askFileName } from "@/lib/format";
 import Stamp from "@/components/Stamp";
 import type { Contract, Release } from "@/lib/types";
 import { parseReleasePdfText, quickReleaseId, type ReleaseItem } from "@/lib/parseRelease";
-import { prettyDate, localISO, type Org } from "@/lib/docs";
+import { prettyDate, localISO, type Org, invoiceNumberOf } from "@/lib/docs";
 import { canonTrade, checkLabor, aggregateLogged } from "@/lib/labor";
 import { useLive } from "@/lib/useLive";
 import ContractPicker, { contractLabel } from "@/components/ContractPicker";
@@ -433,7 +433,7 @@ export default function Releases() {
       await toggle(r, { invoice_sent: today });
     }
     setSosEdit(null); // one preview at a time — two would print as one concatenated PDF
-    setInvPreview({ number: `${c?.number || ""}-${r.rel_number}`, date: today, cNumber: c?.number || "", relNum: r.rel_number, dev: d.dev, workOrder: r.ticket || "", rows: d.rows });
+    setInvPreview({ number: invoiceNumberOf(c?.number, r.rel_number), date: today, cNumber: c?.number || "", relNum: r.rel_number, dev: d.dev, workOrder: r.ticket || "", rows: d.rows });
   };
 
   // ---------- Statement of Services (NYCHA form 042.726) ----------
@@ -1811,7 +1811,7 @@ export default function Releases() {
           }));
         const invPdf = await buildInvoicePdfBytes({
           org: (o || {}) as Org, cNumber: contract.number, relNum: saved.rel, workOrder: saved.ticket || "",
-          dev: saved.location, number: `${contract.number}-${saved.rel}`, date: localISO(), rows,
+          dev: saved.location, number: invoiceNumberOf(contract.number, saved.rel), date: localISO(), rows,
         });
         const merged = await buildPackagePdf(contract.id, contract.number, saved.rel, invPdf);
         downloadPdf(merged, `package_${contract.number}_rel${saved.rel}.pdf`);

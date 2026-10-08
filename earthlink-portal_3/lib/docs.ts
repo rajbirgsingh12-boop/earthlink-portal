@@ -12,6 +12,12 @@ export const grandTotal = (items: LineItem[], taxPct: number) => subTotal(items)
 export const localISO = (d: Date = new Date()) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
+// the NYCHA invoice number: the contract number and the release number run
+// together ("2442583332"), never with a dash in it; built fresh each time an
+// invoice is shown or made, so every invoice old and new reads the same way
+export const invoiceNumberOf = (contract: string | null | undefined, rel: string | null | undefined): string =>
+  `${contract || ""}${rel || ""}`.replace(/[-\s]/g, "");
+
 export async function nextNumber(table: "proposals" | "invoices", prefix: "PROP" | "INV") {
   const year = new Date().getFullYear();
   // number is UNIQUE and rows can be deleted, so count+1 can collide — use max+1

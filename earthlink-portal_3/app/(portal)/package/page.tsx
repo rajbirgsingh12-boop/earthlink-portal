@@ -8,7 +8,7 @@ const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style"));
 import { sb } from "@/lib/supabase";
 import { myProfile } from "@/lib/profile";
 import { fmt, askFileName } from "@/lib/format";
-import { Org, prettyDate, localISO } from "@/lib/docs";
+import { Org, prettyDate, localISO, invoiceNumberOf } from "@/lib/docs";
 import type { Contract, Release } from "@/lib/types";
 import ContractPicker from "@/components/ContractPicker";
 import PageHeader from "@/components/PageHeader";
@@ -53,7 +53,7 @@ export default function InvoicePackage() {
       setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, invoice_sent: today } : x)));
     }
     setPrintOpen(false); // one preview at a time — two would print as one concatenated PDF
-    setInvPreview({ number: `${c?.number || ""}-${r.rel_number}`, date: today, cNumber: c?.number || "", relNum: r.rel_number, dev: r.location || d.dev, workOrder: r.ticket || "", rows: d.rows });
+    setInvPreview({ number: invoiceNumberOf(c?.number, r.rel_number), date: today, cNumber: c?.number || "", relNum: r.rel_number, dev: r.location || d.dev, workOrder: r.ticket || "", rows: d.rows });
   };
 
   useEffect(() => {
@@ -185,7 +185,7 @@ export default function InvoicePackage() {
       setProgress("Making the package…");
       const invPdf = await buildInvoicePdfBytes({
         org: org || ({} as Org), cNumber: c.number, relNum: r.rel_number, workOrder: r.ticket || "",
-        dev: r.location || d.dev, number: `${c.number}-${r.rel_number}`,
+        dev: r.location || d.dev, number: invoiceNumberOf(c.number, r.rel_number),
         date: r.invoice_sent || today, rows: d.rows,
       });
       const merged = await buildPackagePdf(sel, c.number, r.rel_number, invPdf);
@@ -237,7 +237,7 @@ export default function InvoicePackage() {
         if (d.rows.length === 0) continue;
         const invPdf = await buildInvoicePdfBytes({
           org: org || ({} as Org), cNumber: contract.number, relNum: r.rel_number, workOrder: r.ticket || "",
-          dev: r.location || d.dev, number: `${contract.number}-${r.rel_number}`,
+          dev: r.location || d.dev, number: invoiceNumberOf(contract.number, r.rel_number),
           date: r.invoice_sent || today, rows: d.rows,
         });
         files[`package_${contract.number}_rel${r.rel_number}.pdf`] = await buildPackagePdf(sel, contract.number, r.rel_number, invPdf);
@@ -281,7 +281,7 @@ export default function InvoicePackage() {
         if (d.rows.length === 0) continue;
         const bytes = await buildInvoiceBytes({
           org: org || ({} as Org), cNumber: contract.number, relNum: r.rel_number, workOrder: r.ticket || "",
-          dev: r.location || d.dev, number: `${contract.number}-${r.rel_number}`,
+          dev: r.location || d.dev, number: invoiceNumberOf(contract.number, r.rel_number),
           date: r.invoice_sent || today, rows: d.rows,
         });
         files[`invoice_${contract.number}_rel${r.rel_number}.xlsx`] = bytes;

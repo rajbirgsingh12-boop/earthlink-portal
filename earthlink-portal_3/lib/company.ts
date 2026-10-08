@@ -10,6 +10,9 @@ export const COMPANY = {
   zip: "11418",
   phone: "(917) 796-0479",
   phoneHref: "+19177960479",
+  // the number printed on every NYCHA invoice: the owner's father's, by the
+  // owner's word, whatever the letterhead in Settings says
+  invoicePhone: "(917) 509-6427",
   email: "info@earthlink-gc.com",
   site: "www.earthlink-gc.com",
   // the letterhead block, exactly as the owner's Word template prints it

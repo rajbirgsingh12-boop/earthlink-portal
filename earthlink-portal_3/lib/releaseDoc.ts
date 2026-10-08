@@ -133,7 +133,7 @@ async function buildInvoiceWb(a: InvoiceArgs) {
   withV("E5", `INVOICE #: ${a.number}`);
   withV("E8", `VENDOR NAME:  ${(a.org.company || COMPANY.legalName).toUpperCase()}`);
   withV("E10", `ADDRESS: ${[a.org.address1, a.org.address2].filter(Boolean).join(" ").toUpperCase()}`);
-  withV("E13", `PHONE # ${a.org.phone || COMPANY.phone}`);
+  withV("E13", `PHONE # ${COMPANY.invoicePhone}`);
   withV("H13", `FAX # ${COMPANY.fax}`);
   withV("E15", asNum(a.cNumber));
   withV("G15", asNum(a.relNum));

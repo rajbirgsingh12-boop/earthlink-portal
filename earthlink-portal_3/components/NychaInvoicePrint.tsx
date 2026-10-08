@@ -59,7 +59,7 @@ export default function NychaInvoicePrint(p: Props) {
                 <div className="text-[15px] font-bold">FROM:</div>
                 <div>VENDOR NAME:&nbsp; {(p.org.company || COMPANY.legalName).toUpperCase()}</div>
                 <div>ADDRESS: {[p.org.address1, p.org.address2].filter(Boolean).join(" ").toUpperCase()}</div>
-                <div className="mt-1 flex justify-between"><span>PHONE # {p.org.phone || COMPANY.phone}</span><span className="pr-1 font-bold">FAX # {COMPANY.fax}</span></div>
+                <div className="mt-1 flex justify-between"><span>PHONE # {COMPANY.invoicePhone}</span><span className="pr-1 font-bold">FAX # {COMPANY.fax}</span></div>
               </div>
               <div className="flex border-y border-ink">
                 <div className="w-2/5 px-2 py-1">CONTRACT/ORDER#<div className="text-[16px] font-bold">{p.contractNumber || " "}</div></div>

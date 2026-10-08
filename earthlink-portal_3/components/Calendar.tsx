@@ -193,9 +193,15 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
   const cellMotion = "transition-[background-color,outline-color] duration-100";
   // a grid is drawn fresh (and fades in) when the period it shows changes, never on a tap inside it
   const gridKey = `${view}:${view === "month" ? monthOf(anchor) : view === "week" ? weekStart(anchor) : anchor}`;
+  // which way the next grid slides: +1 from the next arrow, -1 from previous, 0 (a fade) for a view change or an outside anchor
+  const pending = useRef(0);
+  const [grid, setGrid] = useState({ key: gridKey, cls: "anim-fade" });
+  if (grid.key !== gridKey) setGrid({ key: gridKey, cls: pending.current > 0 ? "anim-slide-l" : pending.current < 0 ? "anim-slide-r" : "anim-fade" });
+  useEffect(() => { pending.current = 0; }, [gridKey]);
 
   // ---- navigation ----
   const step = (n: number) => {
+    pending.current = n;
     if (view === "month") { const [y, mo] = anchor.split("-").map(Number); const d = new Date(y, mo - 1 + n, 1); onAnchor(localISO(d)); }
     else onAnchor(addDays(anchor, view === "week" ? 7 * n : n));
   };
@@ -238,7 +244,7 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
     const need = Math.ceil((first.getDay() + new Date(y, mo, 0).getDate()) / 7) * 7;
     const cells = Array.from({ length: need }, (_, i) => addDays(start, i));
     return (
-      <div key={gridKey} className="anim-fade overflow-hidden rounded-sm border border-rule bg-white">
+      <div key={gridKey} className={`${grid.cls} overflow-hidden rounded-sm border border-rule bg-white`}>
         <div className="grid grid-cols-7 border-b border-rule bg-paper">
           {WEEKDAYS.map((d) => <div key={d} className="py-1.5 text-center font-display text-[11px] font-semibold uppercase tracking-[.15em] text-inksoft">{d}</div>)}
         </div>
@@ -280,7 +286,7 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
     const start = weekStart(anchor);
     const days = Array.from({ length: 7 }, (_, i) => addDays(start, i));
     return (
-      <div key={gridKey} ref={weekScroll} data-week-scroll className="anim-fade overflow-x-auto rounded-sm border border-rule bg-white">
+      <div key={gridKey} ref={weekScroll} data-week-scroll className={`${grid.cls} overflow-x-auto rounded-sm border border-rule bg-white`}>
         <div className="grid min-w-[700px] grid-cols-7">
           {days.map((iso, i) => {
             const evs = byDay[iso] || [];
@@ -306,7 +312,7 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
   const day = () => {
     const evs = byDay[anchor] || [];
     return (
-      <div key={gridKey} className="anim-fade rounded-sm border border-rule bg-white">
+      <div key={gridKey} className={`${grid.cls} rounded-sm border border-rule bg-white`}>
         {renderDay ? renderDay(anchor, evs) : (
           <div className="flex flex-col gap-1.5 p-2">
             {evs.map((e) => bar(e))}
@@ -321,7 +327,7 @@ export default function Calendar({ events, view, onView, anchor, onAnchor, selec
     <div ref={root}>
       {/* the bar: Today ‹ › · title · Month | Week | Day */}
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => { onAnchor(today); onSelect(today); }}>Today</button>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => { pending.current = today > anchor ? 1 : today < anchor ? -1 : 0; onAnchor(today); onSelect(today); }}>Today</button>
         <div className="flex">
           <button type="button" className="btn-icon rounded-r-none" aria-label={`Previous ${view}`} onClick={() => step(-1)}>‹</button>
           <button type="button" className="btn-icon -ml-[1.5px] rounded-l-none" aria-label={`Next ${view}`} onClick={() => step(1)}>›</button>

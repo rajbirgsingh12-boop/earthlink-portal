@@ -14,7 +14,7 @@ import { useLive } from "@/lib/useLive";
 import { sb } from "@/lib/supabase";
 import { freshProfile } from "@/lib/profile";
 import { askFileName } from "@/lib/format";
-import { scrollTo } from "@/lib/motion";
+import { scrollTo, stagger } from "@/lib/motion";
 import type { Org } from "@/lib/docs";
 import type { Contract, Profile, Role } from "@/lib/types";
 import { ROLE_LABEL, ROLE_OPTIONS } from "@/lib/roles";
@@ -654,12 +654,12 @@ export default function Settings() {
           )}
           <div className="mt-2 divide-y divide-rulesoft">
             {!empsLoaded && <SkeletonRows />}
-            {activeCrew.map((e) => {
+            {activeCrew.map((e, i) => {
               const buf = phoneBuf[e.id] ?? prettyPhone(e.phone || "");
               // one row per worker: name and classification, the phone box, the language switch, the row menu
               // (on a phone the menu sits by the name and the phone box and switch share the second line)
               return (
-                <div key={e.id} className="anim-row flex flex-wrap items-center gap-2 p-3 md:flex-nowrap">
+                <div key={e.id} className="anim-up flex flex-wrap items-center gap-2 p-3 md:flex-nowrap" style={stagger(i)}>
                   <div className="min-w-0 flex-1 basis-48 text-[14px]"><b>{e.name}</b>{e.trade ? <span className="ml-2 text-[12px] text-inksoft">{e.trade}</span> : null}</div>
                   <input className="field order-3 w-auto flex-1 basis-32 md:order-none md:w-44 md:flex-none" placeholder="Phone" aria-label={`Phone for ${e.name}`} inputMode="tel" readOnly={!canEditCrew}
                     value={buf} onChange={(ev) => setPhoneBuf((p) => ({ ...p, [e.id]: ev.target.value }))}
@@ -887,8 +887,8 @@ export default function Settings() {
               )}
             </div>
             {!peopleLoaded && <SkeletonRows />}
-            {people.map((p) => (
-              <div key={p.id} className="anim-row flex flex-wrap items-center gap-2 p-3 md:flex-nowrap">
+            {people.map((p, i) => (
+              <div key={p.id} className="anim-up flex flex-wrap items-center gap-2 p-3 md:flex-nowrap" style={stagger(i)}>
                 <div className="min-w-[180px] flex-1">
                   <input className="field text-sm font-medium" placeholder="Name" aria-label={`Name for ${p.email || p.name || "this account"}`}
                     value={nameBuf[p.id] ?? p.name ?? ""}

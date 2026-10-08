@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { sb } from "@/lib/supabase";
 import { fmt } from "@/lib/format";
@@ -9,16 +9,15 @@ import { canonTrade, checkLabor, aggregateLogged } from "@/lib/labor";
 import { useLive } from "@/lib/useLive";
 import { myProfile, useProfile } from "@/lib/profile";
 import { cached, cachedAt, remember, onCacheUser } from "@/lib/cache";
-import { useCountUp } from "@/lib/useCountUp";
+import PageHeader from "@/components/PageHeader";
 import Stamp from "@/components/Stamp";
 import type { Contract } from "@/lib/types";
-import "./home.css";
 
-// Home is the morning band: the day, the greeting, the three dollar figures that
-// need action, who is on the job today, then the everyday jobs and the three
-// attention cards. Not a PACT page: every role sees the NYCHA dollars it always
-// has, and nothing is read from pact_jobs. The band is this page's heading (the
-// one page without PageHeader); the tab title still comes from the layout.
+// Home is the morning board: the day and a hello under the title, the three
+// dollar figures that need action, who is on the job today, then the everyday
+// jobs and the three attention cards. Not a PACT page: every role sees the
+// NYCHA dollars it always has, and nothing is read from pact_jobs. Plain cards
+// in the site's own palette: the figures do the talking, nothing performs.
 
 interface Row {
   id: string; contract_id: string; rel_number: string; location: string; amount: number;
@@ -68,8 +67,8 @@ const fridayOf = (d: Date) => {
   return fri0;
 };
 const daysSince = (iso: string, d: Date) => Math.max(0, Math.floor((d.getTime() - new Date(iso + "T00:00:00").getTime()) / 86400000));
+const nb = (t: string) => t.replace(/ /g, "\u00A0");
 const sumHours = (es: { hours: number[] }[]) => es.reduce((s, e) => s + (e.hours || []).reduce((a, h) => a + (Number(h) || 0), 0), 0);
-const st = (i: number) => ({ "--i": i } as CSSProperties);
 
 // the raw rows become the view once, here, so the cache holds something small
 function build(raw: Raw, shorts: View["shorts"], now: Date): View {
@@ -119,10 +118,8 @@ function todayFacts(t: NonNullable<View["today"]>): { text: string; alert?: bool
   return out;
 }
 
-// a component, so the hook is not called inside a map
-const CountUp = ({ value }: { value: number }) => <>{fmt0(useCountUp(value))}</>;
-const Skel = ({ className }: { className: string }) => <span className={`skeleton-dark inline-block align-middle ${className}`} />;
-const chipCls = (t: Tone) => t === "alert" ? "bg-alert text-white" : t === "ok" ? "bg-ok text-white" : "bg-paper/10 text-paper";
+// the small word under a figure: red only when it needs a call, green when all is well
+const chipCls = (t: Tone) => t === "alert" ? "font-semibold text-alert" : t === "ok" ? "text-ok" : "text-inksoft";
 
 export default function Home() {
   const { hint, fresh } = useProfile();
@@ -311,63 +308,56 @@ export default function Home() {
   return (
     <div>
       {stale && <div className="busy-bar" aria-hidden />}
+      {/* the day's line wraps between its three parts, never inside one (the spaces inside are non-breaking) */}
+      <PageHeader title="Home" sub={now ? `${greeting}${first ? `, ${first}` : ""} · ${nb(dayLong)} · ${nb(`Week ending ${friShort}`)}` : "\u00A0"} />
 
-      {/* A: the band. Full bleed on a phone, a block in the container on a desk. The wrapper
-          staggers its children in; on a desk it is also the three-column grid */}
-      <section aria-label="Today" className="hero-band -mx-4 -mt-5 bg-logo-brown px-4 pb-3 pt-4 text-paper md:mx-0 md:mt-0 md:rounded-sm md:px-5 md:pb-3.5 md:pt-5">
-        <div className="anim-stagger md:grid md:grid-cols-3 md:gap-x-5">
-          <div style={st(0)} className="flex min-h-[14px] justify-between gap-3 text-[11px] font-semibold uppercase leading-[14px] tracking-[.2em] text-papersoft md:col-span-3">
-            {now ? <><span>{dayLong}</span><span className="shrink-0">Week ending {friShort}</span></> : <Skel className="h-[11px] w-40" />}
-          </div>
-          <h1 style={st(0)} className="mb-2.5 mt-1 font-display text-[clamp(27px,8.7vw,34px)] font-bold uppercase leading-none tracking-[.01em] md:col-span-3 md:mb-3.5 md:text-[40px]">
-            {now ? <>{greeting}{first && <>, <span className="text-papersoft">{first}</span></>}</> : <Skel className="h-[34px] w-64" />}
-          </h1>
-          {(NUMS ?? PLACEHOLDERS).map((n, i) => (
-            <Link key={n.label} href={n.href} style={st(i + 1)}
-              className={`flex min-h-[60px] items-center justify-between gap-3 py-1 active:bg-paper/10 md:block md:min-h-0 md:border-t-0 md:py-0.5 ${i > 0 ? "border-t border-paper/15 md:border-l md:pl-4" : ""}`}>
-              <span className="block min-w-0 flex-1">
-                <span className="block text-[11px] font-semibold uppercase leading-[1.3] tracking-[.14em] text-papersoft">{n.label}</span>
-                {!n.chip ? <Skel className="mt-1 h-[18px] w-24" />
-                  : <span key={n.chip.text} className={`anim-stamp mt-1 inline-block whitespace-nowrap rounded-[2px] px-1.5 font-mono text-[11px] font-semibold leading-[18px] tracking-[.04em] ${chipCls(n.chip.tone)}`}>{n.chip.text}</span>}
-              </span>
-              {n.value === null ? <span className="skeleton-dark block h-8 w-[8.2ch] shrink-0 font-mono text-[32px] md:mt-2 md:h-10 md:text-[40px]" />
-                : <span className="anim-fade min-w-[8.2ch] shrink-0 text-right font-mono text-[32px] font-semibold leading-none tracking-[-.02em] tabular-nums md:mt-2 md:block md:text-left md:text-[40px]"><CountUp value={n.value} /></span>}
-              <span aria-hidden className="-ml-1 shrink-0 text-lg text-papersoft max-[359px]:hidden md:hidden">→</span>
-            </Link>
-          ))}
-          <div style={st(4)} className="mt-1.5 flex flex-wrap items-center justify-between gap-x-4 border-t border-paper/15 pt-1 text-[12px] leading-snug text-papersoft md:col-span-3 md:mt-2.5">
-            {role !== "foreman" && (view === null || view.today) && (
-              <Link href={todayHref} className="inline-flex min-h-[44px] items-center text-paper">
-                <b className="mr-2 text-[11px] font-semibold uppercase tracking-[.14em] text-papersoft">Today</b>
-                {!view ? <Skel className="h-3 w-[150px]" />
-                  : <span>{facts.map((f, i) => <span key={i}>{i > 0 && " · "}<span className={`whitespace-nowrap ${f.alert ? "font-semibold text-[#F0A49E]" : ""}`}>{f.text}</span></span>)} →</span>}
-              </Link>
-            )}
-            <span className="pb-1.5">
-              {!view ? <Skel className="h-3 w-[210px]" />
-                : <>{plural(view.contractsN, "contract")} · <span className="font-mono text-paper">{fmt0(view.tot)}</span> released · {view.weekHours ? <><span className="font-mono text-paper">{Math.round(view.weekHours)}</span> h logged this week</> : "no hours yet this week"}</>}
+      {/* A: the three figures that need action, one tap each to the page where they are fixed */}
+      <div className="card md:grid md:grid-cols-3">
+        {(NUMS ?? PLACEHOLDERS).map((n, i) => (
+          <Link key={n.label} href={n.href} className={`row-btn flex min-h-[56px] items-center justify-between gap-3 px-3.5 py-2 ${i > 0 ? "border-t border-rulesoft md:border-l md:border-t-0" : ""}`}>
+            <span className="block min-w-0 flex-1">
+              <span className="block text-[11px] font-semibold uppercase tracking-[.14em] text-inksoft">{n.label}</span>
+              {!n.chip ? <span className="skeleton mt-1 block h-[14px] w-24" />
+                : <span key={n.chip.text} className={`mt-0.5 block truncate font-mono text-[11px] tracking-wide ${chipCls(n.chip.tone)}`}>{n.chip.text}</span>}
             </span>
-          </div>
-        </div>
-      </section>
+            {n.value === null ? <span className="skeleton block h-6 w-[7ch] shrink-0" />
+              : <span className="shrink-0 font-mono text-[20px] font-semibold leading-none tabular-nums">{fmt0(n.value)}</span>}
+          </Link>
+        ))}
+      </div>
 
-      {/* B: the nudge, only on the days it applies */}
+      {/* the day's line and the quiet facts */}
+      <div className="mt-1 flex flex-wrap items-center justify-between gap-x-4 text-[12px] text-inksoft">
+        {role !== "foreman" && (view === null || view.today) && (
+          <Link href={todayHref} className="inline-flex min-h-[44px] items-center">
+            <b className="mr-2 text-[11px] font-semibold uppercase tracking-[.14em]">Today</b>
+            {!view ? <span className="skeleton inline-block h-3 w-[150px]" />
+              : <span>{facts.map((f, i) => <span key={i}>{i > 0 && " · "}<span className={`whitespace-nowrap ${f.alert ? "font-semibold text-alert" : ""}`}>{f.text}</span></span>)} →</span>}
+          </Link>
+        )}
+        <span className="py-2">
+          {!view ? <span className="skeleton inline-block h-3 w-[210px] align-middle" />
+            : <>{plural(view.contractsN, "contract")} · <span className="font-mono">{fmt0(view.tot)}</span> released · {view.weekHours ? <><span className="font-mono">{Math.round(view.weekHours)}</span> h logged this week</> : "no hours yet this week"}</>}
+        </span>
+      </div>
+
+      {/* the nudge, only on the days it applies */}
       {payrollNudge && (
         <Link href="/payroll" className="anim-fade card mt-3 flex min-h-[52px] items-center gap-2.5 border-alert p-3 text-[14px] transition-shadow hover:shadow">
           <span className="text-alert">⚠</span><span><b>No hours entered for this week yet.</b> Tap here, then Make payroll, and enter the hours before Friday. →</span>
         </Link>
       )}
 
-      {/* C: the four everyday jobs: static, never wait on data. Press and hover come from the kit alone */}
-      <div className="anim-stagger mt-3 grid grid-cols-2 gap-2.5 md:grid-cols-4">
+      {/* B: the four everyday jobs: static, never wait on data. Press and hover come from the kit alone */}
+      <div className="mt-3 grid grid-cols-2 gap-2.5 md:grid-cols-4">
         {LAUNCHERS.map(([label, href], i) => (
-          <Link key={href} href={href} style={st(i)} className={`btn group min-h-[56px] justify-between px-3.5 text-left max-[359px]:px-3 ${i === 0 ? "btn-primary" : ""}`}>
-            <span>{label}</span><span aria-hidden className={`text-lg transition-transform duration-[120ms] max-[359px]:hidden md:group-hover:translate-x-0.5 ${i === 0 ? "text-white" : "text-work"}`}>→</span>
+          <Link key={href} href={href} className={`btn min-h-[56px] justify-between px-3.5 text-left max-[359px]:px-3 ${i === 0 ? "btn-primary" : ""}`}>
+            <span>{label}</span><span aria-hidden className={`text-lg max-[359px]:hidden ${i === 0 ? "text-white" : "text-work"}`}>→</span>
           </Link>
         ))}
       </div>
 
-      {/* D: the attention cards */}
+      {/* C: the attention cards */}
       {!view ? (
         /* the cards' shape, shimmering: no text flash, no layout jump */
         <div role="status" aria-busy="true" aria-label="Loading" className="mt-3.5 grid gap-3 md:grid-cols-3">
@@ -381,8 +371,8 @@ export default function Home() {
           ))}
         </div>
       ) : (
-        <div className="anim-fade anim-stagger mt-3.5 grid gap-3 md:grid-cols-3">
-          <div className="card p-3.5" style={st(0)}>
+        <div className="anim-fade mt-3.5 grid gap-3 md:grid-cols-3">
+          <div className="card p-3.5">
             <div className={headCls}>
               <div className={titleCls}>Chase these first</div>
               <Link href="/package" className="btn-link text-inksoft">Invoice Package →</Link>
@@ -390,7 +380,7 @@ export default function Home() {
             {view.staleN > 0 && <div className="text-[12px] text-inksoft">{view.staleN} over 45 days: worth a call.</div>}
             {view.oldest.length > 0 && <>
               <div className="my-1 flex h-2 gap-[2px] overflow-hidden rounded-[2px]">
-                {buckets.filter((b) => b.sum > 0).map((b) => <b key={b.k} className={`anim-grow-x block ${b.cls}`} style={{ width: `${b.pct}%` }} />)}
+                {buckets.filter((b) => b.sum > 0).map((b) => <b key={b.k} className={`block ${b.cls}`} style={{ width: `${b.pct}%` }} />)}
               </div>
               <div className="mb-1 grid grid-cols-4 text-[11px] text-inksoft">
                 {buckets.map((b) => <span key={b.k}>{b.k}<br /><span className="font-mono">{fmtShort(b.sum)}</span></span>)}
@@ -409,7 +399,7 @@ export default function Home() {
             {view.notInvN > 0 && <div className={footCls}>{view.notInvN} unpaid release{view.notInvN === 1 ? "" : "s"} not invoiced yet · {fmt(view.notInvSum)}</div>}
           </div>
 
-          <div className="card p-3.5" style={st(1)}>
+          <div className="card p-3.5">
             <div className={headCls}>
               <div className={titleCls}>Walk sheets not delivered</div>
               <Link href="/proposals" className="btn-link text-inksoft">{WALK_LABEL} →</Link>
@@ -424,7 +414,7 @@ export default function Home() {
             {view.walksN > 5 && <div className={footCls}>+{view.walksN - 5} more drafts</div>}
           </div>
 
-          <div className="card p-3.5" style={st(2)}>
+          <div className="card p-3.5">
             <div className={headCls}>
               <div className={titleCls}>Payroll short</div>
               <Link href="/payroll" className="btn-link text-inksoft">Payroll →</Link>

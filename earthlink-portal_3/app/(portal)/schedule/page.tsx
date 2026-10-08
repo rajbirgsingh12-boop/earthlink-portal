@@ -9,7 +9,7 @@ import { sb } from "@/lib/supabase";
 import { useProfile } from "@/lib/profile";
 import { cached, onCacheUser, remember } from "@/lib/cache";
 import { prettyDate, addDays, localISO } from "@/lib/docs";
-import { scrollTo } from "@/lib/motion";
+import { scrollTo, stagger } from "@/lib/motion";
 import Stamp from "@/components/Stamp";
 import PageHeader from "@/components/PageHeader";
 import Modal from "@/components/Modal";
@@ -458,13 +458,13 @@ export default function Schedule() {
                 onBlur={() => canEdit && saveAddr(rel.id)} />
               {canEdit && <button type="button" className="btn btn-ghost shrink-0 px-3" onClick={() => openMap(rel.id)}>Map</button>}
             </div>
-            {assigned.map((row) => {
+            {assigned.map((row, i) => {
               const emp = emps.find((e) => e.id === row.employee_id);
               if (!emp) return null;
               const ok = !!cleanPhone(emp.phone || "");
               const first = emp.name.split(" ")[0];
               return (
-                <div key={row.id} className="anim-row flex flex-wrap items-center gap-2 border-t border-rulesoft py-2 first:border-t-0">
+                <div key={row.id} className="anim-up flex flex-wrap items-center gap-2 border-t border-rulesoft py-2 first:border-t-0" style={stagger(i)}>
                   <b className="text-[14px]">{emp.name}</b>
                   <LangToggle value={langOf(emp.lang)} disabled={!canEdit} name={`Language for ${emp.name}`} onChange={async (l: Lang) => {
                     const bad = await saveWorkerLang(sb(), emp.id, l);

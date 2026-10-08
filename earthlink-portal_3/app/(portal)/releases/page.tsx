@@ -29,7 +29,7 @@ import ActionMenu, { RowActions } from "@/components/ActionMenu";
 import PageHeader from "@/components/PageHeader";
 import Modal from "@/components/Modal";
 import Toast, { useFlash } from "@/components/Toast";
-import { scrollTo } from "@/lib/motion";
+import { scrollTo, stagger } from "@/lib/motion";
 
 type Filter = "all" | "chase" | "payroll" | "received" | "canceled" | "hours";
 // the one line a person sees when a write fails; the technical reason goes to the console
@@ -2402,10 +2402,10 @@ export default function Releases() {
         </div>
       ))}
       {filter !== "hours" && <div className="card divide-y divide-rulesoft">
-        {loaded && shown.map((r) => {
+        {loaded && shown.map((r, i) => {
           const att = (r.attachments || []).length;
           return (
-            <div key={r.id} className={`anim-fade flex items-start gap-3 p-3 ${r.canceled ? "opacity-50" : ""}`}>
+            <div key={r.id} className={`anim-up flex items-start gap-3 p-3 ${r.canceled ? "opacity-50" : ""}`} style={stagger(i)}>
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="font-mono text-[13px] font-semibold">#{r.rel_number}</span>

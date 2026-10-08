@@ -6,6 +6,7 @@ import { sb } from "@/lib/supabase";
 import { myProfile, useProfile, clearMyProfile } from "@/lib/profile";
 import { ROLE_LABEL } from "@/lib/roles";
 import type { Profile } from "@/lib/types";
+import { useTabIndicator } from "@/lib/motion";
 
 // The nav is split by line of business: everything NYCHA lives under one menu,
 // everything PACT under another; the day-to-day tabs (Schedule, Payroll) stay
@@ -19,6 +20,9 @@ const TITLES: [string, string][] = [
   ["/pact/schedule", "PACT Schedule"], ["/pact", "PACT Billing"], ["/schedule", "Schedule"],
   ["/payroll/certified", "Certified payroll"], ["/payroll", "Payroll"], ["/settings", "Settings"], ["/admin", "Settings"], ["/help", "Help"],
 ];
+// the nav's order, left to right: a page further right slides in from the right, one further left from the left
+const NAV_ORDER = ["/home", "/releases", "/items", "/proposals", "/package", "/pact", "/pact/schedule", "/schedule", "/payroll", "/payroll/certified", "/settings", "/help"];
+const navIndex = (p: string) => { let best = -1; NAV_ORDER.forEach((h, i) => { if ((p === h || p.startsWith(h + "/")) && (best < 0 || h.length > NAV_ORDER[best].length)) best = i; }); return best; };
 
 export default function PortalLayout({ children }: { children: React.ReactNode }) {
   // the remembered profile paints the right tabs the moment the page is up; the
@@ -36,6 +40,20 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
   const touchOpen = useRef(false);
   const path = usePathname();
   const router = useRouter();
+  // which way the page slides, decided once per route change (a re-render must never recompute it: a changed
+  // animation name restarts the animation). A Back/Forward swipe (popstate) gets the plain fade so it never
+  // fights the browser's own swipe.
+  const viaHistory = useRef(false);
+  useEffect(() => { const h = () => { viaHistory.current = true; }; window.addEventListener("popstate", h); return () => window.removeEventListener("popstate", h); }, []);
+  useEffect(() => { viaHistory.current = false; }, [path]);
+  const [nav, setNav] = useState({ path, cls: "page-enter" });
+  if (nav.path !== path) {
+    const a = navIndex(nav.path), b = navIndex(path);
+    setNav({ path, cls: viaHistory.current || a < 0 || b < 0 || a === b ? "page-enter" : b > a ? "page-fwd" : "page-back" });
+  }
+  // the lit bar under the tabs is one span that glides between them
+  const strip = useRef<HTMLDivElement>(null);
+  const ind = useTabIndicator(strip, [path, profile]);
   // a page is under a tab when it is that route or one beneath it (Certified payroll lights Payroll)
   const under = (h: string) => path === h || (h !== "/home" && path.startsWith(h + "/"));
   useEffect(() => {
@@ -122,7 +140,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
   const cancelClose = () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } };
   const closeSoon = (ms: number) => { cancelClose(); closeTimer.current = setTimeout(() => { closeTimer.current = null; setMenu(null); }, ms); };
   const tabCls = (active: boolean) =>
-    `whitespace-nowrap border-b-[3px] px-4 py-3 font-display text-[15px] font-semibold uppercase tracking-wider transition-colors duration-150 ${active ? "border-work text-work" : "border-transparent text-inksoft hover:text-ink active:text-ink"}`;
+    `whitespace-nowrap border-b-[3px] border-transparent px-4 py-3 font-display text-[15px] font-semibold uppercase tracking-wider transition-colors duration-150 ${active ? "text-work" : "text-inksoft hover:text-ink active:text-ink"}`;
   const openGroup = entries.find((e): e is ["group", Group] => e[0] === "group" && e[1].key === menu)?.[1] || null;
   // in an open panel, the lit row is the most specific route the page is under
   const lit = openGroup ? openGroup.items.filter(([h]) => under(h)).sort((a, b) => b[0].length - a[0].length)[0]?.[0] : undefined;
@@ -155,7 +173,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
         onPointerEnter={cancelClose}
         onPointerLeave={(ev) => { if (ev.pointerType === "mouse" && menu) closeSoon(150); }}>
         <div className="scroll-fade-card overflow-x-auto">
-          <div className="mx-auto flex max-w-5xl">
+          <div ref={strip} className="relative mx-auto flex max-w-5xl">
             {profile === null
               /* the tabs depend on the role: placeholders hold the strip's height until it is known */
               ? [0, 1, 2, 3, 4].map((i) => <div key={i} aria-hidden className="skeleton mx-4 my-4 h-4 w-16" />)
@@ -164,7 +182,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
                   const [, href, label] = e;
                   // hovering a plain tab closes any open menu, a beat later
                   return (
-                    <Link key={href} href={href} className={tabCls(under(href))}
+                    <Link key={href} href={href} data-tab className={tabCls(under(href))}
                       onPointerEnter={(ev) => { if (ev.pointerType === "mouse" && menu) closeSoon(120); }}>
                       {label}
                     </Link>
@@ -174,7 +192,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
                 // a tap (phones have no hover) toggles the menu; hover opens it, and
                 // the click a mouse makes on the way keeps what hovering opened
                 return (
-                  <button key={g.key} type="button" className={`${tabCls(groupActive(g))} inline-flex items-center gap-1.5 active:bg-paper`}
+                  <button key={g.key} type="button" data-tab className={`${tabCls(groupActive(g))} inline-flex items-center gap-1.5 active:bg-paper`}
                     aria-expanded={menu === g.key} aria-haspopup="menu"
                     onPointerEnter={(ev) => { if (ev.pointerType === "mouse") { cancelClose(); openAt(g.key, ev.currentTarget); } }}
                     onPointerDown={(ev) => { byHover.current = ev.pointerType === "mouse" && menu === g.key; touchOpen.current = ev.pointerType !== "mouse"; }}
@@ -187,6 +205,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
                   </button>
                 );
               })}
+            {ind.on && <span aria-hidden className="tab-ind" style={{ transform: `translateX(${ind.x}px) scaleX(${ind.w})` }} />}
           </div>
         </div>
         {/* opened by a finger: the tap that closes it lands here, so a field or a row under it never fires */}
@@ -208,7 +227,8 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
           </div>
         )}
       </div>
-      <div key={path} id="main" className="page-enter mx-auto max-w-5xl px-4 pb-24 pt-5">{children}</div>
+      {/* no will-change and no fill mode here: either would make this wrapper the containing block of every fixed dialog */}
+      <div key={path} id="main" className={`${nav.cls} mx-auto max-w-5xl px-4 pb-24 pt-5`}>{children}</div>
     </div>
   );
 }

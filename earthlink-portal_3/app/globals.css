@@ -29,8 +29,11 @@ body { padding-bottom: env(safe-area-inset-bottom); }
 :root {
   --t-fast: 120ms;  /* menus, popovers, pressed states, chips, carets */
   --t-base: 180ms;  /* modals, panels, disclosures, rows, toasts, bottom bars */
-  --t-slow: 240ms;  /* a page arriving */
+  --t-slow: 240ms;  /* a page arriving, a dialog settling */
+  --t-page: 200ms;  /* a page sliding in by nav order, a calendar paging */
+  --stagger: 30ms;  /* the gap between one row arriving and the next (lib/motion.ts caps it at 8 steps) */
   --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --ease-spring: cubic-bezier(0.22, 1.2, 0.36, 1); /* lands with a small overshoot: the tab glider, a dialog, a stamp, a button letting go */
   --bottom-bar: 0px; /* set to the height of a fixed bottom bar while one is mounted; the toast lifts above it */
   --kb: 0px;         /* how much of the screen the phone's keyboard covers while a sheet is up (Modal keeps it current) */
   --color-work: #10728C;
@@ -38,46 +41,61 @@ body { padding-bottom: env(safe-area-inset-bottom); }
 }
 @media screen {
   @keyframes pagein  { from { opacity: 0; transform: translateY(4px) } }
+  @keyframes k-page-fwd  { from { opacity: 0; transform: translateX(16px) } }
+  @keyframes k-page-back { from { opacity: 0; transform: translateX(-16px) } }
+  @keyframes k-up    { from { opacity: 0; transform: translateY(8px) } }
+  @keyframes k-menu  { from { opacity: 0; transform: scale(0.94) } }
+  @keyframes k-modal { from { opacity: 0; transform: scale(0.96) translateY(8px) } }
+  @keyframes k-slide-l { from { opacity: 0; transform: translateX(24px) } }
+  @keyframes k-slide-r { from { opacity: 0; transform: translateX(-24px) } }
   @keyframes k-fade  { from { opacity: 0 } }
   @keyframes k-pop   { from { opacity: 0; transform: scale(0.98) } }
   @keyframes k-rise  { from { opacity: 0; transform: translateY(-4px) } }
   @keyframes k-sheet { from { transform: translateY(100%) } }
-  @keyframes k-toast { from { opacity: 0; transform: translate(-50%, 8px) } to { opacity: 1; transform: translate(-50%, 0) } }
-  @keyframes k-stamp { from { transform: scale(1.12) } }
+  @keyframes k-toast { from { opacity: 0; transform: translate(-50%, 16px) scale(0.96) } to { opacity: 1; transform: translate(-50%, 0) scale(1) } }
+  @keyframes k-stamp { from { opacity: 0; transform: scale(0.6) } }
   @keyframes k-busy  { from { background-position: -40% 0 } to { background-position: 140% 0 } }
   @keyframes k-spin  { to { transform: rotate(360deg) } }
-  .page-enter { animation: pagein var(--t-slow) var(--ease-out); }
+  .page-enter { animation: pagein var(--t-slow) var(--ease-out); }      /* first paint, a reload, a Back/Forward swipe */
+  .page-fwd   { animation: k-page-fwd var(--t-page) var(--ease-out); }  /* the new page is further right in the nav */
+  .page-back  { animation: k-page-back var(--t-page) var(--ease-out); } /* further left */
   .anim-fade  { animation: k-fade var(--t-base) var(--ease-out); }   /* skeleton -> content, calendar page/view change */
   .anim-pop   { animation: k-pop var(--t-base) var(--ease-out); }    /* modal panel */
-  .anim-menu  { animation: k-rise var(--t-fast) var(--ease-out); transform-origin: top; } /* .menu, .popover, nav group panel, ContractPicker */
+  .anim-menu  { animation: k-menu var(--t-fast) var(--ease-out); transform-origin: top; } /* .menu, nav group panel: scales out of its anchor corner (the caller sets origin-top-* / origin-bottom-*) */
+  .anim-up    { animation: k-up var(--t-base) var(--ease-out) backwards; animation-delay: calc(var(--i, 0) * var(--stagger)); } /* rows and cards arriving in order: style={stagger(i)}; never on a <tr> */
+  .anim-slide-l { animation: k-slide-l var(--t-page) var(--ease-out); } /* the calendar paged forward */
+  .anim-slide-r { animation: k-slide-r var(--t-page) var(--ease-out); } /* the calendar paged back */
   .anim-open  { animation: k-rise var(--t-base) var(--ease-out); }   /* disclosure bodies, inline panels and forms */
   .anim-row   { animation: k-rise var(--t-base) var(--ease-out); }   /* a row that was just added */
   .anim-sheet { animation: k-sheet var(--t-base) var(--ease-out); }  /* SaveBar, walk-sheet total bar */
-  .anim-stamp { animation: k-stamp var(--t-fast) var(--ease-out); }  /* a stamp whose label just changed */
+  .anim-stamp { animation: k-stamp 260ms var(--ease-spring); }      /* a stamp whose words just changed (never on first paint) */
 }
 /* the one overlay every dialog and print preview sits in */
 .overlay { @apply fixed inset-0 z-50 overflow-y-auto bg-ink/50 px-2 py-5; }
 @media screen {
   .overlay { animation: k-fade var(--t-fast) var(--ease-out); }
-  .overlay > .panel { animation: k-pop var(--t-base) var(--ease-out); }
+  .overlay > .panel { animation: k-modal var(--t-slow) var(--ease-spring); } /* rises and settles with a slight overshoot */
 }
 /* on a phone a dialog is a sheet from the bottom, clear of the home indicator (mt-auto, not justify-end, so a tall
    panel still fits). The sheet is its own scroller: the title and the footer stay put, the body scrolls between
    them, and the whole thing is sized to what the keyboard leaves visible (--kb), so the primary is always in reach */
 @media screen and (max-width: 640px) {
   .overlay.sheet { @apply flex flex-col p-0; padding-bottom: var(--kb, 0px); }
-  .overlay.sheet > .panel { @apply mt-auto w-full max-w-none rounded-b-none; padding-bottom: env(safe-area-inset-bottom); animation-name: k-sheet; display: flex; flex-direction: column; max-height: calc(100dvh - var(--kb, 0px)); }
+  .overlay.sheet > .panel { @apply mt-auto w-full max-w-none rounded-b-none; padding-bottom: env(safe-area-inset-bottom); animation-name: k-sheet; animation-timing-function: var(--ease-out); display: flex; flex-direction: column; max-height: calc(100dvh - var(--kb, 0px)); }
   .overlay.sheet > .panel > .panel-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 }
 /* the flash: one place, above any bottom bar, clear of the home indicator */
 .toast { @apply fixed left-1/2 z-[70] max-w-[calc(100vw-2rem)] rounded-sm bg-ink px-4 py-2.5 text-[14px] text-paper shadow-lg; bottom: calc(1.25rem + env(safe-area-inset-bottom) + var(--bottom-bar)); transform: translateX(-50%); }
-@media screen { .toast { animation: k-toast var(--t-base) var(--ease-out) both; } }
+@media screen { .toast { animation: k-toast 260ms var(--ease-spring) both; } } /* slides up and settles */
 /* a thin bar at the very top while the page is busy */
 .busy-bar { @apply fixed inset-x-0 top-0 z-[65] h-[3px]; background: linear-gradient(90deg, transparent, theme('colors.work'), transparent) 0 0 / 40% 100% no-repeat; }
 @media screen { .busy-bar { animation: k-busy 1s linear infinite; } }
+/* the nav's one lit bar: it glides between tabs (useTabIndicator in lib/motion.ts sets translateX(x) scaleX(w) on it) */
+.tab-ind { position: absolute; left: 0; bottom: 0; height: 3px; width: 1px; background: var(--color-work); transform-origin: 0 50%; pointer-events: none; will-change: transform; }
+@media screen { .tab-ind { transition: transform 260ms var(--ease-spring); } }
 /* popovers (typeahead results, pickers) share the menu's look and arrival */
 .popover { @apply card absolute inset-x-0 top-full z-20 mt-1 overflow-hidden shadow-lg; }
-@media screen { .popover { animation: k-rise var(--t-fast) var(--ease-out); } }
+@media screen { .popover { animation: k-menu var(--t-fast) var(--ease-out); transform-origin: top; } }
 /* a full-width row that is a button: feedback on tap, not just hover (hover only where a pointer hovers, so a tapped row lets go) */
 .row-btn { @apply block w-full min-h-[44px] text-left transition-colors; }
 @media (hover: hover) and (pointer: fine) { .row-btn:hover { @apply bg-paper; } }
@@ -106,7 +124,7 @@ body { padding-bottom: env(safe-area-inset-bottom); }
 .scroll-fade-card { background: linear-gradient(90deg, #FCFAF5 30%, rgba(252,250,245,0)) left / 24px 100%, linear-gradient(270deg, #FCFAF5 30%, rgba(252,250,245,0)) right / 24px 100%; background-repeat: no-repeat; background-attachment: local, local; }
 /* reduced motion: one global switch (covers every transition utility and the smooth scrolls) */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-delay: 0s !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
 /* while data loads, shimmering placeholders hold the layout steady */
 .skeleton { position: relative; overflow: hidden; border-radius: 2px; @apply bg-rulesoft; }
@@ -141,10 +159,12 @@ body { padding-bottom: env(safe-area-inset-bottom); }
 .stamp { @apply inline-block border-2 rounded-sm px-2.5 py-0.5 font-display uppercase tracking-widest text-[12px] font-semibold; }
 /* ---- buttons: one kit. Every button is 44px tall, pressed states are its own, hover is only for fine pointers ---- */
 .btn { @apply relative inline-flex min-h-[44px] items-center justify-center gap-1.5 cursor-pointer select-none rounded-sm border-[1.5px] border-ink bg-white px-4 py-2.5 font-display text-[15px] font-semibold uppercase tracking-wider leading-none text-ink; --btn-fg: theme('colors.ink'); box-shadow: 0 1px 2px rgb(43 35 27 / 0.10), inset 0 1px 0 rgb(255 255 255 / 0.7); }
-.btn, .btn-icon, .btn-stamp { transition: box-shadow var(--t-fast), background-color var(--t-fast), border-color var(--t-fast), color var(--t-fast), filter var(--t-fast), transform 60ms; }
+.btn, .btn-icon, .btn-stamp { transition: box-shadow var(--t-fast), background-color var(--t-fast), border-color var(--t-fast), color var(--t-fast), filter var(--t-fast), transform 200ms var(--ease-spring); }
+/* pressed: a 50ms dip (1px down, 3% smaller), then a 200ms spring back up when the finger lets go */
+.btn:active, .btn-icon:active, .btn-stamp:active { transform: translateY(1px) scale(0.97); transition-duration: var(--t-fast), var(--t-fast), var(--t-fast), var(--t-fast), var(--t-fast), 50ms; }
 @media (hover: hover) and (pointer: fine) { .btn:hover { box-shadow: 0 2px 4px rgb(43 35 27 / 0.14), inset 0 1px 0 rgb(255 255 255 / 0.7); } }
-.btn:active { transform: translateY(1px); box-shadow: inset 0 2px 3px rgb(43 35 27 / 0.16); }
-.btn-stamp:active { transform: translateY(1px); filter: brightness(0.95); }
+.btn:active { box-shadow: inset 0 2px 3px rgb(43 35 27 / 0.16); }
+.btn-stamp:active { filter: brightness(0.95); }
 /* primary: the logo's ocean teal with a soft top light; white reads 4.95:1 at the lightest stop, 7.2:1 pressed */
 .btn-primary { --btn-fg: #fff; color: #fff; border-color: #0E6479; background: linear-gradient(180deg, #137A95 0%, #10728C 55%, #0E6A82 100%); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.22), 0 1px 2px rgb(43 35 27 / 0.20); }
 @media (hover: hover) and (pointer: fine) { .btn-primary:hover { filter: brightness(1.05); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.22), 0 2px 5px rgb(43 35 27 / 0.24); } }
@@ -162,7 +182,7 @@ body { padding-bottom: env(safe-area-inset-bottom); }
 .btn-lg { @apply min-h-[52px] px-5 text-[17px]; }
 /* icon buttons: 44x44; -quiet is the bare ⋯ on list rows */
 .btn-icon { @apply relative grid h-11 w-11 shrink-0 cursor-pointer select-none place-items-center rounded-sm border-[1.5px] border-ink bg-white text-ink; --btn-fg: theme('colors.ink'); box-shadow: 0 1px 2px rgb(43 35 27 / 0.10); }
-.btn-icon:active { transform: translateY(1px); box-shadow: inset 0 2px 3px rgb(43 35 27 / 0.16); }
+.btn-icon:active { box-shadow: inset 0 2px 3px rgb(43 35 27 / 0.16); }
 .btn-icon-quiet { @apply border-0 bg-transparent text-inksoft shadow-none; }
 @media (hover: hover) and (pointer: fine) { .btn-icon-quiet:hover { @apply bg-paper text-ink; } }
 .btn-icon-quiet:active { @apply bg-rulesoft/60 text-ink; box-shadow: none; }

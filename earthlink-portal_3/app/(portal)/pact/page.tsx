@@ -19,7 +19,7 @@ import MeasurePanel from "@/components/MeasurePanel";
 import WorkLines from "@/components/WorkLines";
 import Letterhead from "@/components/Letterhead";
 import Toast, { useFlash } from "@/components/Toast";
-import { scrollTo } from "@/lib/motion";
+import { scrollTo, stagger } from "@/lib/motion";
 import { applyMeasure } from "@/lib/measure";
 import { useLive } from "@/lib/useLive";
 import { findDupe, DUPE_COLS } from "@/lib/po";
@@ -1648,9 +1648,9 @@ export default function Pact() {
       ) : list.length === 0 ? (
         <div className="empty">{jobs.length === 0 ? "No POs yet. Upload a partner PO and the job builds itself from it." : `Nothing matches “${q.trim()}”. Try a PO number, a partner or a street.`}</div>
       ) : (
-      <div className="card anim-fade divide-y divide-rulesoft">
-        {list.map((j) => (
-          <div key={j.id} className={`card-pad ${openId === j.id ? "" : "transition-colors hover:bg-paper"} ${j.canceled ? "opacity-50" : ""}`} data-job-card={j.id}>
+      <div className="card divide-y divide-rulesoft">
+        {list.map((j, i) => (
+          <div key={j.id} className={`anim-up card-pad ${openId === j.id ? "" : "transition-colors hover:bg-paper"} ${j.canceled ? "opacity-50" : ""}`} style={stagger(i)} data-job-card={j.id}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <button type="button" className="flex min-w-0 flex-1 items-start gap-2 text-left" aria-expanded={openId === j.id} onClick={() => toggleOpen(j)}>
                 <span aria-hidden className={`mt-1 text-[11px] text-inksoft transition-transform duration-150 ${openId === j.id ? "rotate-90" : ""}`}>▸</span>

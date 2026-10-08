@@ -1,4 +1,5 @@
 "use client";
+import { stagger } from "@/lib/motion";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { matches } from "@/lib/search";
 import { cached, forget, onCacheUser, remember } from "@/lib/cache";
@@ -1216,8 +1217,8 @@ export default function Proposals() {
             return matches(listQ, p.number, p.job, p.client_name, p.development, p.address, p.apt, p.stairhall, p.release_number, c?.number);
           });
         // the whole row opens the sheet; its other actions sit behind the one ⋯
-        const row = (p: Proposal) => (
-          <div key={p.id} className="flex items-center gap-2 p-3">
+        const row = (p: Proposal, i: number) => (
+          <div key={p.id} className="anim-up flex items-center gap-2 p-3" style={stagger(i)}>
             <button type="button" className="row-btn -my-3 -ml-3 flex min-w-0 flex-1 items-center justify-between gap-2 py-3 pl-3 pr-1" onClick={() => openEditor(p)}>
               <div className="min-w-0">
                 <div className="text-[14px] font-semibold">
@@ -1275,7 +1276,7 @@ export default function Proposals() {
                     <div className="font-mono text-[12px] text-inksoft">{g.rows.length} · {fmt(g.rows.reduce((t, p) => t + (Number(p.total) || 0), 0))}</div>
                   </div>
                 )}
-                <div className="card divide-y divide-rulesoft">{g.rows.map(row)}</div>
+                <div className="card divide-y divide-rulesoft">{g.rows.map((p, i) => row(p, i))}</div>
               </div>
             ))}
             {listLoaded && groups.length === 0 && (

@@ -11,7 +11,7 @@ const SECTIONS: { icon?: string; title: string; lines: string[] }[] = [
   {
     title: "Home",
     lines: [
-      "The brown band at the top is today: the day, your name, and the three numbers that need action: Payment not received, Not invoiced yet, Payroll to do. Tap a number to go where you fix it. The Today line says who is on the job and who still needs a text.",
+      "Under the title: the day, a hello, and the three numbers that need action: Payment not received, Not invoiced yet, Payroll to do. Tap a number to go where you fix it. The Today line says who is on the job and who still needs a text.",
       "The four buttons under it are the everyday jobs: Enter today's hours, Fill out a walk sheet, Make an invoice, See the releases.",
       "The cards below show what needs attention: money to chase, walk sheets not delivered, and payroll that's short. Tap a row to open it.",
       "Each card opens the page where you fix it: Invoice Package for the money, Proposals for the walk sheets, Payroll for the hours.",

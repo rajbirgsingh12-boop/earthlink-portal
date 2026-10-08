@@ -1,4 +1,5 @@
 "use client";
+import { stagger } from "@/lib/motion";
 import { useEffect, useRef, useState } from "react";
 import { matches } from "@/lib/search";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the export
@@ -851,8 +852,8 @@ export default function Payroll() {
           // two weeks on the same dates is a mistake worth flagging on both rows
           const weCounts: Record<string, number> = {};
           weeks.forEach((w) => (weCounts[w.week_ending] = (weCounts[w.week_ending] || 0) + 1));
-          return weeks.map((w) => (
-            <div key={w.id} className="anim-fade flex items-center gap-2 pr-2">
+          return weeks.map((w, i) => (
+            <div key={w.id} className="anim-up flex items-center gap-2 pr-2" style={stagger(i)}>
               <button type="button" className="row-btn min-w-0 flex-1 p-3 transition-colors duration-150" onClick={() => openW(w)}>
                 <span className="flex flex-wrap items-center gap-2">
                   <span className="font-mono text-[14px] font-semibold">{weekRange(w.week_ending)}</span>

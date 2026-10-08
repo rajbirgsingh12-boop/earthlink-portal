@@ -1,6 +1,9 @@
 import type { Config } from "tailwindcss";
 const config: Config = {
   content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}"],
+  // a phone has no hover: without this, a tapped button keeps its hover look
+  // until the next tap somewhere else, which is the "stuck" feel
+  future: { hoverOnlyWhenSupported: true },
   theme: {
     extend: {
       colors: {

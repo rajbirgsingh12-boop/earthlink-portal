@@ -5,6 +5,7 @@
 // add up. Server-only: needs ANTHROPIC_API_KEY.
 import { z } from "zod";
 import { isoDate, type PactPoFields } from "./parsePactPo";
+import { splitPaperwork, taxRateOf, addsUp } from "./paperwork";
 
 export const PoSchema = z.object({
   po_number: z.string().describe("The purchase order number exactly as printed, digits and dashes only, no 'PO' prefix. Empty if none."),
@@ -24,8 +25,8 @@ export const PoSchema = z.object({
     unit_price: z.number(),
     property: z.string().describe("Property code column, if any."),
     unit: z.string().describe("Unit code column, if any."),
-  })).describe("The priced work rows of the table, one per row, with wrapped lines joined into the row they belong to."),
-  total: z.number().describe("The total printed on the PO. 0 if none."),
+  })).describe("The priced work rows of the table, one per row, with wrapped lines joined into the row they belong to. Work only: never a Sales Tax, Tax, Subtotal or Total line, even when the PO prints it inside the table."),
+  total: z.number().describe("The grand total printed on the PO (with its sales tax, when the PO adds tax). 0 if none."),
   warnings: z.array(z.string()).describe("Anything a person should double-check, in plain words: two apartments named, a total that doesn't add up, unreadable text. Empty when clean."),
 });
 export type SmartPo = z.infer<typeof PoSchema>;
@@ -37,6 +38,7 @@ export const SMART_PO_SYSTEM = `You read purchase orders (POs) that property-man
 - "Access date" / "Scheduled" is the day the work is set for. "Date Required" and "Date Ordered" are not. The access date is a date, never a work row.
 - The description is the "Description:" field plus its continuation lines, plus the work-row wording (which often repeats it, wrapped onto several lines) — joined into one plain sentence, without labels, dates, form headings or HPD ticket boilerplate stripped only if it is a label.
 - Money: read the rows and the total as printed. A PO priced at $1.00 (rows and total) is a placeholder — report 1 and do not invent prices. A "NOT APPROVED" stamp is normal for these partners; just report it.
+- Sales tax, subtotal, total and balance lines are never rows, even when the PO prints them inside its table: Earth Link's invoice adds the sales tax itself, under the total.
 - Never guess a field that is not on the page: leave it empty.`;
 
 export type SmartRead = { fields: PactPoFields & { taxPct?: number }; readBy: "claude" | "rules"; note?: string };
@@ -58,9 +60,11 @@ export function smartAgrees(s: SmartPo, text: string): string | null {
 // things worth a note, never a rejection
 export function smartNotes(s: SmartPo): string[] {
   const out: string[] = [];
-  const rowSum = s.rows.reduce((a, r) => a + cents(cents(r.unit_price) * (Number(r.qty) || 0)), 0);
-  const near = (a: number, b: number) => Math.abs(a - b) <= 0.05;
-  if (s.rows.length > 0 && s.total > 1 && !near(rowSum, s.total) && !near(cents(rowSum * 1.08875), s.total)) out.push("The rows don't add up to the PO's printed total: check the money on Billing");
+  // the work rows against the total: a Sales Tax row the read carried is the
+  // tax, not work, and a total with the PO's tax on it adds up
+  const split = splitPaperwork(s.rows);
+  const rate = taxRateOf(split.tax, split.workSum);
+  if (split.work.length > 0 && s.total > 1 && !addsUp(split.workSum, split.taxSum, s.total, rate)) out.push("The rows don't add up to the PO's printed total: check the money on Billing");
   if (s.rows.some((r) => r.qty < 0 || r.unit_price < 0)) out.push("A row has a negative quantity or price: check it");
   return out;
 }
@@ -69,11 +73,17 @@ export function smartNotes(s: SmartPo): string[] {
 // one, the rules fill whatever it left empty.
 export function mergeSmart(rules: PactPoFields & { taxPct?: number }, s: SmartPo): PactPoFields & { taxPct?: number } {
   const pick = (a: string, b: string) => (a && a.trim() ? a.trim() : b || "");
-  const rows = s.rows.length
-    ? s.rows.map((r) => ({ description: r.description.trim(), qty: Number(r.qty) || 0, unit_price: cents(r.unit_price), property: r.property || "", unit: r.unit || "", uom: r.uom || undefined }))
-    : rules.rows;
+  // A Sales Tax (or Subtotal, Total) row Claude reported from inside the PO's
+  // table is the PO's paperwork. It never becomes a work line: the invoice
+  // adds the tax once, under the total. What it charged tells the job its rate.
+  const all = s.rows.map((r) => ({ description: r.description.trim(), qty: Number(r.qty) || 0, unit_price: cents(r.unit_price), property: r.property || "", unit: r.unit || "", uom: r.uom || undefined }));
+  const split = splitPaperwork(all);
+  const rows = split.work.length ? split.work : rules.rows;
   const rowSum = rows.reduce((a, r) => a + cents(cents(r.unit_price) * (Number(r.qty) || 0)), 0);
-  const amount = s.total > 0 ? cents(s.total) : rules.amount || rowSum;
+  const ownRate = split.work.length ? taxRateOf(split.tax, rowSum) : undefined;
+  const taxPct = ownRate ?? rules.taxPct;
+  const taxRows = split.work.length ? split.taxSum : 0;
+  const amount = s.total > 0 ? cents(s.total) : rules.amount || cents(rowSum + taxRows);
   // a date in any shape Claude might write it — "2026-09-10", "9/10/2026"
   const accessDate = (/^\d{4}-\d{2}-\d{2}$/.test(s.access_date) ? s.access_date : "") || isoDate(s.access_date) || rules.accessDate || "";
   const warnings = [...new Set([...(rules.warnings || []), ...s.warnings.map((w) => w.trim()).filter(Boolean), ...smartNotes(s)])];
@@ -88,8 +98,9 @@ export function mergeSmart(rules: PactPoFields & { taxPct?: number }, s: SmartPo
     contact: pick(s.contact, rules.contact),
     desc: pick(s.description, rules.desc),
     rows, amount,
-    rowsAddUp: rows.length === 0 || amount <= 1 || Math.abs(rowSum - amount) < 0.02,
+    rowsAddUp: rows.length === 0 || amount <= 1 || addsUp(rowSum, taxRows, amount, taxPct),
     readable: true,
+    ...(taxPct !== undefined ? { taxPct } : {}),
     ...(accessDate ? { accessDate } : {}),
     ...(pick(s.po_status, rules.poStatus || "") ? { poStatus: pick(s.po_status, rules.poStatus || "").toUpperCase() } : {}),
     ...(warnings.length ? { warnings } : {}),

@@ -3,6 +3,7 @@
 // fields the PO reader produces, so uploading either kind of file makes a job.
 import { unzipSync, strFromU8 } from "fflate";
 import { readRow, parsePactPoPages, linesFromItems, type PactPoFields, type PoItem } from "./parsePactPo";
+import { isTaxLine, isTotalLabel, taxRateOf } from "./paperwork";
 
 // document.xml → plain text, one line per paragraph. Table rows become one
 // line each with tab-separated cells, so "description | price" tables read
@@ -107,9 +108,17 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
   if (start < 0) start = lines.findIndex((l) => /pleased to submit/i.test(l));
   const stopRe = /total\s*cost|labor and materials|sales\s*tax|grand\s*total|amount\s*due|best regards|sincerely/i;
   const amtRe = /\$\s*([\d,]+(?:\.\d{1,2})?)/g;
+  // A Sales Tax, Subtotal or Total line that a letter printed INSIDE its work
+  // table (one made before the portal kept those off its lines) is paperwork:
+  // skipped, never a row, and never where the reading stops (the work below
+  // it is still work). What it added is remembered, so the letter's own
+  // totals can be taken back down to the work it really bills.
+  let skipped = 0;
+  const paper = (d: string) => isTaxLine(d) || isTotalLabel(d);
   const pushItem = (descRaw: string, amount: number) => {
     const description = descRaw.replace(/[\t:;,\s-]+$/g, "").replace(/^[\s:;,-]+/, "").replace(/\s{2,}/g, " ").trim();
     if (!description || description.length < 3 || amount <= 0) return;
+    if (paper(description)) { skipped += amount; return; }
     // "2 x $350" or "2 @ $350" inside the text = real qty and unit price
     const qm = description.match(/(\d+(?:\.\d+)?)\s*(?:x|@)\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/i);
     const qty = qm ? parseFloat(qm[1]) : 1;
@@ -135,13 +144,20 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
     // every money column prints a $. Without this, a wrapped description
     // fragment like "and wall, 30 inch microwave cabinet" reads as a $30 row.
     const bare = l.includes("$") ? readRow(l, { allowTotalish: true }) : null;
+    if (bare && paper(bare.description)) {
+      // the wrapped tail waiting in pending is the row above's, as with any complete row
+      if (pending && !pending.includes("$") && rows.length > 0) rows[rows.length - 1].description = `${rows[rows.length - 1].description} ${pending}`.replace(/\s{2,}/g, " ").trim();
+      pending = "";
+      skipped += Math.round(bare.qty * bare.unit_price * 100) / 100;
+      continue;
+    }
     // The totals end the work — but only when the line is NOT itself a
     // complete work row ("Total station survey 1 $500.00 $500.00" is work
     // that happens to start with Total). A real totals line never carries
     // row arithmetic, fails that read, and stops the table here — BEFORE the
     // pending-glue below can weld "Total Cost … $9,565.00" onto a wrapped
     // fragment and mint a phantom row out of the pair.
-    const stopish = stopRe.test(l) || /^total\b/i.test(l);
+    const stopish = stopRe.test(l) || /^total\b/i.test(l) || isTaxLine(l) || isTotalLabel(l);
     if (!bare && stopish) {
       // the LAST row's wrapped tail sits in pending when the totals arrive
       if (pending && !pending.includes("$") && rows.length > 0) {
@@ -155,6 +171,7 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
       pending = "";
     }
     const row = bare || (l.includes("$") && !stopish ? readRow(`${pending} ${l}`.trim(), { allowTotalish: true }) : null);
+    if (row && paper(row.description)) { pending = ""; skipped += Math.round(row.qty * row.unit_price * 100) / 100; continue; }
     if (row) {
       pending = "";
       rows.push({ description: row.description, qty: row.qty, unit_price: row.unit_price, property: "", unit: punit, ...(row.uom ? { uom: row.uom } : {}) });
@@ -199,21 +216,29 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
   // "Tax…" or "Total…" can never be mistaken for one
   const totalsText = stopAt >= 0 ? lines.slice(stopAt).join("\n") : t;
   const lineStart = (label: string) => new RegExp(`^\\s*(?:${label})\\b[^$\\n]{0,40}\\$\\s*([\\d,]+\\.?\\d*)`, "im");
-  const sub = money(totalsText.match(lineStart("Labor and materials?|Total Cost|Sub\\s*-?\\s*total|Subtotal"))?.[1] || "") || rows.reduce((s, r) => s + r.qty * r.unit_price, 0);
+  const rowsSum = Math.round(rows.reduce((s, r) => s + r.qty * r.unit_price, 0) * 100) / 100;
+  // what the letter itself subtotalled and taxed: its printed figure, or its
+  // rows with anything skipped above added back
+  const sub = money(totalsText.match(lineStart("Labor and materials?|Total Cost|Sub\\s*-?\\s*total|Subtotal"))?.[1] || "") || Math.round((rowsSum + skipped) * 100) / 100;
   const taxM = totalsText.match(lineStart("(?:Sales\\s*)?Tax"));
   const tax = money(taxM?.[1] || "");
   const grand = money(totalsText.match(lineStart("Grand Total|Amount Due|Total Due"))?.[1] || "");
   // the percentage the letter prints beats one worked back out of the money,
   // and a tax line of $0.00 means no tax — not "no tax rate given"
   const printed = taxM ? parseFloat(taxM[0].match(/\(?\s*([\d.]+)\s*%/)?.[1] || "") : NaN;
+  // (a worked-out rate that is a New York rate to the cent is that rate:
+  // $69.23 on $780.00 is 8.875%, not 8.876%)
   const taxPct = Number.isFinite(printed) ? printed
-    : taxM && sub > 0 ? Math.round((tax / sub) * 100 * 1000) / 1000
+    : taxM && sub > 0 ? (tax > 0 ? taxRateOf([{ description: "", qty: 1, unit_price: tax }], sub) : undefined) ?? Math.round((tax / sub) * 100 * 1000) / 1000
       : undefined;
 
   const desc = rows[0]?.description || t.match(/proposal for the property/i)?.[0] || "";
+  // a letter that carried a tax or totals line among its work billed that line
+  // and taxed it again: the job bills its work, taxed once at the letter's rate
+  const billed = skipped > 0 ? rowsSum : sub;
   return {
     po, poDate, desc, scope: rows.map((r) => r.description).join(". ").slice(0, 600), partner: "", address, billBlock, contact: contactName, punit, rowsAddUp: true,
-    amount: grand || (sub > 0 ? Math.round(sub * (1 + (taxPct ?? 8.875) / 100) * 100) / 100 : 0),
+    amount: (skipped > 0 ? 0 : grand) || (billed > 0 ? Math.round(billed * (1 + (taxPct ?? 8.875) / 100) * 100) / 100 : 0),
     rows, readable: rows.length > 0 || !!po || !!svc, taxPct,
   };
 }

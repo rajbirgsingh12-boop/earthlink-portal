@@ -25,6 +25,7 @@ import {
 } from "@/lib/jobFlow";
 import { bookPrice } from "@/lib/priceServer";
 import { roomsIn } from "@/lib/priceBook";
+import { workLines } from "@/lib/paperwork";
 import type { SfLine } from "@/lib/measure";
 
 const env = (k: string) => process.env[k] || "";
@@ -189,7 +190,9 @@ async function unmarkDone(db: Db, o: { emp: Emp; body: string; now: Date; today:
   await db.patch(`texted_photos?pact_job_id=eq.${job.id}&status=eq.done`, { status: "seen" });
   return backInProgressText(pick.kind === "pact" ? pick.label : "", lang);
 }
-const itemsOf = (j: ThreadJob): SfLine[] => (Array.isArray(j.items) ? j.items : []);
+// the job's work lines: a Sales Tax line left on them from an old PO read is
+// paperwork, never measured, asked about or saved back (lib/paperwork.ts)
+const itemsOf = (j: ThreadJob): SfLine[] => workLines(Array.isArray(j.items) ? j.items : []);
 const namesOf = (j: ThreadJob) => (j.attachments || []).map((a) => a?.name || "");
 const stageOfJob = (j: ThreadJob) => stageOf({ ...countKinds(namesOf(j)), needSf: measureLines(itemsOf(j)).some((l) => !l.has) });
 // where the job is for this worker: a worker's own first pictures of a job

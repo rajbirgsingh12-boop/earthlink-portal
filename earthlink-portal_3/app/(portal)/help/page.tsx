@@ -77,6 +77,7 @@ const SECTIONS: { icon?: string; title: string; lines: string[] }[] = [
       "Tap a row to open the job. Take 📷 Before photos when you start and 📷 After photos when you finish.",
       "⬇ Photos (PDF) (on the open job, and under Documents) puts a job's before and after pictures on one PDF with the job on top, ready to send out.",
       "Work lines are what gets billed. + Add line if the job runs past what the PO listed; a removed line comes back with Undo.",
+      "Sales tax is never a work line. The invoice and the proposal add it once, under the total, at the job's Sales tax %. A PO's own Sales Tax line only sets that rate.",
       "A PO read in is priced the way the work is billed: plaster and sheetrock by the square foot, and they bring their primer and paint by the room.",
       "Paint and primer on their own go by the room; a door by the door.",
       "An apartment-size paint (“paint 2 bedroom 1 bath apartment”) is at the apartment price. A price the PO itself prints is kept as printed.",

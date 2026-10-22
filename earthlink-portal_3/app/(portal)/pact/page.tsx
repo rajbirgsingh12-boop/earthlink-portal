@@ -25,6 +25,7 @@ import { useLive } from "@/lib/useLive";
 import { findDupe, DUPE_COLS } from "@/lib/po";
 import { INVOICE_FLOOR, insertJob, subtotalOf, intakePoFile, claimInvoiceNo, noMoney } from "@/lib/pactIntake";
 import { COMPANY } from "@/lib/company";
+import { workLines, splitPaperwork, hasPaperwork, paperworkRepair } from "@/lib/paperwork";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { parsePactPoText, type PactPoFields, type PoItem } from "@/lib/parsePactPo";
@@ -132,7 +133,7 @@ export default function Pact() {
   const isImg = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n);
   const itemsOf = (j: Job): Item[] => (Array.isArray(j.items) ? j.items : []);
   // a job with a line to bill — an invoice number is only ever given out for one of these
-  const hasLines = (j: Job) => cleanLineWording(itemsOf(j)).items.some((it) => Number(it.qty) > 0 && it.description.trim());
+  const hasLines = (j: Job) => cleanLineWording(workLines(itemsOf(j))).items.some((it) => Number(it.qty) > 0 && it.description.trim());
   const atFocus = useRef(""); // what a text box held when it was tapped into — a blur that changed nothing writes nothing
   // the job's short name: the street and the apartment, nothing else. The
   // borough, the state and the zip are on the invoice, not in a list you
@@ -151,7 +152,8 @@ export default function Pact() {
   };
   // private work is taxable — NYC sales tax by default, editable per job
   const taxRate = (j: Job) => (j.tax_pct === null || j.tax_pct === undefined ? 8.875 : Number(j.tax_pct));
-  const invSubtotal = (j: Job) => itemsOf(j).reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
+  // the work lines only: a Sales Tax line left on a job is never billed, and never taxed again
+  const invSubtotal = (j: Job) => workLines(itemsOf(j)).reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
   const invTax = (j: Job) => invSubtotal(j) * taxRate(j) / 100;
   const invTotal = (j: Job) => invSubtotal(j) + invTax(j);
 
@@ -237,6 +239,57 @@ export default function Pact() {
     }
     if (error) { flash(upgradeHint(error.message)); load(); }
   };
+
+  // ---------- a sales-tax line on a job's work lines ----------
+  // The invoice adds the tax once, under the total. A job that still carries a
+  // "Sales Tax" (or Subtotal, Total) line from an older PO read was billing its
+  // tax twice. The line comes off here, against the database's own row: no
+  // work line changes, the money moves only where it was worked out from the
+  // lines, and an invoiced or paid job is left for a person to look at
+  // (lib/paperwork.ts paperworkRepair). Admin 1 only: it moves money.
+  const repairPaperwork = async (id: string): Promise<{ job: Job | null; billed: boolean }> => {
+    const { data } = await sb().from("pact_jobs").select("*").eq("id", id).single();
+    if (!data) return { job: null, billed: false };
+    const row = data as Job;
+    const r = paperworkRepair(row);
+    if (!r.patch) return { job: null, billed: r.billed };
+    let { error } = await sb().from("pact_jobs").update(r.patch).eq("id", id);
+    if (error && "list_subtotal" in r.patch && /list_subtotal/i.test(error.message)) { // before RUN_ME section 15
+      const { list_subtotal: _skip, ...rest } = r.patch; void _skip;
+      ({ error } = await sb().from("pact_jobs").update(rest).eq("id", id));
+    }
+    if (error) return { job: null, billed: false };
+    const job = { ...row, ...r.patch } as Job;
+    setJobs((prev) => prev.map((x) => (x.id === id ? { ...x, ...r.patch } : x)));
+    return { job, billed: false };
+  };
+  // once a visit, when the database's own list is in: every job still carrying
+  // such a line is put right, and Admin 1 is told (by PO number, once per job)
+  // about the ones that already went out on an invoice
+  const paperSwept = useRef(false);
+  useEffect(() => {
+    if (!loaded || !freshRows.current || role !== "admin" || paperSwept.current) return;
+    paperSwept.current = true;
+    const todo = jobs.filter((j) => hasPaperwork(j.items));
+    if (todo.length === 0) return;
+    (async () => {
+      let fixed = 0;
+      const billed: string[] = [];
+      for (const j of todo) {
+        const r = await repairPaperwork(j.id);
+        if (r.job) fixed += 1;
+        else if (r.billed) billed.push(j.id);
+      }
+      const told = new Set(cached<string[]>("pact:taxLineBilled") || []);
+      const fresh = billed.filter((id) => !told.has(id));
+      if (fresh.length) remember("pact:taxLineBilled", [...told, ...fresh]);
+      const pos = fresh.map((id) => jobs.find((x) => x.id === id)).map((x) => x?.po_number || x?.job_number || "").filter(Boolean);
+      const says: string[] = [];
+      if (fixed) says.push(`Took the sales tax line off ${fixed} job${fixed === 1 ? "" : "s"}. Tax is added once, under the total.`);
+      if (pos.length) says.push(`Already invoiced with a sales tax line on it, check what was billed: PO ${pos.join(", PO ")}.`);
+      if (says.length) flash(says.join(" "));
+    })();
+  }, [loaded, role, jobs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // delete = gone for good (after a confirm) — the job, its photos and documents
   const deleteJob = async (j: Job) => {
@@ -333,7 +386,7 @@ export default function Pact() {
       // carry a key) stay out, so "Primer" can never read as a fresh painting
       // order. A priced line's own PRICE is never changed by this — see the
       // merge — only its wording and what belongs beside it.
-      const typed = before
+      const typed = workLines(before)
         .filter((it) => !it.key && it.description.trim())
         .map((it) => it.description);
       const text = [live.description || "", ...typed].filter(Boolean).join(". ");
@@ -369,6 +422,13 @@ export default function Pact() {
       const { data } = await sb().from("pact_jobs").select("*").eq("id", openId).single();
       if (closed || !data) return;
       let fresh = data as Job;
+      // a sales-tax line left on the work lines comes off first (Admin 1),
+      // before anything below saves the lines again
+      if (role === "admin" && hasPaperwork(fresh.items)) {
+        const r = await repairPaperwork(fresh.id);
+        if (closed) return;
+        if (r.job) fresh = r.job;
+      }
       // old wording on the lines heals here, against the row just fetched —
       // so the jobs already in the portal pick up the cleanup one by one
       // even before RUN_ME.sql sweeps the rest
@@ -500,7 +560,7 @@ export default function Pact() {
   // so a signed copy coming back makes the invoice without retyping anything
   // everything the proposal letter says, for the view and the file alike
   const proposalFields = async (j: Job) => {
-    let lines = cleanLineWording(itemsOf(j)).items
+    let lines = cleanLineWording(workLines(itemsOf(j))).items
       .filter((it) => it.description.trim() && Number(it.qty) > 0)
       .map((it) => ({ description: it.description, qty: Number(it.qty), unit: it.unit, unit_price: Number(it.unit_price) || 0 }));
     if (lines.length === 0) {
@@ -792,7 +852,7 @@ export default function Pact() {
   const isEmailJob = (j: Job) => (j.notes || "").startsWith("📧");
   const hasPhotos = (j: Job) => (j.attachments || []).some((a) => isImg(a.name));
   const hasRealPrices = (j: Job) => Number(j.amount || 0) >= 100
-    || (j.items || []).some((it) => (Number(it.qty) || 0) * (Number(it.unit_price) || 0) >= 100);
+    || workLines(j.items).some((it) => (Number(it.qty) || 0) * (Number(it.unit_price) || 0) >= 100);
   const emailJobsToClean = () => jobs.filter((j) => isEmailJob(j) && !hasPhotos(j) && !hasRealPrices(j));
   const cleanupEmailJobs = async () => {
     const gone = emailJobsToClean();
@@ -995,14 +1055,33 @@ export default function Pact() {
   // from before the first keystroke are kept here, per job, and that is what
   // the save compares against; the save clears it.
   const beforeEdit = useRef<Record<string, Item[]>>({});
-  const setItems = (j: Job, items: Item[], persist = false, baseline = false) => {
+  // Taking a Sales Tax (or Subtotal, Total) line off is not pricing the job
+  // either: when that is all a save does, and the lines were still the list's
+  // own, the baseline moves with them, so no invoice number is spent on it.
+  const sameLine = (a: Item, b: Item) => a.description === b.description && Number(a.qty) === Number(b.qty)
+    && (a.unit || "") === (b.unit || "") && Number(a.unit_price) === Number(b.unit_price) && (a.key || "") === (b.key || "");
+  const paperOnly = (j: Job, was: Item[], items: Item[]): boolean => {
+    if (j.list_subtotal === null || j.list_subtotal === undefined || !hasPaperwork(was)) return false;
+    if (Math.abs(Number(j.list_subtotal) - subtotalOf(was)) >= 0.005) return false;
+    const w = workLines(was);
+    return w.length === items.length && w.every((a, i) => sameLine(a, items[i]));
+  };
+  const setItems = (j: Job, items0: Item[], persist = false, baseline = false) => {
+    // A Sales Tax, Subtotal or Total line is never a work line: the invoice
+    // adds the tax once, under the total, from the Sales tax % box. Typed in,
+    // or left over from an old PO read, it comes off when the lines are saved.
+    const split = persist ? splitPaperwork(items0) : null;
+    const items = split ? split.work : items0;
     if (!persist && !beforeEdit.current[j.id]) beforeEdit.current[j.id] = itemsOf(j);
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, items } : x)));
     setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, items } : prev));
     if (persist) {
       const was = beforeEdit.current[j.id] ?? itemsOf(j);
       delete beforeEdit.current[j.id];
-      if (!baseline && roomCountFix(j, was, items)) baseline = true;
+      // (judged on the work lines: a tax line coming off in the same save changes nothing here)
+      if (!baseline && roomCountFix(j, workLines(was), items)) baseline = true;
+      if (!baseline && paperOnly(j, was, items)) baseline = true;
+      if (split && split.work.length !== items0.length) flash("Sales tax is added once, under the total, from the Sales tax % box. The tax line was taken off the work lines.");
     }
     if (persist) {
       const sub = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
@@ -1193,7 +1272,7 @@ export default function Pact() {
             const hit = prior.find((p) => re.test(p.bill_to || ""));
             if (hit) partner = hit.partner;
           }
-          const seed: Item[] = parsed.rows.map((r) => ({ description: r.description, qty: r.qty, unit: r.uom || unitFor(r.description), unit_price: r.unit_price, ...(r.base ? { base: r.base } : {}) }));
+          const seed: Item[] = workLines(parsed.rows).map((r) => ({ description: r.description, qty: r.qty, unit: r.uom || unitFor(r.description), unit_price: r.unit_price, ...(r.base ? { base: r.base } : {}) }));
           const { data: job, error } = await insertJob({
             partner, development: "", job_number: parsed.po, description: parsed.desc, amount: parsed.amount,
             po_number: parsed.po, po_date: parsed.poDate, address: parsed.address, property_unit: parsed.punit,
@@ -1273,7 +1352,7 @@ export default function Pact() {
   const buildPackageBytes = async (j: Job, org2: Org): Promise<Uint8Array | null> => {
     const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
     const { money: usd } = await import("@/lib/proposalDoc");
-    const items = cleanLineWording(itemsOf(j)).items.filter((it) => Number(it.qty) > 0 && it.description.trim());
+    const items = cleanLineWording(workLines(itemsOf(j))).items.filter((it) => Number(it.qty) > 0 && it.description.trim());
     if (items.length === 0) return null;
       const pkg = await PDFDocument.create();
       const helv = await pkg.embedFont(StandardFonts.Helvetica);
@@ -1564,7 +1643,7 @@ export default function Pact() {
         // taken at upload only stands in while the list is still loading; a
         // deleted job closes the card outright (deleteJob clears it).
         const j = jobs.find((x) => x.id === oneShot.id) || oneShot.job;
-        const billable = itemsOf(j).filter((it) => it.description.trim() && Number(it.qty) > 0);
+        const billable = workLines(itemsOf(j)).filter((it) => it.description.trim() && Number(it.qty) > 0);
         const priced = billable.some((it) => Number(it.unit_price) > 0);
         return (
           <div className="card card-pad page-enter mb-3 border-work">
@@ -1729,13 +1808,13 @@ export default function Pact() {
                 {/* the PO seeds one line — add more when the job runs past what's listed (excess materials etc.) */}
                 <div className="mt-3">
                   <div className="section-label mb-1.5">Work lines · what gets billed for this job</div>
-                  {!canEdit && itemsOf(j).map((it, i) => (
+                  {!canEdit && workLines(itemsOf(j)).map((it, i) => (
                     <div key={i} className="mb-1 flex flex-wrap items-center gap-2 text-[13px]">
                       <span className="flex-1">{it.description || "(no wording)"}</span>
                       <span className="font-mono text-inksoft">{it.qty} {it.unit}</span>
                     </div>
                   ))}
-                  {!canEdit && itemsOf(j).length === 0 && <div className="empty">No lines yet.</div>}
+                  {!canEdit && workLines(itemsOf(j)).length === 0 && <div className="empty">No lines yet.</div>}
                   {canEdit && (
                     <WorkLines items={itemsOf(j)} canPrice={canPrice} bufferKey={`${j.id}:wl`}
                       onChange={(next) => setItems(j, next)} onCommit={(next) => setItems(j, next, true)}
@@ -1773,6 +1852,8 @@ export default function Pact() {
       {/* ---------- invoice editor ---------- */}
       {invJob && canInvoice && (() => {
         const j = jobs.find((x) => x.id === invJob.id) || invJob;
+        // every line as it stands, so a line being typed never vanishes under
+        // the cursor; a sales-tax line comes off when the lines are saved
         const items = itemsOf(j);
         return (
           <Modal wide title={`Invoice · PO ${j.po_number || j.job_number}`} onClose={() => setInvJob(null)}

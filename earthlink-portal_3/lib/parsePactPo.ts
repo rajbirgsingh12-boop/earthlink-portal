@@ -15,6 +15,8 @@ export interface PoSeg { x: number; w: number; text: string }
 export interface PoLine { page: number; y: number; size: number; text: string; segs: PoSeg[] }
 export type PoItem = { str?: string; transform?: number[]; width?: number; height?: number };
 
+import { isTaxLine, isTotalLabel, taxRateOf, addsUp } from "./paperwork";
+
 export interface PactPoFields {
   po: string;
   poDate: string;
@@ -40,6 +42,9 @@ export interface PactPoFields {
   // things a person should know about how this PO was read — a PO that
   // names two apartments, say — in plain words
   warnings?: string[];
+  // the sales tax rate the document itself charges, when it prints a tax line
+  // (its percentage, or its figure over the work); the job bills at this rate
+  taxPct?: number;
 }
 
 // "8/20/26" and "08/20/2026" both become 2026-08-20; anything that isn't a
@@ -161,7 +166,7 @@ export function readRow(line: string, opts: { allowTotalish?: boolean } = {}): P
   const dropLineNo = (d: string, used: boolean) => (used ? d : d.replace(/^\d{1,3}\s+(?=[A-Za-z])/, ""));
   const take = (qi: number, ui: number, ti: number) => {
     const desc = dropLineNo(tidy(l.slice(0, nums[qi].at)), qi === 0);
-    if (!desc || desc.length < 3 || (!opts.allowTotalish && TOTALISH.test(desc))) return null;
+    if (!desc || desc.length < 3 || (!opts.allowTotalish && (TOTALISH.test(desc) || isTaxLine(desc) || isTotalLabel(desc)))) return null;
     const tail = l.slice(nums[ti].at + nums[ti].len).trim().split(/\s+/).filter((w) => /^[\w-]+$/.test(w));
     // the unit of measure, when the table prints one between quantity and price
     const between = l.slice(nums[qi].at + nums[qi].len, nums[ui].at).replace(/[^A-Za-z ]/g, " ").trim();
@@ -193,7 +198,7 @@ export function readRow(line: string, opts: { allowTotalish?: boolean } = {}): P
     const ui = ti - 1;
     if (nums[ui].v > 0 && near(nums[ui].v, nums[ti].v)) {
       const desc = dropLineNo(tidy(l.slice(0, nums[ui].at)), false);
-      if (desc && desc.length >= 3 && (opts.allowTotalish || !TOTALISH.test(desc))) {
+      if (desc && desc.length >= 3 && (opts.allowTotalish || !(TOTALISH.test(desc) || isTaxLine(desc) || isTotalLabel(desc)))) {
         const tail = l.slice(nums[ti].at + nums[ti].len).trim().split(/\s+/).filter((w) => /^[\w-]+$/.test(w));
         return { description: desc, qty: 1, unit_price: nums[ui].v, property: tail[0] || "", unit: tail[1] || "" };
       }
@@ -225,7 +230,7 @@ export function readRowsFrom(src: PoLine[], pitch: number): PactPoFields["rows"]
     // a row's wrap is on the same page as the row — the top of the next page is
     // a fresh letterhead, not the rest of the sentence
     if (L.page !== rowPage) { at = -1; continue; }
-    if (TOTALISH.test(L.text) || SITE_LABEL.test(L.text) || BILL_LABEL.test(L.text) || STOP_LABEL.test(L.text)) continue;
+    if (TOTALISH.test(L.text) || isTaxLine(L.text) || SITE_LABEL.test(L.text) || BILL_LABEL.test(L.text) || STOP_LABEL.test(L.text)) continue;
     if (MONEYISH.test(L.text)) continue;
     if (lastY - L.y > 1.6 * pitch) { at = -1; continue; }
     // every word of it has to sit inside the description column
@@ -492,10 +497,27 @@ export function parsePactPoText(raw: string, structured?: PoLine[]): PactPoField
     .replace(/^[,\s]+/, "").trim();
 
   const rows = readRowsFrom(src, pitch);
-  const grand = [...t.matchAll(/(?:Total|Amount Due|Grand Total)\s*:?\s*\$\s*([\d,]+\.\d{2})/gi)].map((m) => cash(m[1]));
+  // The PO's total, read off its own line: a "Sales Tax Total" or a
+  // "Subtotal" figure is not it. A label and figure split over two lines are
+  // read from the page as one string, the way they always were.
+  const totalRe = /(?:Total|Amount Due|Grand Total)\s*:?\s*\$\s*([\d,]+\.\d{2})/gi;
+  const onLines = lines.flatMap((ln) => [...ln.matchAll(totalRe)].filter((m) => {
+    const head = ln.slice(0, m.index as number);
+    const lead = head.slice(head.lastIndexOf("$") + 1).replace(/^[\s\d,.]*/, "");
+    return !/sub\s*-?\s*$/i.test(lead) && !isTaxLine(`${lead} total`);
+  }).map((m) => cash(m[1])));
+  const grand = onLines.length > 0 ? onLines : [...t.matchAll(totalRe)].map((m) => cash(m[1]));
   const rowSum = rows.reduce((s, r) => s + r.qty * r.unit_price, 0);
   const amount = grand.length > 0 ? grand[grand.length - 1] : rowSum;
-  const rowsAddUp = grand.length === 0 || rows.length === 0 || Math.abs(rowSum - amount) < 0.02;
+  // the PO's own sales tax line, when it prints one: the first figure on it
+  // ("Sales Tax (8.875%) $245.05"). It is never a work row (readRow above);
+  // it tells the job the rate the PO charges, and lets a taxed total add up.
+  const taxRows = lines
+    .filter((ln) => isTaxLine(ln) && /\$\s*[\d,]+\.\d{2}/.test(ln))
+    .map((ln) => ({ description: ln, qty: 1, unit_price: cash(ln.match(/\$\s*([\d,]+\.\d{2})/)?.[1] || "0") }));
+  const taxFig = taxRows.reduce((s, r) => s + r.unit_price, 0);
+  const taxPct = rows.length > 0 ? taxRateOf(taxRows, Math.round(rowSum * 100) / 100) : undefined;
+  const rowsAddUp = grand.length === 0 || rows.length === 0 || addsUp(Math.round(rowSum * 100) / 100, Math.round(taxFig * 100) / 100, amount, taxPct);
   const APT_RE = /\b(?:apartment|apt\.?|unit|#)\s*([\dA-Za-z][\dA-Za-z -]{0,8}?)(?=\s*(?:,|Brooklyn|Bronx|Queens|Manhattan|Staten|New York|NY\b|$))/gi;
   const aptsIn = (a: string) => [...a.matchAll(APT_RE)].map((m) => m[1].trim()).filter(Boolean);
   const apts = aptsIn(address);
@@ -558,5 +580,6 @@ export function parsePactPoText(raw: string, structured?: PoLine[]): PactPoField
     ...(accessDate ? { accessDate } : {}),
     ...(poStatus ? { poStatus } : {}),
     ...(warnings.length ? { warnings } : {}),
+    ...(taxPct !== undefined ? { taxPct } : {}),
   };
 }

@@ -6,6 +6,7 @@
 //
 // Prices are editable in Settings; what's here is the list as they gave it.
 import { sb } from "./supabase";
+import { splitPaperwork, isTaxLine } from "./paperwork";
 
 export interface PriceItem {
   key: string;
@@ -607,7 +608,7 @@ export function mergePricedLines(text: string | string[], existing: JobLine[], b
   let allIn = false;
   if (opts.fillOnly) {
     for (const it of existing) {
-      if (!realPrice(it.unit_price)) continue;
+      if (!realPrice(it.unit_price) || isTaxLine(it.description)) continue;
       const ks = keysIn(it.description, bk);
       ks.forEach((k) => paidFor.add(k));
       if (ks.includes("paint_sf") && ks.some((k) => WET.includes(k))) allIn = true;
@@ -620,6 +621,7 @@ export function mergePricedLines(text: string | string[], existing: JobLine[], b
   const covered = new Map<string, number>();
   const sameText = (a: string, b: string) => a.toLowerCase().replace(/[^a-z0-9]/g, "") === b.toLowerCase().replace(/[^a-z0-9]/g, "");
   existing.forEach((it, i) => {
+    if (isTaxLine(it.description)) return; // paperwork: covers no work
     // a line that IS one of the price-list lines, word for word, covers that
     // one and nothing else — before falling back to reading its wording
     const exact = bk.find((p) => sameText(p.description, it.description))?.key;
@@ -683,6 +685,8 @@ export function normalizeJobLines(items: JobLine[], text: string, bk: PriceItem[
   const rooms = roomsIn([text, ...items.map((it) => it.description)].join(". "));
   let changed = false;
   let out: JobLine[] = items.map((it) => {
+    // a sales-tax line is paperwork: it never takes a price-list key, a unit or a price
+    if (isTaxLine(it.description)) return it;
     const k = keyOf(it);
     const p = k ? byKey.get(k) : undefined;
     if (!k || !p || p.unit === "HOUR") return it;
@@ -740,19 +744,25 @@ export function normalizeJobLines(items: JobLine[], text: string, bk: PriceItem[
 // in, priced. A price the PO itself states is never touched: that one is the
 // agreement. A PO that totals a dollar hasn't told us the money — the priced
 // lines have.
-export function linesFromPoRead(f: { desc: string; scope: string; rows: { description: string; qty: number; unit_price: number; uom?: string; base?: string }[] },
+export function linesFromPoRead(f: { desc: string; scope: string; rows: { description: string; qty: number; unit_price: number; uom?: string; base?: string }[]; taxPct?: number },
   unreadable: boolean, amount: number, bk: PriceItem[]): { items: JobLine[]; amount: number; warnings: string[] } {
+  // and a "row" that is only a date or a form label is not work at all
+  const junkRow = (d: string) => /^\s*(?:access|scheduled?|start|work|due|order(?:ed)?)\s*date\b/i.test(d) || /^\s*date\b/i.test(d) || !/[A-Za-z]{3}/.test(d);
+  // A PO's Sales Tax, Subtotal and Total rows are its paperwork, not work: the
+  // invoice adds the tax once, under the total. Kept as a line, the tax was
+  // billed twice (lib/paperwork.ts). Taken off once, here, so none of what
+  // follows (the placeholder test, the lines, the words the list prices) ever
+  // sees them.
+  const rows = splitPaperwork(f.rows.filter((r) => !junkRow(r.description))).work;
   // a PO whose printed total is the $1 placeholder has priced nothing — any
   // row that arrives with a price on it there is a misread (a date, a line
   // number), never an agreement. Rows that each say $1 are the same
   // placeholder however they add up ($3 for three rooms is not a price).
-  const rowsPlaceholder = f.rows.length > 0 && f.rows.every((r) => Number(r.unit_price) > 0 && Number(r.unit_price) <= PLACEHOLDER);
+  const rowsPlaceholder = rows.length > 0 && rows.every((r) => Number(r.unit_price) > 0 && Number(r.unit_price) <= PLACEHOLDER);
   const placeholderPo = (amount > 0 && amount <= PLACEHOLDER) || rowsPlaceholder;
-  // and a "row" that is only a date or a form label is not work at all
-  const junkRow = (d: string) => /^\s*(?:access|scheduled?|start|work|due|order(?:ed)?)\s*date\b/i.test(d) || /^\s*date\b/i.test(d) || !/[A-Za-z]{3}/.test(d);
   const seed: JobLine[] = unreadable ? []
-    : f.rows.length > 0
-      ? f.rows.filter((r) => !junkRow(r.description))
+    : rows.length > 0
+      ? rows
         .map((r) => ({ description: r.description, qty: r.qty, unit: normUnit(r.uom || unitFor(r.description)), unit_price: placeholderPo ? 0 : r.unit_price, ...(r.base ? { base: r.base } : {}) }))
         // a placeholder row that names more than one trade ("scrape plaster
         // paint") is dropped: keeping it would leave a dollar line sitting
@@ -766,7 +776,7 @@ export function linesFromPoRead(f: { desc: string; scope: string; rows: { descri
   // description as its scope, and counting both doubles every quantity
   // (each text is priced on its own and the biggest count wins, so a
   // description that repeats the rows never doubles them)
-  const said = [...new Set([f.desc, f.scope, f.rows.map((r) => r.description).join(" ")].map((x) => (x || "").trim()).filter(Boolean))];
+  const said = [...new Set([f.desc, f.scope, rows.map((r) => r.description).join(" ")].map((x) => (x || "").trim()).filter(Boolean))];
   const priced = normalizeJobLines(mergePricedLines(said, seed, bk, { fillOnly: poPriced, prepOnly: poPriced }), said.join(". "), bk).items
     // a placeholder the list had no answer for is work still to be priced —
     // showing it as a dollar would put "$1.00" on a proposal
@@ -780,5 +790,5 @@ export function linesFromPoRead(f: { desc: string; scope: string; rows: { descri
   const warnings: string[] = [];
   if (poPriced && Math.abs(lineSub - sub(seed)) > 0.5) warnings.push("The price list added to or priced work beyond the PO's own rows: check the lines against the PO before invoicing");
   const keepPrinted = amount > PLACEHOLDER && !placeholderPo;
-  return { items: priced, amount: keepPrinted || lineSub <= 0 ? amount : Math.round(lineSub * 1.08875 * 100) / 100, warnings };
+  return { items: priced, amount: keepPrinted || lineSub <= 0 ? amount : Math.round(lineSub * (1 + (f.taxPct ?? 8.875) / 100) * 100) / 100, warnings };
 }

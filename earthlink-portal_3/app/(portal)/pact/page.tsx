@@ -25,7 +25,7 @@ import { useLive } from "@/lib/useLive";
 import { findDupe, DUPE_COLS } from "@/lib/po";
 import { INVOICE_FLOOR, insertJob, subtotalOf, intakePoFile, claimInvoiceNo, noMoney } from "@/lib/pactIntake";
 import { COMPANY } from "@/lib/company";
-import { workLines, splitPaperwork, hasPaperwork, paperworkRepair, isBilled } from "@/lib/paperwork";
+import { workLines, splitPaperwork, hasPaperwork, paperworkRepair, isBilled, exactTotal } from "@/lib/paperwork";
 import { useNumBuffer } from "@/lib/numBuffer";
 import { shrinkImage } from "@/lib/shrinkImage";
 import { parsePactPoText, type PactPoFields, type PoItem } from "@/lib/parsePactPo";
@@ -229,9 +229,13 @@ export default function Pact() {
 
   // invoice numbers, the job insert and the PO reader live in lib/pactIntake —
   // the Schedule tab takes POs in through the same door
-  const patch = async (j: Job, p: Partial<Job>) => {
-    setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, ...p } : x)));
-    setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, ...p } : prev));
+  // `keepItems`: the lines on screen stay as they are (a save that finishes
+  // after the next edit began must not put older lines back in front of it)
+  const patch = async (j: Job, p: Partial<Job>, keepItems = false) => {
+    const { items: _items, ...others } = p; void _items;
+    const local = keepItems ? others : p;
+    setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, ...local } : x)));
+    setInvJob((prev) => (prev && prev.id === j.id ? { ...prev, ...local } : prev));
     let { error } = await sb().from("pact_jobs").update(p).eq("id", j.id);
     if (error && "list_subtotal" in p && /list_subtotal/i.test(error.message)) { // before RUN_ME section 15
       const { list_subtotal: _skip, ...rest } = p; void _skip;
@@ -239,6 +243,20 @@ export default function Pact() {
     }
     if (error) { flash(upgradeHint(error.message)); load(); }
   };
+
+  // One job's writes go one after another: a save, or a repair, waits for the
+  // one before it to land, so nothing written first can be written over by
+  // an older copy arriving late (the database's triggers judge each in turn).
+  const jobQueue = useRef<Record<string, Promise<unknown>>>({});
+  const inOrder = <T,>(id: string, run: () => Promise<T>): Promise<T> => {
+    const next = (jobQueue.current[id] || Promise.resolve()).catch(() => null).then(run);
+    jobQueue.current[id] = next;
+    void next.finally(() => { if (jobQueue.current[id] === next) delete jobQueue.current[id]; }).catch(() => null);
+    return next;
+  };
+  // what the queue's own writes put on a job, for the saves queued behind them
+  // (the copy a save was handed was taken before those writes landed)
+  const written = useRef<Record<string, Partial<Job>>>({});
 
   // ---------- a sales-tax line on a job's work lines ----------
   // The invoice adds the tax once, under the total. A job that still carries a
@@ -271,7 +289,9 @@ export default function Pact() {
   // at the top of the page until Admin 1 says they have been looked at
   const [taxSeen, setTaxSeen] = useState<string[] | null>(null);
   useEffect(() => onCacheUser(() => setTaxSeen(cached<string[]>("pact:taxLineSeen") || [])), []);
-  const taxBilled = canPrice && taxSeen ? jobs.filter((j) => isBilled(j) && !j.canceled && hasPaperwork(j.items) && !taxSeen.includes(j.id)) : [];
+  // (a tax line only: a leftover Total line never added any tax)
+  const taxBilled = canPrice && taxSeen ? jobs.filter((j) => isBilled(j) && !j.canceled && splitPaperwork(itemsOf(j)).tax.length > 0 && !taxSeen.includes(j.id)) : [];
+  const taxBilledNames = taxBilled.map((x) => (x.po_number || x.job_number ? `PO ${x.po_number || x.job_number}` : (x.address || "").split(",")[0].trim() || "a job with no PO number")).join(", ");
   // once a visit, when the database's own list is in: every job still carrying
   // such a line is put right (Admin 1 only: it moves money)
   const paperSwept = useRef(false);
@@ -283,7 +303,7 @@ export default function Pact() {
     (async () => {
       let taxFixed = 0, totalsFixed = 0;
       for (const j of todo) {
-        const r = await repairPaperwork(j.id);
+        const r = await inOrder(j.id, () => repairPaperwork(j.id));
         if (r.fixed && r.tax) taxFixed += 1;
         else if (r.fixed) totalsFixed += 1;
       }
@@ -429,7 +449,8 @@ export default function Pact() {
       // a sales-tax line left on the work lines comes off first (Admin 1),
       // before anything below saves the lines again
       if (role === "admin" && hasPaperwork(fresh.items)) {
-        const r = await repairPaperwork(fresh.id);
+        const id = fresh.id;
+        const r = await inOrder(id, () => repairPaperwork(id));
         if (closed) return;
         if (r.job) fresh = r.job; // the row as it stands now, never the first read
       }
@@ -1080,8 +1101,8 @@ export default function Pact() {
         : canPrice ? "Sales tax is added once, under the total, from the Sales tax % box. The tax line was taken off the work lines."
           : "Sales tax is added once, under the total. The tax line was taken off the work lines.");
     }
-    void (async () => {
-      let jj = j, was = was0;
+    void inOrder(j.id, async () => {
+      let jj: Job = { ...j, ...(written.current[j.id] || {}) }, was = was0;
       // A leftover line SAVED on the job comes off the stored row first, in a
       // write of its own (its baseline and the rate it names move with it, as
       // the repair does), so this save is judged on its own: taking that line
@@ -1089,15 +1110,29 @@ export default function Pact() {
       // this save changes is judged the way it always was.
       if (!billedJob && hasPaperwork(was0)) {
         const r = await repairPaperwork(j.id, true);
-        if (r.job) jj = { ...j, ...r.job };
+        if (r.job) {
+          const { items: _i, ...stored } = r.job; void _i;
+          written.current[j.id] = { ...(written.current[j.id] || {}), ...stored };
+          jj = { ...jj, ...stored };
+        }
         was = workLines(was0);
       }
+      // tapping in and out of a line, with nothing changed, writes nothing
+      const same = JSON.stringify(was) === JSON.stringify(items);
+      if (same && !baseline) return;
       if (!baseline && roomCountFix(jj, was, items)) baseline = true;
-      const sub = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
+      // the money is the work lines' alone (an invoiced job's lines can still
+      // hold the tax line it was billed with). An invoiced or paid job's
+      // total moves only when its work's money does: what went out stays.
+      const sub = exactTotal(workLines(items));
+      const moneyMoved = sub !== exactTotal(workLines(was));
       const amount = sub * (1 + taxRate(jj) / 100); // billed total includes tax
       // unpriced lines must not wipe a hand-typed job amount
-      await patch({ ...jj, items }, { ...(sub > 0 ? { items, amount } : { items }), ...(baseline ? { list_subtotal: subtotalOf(items) } : {}) });
-    })();
+      const p: Partial<Job> = { items, ...(sub > 0 && (!billedJob || moneyMoved) ? { amount } : {}), ...(baseline ? { list_subtotal: subtotalOf(items) } : {}) };
+      const { items: _p, ...others } = p; void _p;
+      written.current[j.id] = { ...(written.current[j.id] || {}), ...others };
+      await patch(jj, p, true);
+    }).catch(() => null).then(() => { if (!jobQueue.current[j.id]) delete written.current[j.id]; });
   };
 
   // A paper the portal made gets kept on the job, next to the PO and the
@@ -1645,7 +1680,7 @@ export default function Pact() {
       </PageHeader>
       {taxBilled.length > 0 && (
         <div className="notice mb-3 flex flex-wrap items-center gap-2" data-tax-billed>
-          <span className="min-w-0 flex-1">Invoiced with a sales tax line among the work lines, so the tax may have gone out twice. Check what was billed: PO {taxBilled.map((x) => x.po_number || x.job_number).join(", PO ")}.</span>
+          <span className="min-w-0 flex-1">Invoiced with a sales tax line among the work lines, so the tax may have gone out twice. Check what was billed: {taxBilledNames}.</span>
           <button type="button" className="btn btn-ghost btn-sm" onClick={() => {
             const next = [...(taxSeen || []), ...taxBilled.map((x) => x.id)];
             setTaxSeen(next); remember("pact:taxLineSeen", next);

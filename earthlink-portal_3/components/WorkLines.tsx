@@ -49,6 +49,9 @@ export default function WorkLines({ items, canPrice, bufferKey, onChange, onComm
   };
   const add = () => {
     setFresh(-1); // the last row, whatever the count comes back as
+    // the slide-in plays once: after it, no row carries it (a row that moves
+    // up into last place when another is removed never slides in again)
+    setTimeout(() => setFresh((f) => (f === -1 ? null : f)), 600);
     focusNew.current = true;
     onCommit([...items, { description: "", qty: 1, unit: "EACH", unit_price: 0 }]);
   };

@@ -15,7 +15,7 @@ export interface PoSeg { x: number; w: number; text: string }
 export interface PoLine { page: number; y: number; size: number; text: string; segs: PoSeg[] }
 export type PoItem = { str?: string; transform?: number[]; width?: number; height?: number };
 
-import { isTaxLine, isTotalLabel, taxRateOf, taxFigure, addsUp } from "./paperwork";
+import { isTaxLine, isTotalLabel, isPurePaperLabel, taxRateOf, taxFigure, addsUp } from "./paperwork";
 
 export interface PactPoFields {
   po: string;
@@ -231,6 +231,10 @@ export function readRowsFrom(src: PoLine[], pitch: number): PactPoFields["rows"]
     // a fresh letterhead, not the rest of the sentence
     if (L.page !== rowPage) { at = -1; continue; }
     if (TOTALISH.test(L.text) || SITE_LABEL.test(L.text) || BILL_LABEL.test(L.text) || STOP_LABEL.test(L.text)) continue;
+    // the label of a tax line printed in the description column ("NYS Sales
+    // Tax", "MCTD 0.375%") is not the row's words; "plus tax, living room"
+    // wrapped under a row is
+    if (isTaxLine(L.text) && isPurePaperLabel(L.text)) continue;
     if (MONEYISH.test(L.text)) continue;
     if (lastY - L.y > 1.6 * pitch) { at = -1; continue; }
     // every word of it has to sit inside the description column

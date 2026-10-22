@@ -3,7 +3,7 @@
 // fields the PO reader produces, so uploading either kind of file makes a job.
 import { unzipSync, strFromU8 } from "fflate";
 import { readRow, parsePactPoPages, linesFromItems, type PactPoFields, type PoItem } from "./parsePactPo";
-import { isTaxLine, isTotalLabel, taxRateOf } from "./paperwork";
+import { isTaxLine, isTotalLabel, isPurePaperLabel, labelOf, taxRateOf } from "./paperwork";
 
 // document.xml → plain text, one line per paragraph. Table rows become one
 // line each with tab-separated cells, so "description | price" tables read
@@ -106,7 +106,9 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
   const rows: PactPoFields["rows"] = [];
   let start = lines.findIndex((l) => /scope of work/i.test(l));
   if (start < 0) start = lines.findIndex((l) => /pleased to submit/i.test(l));
-  const stopRe = /total\s*cost|labor and materials|sales\s*tax|grand\s*total|amount\s*due|best regards|sincerely/i;
+  // (a sales tax line stops the work on its own words, below: "price
+  // includes / sales tax and delivery" wrapped in a work line does not)
+  const stopRe = /total\s*cost|labor and materials|grand\s*total|amount\s*due|best regards|sincerely/i;
   const amtRe = /\$\s*([\d,]+(?:\.\d{1,2})?)/g;
   // A Sales Tax, Subtotal or Total line that a letter printed INSIDE its work
   // table (one made before the portal kept those off its lines) is paperwork:
@@ -117,11 +119,22 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
   // Total line is only the sum of the rows, and is never added back in)
   let skipped = 0, skippedTax = 0;
   const paper = (d: string) => isTaxLine(d) || isTotalLabel(d);
+  // A line is paperwork only on its own words. Words carried over from the
+  // line above can only make it work ("materials plus" + "tax and delivery
+  // $4,500.00" is work); they never make a work line paperwork.
+  //  - all label ("Sales Tax", "Subtotal"): paperwork, whatever is above it
+  //  - opens like one ("tax and delivery", "balance"): paperwork unless the
+  //    words above it finish it into work
+  const paperOn = (own: string, joined: string) => isPurePaperLabel(own) || (paper(own) && paper(joined));
   const skip = (d: string, amount: number) => { skipped += amount; if (isTaxLine(d)) skippedTax += amount; };
-  const pushItem = (descRaw: string, amount: number) => {
+  // the words before a row's money, or (when it has none of its own) the words carried in from above
+  const wordsOf = (own: string, joined: string) => (labelOf(own) ? own : joined);
+  // set per line: its paperwork-looking words were finished into work by the words above
+  let finished = false;
+  const pushItem = (descRaw: string, amount: number, ownRaw?: string) => {
     const description = descRaw.replace(/[\t:;,\s-]+$/g, "").replace(/^[\s:;,-]+/, "").replace(/\s{2,}/g, " ").trim();
     if (!description || description.length < 3 || amount <= 0) return;
-    if (paper(description)) { skip(description, amount); return; }
+    if (!finished && paperOn(wordsOf(ownRaw ?? description, description), description)) { skip(description, amount); return; }
     // "2 x $350" or "2 @ $350" inside the text = real qty and unit price
     const qm = description.match(/(\d+(?:\.\d+)?)\s*(?:x|@)\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/i);
     const qty = qm ? parseFloat(qm[1]) : 1;
@@ -134,6 +147,7 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
   for (let i = start + 1; start >= 0 && i < lines.length; i++) {
     const l = lines[i].replace(/\t/g, " ").trim();
     if (!l) continue;
+    finished = false;
     // A work line is a line whose own numbers agree: quantity times price is
     // the line total. That holds for our own letters and for most partners',
     // and nothing else on the page can fake it.
@@ -147,39 +161,76 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
     // every money column prints a $. Without this, a wrapped description
     // fragment like "and wall, 30 inch microwave cabinet" reads as a $30 row.
     const bare = l.includes("$") ? readRow(l, { allowTotalish: true }) : null;
-    if (bare && paper(bare.description)) {
-      // the wrapped tail waiting in pending is the row above's, as with any complete row
-      if (pending && !pending.includes("$") && rows.length > 0) rows[rows.length - 1].description = `${rows[rows.length - 1].description} ${pending}`.replace(/\s{2,}/g, " ").trim();
+    // the words waiting from the line above (a description with no money yet)
+    const above = pending && !pending.includes("$") ? pending : "";
+    // what waits there is only a paperwork label ("Subtotal", "NYS Tax
+    // 8.875%"): the totals block printing its labels on their own lines.
+    // It is never glued onto a work row.
+    const aboveIsLabel = !!above && isPurePaperLabel(above);
+    // Words above that finish a paperwork-looking line into work. A tax
+    // word that is more than a label ("tax and delivery") is finished by
+    // them. A totals word ("pressure" + "balance $650.00") only on a figure
+    // that cannot be the total of the rows read so far. An all-label line
+    // never is, but for a tax label ("materials plus" + "tax 1 $4,500.00
+    // $4,500.00") on a figure far more than any tax on the work above it.
+    const sumSoFar = Math.round(rows.reduce((a, r) => a + r.qty * r.unit_price, 0) * 100) / 100;
+    const finishes = (own: string, figure: number) => {
+      if (!above || paper(`${above} ${own}`)) return false;
+      const couldBeTotal = sumSoFar > 0 && figure >= sumSoFar - 0.02;
+      const couldBeTax = sumSoFar > 0 && figure <= sumSoFar * 0.2 + 0.02;
+      if (isTaxLine(own)) return !isPurePaperLabel(own) || !couldBeTax;
+      return !isPurePaperLabel(own) && !couldBeTotal;
+    };
+    const tailToLastRow = () => {
+      if (above && rows.length > 0 && !aboveIsLabel) rows[rows.length - 1].description = `${rows[rows.length - 1].description} ${above}`.replace(/\s{2,}/g, " ").trim();
       pending = "";
+    };
+    if (bare && paper(bare.description)) {
+      // "tax and delivery 1 $4,500.00 $4,500.00" under "materials plus" is
+      // the end of that work's description, and the row is work
+      const joined = `${above} ${bare.description}`;
+      if (finishes(bare.description, Math.round(bare.qty * bare.unit_price * 100) / 100)) {
+        pending = "";
+        rows.push({ description: joined.replace(/\s{2,}/g, " ").trim(), qty: bare.qty, unit_price: bare.unit_price, property: "", unit: punit, ...(bare.uom ? { uom: bare.uom } : {}) });
+        continue;
+      }
+      // the wrapped tail waiting in pending is the row above's, as with any complete row
+      tailToLastRow();
       skip(bare.description, Math.round(bare.qty * bare.unit_price * 100) / 100);
       continue;
     }
-    // The totals end the work — but only when the line is NOT itself a
+    // The totals end the work, but only when the line is NOT itself a
     // complete work row ("Total station survey 1 $500.00 $500.00" is work
     // that happens to start with Total). A real totals line never carries
-    // row arithmetic, fails that read, and stops the table here — BEFORE the
+    // row arithmetic, fails that read, and stops the table here, BEFORE the
     // pending-glue below can weld "Total Cost … $9,565.00" onto a wrapped
     // fragment and mint a phantom row out of the pair.
-    // A tax or totals line stops the work only when it carries a figure, and
-    // only judged with the description it may finish: "plus tax" or
-    // "balance" wrapped under a work line is the end of that line's words,
-    // and "materials plus / tax and delivery $4,500.00" is work.
-    const judged = pending && !pending.includes("$") ? `${pending} ${l}` : l;
-    const stopish = stopRe.test(l) || /^total\b/i.test(l) || (l.includes("$") && (isTaxLine(judged) || isTotalLabel(judged)));
+    // A tax or totals line stops the work when it carries a figure and its
+    // own words are paperwork: all label ("Subtotal $2,980.00", whatever note
+    // or wrapped words wait above it), or a label the words above do not
+    // finish into work ("plus tax" or "balance" wrapped under a work line is
+    // the end of that line's words). A figure alone under a label waiting
+    // above it ("Subtotal" / "$2,980.00") is the totals block too.
+    const ownPaper = l.includes("$") && paper(l);
+    const figures = [...l.matchAll(amtRe)];
+    finished = ownPaper && finishes(l, figures.length ? money(figures[figures.length - 1][1]) : 0);
+    const figureUnderLabel = aboveIsLabel && l.includes("$") && !labelOf(l) && !readRow(`${above} ${l}`, { allowTotalish: true });
+    const stopish = stopRe.test(l) || /^total\b/i.test(l) || (ownPaper && !finished) || figureUnderLabel;
     if (!bare && stopish) {
       // the LAST row's wrapped tail sits in pending when the totals arrive
-      if (pending && !pending.includes("$") && rows.length > 0) {
-        rows[rows.length - 1].description = `${rows[rows.length - 1].description} ${pending}`.replace(/\s{2,}/g, " ").trim();
-        pending = "";
-      }
+      // (a label waiting there is the totals', and is dropped)
+      tailToLastRow();
       stopAt = i; break;
     }
+    // words that open like paperwork ("tax and delivery") waiting above a
+    // line that is work all on its own are the row above's wrapped tail
+    if (above && paper(above) && l.includes("$") && labelOf(l) && !paper(l)) tailToLastRow();
     if (bare && pending && rows.length > 0) {
       rows[rows.length - 1].description = `${rows[rows.length - 1].description} ${pending}`.replace(/\s{2,}/g, " ").trim();
       pending = "";
     }
     const row = bare || (l.includes("$") && !stopish ? readRow(`${pending} ${l}`.trim(), { allowTotalish: true }) : null);
-    if (row && paper(row.description)) { pending = ""; skip(row.description, Math.round(row.qty * row.unit_price * 100) / 100); continue; }
+    if (row && !finished && paperOn(wordsOf(l, row.description), row.description)) { pending = ""; skip(row.description, Math.round(row.qty * row.unit_price * 100) / 100); continue; }
     if (row) {
       pending = "";
       rows.push({ description: row.description, qty: row.qty, unit_price: row.unit_price, property: "", unit: punit, ...(row.uom ? { uom: row.uom } : {}) });
@@ -197,7 +248,8 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
     let cursor = 0;
     for (let mi = 0; mi < monies.length; mi++) {
       const m = monies[mi];
-      const full = `${pending} ${l.slice(cursor, m.index).trim()}`.trim();
+      const own = l.slice(cursor, m.index).trim();
+      const full = `${pending} ${own}`.trim();
       pending = "";
       cursor = (m.index as number) + m[0].length;
       // "desc 2 x $450.00 $900.00" — a unit price then the line total
@@ -209,12 +261,12 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
         const amt = money(next[1]);
         const desc = full.replace(/(\d+(?:\.\d+)?)\s*[x@]\s*$/i, "").trim();
         if (Math.abs(qty * up - amt) < 0.02) rows.push({ description: desc, qty, unit_price: up, property: "", unit: punit });
-        else pushItem(desc, amt);
+        else pushItem(desc, amt, own.replace(/(\d+(?:\.\d+)?)\s*[x@]\s*$/i, "").trim());
         cursor = (next.index as number) + next[0].length;
         mi++;
         continue;
       }
-      pushItem(full, money(m[1]));
+      pushItem(full, money(m[1]), own);
     }
     const tail = l.slice(cursor).trim();
     if (tail) pending = tail;
@@ -225,22 +277,35 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
   const totalsText = stopAt >= 0 ? lines.slice(stopAt).join("\n") : t;
   const lineStart = (label: string) => new RegExp(`^\\s*(?:${label})\\b[^$\\n]{0,40}\\$\\s*([\\d,]+\\.?\\d*)`, "im");
   const rowsSum = Math.round(rows.reduce((s, r) => s + r.qty * r.unit_price, 0) * 100) / 100;
-  // what the letter itself subtotalled and taxed: its printed figure, or its
-  // rows with anything skipped above added back
-  const sub = money(totalsText.match(lineStart("Labor and materials?|Total Cost|Sub\\s*-?\\s*total|Subtotal"))?.[1] || "") || Math.round((rowsSum + skippedTax) * 100) / 100;
-  const taxM = totalsText.match(lineStart("(?:Sales\\s*)?Tax"));
+  const taxM = totalsText.match(lineStart("(?:(?:NYS|NYC|NY|New York|State|City|Combined|Total)\\s+)*(?:Sales\\s*)?Tax"));
   const tax = money(taxM?.[1] || "");
   const grand = money(totalsText.match(lineStart("Grand Total|Amount Due|Total Due"))?.[1] || "");
   // a rate worked back out of the money is a sales tax rate or nothing (a work
   // figure taken for the tax must never become a 60% rate on the job)
   const capped = (r: number) => (r >= 0 && r <= 20 ? r : undefined);
-  // the percentage the letter prints beats one worked back out of the money,
-  // and a tax line of $0.00 means no tax — not "no tax rate given"
-  const printed = taxM ? parseFloat(taxM[0].match(/\(?\s*([\d.]+)\s*%/)?.[1] || "") : NaN;
   // (a worked-out rate that is a New York rate to the cent is that rate:
   // $69.23 on $780.00 is 8.875%, not 8.876%)
+  const nyRate = (base: number) => (tax > 0 && base > 0 ? taxRateOf([{ description: "", qty: 1, unit_price: tax }], base, { strict: true }) : undefined);
+  const workedOut = (base: number) => nyRate(base) ?? (base > 0 ? capped(Math.round((tax / base) * 100 * 1000) / 1000) : undefined);
+  // What the letter itself subtotalled and taxed: its printed figure, or its
+  // rows with what it skipped added back. A skipped tax line was billed as a
+  // row and taxed along with the work. A skipped Total row may have been
+  // billed too, or may only have summed the rows above it: of the two, the
+  // base whose tax is a New York rate to the cent (or that comes to the
+  // letter's grand total) is the one, and with neither the rate is left to
+  // the job (a worked-out rate off the wrong base would be twice the real one).
+  const printedSub = money(totalsText.match(lineStart("Labor and materials?|Total Cost|Sub\\s*-?\\s*total|Subtotal"))?.[1] || "");
+  const r2 = (v: number) => Math.round(v * 100) / 100;
+  const bases = Array.from(new Set([r2(rowsSum + skippedTax), r2(rowsSum + skipped)]));
+  const fitBase = printedSub ? printedSub
+    : bases.find((b) => nyRate(b) !== undefined) ?? bases.find((b) => grand > 0 && Math.abs(r2(b + tax) - grand) <= 0.05);
+  const sub = fitBase ?? bases[0];
+  const unsure = !printedSub && bases.length > 1;
+  // the percentage the letter prints beats one worked back out of the money,
+  // and a tax line of $0.00 means no tax, not "no tax rate given"
+  const printed = taxM ? parseFloat(taxM[0].match(/\(?\s*([\d.]+)\s*%/)?.[1] || "") : NaN;
   const taxPct = Number.isFinite(printed) ? printed
-    : taxM && sub > 0 ? (tax > 0 ? taxRateOf([{ description: "", qty: 1, unit_price: tax }], sub) : undefined) ?? capped(Math.round((tax / sub) * 100 * 1000) / 1000)
+    : taxM && sub > 0 ? (tax > 0 ? (unsure ? nyRate(sub) : workedOut(sub)) : 0)
       : undefined;
 
   const desc = rows[0]?.description || t.match(/proposal for the property/i)?.[0] || "";

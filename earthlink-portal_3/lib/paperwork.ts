@@ -13,18 +13,37 @@ export interface MoneyLine { description: string; qty?: number | string; unit_pr
 const cents = (v: number) => Math.round((Number(v) || 0) * 100) / 100;
 const amountOf = (r: MoneyLine) => cents((Number(r.qty) || 0) * (Number(r.unit_price) || 0));
 const sumOf = (rows: MoneyLine[]) => cents(rows.reduce((s, r) => s + amountOf(r), 0));
-// the lines' total the way the database works it out (RUN_ME section 15:
-// round(sum(qty * price), 2)): one exact sum, rounded once
-export const exactTotal = (rows: MoneyLine[] | null | undefined): number =>
-  Math.round((rows || []).reduce((s, r) => s + (Number(r.qty) || 0) * (Number(r.unit_price) || 0), 0) * 100) / 100;
+
+// The lines' total exactly the way the database works it out (RUN_ME section
+// 15: round(sum(qty * price), 2), in exact decimals, half away from zero):
+// whole numbers scaled by a million, so no float ever decides a cent.
+const SCALE = 6;
+const scaled = (v: unknown): bigint => {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n === 0) return BigInt(0);
+  let s = String(n);
+  if (/e/i.test(s)) s = n.toFixed(SCALE);
+  const neg = s.startsWith("-");
+  if (neg) s = s.slice(1);
+  const [i, f = ""] = s.split(".");
+  const v2 = BigInt(i + (f + "000000").slice(0, SCALE));
+  return neg ? -v2 : v2;
+};
+export const exactTotal = (rows: MoneyLine[] | null | undefined): number => {
+  let sum = BigInt(0);
+  for (const r of rows || []) sum += scaled(r.qty) * scaled(r.unit_price); // scaled by 10^12
+  const unit = BigInt(10000000000);                                          // 10^12 down to cents
+  const neg = sum < BigInt(0);
+  const c = ((neg ? -sum : sum) + unit / BigInt(2)) / unit;
+  return Number(neg ? -c : c) / 100;
+};
 
 // A line's words with its figures taken off: money, rates, the item number,
-// the unit or property code a partner's table prints in front of the
-// description, and anything in brackets ("0884-03A Sales Tax (8.875%, incl.
-// MCTD) $245.05" reads "sales tax").
+// and the unit or property code a partner's table prints in front of the
+// description ("0884-03A Sales Tax (8.875%) $245.05" reads "sales tax").
+// Words in brackets stay words.
 export function labelOf(d: string): string {
   let s = String(d || "").toLowerCase()
-    .replace(/\([^)]*\)/g, " ")
     .replace(/\$\s*-?[\d,]*\.?\d+/g, " ")
     .replace(/-?\d[\d,]*(?:\.\d+)?\s*%/g, " ")
     .replace(/\s*[&/+]\s*/g, " and ")
@@ -35,19 +54,29 @@ export function labelOf(d: string): string {
 
 // A tax line OPENS with the tax: "Sales Tax", "NYS Sales Tax 8.875%", "Tax",
 // "Sales & Use Tax", "Total Tax", "MTA Tax", "Kings County Sales Tax",
-// "SALESTAX", "Sales Tax (materials only)". Work that only mentions tax
-// ("Plaster incl. tax", "Taxi stand repaint") is still work, and so is a line
-// whose tax word is straight away qualified out of being a charge ("Tax
-// exempt paint", "Sales tax included", "Tax lot 12 survey", "Tax ID").
-const TAX_HEAD = /^(?:(?:est|estimated|total|combined|applicable|plus|add|nyc|nys|ny|new york|state|city|local|county|mctd|mta|and|[a-z]+ county)\s+)*(?:salestax|(?:(?:sales and use|sales|sale|sls|use)\s+)?tax)(?:es)?(?:\s|$)/;
-const NOT_A_CHARGE = /^(?:incl|included|includes|including|inclusive|exempt|exemption|id|lot|free)\b/;
-// the pieces of a New York tax printed by their codes alone ("NYS 4%", "MCTD 0.375%")
+// "SALESTAX", "Sales Tax (materials only)", "Sales Tax (incl. MCTD)", the
+// codes of a New York tax's pieces on their own ("NYS 4%", "MCTD 0.375%") and
+// the transit surcharge ("MCTD Surcharge 0.375%"). Work that only mentions tax
+// ("Plaster incl. tax", "Taxi stand repaint", "Prepare county tax filing") is
+// still work, and so is a line whose tax word is straight away qualified out
+// of being a charge ("Tax exempt paint", "Sales tax included", "Tax lot 12
+// survey", "Tax ID"). ("Sales Tax (not included in unit prices)" is the
+// tax, charged on top.)
+const COUNTY = "(?:kings|queens|bronx|new york|richmond|nassau|suffolk|westchester|rockland|orange|putnam|dutchess|albany|erie|monroe|onondaga) county";
+const TAX_HEAD = new RegExp(`^(?:(?:est|estimated|total|combined|applicable|plus|add|nyc|nys|ny|new york|state|city|local|county|mctd|mta|and|${COUNTY})\\s+)*(?:salestax|(?:(?:sales and use|sales|sale|sls|use)\\s+)?tax)(?:es)?(?:\\s|$)`);
 const TAX_CODES = /^(?:nys|nyc|mctd|mta)(?: and (?:nys|nyc|mctd|mta))*$/;
+const SURCHARGE = /^(?:mctd|mta|metropolitan commuter transportation district)(?: and (?:mctd|mta))? surcharge(?:\s|$)/;
+// right after the tax word: not a charge ("exempt", "included"), unless what
+// is included is a piece of the tax itself ("incl. MCTD")
+const NOT_A_CHARGE = /^(?:exempt|exemption|id|lot|free|inclusive|incl(?:uded|udes|uding)?(?! (?:mctd|mta|surcharge|county|city|state|nys|nyc)\b))\b/;
+const taxHead = (l: string): RegExpMatchArray | null => {
+  if (TAX_CODES.test(l)) return l.match(/^.*$/);
+  return l.match(SURCHARGE) || l.match(TAX_HEAD);
+};
 export const isTaxLine = (d: string): boolean => {
   const l = labelOf(d);
-  if (TAX_CODES.test(l)) return true;
-  const m = l.match(TAX_HEAD);
-  return !!m && !NOT_A_CHARGE.test(l.slice(m[0].length));
+  const m = taxHead(l);
+  return !!m && !NOT_A_CHARGE.test(l.slice(m[0].length).trim());
 };
 
 // A totals line is ALL label: "Subtotal", "Grand Total", "Total Cost (labor
@@ -55,6 +84,19 @@ export const isTaxLine = (d: string): boolean => {
 // the kitchen" and "Subtotal of plaster work 130 SF" are work.
 const TOTAL_LABEL = /^(?:sub ?total|grand total|total|net total|order total|po total|invoice total|job total|total amount|total due|amount due|balance|balance due|balance remaining|total cost(?: labou?r and materials?)?|total labou?r and materials?|(?:non )?taxable (?:sub ?total|amount|total)|(?:sub ?total|total) (?:before|excl|excluding|without|incl|including|with|plus|after) (?:sales )?tax(?:es)?)(?: amount| due)?$/;
 export const isTotalLabel = (d: string): boolean => TOTAL_LABEL.test(labelOf(d));
+
+// Nothing but the paperwork's own label: "Sales Tax", "Tax (8.875%)", "NYS
+// Sales Tax", "Subtotal", "Grand Total". Not a line with more words after it
+// ("tax and delivery", or "balance" of "pressure balance"), which can be the
+// end of a work description wrapped onto its own line.
+const TAX_TAIL = /^(?:(?:total|amount|due|charged?|rate|on|of|the|above|materials?|labou?r|only|sub ?total|incl|mctd|mta|surcharge|if|applicable|nys|nyc)\s*)*$/;
+export const isPurePaperLabel = (d: string): boolean => {
+  const l = labelOf(d);
+  if (!l) return false;
+  if (l !== "balance" && TOTAL_LABEL.test(l)) return true;
+  const m = taxHead(l);
+  return !!m && TAX_TAIL.test(l.slice(m[0].length).trim());
+};
 
 // The rows of a document split into the work and its paperwork. A tax line is
 // known by its name alone. A totals line also has to carry the totals' figure
@@ -81,32 +123,46 @@ export const hasPaperwork = (rows: MoneyLine[] | null | undefined): boolean => {
   return s.tax.length + s.totals.length > 0;
 };
 
-// The rate a document's own tax charges. A tax printed twice (a row in the
-// table and again in the footer) is one tax; the state, city and transit
-// pieces of a New York tax ("NYS 4%", "NYC 4.5%", "MCTD 0.375%") add up to
-// one rate. The candidates, in order: the percentages printed, the figure
-// matched to a New York rate to the cent, and (unless strict) the figure over
-// the work. When the document prints its total, the rate has to reproduce it.
-// Nothing when nothing fits: the job keeps its own rate (a $0.00 or 0% line is
-// not taken as "no tax" here: that is a person's call).
+// The rate a document's own tax charges.
+//  - A line printed twice in the same words and figure is one tax (a table
+//    row "Sales Tax 8.875%" and the footer's "Sales Tax" under it). Lines in
+//    different words are different taxes: a state 4% and a county 4% are 8%.
+//  - The state, city and transit pieces of a New York tax ("NYS 4%", "NYC
+//    4.5%", "MCTD 0.375%") add up to one rate; a "Total Sales Tax 8.875%"
+//    printed beside its own pieces is their sum, not one more piece.
+//  - The candidates, in order: the printed percentage, the tax figure (all of
+//    it, or one line of it) matched to a New York rate to the cent, and
+//    (unless strict) the figure over the work.
+//  - With the document's printed total: the first candidate that reproduces
+//    it. If none does (freight, a discount on the total), the printed
+//    percentage still stands, unless strict.
+//  - Strict, with no total: only a rate that reproduces one of the tax
+//    figures on the work to the cent (a saved job is never re-rated on a guess).
+// Nothing when nothing fits: the job keeps its own rate. (A $0.00 or 0% line
+// is not taken as "no tax" here: that is a person's call.)
 const NY_RATES = [8.875, 8.625, 8.5, 8.375, 8.25, 8.125, 8, 7.375, 7, 4.5, 4];
 const pctOf = (d: string): number | undefined => {
   const m = String(d || "").match(/(\d+(?:\.\d+)?)\s*%/);
   const v = m ? parseFloat(m[1]) : NaN;
   return v > 0 && v <= 20 ? v : undefined;
 };
-// the tax lines with a repeat of the same tax taken out
+const r3 = (v: number) => Math.round(v * 1000) / 1000;
 const onceEach = (taxRows: MoneyLine[]) => {
   const seen = new Set<string>();
   return (taxRows || []).filter((r) => {
-    const k = `${pctOf(r.description) ?? ""}|${Math.round(amountOf(r) * 100)}`;
+    const k = `${labelOf(r.description)}|${Math.round(amountOf(r) * 100)}`;
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
   });
 };
-// the tax a document charges, counted once
-export const taxFigure = (taxRows: MoneyLine[]): number => sumOf(onceEach(taxRows));
+// the tax a document charges, counted once (a line that is the others' sum is not added to them)
+export const taxFigure = (taxRows: MoneyLine[]): number => {
+  const rows = onceEach(taxRows);
+  const all = sumOf(rows);
+  const whole = rows.length > 2 ? rows.find((r) => Math.abs(amountOf(r) * 2 - all) <= 0.02) : undefined;
+  return whole ? amountOf(whole) : all;
+};
 // the work taxed at this rate comes to the printed total (to the cent, five at most)
 export const fitsTotal = (workSum: number, rate: number, total: number): boolean =>
   Math.abs(Math.round(workSum * (100 + rate)) / 100 - total) <= 0.05;
@@ -114,19 +170,28 @@ const snap = (workSum: number, fig: number) => NY_RATES.find((k) => Math.abs(Mat
 export function taxRateOf(taxRows: MoneyLine[], workSum: number, opts: { total?: number; strict?: boolean } = {}): number | undefined {
   if (!(workSum > 1)) return undefined;
   const rows = onceEach(taxRows);
-  const cands: number[] = [];
   const pcts = rows.map((r) => pctOf(r.description)).filter((v): v is number => v !== undefined);
-  if (pcts.length) cands.push(Math.round(pcts.reduce((a, b) => a + b, 0) * 1000) / 1000);
-  const T = sumOf(rows);
-  if (T > 0) {
-    const all = snap(workSum, T);
-    if (all !== undefined) cands.push(all);
-    for (const r of rows) { const one = snap(workSum, amountOf(r)); if (one !== undefined) cands.push(one); }
-    const r = Math.round((T / workSum) * 100 * 1000) / 1000;
-    if (!opts.strict && r > 0 && r <= 20) cands.push(r);
+  let printed: number | undefined;
+  if (pcts.length) {
+    const sum = r3(pcts.reduce((a, b) => a + b, 0));
+    printed = (pcts.length > 2 ? pcts.find((p) => Math.abs(p * 2 - sum) < 0.0005) : undefined) ?? sum;
   }
+  const T = taxFigure(rows);
+  const figs = [T, ...rows.map(amountOf)].filter((v) => v > 0);
+  const snaps = figs.map((v) => snap(workSum, v)).filter((v): v is number => v !== undefined);
+  const lr = T > 0 ? r3((T / workSum) * 100) : 0;
+  const loose = lr > 0 && lr <= 20 ? lr : undefined;
   const total = Number(opts.total) || 0;
-  return cands.find((k) => !(total > 1) || fitsTotal(workSum, k, total));
+  if (total > 1) {
+    const cands = [printed, ...snaps, opts.strict ? undefined : loose].filter((v): v is number => v !== undefined);
+    return cands.find((k) => fitsTotal(workSum, k, total)) ?? (opts.strict ? undefined : printed);
+  }
+  if (opts.strict) {
+    // borne out by the figures: the printed rate when one of them reproduces it, else a New York rate one reproduces
+    if (printed !== undefined) return figs.length === 0 ? (NY_RATES.includes(printed) ? printed : undefined) : snaps.includes(printed) ? printed : undefined;
+    return snaps[0];
+  }
+  return printed ?? snaps[0] ?? loose;
 }
 
 // Does a document's work add up to the total it printed? With no tax, with its
@@ -144,9 +209,10 @@ export function addsUp(workSum: number, taxSum: number, total: number, rate?: nu
 // look at). The work lines themselves are never touched: no price, quantity,
 // unit or key changes. Money moves only where it was worked out from the
 // lines; a total the PO printed stays. The auto-price baseline moves only when
-// the job was still at it, so taking a tax line off never prices a job (and
-// never hands it an invoice number). The rate is set only when the job never
-// had one chosen and the tax line names (or reproduces) its own.
+// the job was still exactly at it, so taking a tax line off never prices a
+// job (and never hands it an invoice number). The rate is set only when the
+// job holds none of its own choosing and the tax line names one that its
+// figures (or the PO's printed total) bear out.
 export interface RepairJob {
   items?: MoneyLine[] | null; amount?: number | string | null; tax_pct?: number | string | null;
   list_subtotal?: number | string | null; invoice_sent?: string | null; received?: boolean | null;
@@ -165,17 +231,17 @@ export function paperworkRepair<T extends MoneyLine>(j: RepairJob & { items?: T[
   // repairs came in before the readers carried a PO's rate, and they all hold it
   const hadRate = j.tax_pct !== null && j.tax_pct !== undefined && String(j.tax_pct).trim() !== "";
   const was = hadRate ? Number(j.tax_pct) : 8.875;
-  // only a rate the tax line prints, or one it reproduces to the cent on the
-  // work as it stands: never a figure divided by work that has changed since
-  const own = !hadRate || was === 8.875 ? taxRateOf(s.tax, newTotal, { strict: true }) : undefined;
+  const amt = Number(j.amount) || 0;
+  const fromLines = Math.abs(amt - cents(oldTotal * (1 + was / 100))) <= 0.02 || Math.abs(amt - cents(oldTotal * 1.08875)) <= 0.02;
+  // only a rate the tax line names and its figures (or the PO's printed
+  // total, when that is what the job holds) bear out: never a guess
+  const own = !hadRate || was === 8.875 ? taxRateOf(s.tax, newTotal, { strict: true, total: !fromLines && amt > 1 ? amt : undefined }) : undefined;
   const rate = own ?? was;
   const patch: { items: T[]; amount?: number; tax_pct?: number; list_subtotal?: number } = { items: s.work };
   if (own !== undefined && own !== was) patch.tax_pct = own;
-  const amt = Number(j.amount) || 0;
-  const fromLines = Math.abs(amt - cents(oldTotal * (1 + was / 100))) <= 0.02 || Math.abs(amt - cents(oldTotal * 1.08875)) <= 0.02;
   if (fromLines && newTotal > 0) patch.amount = cents(newTotal * (1 + rate / 100));
   const base = j.list_subtotal === null || j.list_subtotal === undefined || String(j.list_subtotal).trim() === "" ? NaN : Number(j.list_subtotal);
-  // still at the baseline, judged the way the database rounds it (to the cent)
-  if (Number.isFinite(base) && Math.abs(base - exactTotal(items)) <= 0.011) patch.list_subtotal = exactTotal(s.work);
+  // still exactly at the baseline, to the cent the way the database rounds it
+  if (Number.isFinite(base) && Math.abs(base - exactTotal(items)) < 0.005) patch.list_subtotal = exactTotal(s.work);
   return { patch, billed: false, removed, taxLines: s.tax.length };
 }

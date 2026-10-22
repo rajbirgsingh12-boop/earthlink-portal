@@ -48,11 +48,13 @@ export default function WorkLines({ items, canPrice, bufferKey, onChange, onComm
     });
   };
   const add = () => {
-    setFresh(items.length);
+    setFresh(-1); // the last row, whatever the count comes back as
     focusNew.current = true;
     onCommit([...items, { description: "", qty: 1, unit: "EACH", unit_price: 0 }]);
   };
-  // once the new row is on screen, the cursor is in its description
+  // once the new row is on screen, the cursor is in its description. Run on
+  // every change of the lines, not their count: a save that also took a
+  // leftover Sales Tax line off brings the new row back at the same count
   useEffect(() => {
     if (!focusNew.current) return;
     focusNew.current = false;
@@ -63,12 +65,12 @@ export default function WorkLines({ items, canPrice, bufferKey, onChange, onComm
       last.focus({ preventScroll: true });
       scrollTo(last, "nearest");
     });
-  }, [items.length]);
+  }, [items]);
 
   return (
     <div ref={wrap}>
       {items.map((it, i) => (
-        <div key={i} data-line className={`mb-2 flex flex-wrap items-start gap-1.5 rounded-sm border border-rulesoft p-2 ${i === fresh ? "anim-row" : ""}`}>
+        <div key={i} data-line className={`mb-2 flex flex-wrap items-start gap-1.5 rounded-sm border border-rulesoft p-2 ${i === fresh || (fresh === -1 && i === items.length - 1) ? "anim-row" : ""}`}>
           <input data-line-desc className="field min-w-0 flex-1" placeholder="What was done: door, plaster, paint…" aria-label="What was done" value={it.description}
             onChange={(e) => {
               // the unit follows the words until someone sets it by hand

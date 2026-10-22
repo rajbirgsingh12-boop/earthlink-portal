@@ -15,7 +15,7 @@ export interface PoSeg { x: number; w: number; text: string }
 export interface PoLine { page: number; y: number; size: number; text: string; segs: PoSeg[] }
 export type PoItem = { str?: string; transform?: number[]; width?: number; height?: number };
 
-import { isTaxLine, isTotalLabel, taxRateOf, addsUp } from "./paperwork";
+import { isTaxLine, isTotalLabel, taxRateOf, taxFigure, addsUp } from "./paperwork";
 
 export interface PactPoFields {
   po: string;
@@ -230,7 +230,7 @@ export function readRowsFrom(src: PoLine[], pitch: number): PactPoFields["rows"]
     // a row's wrap is on the same page as the row — the top of the next page is
     // a fresh letterhead, not the rest of the sentence
     if (L.page !== rowPage) { at = -1; continue; }
-    if (TOTALISH.test(L.text) || isTaxLine(L.text) || SITE_LABEL.test(L.text) || BILL_LABEL.test(L.text) || STOP_LABEL.test(L.text)) continue;
+    if (TOTALISH.test(L.text) || SITE_LABEL.test(L.text) || BILL_LABEL.test(L.text) || STOP_LABEL.test(L.text)) continue;
     if (MONEYISH.test(L.text)) continue;
     if (lastY - L.y > 1.6 * pitch) { at = -1; continue; }
     // every word of it has to sit inside the description column
@@ -515,9 +515,12 @@ export function parsePactPoText(raw: string, structured?: PoLine[]): PactPoField
   const taxRows = lines
     .filter((ln) => isTaxLine(ln) && /\$\s*[\d,]+\.\d{2}/.test(ln))
     .map((ln) => ({ description: ln, qty: 1, unit_price: cash(ln.match(/\$\s*([\d,]+\.\d{2})/)?.[1] || "0") }));
-  const taxFig = taxRows.reduce((s, r) => s + r.unit_price, 0);
-  const taxPct = rows.length > 0 ? taxRateOf(taxRows, Math.round(rowSum * 100) / 100) : undefined;
-  const rowsAddUp = grand.length === 0 || rows.length === 0 || addsUp(Math.round(rowSum * 100) / 100, Math.round(taxFig * 100) / 100, amount, taxPct);
+  // (one tax counted once: the same figure in the table and again in the
+  // footer is one tax, and the rate has to reproduce the printed total)
+  const taxFig = taxFigure(taxRows);
+  const work = Math.round(rowSum * 100) / 100;
+  const taxPct = rows.length > 0 ? taxRateOf(taxRows, work, { total: grand.length > 0 ? amount : undefined }) : undefined;
+  const rowsAddUp = grand.length === 0 || rows.length === 0 || addsUp(work, taxFig, amount, taxPct);
   const APT_RE = /\b(?:apartment|apt\.?|unit|#)\s*([\dA-Za-z][\dA-Za-z -]{0,8}?)(?=\s*(?:,|Brooklyn|Bronx|Queens|Manhattan|Staten|New York|NY\b|$))/gi;
   const aptsIn = (a: string) => [...a.matchAll(APT_RE)].map((m) => m[1].trim()).filter(Boolean);
   const apts = aptsIn(address);

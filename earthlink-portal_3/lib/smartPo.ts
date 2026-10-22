@@ -5,7 +5,7 @@
 // add up. Server-only: needs ANTHROPIC_API_KEY.
 import { z } from "zod";
 import { isoDate, type PactPoFields } from "./parsePactPo";
-import { splitPaperwork, taxRateOf, addsUp } from "./paperwork";
+import { splitPaperwork, taxRateOf, addsUp, fitsTotal } from "./paperwork";
 
 export const PoSchema = z.object({
   po_number: z.string().describe("The purchase order number exactly as printed, digits and dashes only, no 'PO' prefix. Empty if none."),
@@ -63,7 +63,7 @@ export function smartNotes(s: SmartPo): string[] {
   // the work rows against the total: a Sales Tax row the read carried is the
   // tax, not work, and a total with the PO's tax on it adds up
   const split = splitPaperwork(s.rows);
-  const rate = taxRateOf(split.tax, split.workSum);
+  const rate = taxRateOf(split.tax, split.workSum, { total: s.total });
   if (split.work.length > 0 && s.total > 1 && !addsUp(split.workSum, split.taxSum, s.total, rate)) out.push("The rows don't add up to the PO's printed total: check the money on Billing");
   if (s.rows.some((r) => r.qty < 0 || r.unit_price < 0)) out.push("A row has a negative quantity or price: check it");
   return out;
@@ -80,15 +80,19 @@ export function mergeSmart(rules: PactPoFields & { taxPct?: number }, s: SmartPo
   const split = splitPaperwork(all);
   const rows = split.work.length ? split.work : rules.rows;
   const rowSum = rows.reduce((a, r) => a + cents(cents(r.unit_price) * (Number(r.qty) || 0)), 0);
-  const ownRate = split.work.length ? taxRateOf(split.tax, rowSum) : undefined;
-  const taxPct = ownRate ?? rules.taxPct;
   const taxRows = split.work.length ? split.taxSum : 0;
   const amount = s.total > 0 ? cents(s.total) : rules.amount || cents(rowSum + taxRows);
+  // the PO's own rate: from the tax row Claude carried, or else the rules
+  // read's, and either one only when it reproduces the PO's printed total
+  const ownRate = split.work.length ? taxRateOf(split.tax, rowSum, { total: s.total > 0 ? s.total : undefined }) : undefined;
+  const rulesRate = rules.taxPct !== undefined && (!(amount > 1) || fitsTotal(rowSum, rules.taxPct, amount)) ? rules.taxPct : undefined;
+  const taxPct = ownRate ?? rulesRate;
   // a date in any shape Claude might write it — "2026-09-10", "9/10/2026"
   const accessDate = (/^\d{4}-\d{2}-\d{2}$/.test(s.access_date) ? s.access_date : "") || isoDate(s.access_date) || rules.accessDate || "";
   const warnings = [...new Set([...(rules.warnings || []), ...s.warnings.map((w) => w.trim()).filter(Boolean), ...smartNotes(s)])];
   return {
     ...rules,
+    taxPct: undefined,
     po: pick(s.po_number, rules.po),
     poDate: pick(s.po_date, rules.poDate),
     partner: pick(s.partner, rules.partner),

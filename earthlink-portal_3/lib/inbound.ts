@@ -25,7 +25,7 @@ import {
 } from "@/lib/jobFlow";
 import { bookPrice } from "@/lib/priceServer";
 import { roomsIn } from "@/lib/priceBook";
-import { workLines } from "@/lib/paperwork";
+import { workLines, paperworkRepair } from "@/lib/paperwork";
 import type { SfLine } from "@/lib/measure";
 
 const env = (k: string) => process.env[k] || "";
@@ -256,11 +256,14 @@ async function measureOnJob(db: Db, job: ThreadJob, hits: Parameters<typeof appl
   const { items, changes } = applyMeasures(itemsOf(job), hits, plasterPrice, prep);
   if (!changes.length) return null;
   const sub = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
-  const tax = job.tax_pct === null || job.tax_pct === undefined ? 8.875 : Number(job.tax_pct);
+  // a Sales Tax line still saved on the job (itemsOf leaves it out) goes with
+  // this save: the rate it names is kept on the job, as the page's repair would
+  const ownRate = paperworkRepair(job).patch?.tax_pct;
+  const tax = ownRate ?? (job.tax_pct === null || job.tax_pct === undefined ? 8.875 : Number(job.tax_pct));
   const who = (o.emp.name || "").trim().split(/\s+/)[0] || "";
   const line = measureNoteLine(changes, who, nyWhen(o.now));
   const notes = `${(job.notes || "").trim()}${(job.notes || "").trim() ? "\n" : ""}${line}`;
-  const saved = await db.patch(`pact_jobs?id=eq.${job.id}`, { items, notes, ...(sub > 0 ? { amount: Math.round(sub * (1 + tax / 100) * 100) / 100 } : {}) });
+  const saved = await db.patch(`pact_jobs?id=eq.${job.id}`, { items, notes, ...(ownRate !== undefined ? { tax_pct: ownRate } : {}), ...(sub > 0 ? { amount: Math.round(sub * (1 + tax / 100) * 100) / 100 } : {}) });
   if (!saved) return null;
   await putRow(db, { employee_id: o.emp.id, from_phone: o.from, body: o.body, status: "measure", how: "measure", pact_job_id: job.id, photos: [], msg_sid: o.sid || null, note: line });
   return { changes, stillBlank: measureLines(items).filter((l) => !l.has) };

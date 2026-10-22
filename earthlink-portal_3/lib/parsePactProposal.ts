@@ -113,12 +113,15 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
   // skipped, never a row, and never where the reading stops (the work below
   // it is still work). What it added is remembered, so the letter's own
   // totals can be taken back down to the work it really bills.
-  let skipped = 0;
+  // (a skipped tax line is what the letter taxed on top of its work; a skipped
+  // Total line is only the sum of the rows, and is never added back in)
+  let skipped = 0, skippedTax = 0;
   const paper = (d: string) => isTaxLine(d) || isTotalLabel(d);
+  const skip = (d: string, amount: number) => { skipped += amount; if (isTaxLine(d)) skippedTax += amount; };
   const pushItem = (descRaw: string, amount: number) => {
     const description = descRaw.replace(/[\t:;,\s-]+$/g, "").replace(/^[\s:;,-]+/, "").replace(/\s{2,}/g, " ").trim();
     if (!description || description.length < 3 || amount <= 0) return;
-    if (paper(description)) { skipped += amount; return; }
+    if (paper(description)) { skip(description, amount); return; }
     // "2 x $350" or "2 @ $350" inside the text = real qty and unit price
     const qm = description.match(/(\d+(?:\.\d+)?)\s*(?:x|@)\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/i);
     const qty = qm ? parseFloat(qm[1]) : 1;
@@ -148,7 +151,7 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
       // the wrapped tail waiting in pending is the row above's, as with any complete row
       if (pending && !pending.includes("$") && rows.length > 0) rows[rows.length - 1].description = `${rows[rows.length - 1].description} ${pending}`.replace(/\s{2,}/g, " ").trim();
       pending = "";
-      skipped += Math.round(bare.qty * bare.unit_price * 100) / 100;
+      skip(bare.description, Math.round(bare.qty * bare.unit_price * 100) / 100);
       continue;
     }
     // The totals end the work — but only when the line is NOT itself a
@@ -157,7 +160,12 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
     // row arithmetic, fails that read, and stops the table here — BEFORE the
     // pending-glue below can weld "Total Cost … $9,565.00" onto a wrapped
     // fragment and mint a phantom row out of the pair.
-    const stopish = stopRe.test(l) || /^total\b/i.test(l) || isTaxLine(l) || isTotalLabel(l);
+    // A tax or totals line stops the work only when it carries a figure, and
+    // only judged with the description it may finish: "plus tax" or
+    // "balance" wrapped under a work line is the end of that line's words,
+    // and "materials plus / tax and delivery $4,500.00" is work.
+    const judged = pending && !pending.includes("$") ? `${pending} ${l}` : l;
+    const stopish = stopRe.test(l) || /^total\b/i.test(l) || (l.includes("$") && (isTaxLine(judged) || isTotalLabel(judged)));
     if (!bare && stopish) {
       // the LAST row's wrapped tail sits in pending when the totals arrive
       if (pending && !pending.includes("$") && rows.length > 0) {
@@ -171,7 +179,7 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
       pending = "";
     }
     const row = bare || (l.includes("$") && !stopish ? readRow(`${pending} ${l}`.trim(), { allowTotalish: true }) : null);
-    if (row && paper(row.description)) { pending = ""; skipped += Math.round(row.qty * row.unit_price * 100) / 100; continue; }
+    if (row && paper(row.description)) { pending = ""; skip(row.description, Math.round(row.qty * row.unit_price * 100) / 100); continue; }
     if (row) {
       pending = "";
       rows.push({ description: row.description, qty: row.qty, unit_price: row.unit_price, property: "", unit: punit, ...(row.uom ? { uom: row.uom } : {}) });
@@ -219,17 +227,20 @@ export function parsePactProposalText(raw: string): PactPoFields & PactProposalE
   const rowsSum = Math.round(rows.reduce((s, r) => s + r.qty * r.unit_price, 0) * 100) / 100;
   // what the letter itself subtotalled and taxed: its printed figure, or its
   // rows with anything skipped above added back
-  const sub = money(totalsText.match(lineStart("Labor and materials?|Total Cost|Sub\\s*-?\\s*total|Subtotal"))?.[1] || "") || Math.round((rowsSum + skipped) * 100) / 100;
+  const sub = money(totalsText.match(lineStart("Labor and materials?|Total Cost|Sub\\s*-?\\s*total|Subtotal"))?.[1] || "") || Math.round((rowsSum + skippedTax) * 100) / 100;
   const taxM = totalsText.match(lineStart("(?:Sales\\s*)?Tax"));
   const tax = money(taxM?.[1] || "");
   const grand = money(totalsText.match(lineStart("Grand Total|Amount Due|Total Due"))?.[1] || "");
+  // a rate worked back out of the money is a sales tax rate or nothing (a work
+  // figure taken for the tax must never become a 60% rate on the job)
+  const capped = (r: number) => (r >= 0 && r <= 20 ? r : undefined);
   // the percentage the letter prints beats one worked back out of the money,
   // and a tax line of $0.00 means no tax — not "no tax rate given"
   const printed = taxM ? parseFloat(taxM[0].match(/\(?\s*([\d.]+)\s*%/)?.[1] || "") : NaN;
   // (a worked-out rate that is a New York rate to the cent is that rate:
   // $69.23 on $780.00 is 8.875%, not 8.876%)
   const taxPct = Number.isFinite(printed) ? printed
-    : taxM && sub > 0 ? (tax > 0 ? taxRateOf([{ description: "", qty: 1, unit_price: tax }], sub) : undefined) ?? Math.round((tax / sub) * 100 * 1000) / 1000
+    : taxM && sub > 0 ? (tax > 0 ? taxRateOf([{ description: "", qty: 1, unit_price: tax }], sub) : undefined) ?? capped(Math.round((tax / sub) * 100 * 1000) / 1000)
       : undefined;
 
   const desc = rows[0]?.description || t.match(/proposal for the property/i)?.[0] || "";

@@ -5,7 +5,7 @@
 // every case can be tried on its own. Server-only (it signs with node:crypto).
 import { createHmac, timingSafeEqual } from "crypto";
 import { normPo } from "./po";
-import { langOf, type Lang } from "./crewText";
+import { atJob, langOf, streetOf, type Lang } from "./crewText";
 
 export type Params = [string, string][];
 
@@ -93,21 +93,27 @@ export function refsIn(body: string): Ref[] {
 }
 
 export interface MineRow { day: string; pact_job_id?: string | null; release_id?: string | null; texted_at?: string | null }
-export interface JobKey { kind: "pact" | "rel"; id: string; label: string; keys: string[] }
+// street and apt: where the job is, so a reply names it the way the crew knows it (lib/crewText jobName)
+export interface JobKey { kind: "pact" | "rel"; id: string; label: string; keys: string[]; street?: string; apt?: string }
 export type Pick =
-  | { kind: "pact" | "rel"; id: string; label: string; why: "number" | "today" | "recent" | "told" }
+  | { kind: "pact" | "rel"; id: string; label: string; street?: string; apt?: string; why: "number" | "today" | "recent" | "told" }
   | { kind: "ask"; why: "none" | "many" | "unknown"; number?: string };
 
 // A PACT job's numbers (PO, job number) and a release's number, stripped the
 // way the portal strips a PO — "PO# 09001" is "9001"
 // "PO# 220011" is said "PO 220011" — the label is put on here, once
 const bare = (s: string, label: RegExp) => s.trim().replace(label, "").trim();
-export const pactKey = (j: { id: string; po_number?: string | null; job_number?: string | null }): JobKey => {
+export const pactKey = (j: { id: string; po_number?: string | null; job_number?: string | null; address?: string | null; development?: string | null; property_unit?: string | null }): JobKey => {
   const po = (j.po_number || "").trim(), job = (j.job_number || "").trim();
-  return { kind: "pact", id: j.id, label: `PO ${bare(po || job, /^(p\.?\s*o\.?\s*#?|#)\s*/i)}`.trim(), keys: [normPo(po), normPo(job)].filter(Boolean) };
+  return {
+    kind: "pact", id: j.id, label: `PO ${bare(po || job, /^(p\.?\s*o\.?\s*#?|#)\s*/i)}`.trim(), keys: [normPo(po), normPo(job)].filter(Boolean),
+    street: streetOf(j.address) || (j.development || "").trim(), apt: (j.property_unit || "").trim(),
+  };
 };
-export const relKey = (r: { id: string; rel_number?: string | null }): JobKey =>
-  ({ kind: "rel", id: r.id, label: `release ${bare(r.rel_number || "", /^(release\s*#?|rel\.?\s*#?|#)\s*/i)}`.trim(), keys: [normPo(r.rel_number)].filter(Boolean) });
+export const relKey = (r: { id: string; rel_number?: string | null; address?: string | null; location?: string | null }): JobKey =>
+  ({ kind: "rel", id: r.id, label: `release ${bare(r.rel_number || "", /^(release\s*#?|rel\.?\s*#?|#)\s*/i)}`.trim(), keys: [normPo(r.rel_number)].filter(Boolean), street: streetOf(r.address) || (r.location || "").trim() });
+// a job picked, with what names it
+const picked = (j: JobKey, why: "number" | "today" | "recent" | "told"): Pick => ({ kind: j.kind, id: j.id, label: j.label, street: j.street, apt: j.apt, why });
 
 // "2026-09-22" minus n days, by the calendar (no clock, no time zone)
 export const dayMinus = (iso: string, n: number): string => {
@@ -137,7 +143,7 @@ export function pickJob(body: string, rows: MineRow[], mine: JobKey[], today: st
       // a PO is one job across the whole portal; a release number is not
       for (const j of anyPo) if (j.kind === "pact" && j.keys.includes(r.n)) hits.set(j.id, j);
     }
-    if (hits.size === 1) { const j = [...hits.values()][0]; return { kind: j.kind, id: j.id, label: j.label, why: "number" }; }
+    if (hits.size === 1) return picked([...hits.values()][0], "number");
     if (hits.size > 1) return { kind: "ask", why: "many" };
     // a number was given out loud and fits nothing: never guess past it
     const told = refs.find((r) => r.said);
@@ -155,14 +161,14 @@ export function pickJob(body: string, rows: MineRow[], mine: JobKey[], today: st
   for (let back = 0; back <= RECENT_DAYS; back++) {
     const day = dayMinus(today, back);
     const js = jobsOn(day);
-    if (js.length === 1) return { kind: js[0].kind, id: js[0].id, label: js[0].label, why: back === 0 ? "today" : "recent" };
+    if (js.length === 1) return picked(js[0], back === 0 ? "today" : "recent");
     if (js.length > 1) {
       // two jobs that day: the one they were texted about last — a PO that came
       // in during the day is texted later than the morning's, and the pictures
       // after that text are its. Texts that went out together say nothing.
       const toldAt = (j: JobKey) => Math.max(0, ...rows.filter((r) => r.day === day && (r.pact_job_id || r.release_id) === j.id).map((r) => Date.parse(r.texted_at || "") || 0));
       const told = js.map((j) => ({ j, at: toldAt(j) })).sort((a, b) => b.at - a.at);
-      if (back === 0 && told[0].at > 0 && told[0].at - told[1].at >= TOLD_APART_MS) return { kind: told[0].j.kind, id: told[0].j.id, label: told[0].j.label, why: "told" };
+      if (back === 0 && told[0].at > 0 && told[0].at - told[1].at >= TOLD_APART_MS) return picked(told[0].j, "told");
       return { kind: "ask", why: "many" };
     }
   }
@@ -184,6 +190,7 @@ export function photoName(kind: string, at: Date, first: string, sid: string, i:
 }
 
 // ---- what to say back ----
+// `label` here is the job's whole name, address first (lib/crewText jobName)
 export type Reply =
   | { k: "filed"; n: number; label: string }
   | { k: "held"; n: number }
@@ -203,29 +210,29 @@ export function replyText(r: Reply, lang0?: string | null): string {
   switch (r.k) {
     case "filed":
       return es
-        ? `Recibido — ${photos(r.n, lang)} ${r.n === 1 ? "quedó" : "quedaron"} en el ${r.label}. ¡Gracias! Si es otro trabajo, responda con el número de PO correcto.`
-        : `Got it — ${photos(r.n, lang)} on ${r.label}. Thanks! If that's the wrong job, reply with the right PO number.`;
+        ? `Recibido: ${photos(r.n, lang)} ${r.n === 1 ? "quedó" : "quedaron"} ${atJob(r.label, lang)}. ¡Gracias! Si es otro trabajo, responda con el número de PO correcto.`
+        : `Got it: ${photos(r.n, lang)} ${atJob(r.label, lang)}. Thanks! If that's the wrong job, reply with the right PO number.`;
     case "held":
       return es
         ? `Recibimos ${r.n === 1 ? "su foto" : `sus ${photos(r.n, lang)}`}. ¿De qué trabajo ${r.n === 1 ? "es" : "son"}? Responda con el número de PO o de release.`
         : `Got your ${photos(r.n, lang)}. Which job ${r.n === 1 ? "is it" : "are they"} for? Reply with the PO or release number.`;
     case "moved":
       return es
-        ? `Listo — ${r.n === 1 ? "su foto" : `sus ${photos(r.n, lang)}`} ahora ${r.n === 1 ? "está" : "están"} en el ${r.label}.`
-        : `Done — your ${photos(r.n, lang)} ${r.n === 1 ? "is" : "are"} on ${r.label} now.`;
+        ? `Listo: ${r.n === 1 ? "su foto" : `sus ${photos(r.n, lang)}`} ahora ${r.n === 1 ? "está" : "están"} ${atJob(r.label, lang)}.`
+        : `Done: your ${photos(r.n, lang)} ${r.n === 1 ? "is" : "are"} ${atJob(r.label, lang)} now.`;
     case "unknown":
       return es
         ? `No encontramos el número ${r.number} en sus trabajos. La oficina pondrá sus fotos en el trabajo correcto.`
         : `Couldn't find ${r.number} on your jobs. The office will put your photos on the right job.`;
     case "notphoto":
-      return es ? "Solo se guardan fotos en el trabajo — eso no era una foto." : "Only photos go on the job — that wasn't a photo.";
+      return es ? "Solo se guardan fotos en el trabajo; eso no era una foto." : "Only photos go on the job; that wasn't a photo.";
     case "resend":
       return es ? "No supimos de qué trabajo son sus fotos. Por favor envíelas otra vez con el número de PO en el mensaje." : "We couldn't tell which job your photos are for. Please send them again with the PO number in the text.";
     case "failed":
       return es ? "Sus fotos no llegaron bien. Por favor envíelas otra vez." : "Your photos didn't come through. Please send them again.";
     case "inall": {
       const pile = r.kind === "before" ? (es ? " de ANTES" : " BEFORE") : r.kind === "after" ? (es ? " de DESPUES" : " AFTER") : "";
-      return es ? `En total, ${r.n} fotos${pile} en el ${r.label}.` : `${r.n}${pile} photos on ${r.label} in all.`;
+      return es ? `En total, ${r.n} fotos${pile} ${atJob(r.label, lang)}.` : `${r.n}${pile} photos ${atJob(r.label, lang)} in all.`;
     }
     case "lost":
       return es
@@ -241,7 +248,7 @@ export function replyText(r: Reply, lang0?: string | null): string {
       // nobody knows this phone's language yet: both
       return r.n > 0
         ? "Earth Link: got your photos. This phone isn't on the crew list yet, so the office will put them on the job. / Recibimos sus fotos. Este teléfono aún no está en la lista del equipo; la oficina las pondrá en el trabajo."
-        : "Earth Link: this number takes job photos from the crew. This phone isn't on the crew list — ask the office to add it. / Este número recibe fotos de trabajo del equipo. Este teléfono no está en la lista; pida a la oficina que lo agregue.";
+        : "Earth Link: this number takes job photos from the crew. This phone isn't on the crew list; ask the office to add it. / Este número recibe fotos de trabajo del equipo. Este teléfono no está en la lista; pida a la oficina que lo agregue.";
   }
 }
 

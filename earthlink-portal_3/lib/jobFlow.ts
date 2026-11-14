@@ -1,29 +1,30 @@
 // A PACT job, start to finish, by text — one thread the worker follows from
 // the company number, and everything they send lands on the job:
 //
-//   the crew text   → "When you get there, reply with BEFORE photos."
-//   before photos   → on the job as before photos; "Now text the square feet
-//                      for: Plaster. Like: plaster 120 sf."
-//   measurements    → onto the job's lines (the proposal and the invoice are
-//                      drawn from those lines, so they carry the number from
-//                      then on); "When you finish, reply with AFTER photos."
+//   the crew text   → "When you get there, reply with BEFORE photos. When you
+//                      finish, reply with AFTER photos."
+//   before photos   → on the job as before photos; "When you finish, reply
+//                      with AFTER photos."
 //   after photos    → on the job as after photos; "Thanks, all set."
 //
+// The crew is never asked for square feet: the office measures. A number a
+// worker texts on their own ("plaster 120 sf") still goes onto the job's
+// lines, as it always has. Every reply names the job by its address
+// (lib/crewText jobName), the caller passes that name in as `label`.
+//
 // Where the job is in that thread is read off the job itself — the photos it
-// has and the lines still waiting for a number — never kept anywhere else, so
-// a photo the office took and a number the office typed count the same as a
-// texted one. Pure: no database, no Twilio. The route (/api/sms-in) does the
-// reading and writing; this decides and writes the words.
-import { langOf } from "./crewText";
+// has — never kept anywhere else, so a photo the office took counts the same
+// as a texted one. Pure: no database, no Twilio. The route (/api/sms-in) does
+// the reading and writing; this decides and writes the words.
+import { atJob, langOf, ofJob, theJob } from "./crewText";
 import { isSfLine, roundSf, type SfLine } from "./measure";
 import { normUnit } from "./priceBook";
 
-export type Stage = "before" | "measure" | "after" | "done";
+export type Stage = "before" | "after" | "done";
 export type PhotoKind = "before" | "after";
-export interface StageInput { beforeN: number; afterN: number; needSf: boolean }
-// no before photos yet: the job hasn't started; a measured line still blank:
-// the number is the next thing; then the after photos; then nothing more
-export const stageOf = (s: StageInput): Stage => (s.beforeN === 0 ? "before" : s.needSf ? "measure" : s.afterN === 0 ? "after" : "done");
+export interface StageInput { beforeN: number; afterN: number }
+// no before photos yet: the job hasn't started; then the after photos; then nothing more
+export const stageOf = (s: StageInput): Stage => (s.beforeN === 0 ? "before" : s.afterN === 0 ? "after" : "done");
 
 // the photo's own name says which it is; a job's documents sort on the prefix
 export const isImageName = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n || "");
@@ -337,55 +338,31 @@ const example = (lines: MeasureLine[]): string => {
   if (!pick.length) return "plaster 120 sf";
   return pick.map(exampleOf).join(", ");
 };
-// what the blank lines are measured in: "the square feet", "how many rooms", or "the measurements"
-type Asked = "sqft" | "rooms" | "measure";
-const askedOf = (lines: MeasureLine[]): Asked => (lines.length && lines.every((l) => l.unit === "ROOM") ? "rooms" : lines.every((l) => l.unit === "SF") ? "sqft" : "measure");
-const WHAT = {
-  en: { sqft: "the square feet", rooms: "how many rooms", measure: "the measurements" },
-  es: { sqft: "los pies cuadrados", rooms: "cuántos cuartos", measure: "las medidas" },
-};
 const list = (lines: MeasureLine[]) => lines.map((l) => l.name).join(", ");
 // "3 BEFORE photos" / "3 fotos de ANTES"
 const kindN = (n: number, kind: PhotoKind, lang: "en" | "es") =>
   lang === "es" ? `${n} foto${n === 1 ? "" : "s"} de ${kind === "before" ? "ANTES" : "DESPUES"}` : `${n} ${kind === "before" ? "BEFORE" : "AFTER"} photo${n === 1 ? "" : "s"}`;
 
-// the line at the foot of the crew text: the three steps, in one breath. The
-// middle step reads off the job's own lines — square feet for plaster,
-// linear feet for baseboard, how many rooms for paint; nothing at all on a
-// job with nothing to measure (an apartment painted at the apartment price).
-// `needs` as a yes/no is the plain form, for a preview with no job in hand.
-export function jobAsk(lang0: string | null | undefined, needs: boolean | SfLine[] | MeasureLine[]): string {
-  const lang = langOf(lang0);
-  const lines: MeasureLine[] = typeof needs === "boolean"
-    ? (needs ? [{ index: 0, key: "plaster", name: "Plaster", unit: "SF", qty: 1, has: false, words: [] }] : [])
-    : (needs.length && "words" in needs[0] ? (needs as MeasureLine[]) : measureLines(needs as SfLine[]));
-  const blank = lines.filter((l) => !l.has);
-  const mid = blank.length ? (lang === "es" ? ` Luego mande ${WHAT.es[askedOf(blank)]}, como: ${example(blank)}.` : ` Then text ${WHAT.en[askedOf(blank)]}, like: ${example(blank)}.`) : "";
-  if (lang === "es") return `Al llegar, responda con fotos de ANTES.${mid} Al terminar, responda con fotos de DESPUES.`;
-  return `When you get there, reply with BEFORE photos.${mid} When you finish, reply with AFTER photos.`;
+// the line at the foot of the crew text: the two steps, in one breath. The
+// same for every job (the crew is never asked for square feet); the second
+// argument is what callers have always passed, the job's lines, and is not read.
+export function jobAsk(lang0: string | null | undefined, _job?: unknown): string {
+  if (langOf(lang0) === "es") return "Al llegar, responda con fotos de ANTES. Al terminar, responda con fotos de DESPUES.";
+  return "When you get there, reply with BEFORE photos. When you finish, reply with AFTER photos.";
 }
 export const JOB_ASK_MARK = { en: "reply with BEFORE photos", es: "responda con fotos de ANTES" };
 // the before pictures are on the job: what comes next
-export function gotBeforeText(n: number, label: string, lines: MeasureLine[], lang0?: string | null): string {
+export function gotBeforeText(n: number, label: string, lang0?: string | null): string {
   const lang = langOf(lang0);
-  const blank = lines.filter((l) => !l.has);
-  if (lang === "es") {
-    return blank.length
-      ? `Recibido: ${kindN(n, "before", lang)} en el ${label}. Ahora mande ${WHAT.es[askedOf(blank)]} de: ${list(blank)}. Como: ${example(lines)}.`
-      : `Recibido: ${kindN(n, "before", lang)} en el ${label}. Al terminar, responda con fotos de DESPUES.`;
-  }
-  return blank.length
-    ? `Got ${kindN(n, "before", lang)} on ${label}. Now text ${WHAT.en[askedOf(blank)]} for: ${list(blank)}. Like: ${example(lines)}.`
-    : `Got ${kindN(n, "before", lang)} on ${label}. When you finish, reply with AFTER photos.`;
+  if (lang === "es") return `Recibido: ${kindN(n, "before", lang)} ${atJob(label, lang)}. Al terminar, responda con fotos de DESPUES.`;
+  return `Got ${kindN(n, "before", lang)} ${atJob(label, lang)}. When you finish, reply with AFTER photos.`;
 }
-// the numbers are on the job's lines — and so on the proposal and the invoice
-export function gotMeasureText(changes: Change[], label: string, stillBlank: MeasureLine[], lang0?: string | null): string {
+// a number a worker texted on their own is on the job's lines, and so on the proposal and the invoice
+export function gotMeasureText(changes: Change[], label: string, lang0?: string | null): string {
   const lang = langOf(lang0);
   const got = changes.map((c) => `${c.name} ${c.qty} ${c.unit === "ROOM" && c.qty === 1 ? (lang === "es" ? "cuarto" : "room") : unitWord(c.unit, lang)}`).join(", ");
-  if (lang === "es") {
-    return `Anotado: ${got} en el ${label}. Ya está en la propuesta y la factura.${stillBlank.length ? ` Falta: ${list(stillBlank)}.` : " Al terminar, responda con fotos de DESPUES."}`;
-  }
-  return `Got it: ${got} on ${label}. It's on the proposal and the invoice.${stillBlank.length ? ` Still need: ${list(stillBlank)}.` : " When you finish, reply with AFTER photos."}`;
+  if (lang === "es") return `Anotado: ${got} ${atJob(label, lang)}. Ya está en la propuesta y la factura.`;
+  return `Got it: ${got} ${atJob(label, lang)}. It's on the proposal and the invoice.`;
 }
 export function askMeasureText(p: Extract<Parsed, { kind: "ask" }>, label: string, lines: MeasureLine[], lang0?: string | null): string {
   const lang = langOf(lang0);
@@ -397,15 +374,15 @@ export function askMeasureText(p: Extract<Parsed, { kind: "ask" }>, label: strin
   }
   if (p.why === "noline") {
     return lang === "es"
-      ? `El ${label} no tiene una línea por pies cuadrados. Mande el número con el trabajo, como: plaster ${roundSf(p.qty || 120)} sf.`
+      ? `${theJob(label, lang, true)} no tiene una línea por pies cuadrados. Mande el número con el trabajo, como: plaster ${roundSf(p.qty || 120)} sf.`
       : `${label} has no square-foot line. Text the number with the work, like: plaster ${roundSf(p.qty || 120)} sf.`;
   }
   if (p.why === "unit") {
     const have = `${p.was || 0} ${p.rooms ? (lang === "es" ? "cuartos" : "rooms") : lang === "es" ? "pies cuadrados" : "sq ft"}`;
     const ex = `${(p.line || "plaster").toLowerCase().split(" ")[0]} ${roundSf(p.qty || 130)} ${p.rooms ? "rooms" : "sf"}`;
     return lang === "es"
-      ? `${p.line || "Esa línea"} ya tiene ${have} en el ${label}. Para cambiarlo, mándelo con la unidad, como: ${ex}.`
-      : `${p.line || "That line"} already has ${have} on ${label}. To change it, text it with the unit, like: ${ex}.`;
+      ? `${p.line || "Esa línea"} ya tiene ${have} ${atJob(label, lang)}. Para cambiarlo, mándelo con la unidad, como: ${ex}.`
+      : `${p.line || "That line"} already has ${have} ${atJob(label, lang)}. To change it, text it with the unit, like: ${ex}.`;
   }
   if (p.why === "big") {
     return lang === "es"
@@ -419,24 +396,24 @@ export function askMeasureText(p: Extract<Parsed, { kind: "ask" }>, label: strin
   }
   if (p.why === "unknown") {
     return lang === "es"
-      ? `No veo "${p.word}" en el ${label}. Las líneas son: ${list(lines)}. Mande como: ${example(lines)}.`
-      : `I don't see "${p.word}" on ${label}. The lines are: ${list(lines)}. Text it like: ${example(lines)}.`;
+      ? `No veo "${p.word}" ${atJob(label, lang)}. Las líneas son: ${list(lines)}. Mande como: ${example(lines)}.`
+      : `I don't see "${p.word}" ${atJob(label, lang)}. The lines are: ${list(lines)}. Text it like: ${example(lines)}.`;
   }
   return lang === "es"
     ? `¿De qué línea ${qty ? `son los ${qty}` : "es"}? Mande como: ${example(lines)}.`
     : `Which line ${qty ? `is the ${qty} for` : "is it for"}? Text it like: ${example(lines)}.`;
 }
-// pictures and the square feet in one text: both landed
+// pictures and a number the worker texted on their own, in one text: both landed
 // `lost`: pictures in the text that didn't come through — then nothing is "all set"
-export function gotBothText(kind: PhotoKind, n: number, label: string, changes: Change[], stillBlank: MeasureLine[], lang0?: string | null, marked = false, lost = 0): string {
+export function gotBothText(kind: PhotoKind, n: number, label: string, changes: Change[], lang0?: string | null, marked = false, lost = 0): string {
   const lang = langOf(lang0);
   const got = changes.map((c) => `${c.name} ${c.qty} ${c.unit === "ROOM" && c.qty === 1 ? (lang === "es" ? "cuarto" : "room") : unitWord(c.unit, lang)}`).join(", ");
   const tail = marked ? ` ${MARKED_DONE[lang]}` : "";
   const thanks = lost ? "" : lang === "es" ? " ¡Gracias, todo listo!" : " Thanks, all set!";
   if (lang === "es") {
-    return `Recibido: ${kindN(n, kind, lang)} en el ${label}. Anotado: ${got}. Ya está en la propuesta y la factura.${stillBlank.length ? ` Falta: ${list(stillBlank)}.` : kind === "before" ? " Al terminar, responda con fotos de DESPUES." : thanks}${tail}`;
+    return `Recibido: ${kindN(n, kind, lang)} ${atJob(label, lang)}. Anotado: ${got}. Ya está en la propuesta y la factura.${kind === "before" ? " Al terminar, responda con fotos de DESPUES." : thanks}${tail}`;
   }
-  return `Got ${kindN(n, kind, lang)} on ${label}. Got it: ${got}. It's on the proposal and the invoice.${stillBlank.length ? ` Still need: ${list(stillBlank)}.` : kind === "before" ? " When you finish, reply with AFTER photos." : thanks}${tail}`;
+  return `Got ${kindN(n, kind, lang)} ${atJob(label, lang)}. Got it: ${got}. It's on the proposal and the invoice.${kind === "before" ? " When you finish, reply with AFTER photos." : thanks}${tail}`;
 }
 // a measurement with no one PACT job to put it on
 export function askWhichJobText(lang0?: string | null): string {
@@ -447,31 +424,31 @@ export function askWhichJobText(lang0?: string | null): string {
 // a measurement for a job the office already billed: the lines are not touched
 export function invoicedText(label: string, lang0?: string | null): string {
   return langOf(lang0) === "es"
-    ? `El ${label} ya está facturado, así que sus líneas no cambian. La oficina puede cambiarlo desde Billing.`
+    ? `${theJob(label, "es", true)} ya está facturado, así que sus líneas no cambian. La oficina puede cambiarlo desde Billing.`
     : `${label} is already invoiced, so its lines don't change. The office can change it from Billing.`;
 }
 // square feet for a release: releases are priced by the office, so the words go to them
 export function releaseMeasureText(label: string, lang0?: string | null): string {
   return langOf(lang0) === "es"
-    ? `Recibido. Los pies cuadrados del ${label} los ve la oficina; verán su mensaje.`
-    : `Got it. Square feet on ${label} go to the office, and they'll see your text.`;
+    ? `Recibido. Los pies cuadrados ${ofJob(label, "es")} los ve la oficina; verán su mensaje.`
+    : `Got it. Square feet ${atJob(label, "en")} go to the office, and they'll see your text.`;
 }
 // the after pictures are on the job: the thread is done — and the job is
 // marked work done, which the worker is told, with the way to take it back
 export const MARKED_DONE = { en: "Marked work done. Not finished? Reply NOT DONE.", es: "Marcado como terminado. ¿No terminó? Responda NO TERMINADO." };
-export function gotAfterText(n: number, label: string, stillBlank: MeasureLine[], lang0?: string | null, marked = false, lost = 0): string {
+export function gotAfterText(n: number, label: string, lang0?: string | null, marked = false, lost = 0): string {
   const lang = langOf(lang0);
   const tail = marked ? ` ${MARKED_DONE[lang]}` : "";
   const thanks = lost ? "" : lang === "es" ? " ¡Gracias, todo listo!" : " Thanks, all set!";
-  if (lang === "es") return `Recibido: ${kindN(n, "after", lang)} en el ${label}.${thanks}${stillBlank.length ? ` No olvide ${WHAT.es[askedOf(stillBlank)]} de: ${list(stillBlank)} (como: ${example(stillBlank)}).` : ""}${tail}`;
-  return `Got ${kindN(n, "after", lang)} on ${label}.${thanks}${stillBlank.length ? ` Don't forget ${WHAT.en[askedOf(stillBlank)]} for: ${list(stillBlank)} (like: ${example(stillBlank)}).` : ""}${tail}`;
+  if (lang === "es") return `Recibido: ${kindN(n, "after", lang)} ${atJob(label, lang)}.${thanks}${tail}`;
+  return `Got ${kindN(n, "after", lang)} ${atJob(label, lang)}.${thanks}${tail}`;
 }
 // "not done", "no terminado": the worker takes the work-done mark back
 export const notDone = (body: string): boolean =>
   /\b(not done|not finished|not complete|not completed|still working|still going|no terminado|no termine|no terminamos|no hemos terminado|no esta terminado|no esta listo|todavia no|aun no)\b/.test(norm(body));
 export function backInProgressText(label: string, lang0?: string | null): string {
   return langOf(lang0) === "es"
-    ? `OK, el ${label} sigue en proceso. Responda con fotos de DESPUES al terminar.`
+    ? `OK, ${theJob(label, "es")} sigue en proceso. Responda con fotos de DESPUES al terminar.`
     : `OK, ${label} is back in progress. Reply with AFTER photos when it's finished.`;
 }
 export function nothingToUndoText(lang0?: string | null): string {

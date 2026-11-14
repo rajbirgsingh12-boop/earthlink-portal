@@ -6,7 +6,7 @@
 import { NextResponse } from "next/server";
 import { pactKey, relKey } from "@/lib/smsIn";
 import { dropBatch, fileBatch, serviceDb, type Batch } from "@/lib/photoStore";
-import { countKinds, measureLines, photoKindFor, stageOf, type PhotoKind } from "@/lib/jobFlow";
+import { countKinds, photoKindFor, stageOf, type PhotoKind } from "@/lib/jobFlow";
 import type { SfLine } from "@/lib/measure";
 
 export const runtime = "nodejs";
@@ -59,7 +59,7 @@ export async function POST(req: Request) {
     const j = got.rows[0];
     if (j) {
       target = pactKey(j);
-      const stage = stageOf({ ...countKinds((j.attachments || []).map((a) => a?.name || "")), needSf: measureLines(Array.isArray(j.items) ? j.items : []).some((l) => !l.has) });
+      const stage = stageOf(countKinds((j.attachments || []).map((a) => a?.name || "")));
       kind = photoKindFor(b.body || "", stage, null);
     }
   } else if (body.release_id && uuid.test(body.release_id)) {

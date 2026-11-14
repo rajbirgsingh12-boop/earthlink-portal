@@ -39,8 +39,8 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   const [machine, setMachine] = useState(true); // company number set up? (else a group text opens on this phone)
   const [photosIn, setPhotosIn] = useState(false); // photos texted back go on the job: the text asks for them
   useEffect(() => { textMachine().then((m) => { setMachine(m.configured); setPhotosIn(m.photosIn); }); }, []);
-  // the three-step ask exactly as this job's text will carry it (the server
-  // reads it off the job's lines; the plain form stands in until it answers)
+  // the ask exactly as this job's text will carry it (before photos, then after
+  // photos; the plain form stands in until the server answers)
   const [askFor, setAskFor] = useState<{ en: string; es: string } | null>(null);
   useEffect(() => {
     if (!machine || !photosIn || !job.id) return;
@@ -172,9 +172,8 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
       await onChange();
     } finally { sendingNow.current = false; setSending(false); }
   };
-  // the preview, as the first worker on the job gets it (the thread's ask goes
-  // on the end once photos texted back land on the job; the server leaves the
-  // square-feet sentence off a job with nothing to measure)
+  // the preview, as the first worker on the job gets it (the thread's ask, before
+  // photos then after photos, goes on the end once photos texted back land on the job)
   const preview = () => {
     const t = crewPreview(job, (emps.find((e) => rows[0] && e.id === rows[0].employee_id)?.name || "Name").split(" ")[0], work.trim(), undefined, shownLang);
     return machine && photosIn ? withJobAsk(t, askFor ? askFor[shownLang === "es" ? "es" : "en"] : jobAsk(shownLang, true)) : t;

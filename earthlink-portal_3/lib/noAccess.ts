@@ -6,7 +6,7 @@
 // was missed, which job is next, and the words sent back. No database, no
 // network — /api/sms-in (lib/nobodyFlow.ts) does the doing.
 import { normPo } from "./po";
-import { langOf, longDay, PHOTO_INVITE, type Lang } from "./crewText";
+import { langOf, longDay, PHOTO_INVITE, theJob, type Lang } from "./crewText";
 
 // lower case, no accents, no punctuation: "¡No abrió!" → "no abrio"
 const norm = (s: string) => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
@@ -67,6 +67,7 @@ export const numbersIn = (body: string): string[] => [...new Set(((body || "").m
 // ---- which job, which next ----
 export interface DayJob {
   kind: "pact" | "rel"; id: string; label: string; keys: string[];
+  street?: string; apt?: string;   // where it is, for the words (lib/crewText jobName)
   day: string;            // the day the worker is on it
   rowIds: string[];       // this worker's crew rows for it that day
 }
@@ -162,12 +163,14 @@ export function whichNext(ctx: { today: string; jobs: DayJob[]; missed: DayJob; 
 }
 
 // ---- the words ----
-const said = (label: string, lang: Lang) => (lang === "es" ? `el ${label}` : label);
+// `label` in ackText and coworkerText's `missedLabel` is the job's whole name,
+// address first ("2205 Linden Blvd, Apt 4B (PO 9098)"), or just "PO 9098"
+const said = (label: string, lang: Lang) => theJob(label, lang);
 export function ackText(label: string, lang0?: string | null): string {
   const lang = langOf(lang0);
   return lang === "es"
-    ? `Entendido — no había nadie en ${said(label, lang)}. La oficina le dará otro día.`
-    : `Got it — nobody home at ${label}. The office will give it a new day.`;
+    ? `Entendido, no había nadie en ${said(label, lang)}. La oficina le dará otro día.`
+    : `Got it, nobody home at ${label}. The office will give it a new day.`;
 }
 // "Hi Jose, this is Earth Link. You are scheduled…" → "You are scheduled…" —
 // it rides under the "got it" in the same text

@@ -23,6 +23,7 @@ import {
   applyMeasures, askMeasureText, askWhichJobText, backInProgressText, countKinds, doneNoteLine, gotAfterText, gotBeforeText, gotBothText, gotMeasureText, invoicedText, kindOfName, measureLines, measureNoteLine, notDone, nothingToUndoText, parseMeasures, photoKindFor, releaseMeasureText, stageOf, undoneNoteLine,
   type Change, type MeasureLine, type PhotoKind, type Stage,
 } from "@/lib/jobFlow";
+import { jobName } from "@/lib/crewText";
 import { bookPrice } from "@/lib/priceServer";
 import { roomsIn } from "@/lib/priceBook";
 import { workLines, paperworkRepair } from "@/lib/paperwork";
@@ -47,7 +48,7 @@ type Hint = Inbound["jobHint"];
 const withHint = (p: ReturnType<typeof pickJob>, mine: JobKey[], hint?: Hint): ReturnType<typeof pickJob> => {
   if (p.kind !== "ask" || p.why !== "many" || !hint) return p;
   const j = mine.find((x) => x.kind === hint.kind && x.id === hint.id);
-  return j ? { kind: j.kind, id: j.id, label: j.label, why: "today" } : p;
+  return j ? { kind: j.kind, id: j.id, label: j.label, street: j.street, apt: j.apt, why: "today" } : p;
 };
 // what came in and who from, for the owner's copy (app/api/sms-in)
 export interface Seen { from: string; who: string; body: string; photos: number; other: number }
@@ -55,6 +56,11 @@ const nyDay = (d: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: "America
 const enc = encodeURIComponent;
 interface Emp { id: string; name?: string | null; phone?: string | null; lang?: string | null; active?: boolean | null }
 
+// what names a job in a reply: its number, and where it is
+const PACT_KEY_COLS = "id,po_number,job_number,address,development,property_unit";
+const REL_KEY_COLS = "id,rel_number,address,location";
+interface PactRow { id: string; po_number?: string; job_number?: string; address?: string; development?: string; property_unit?: string }
+interface RelRow { id: string; rel_number?: string; address?: string; location?: string }
 // the jobs this worker is on, two weeks either side of today
 async function jobsOf(db: Db, emp: Emp, today: string): Promise<{ rows: MineRow[]; mine: JobKey[] }> {
   const win = `employee_id=eq.${emp.id}&day=gte.${dayMinus(today, 14)}&day=lte.${dayMinus(today, -14)}`;
@@ -65,8 +71,8 @@ async function jobsOf(db: Db, emp: Emp, today: string): Promise<{ rows: MineRow[
   const ids = (xs: (string | null | undefined)[]) => [...new Set(xs.filter(Boolean) as string[])];
   const pIds = ids(rows.map((r) => r.pact_job_id)), rIds = ids(rows.map((r) => r.release_id));
   const [p, r] = await Promise.all([
-    pIds.length ? db.get<{ id: string; po_number?: string; job_number?: string }>(`pact_jobs?id=in.(${pIds.join(",")})&select=id,po_number,job_number`) : Promise.resolve({ ok: true, rows: [] }),
-    rIds.length ? db.get<{ id: string; rel_number?: string }>(`releases?id=in.(${rIds.join(",")})&select=id,rel_number`) : Promise.resolve({ ok: true, rows: [] }),
+    pIds.length ? db.get<PactRow>(`pact_jobs?id=in.(${pIds.join(",")})&select=${PACT_KEY_COLS}`) : Promise.resolve({ ok: true, rows: [] }),
+    rIds.length ? db.get<RelRow>(`releases?id=in.(${rIds.join(",")})&select=${REL_KEY_COLS}`) : Promise.resolve({ ok: true, rows: [] }),
   ]);
   return { rows, mine: [...p.rows.map(pactKey), ...r.rows.map(relKey)] };
 }
@@ -76,7 +82,7 @@ async function anyPoOf(db: Db, body: string, mine: JobKey[]): Promise<JobKey[]> 
   const want = refsIn(body).filter((r) => (r.said ? r.n.length >= 3 : r.n.length >= 5) && /^\d+$/.test(r.n) && !mine.some((j) => j.keys.includes(r.n)));
   if (!want.length) return [];
   const found = await Promise.all(want.slice(0, 3).map((r) =>
-    db.get<{ id: string; po_number?: string; job_number?: string }>(`pact_jobs?or=(po_number.ilike.*${r.n}*,job_number.ilike.*${r.n}*)&canceled=not.is.true&select=id,po_number,job_number&limit=20`)));
+    db.get<PactRow>(`pact_jobs?or=(po_number.ilike.*${r.n}*,job_number.ilike.*${r.n}*)&canceled=not.is.true&select=${PACT_KEY_COLS}&limit=20`)));
   return found.flatMap((f) => f.rows.map(pactKey));
 }
 
@@ -132,17 +138,17 @@ async function settleBurst(db: Db, o: { emp: Emp; batchId: string; target: Targe
       && (!o.kind || kindOfName(b.photos![0].name) === o.kind));
     const total = same.reduce((n, b) => n + (b.photos || []).length, 0);
     if (same.length < 2 || total < 2 || total === o.said) return; // one text, or its own answer already said the count
-    await o.deliver(to, replyText({ k: "inall", n: total, label: o.target.label, kind: o.kind }, o.lang), (o.emp.name || "").trim() || undefined);
+    await o.deliver(to, replyText({ k: "inall", n: total, label: jobName(o.target, o.lang), kind: o.kind }, o.lang), (o.emp.name || "").trim() || undefined);
   } catch { /* a count that didn't go out loses nothing: the pictures are on the job */ }
 }
 // the job a batch is on, named the way the worker says it
 async function targetOf(db: Db, b: Batch): Promise<Target | null> {
   if (b.pact_job_id) {
-    const j = (await db.get<{ id: string; po_number?: string; job_number?: string }>(`pact_jobs?id=eq.${b.pact_job_id}&select=id,po_number,job_number`)).rows[0];
+    const j = (await db.get<PactRow>(`pact_jobs?id=eq.${b.pact_job_id}&select=${PACT_KEY_COLS}`)).rows[0];
     return j ? pactKey(j) : null;
   }
   if (b.release_id) {
-    const r = (await db.get<{ id: string; rel_number?: string }>(`releases?id=eq.${b.release_id}&select=id,rel_number`)).rows[0];
+    const r = (await db.get<RelRow>(`releases?id=eq.${b.release_id}&select=${REL_KEY_COLS}`)).rows[0];
     return r ? relKey(r) : null;
   }
   return null;
@@ -188,13 +194,13 @@ async function unmarkDone(db: Db, o: { emp: Emp; body: string; now: Date; today:
   const who = (o.emp.name || "").trim().split(/\s+/)[0] || "";
   if (!(await db.patch(`pact_jobs?id=eq.${job.id}`, { work_done: false, notes: withNote(job.notes, undoneNoteLine(who, nyWhen(o.now))) }))) return nothingToUndoText(lang);
   await db.patch(`texted_photos?pact_job_id=eq.${job.id}&status=eq.done`, { status: "seen" });
-  return backInProgressText(pick.kind === "pact" ? pick.label : "", lang);
+  return backInProgressText(pick.kind === "pact" ? jobName(pick, lang) : "", lang);
 }
 // the job's work lines: a Sales Tax line left on them from an old PO read is
 // paperwork, never measured, asked about or saved back (lib/paperwork.ts)
 const itemsOf = (j: ThreadJob): SfLine[] => workLines(Array.isArray(j.items) ? j.items : []);
 const namesOf = (j: ThreadJob) => (j.attachments || []).map((a) => a?.name || "");
-const stageOfJob = (j: ThreadJob) => stageOf({ ...countKinds(namesOf(j)), needSf: measureLines(itemsOf(j)).some((l) => !l.has) });
+const stageOfJob = (j: ThreadJob) => stageOf(countKinds(namesOf(j)));
 // where the job is for this worker: a worker's own first pictures of a job
 // are before pictures (two workers at one door each start with theirs), as
 // long as nobody has sent its after pictures yet
@@ -226,7 +232,7 @@ async function measureIn(db: Db, o: { emp: Emp; body: string; from: string; sid:
     // square feet on a release: the office prices releases — the words go to them
     if (parseMeasures(o.body, [], false, { ignore }).kind === "none") return null;
     await putRow(db, { employee_id: o.emp.id, from_phone: o.from, body: o.body, status: "reply", how: "measure", photos: [], release_id: pick.id, msg_sid: o.sid || null });
-    return releaseMeasureText(pick.label, lang);
+    return releaseMeasureText(jobName(pick, lang), lang);
   }
   if (pick.kind !== "pact") {
     // a measurement ("50 sf", "plaster 50") with no one job to put it on: say which
@@ -237,11 +243,11 @@ async function measureIn(db: Db, o: { emp: Emp; body: string; from: string; sid:
   const lines = measureLines(itemsOf(job));
   const parsed = parseMeasures(o.body, lines, lines.some((l) => !l.has), { ignore });
   if (parsed.kind === "none") return null;
-  if (billed(job)) return invoicedText(pick.label, lang);
-  if (parsed.kind === "ask") return askMeasureText(parsed, pick.label, lines, lang);
+  if (billed(job)) return invoicedText(jobName(pick, lang), lang);
+  if (parsed.kind === "ask") return askMeasureText(parsed, jobName(pick, lang), lines, lang);
   const done = await measureOnJob(db, job, parsed.hits, { ...o, sid: o.sid });
   if (!done) return lang && /^(es|spa|esp)/i.test(lang) ? "No se pudo guardar la medida. Por favor mándela otra vez." : "Couldn't save that measurement. Please text it again.";
-  return gotMeasureText(done.changes, pick.label, done.stillBlank, lang);
+  return gotMeasureText(done.changes, jobName(pick, lang), lang);
 }
 // the numbers onto the job: its lines, its billed total (as the page keeps
 // it: never wiped by lines at no price), a 📏 line on its notes, and a row
@@ -340,16 +346,15 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
       const onIt = (b: Batch) => b.status === "filed" && (pick.kind === "pact" ? b.pact_job_id === pick.id : b.release_id === pick.id);
       const already = group.filter(onIt).reduce((s, b) => s + (b.photos || []).length, 0);
       const toMove = group.filter((b) => !onIt(b));
-      if (!toMove.length) return already ? say({ k: "moved", n: already, label: pick.label }, lang) : answer();
+      if (!toMove.length) return already ? say({ k: "moved", n: already, label: jobName(pick, lang) }, lang) : answer();
       const thread = pick.kind === "pact" ? await threadJob(db, pick.id) : null;
       const kind: PhotoKind | undefined = thread ? photoKindFor(toMove.map((b) => b.body || "").join(" "), await stageFor(db, thread, emp.id), null) : undefined;
       let n = 0;
       for (const b of [...toMove].reverse()) n += await fileBatch(db, b, pick, "number", kind);
       if (!n) return answer();
-      if (!thread || !kind) return say({ k: "moved", n: n + already, label: pick.label }, lang);
-      const lines = measureLines(itemsOf(thread));
-      if (kind === "before") return answer(gotBeforeText(n + already, pick.label, lines, lang));
-      return answer(gotAfterText(n + already, pick.label, lines.filter((l) => !l.has), lang, await markDone(db, thread, emp, from, now, today)));
+      if (!thread || !kind) return say({ k: "moved", n: n + already, label: jobName(pick, lang) }, lang);
+      if (kind === "before") return answer(gotBeforeText(n + already, jobName(pick, lang), lang));
+      return answer(gotAfterText(n + already, jobName(pick, lang), lang, await markDone(db, thread, emp, from, now, today)));
     }
     if (pick.kind === "ask" && pick.why === "unknown" && group.some((b) => b.status === "held")) return say({ k: "unknown", number: pick.number || "" }, lang);
     return answer();
@@ -461,25 +466,27 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
     const n = put.length + moved + prior;
     // and once the send has settled, the newest piece texts the whole count if its answer didn't
     const settle = (saidN: number) => { if (emp) waitUntil(settleBurst(db, { emp, batchId, target, kind: thread ? kind : null, said: saidN, lang, from, now, deliver: inb.deliver })); };
+    const name = jobName(target, lang);
     if (thread) {
-      // the square feet, when they came with the pictures ("plaster 120 sf" +
-      // a photo). A bare number with pictures is how many pictures, never square feet.
+      // square feet the worker sent with the pictures on their own ("plaster
+      // 120 sf" + a photo; nobody asks for them). A bare number with pictures
+      // is how many pictures, never square feet.
       const lines = measureLines(itemsOf(thread));
       const parsed = emp ? parseMeasures(body, lines, false, { ignore }) : { kind: "none" as const };
       const measured = parsed.kind === "ok" && !billed(thread) ? await measureOnJob(db, thread, parsed.hits, { emp: emp!, body, from, sid: "", now }) : null;
-      const asked = parsed.kind === "ask" ? askMeasureText(parsed, target.label, lines, lang) : parsed.kind === "ok" && billed(thread) ? invoicedText(target.label, lang) : "";
+      const asked = parsed.kind === "ask" ? askMeasureText(parsed, name, lines, lang) : parsed.kind === "ok" && billed(thread) ? invoicedText(name, lang) : "";
       // after pictures: the job is work done, ready to invoice
       const marked = kind === "after" && emp ? await markDone(db, thread, emp, from, now, today) : false;
       if (quiet && !moved && !measured && !marked && !asked) { settle(0); return hush(); }
       settle(n);
-      // the thread's next step: the square feet after the before pictures, the after pictures after that
-      if (measured) return said(gotBothText(kind, n, target.label, measured.changes, measured.stillBlank, lang, marked, lost));
-      const next = kind === "before" ? gotBeforeText(n, target.label, lines, lang) : gotAfterText(n, target.label, lines.filter((l) => !l.has), lang, marked, lost);
+      // the thread's next step: the after pictures after the before pictures
+      if (measured) return said(gotBothText(kind, n, name, measured.changes, lang, marked, lost));
+      const next = kind === "before" ? gotBeforeText(n, name, lang) : gotAfterText(n, name, lang, marked, lost);
       return said(asked ? `${next}\n${asked}` : next);
     }
     if (quiet && !moved) { settle(0); return hush(); }
     settle(n);
-    return said(replyText({ k: "filed", n, label: target.label }, lang));
+    return said(replyText({ k: "filed", n, label: name }, lang));
   }
   // nowhere to put them yet: they wait for the office — unless there's no
   // place to keep them waiting (RUN_ME section 20 not run), and then the

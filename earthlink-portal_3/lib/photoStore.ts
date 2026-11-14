@@ -12,7 +12,7 @@ export interface Batch {
   status?: string | null; pact_job_id?: string | null; release_id?: string | null; created_at?: string | null;
   how?: string | null; // how it got to its job: number (named in a text), burst (sent with one that did), day (the one job that day), office
 }
-export type Target = Pick<JobKey, "kind" | "id" | "label">;
+export type Target = Pick<JobKey, "kind" | "id" | "label" | "street" | "apt">;
 
 export function serviceDb() {
   const url = env("NEXT_PUBLIC_SUPABASE_URL"), key = env("SUPABASE_SERVICE_ROLE_KEY");

@@ -85,12 +85,41 @@ export function crewText(t: CrewTextInput): string {
   return paras.join("\n\n");
 }
 
+// The job named in a reply to the crew: where it is, the way the crew knows
+// it, with the job's number after it ("2205 Linden Blvd, Apt 4B (PO 9098)").
+// Just the number when the job has no address on it. The street is the
+// address up to its first comma; a job with no address goes by its building.
+export const jobName = (j: { label: string; street?: string | null; apt?: string | null }, lang0?: string | null): string => {
+  const lang = langOf(lang0);
+  const street = flat(j.street).replace(/[.,\s]+$/, "");
+  const apt = flat(j.apt).replace(/^(apt\.?|apartment|unit|#)\s*/i, "");
+  // an address that already says the apartment ("2205 Linden Blvd Apt 4B") doesn't get it twice
+  const aptSaid = !!apt && new RegExp(`(^|[^a-z0-9])${apt.replace(/[^a-z0-9]/gi, (c) => `\\${c}`)}($|[^a-z0-9])`, "i").test(street);
+  const where = street ? [street, apt && !aptSaid && `${lang === "es" ? "Apto" : "Apt"} ${apt}`].filter(Boolean).join(", ") : "";
+  const label = flat(j.label);
+  return where && label ? `${where} (${label})` : where || label;
+};
+// the street part of an address: "2205 Linden Blvd, Brooklyn, NY 11207" is "2205 Linden Blvd"
+export const streetOf = (address?: string | null): string => flat(address).split(",")[0].replace(/[.\s]+$/, "");
+// a job name in a sentence. "PO 9098" and "release 12" are numbers ("on PO
+// 9098", "en el PO 9098"); an address is a place ("at 2205 Linden Blvd",
+// "en 2205 Linden Blvd")
+const isRef = (name: string) => /^(po|release)\b/i.test(flat(name));
+export const atJob = (name: string, lang: Lang): string =>
+  lang === "es" ? (isRef(name) ? `en el ${name}` : `en ${name}`) : isRef(name) ? `on ${name}` : `at ${name}`;
+// as the subject of a sentence: "El PO 9098 ya está facturado" / "2205 Linden Blvd (PO 9098) ya está facturado"
+export const theJob = (name: string, lang: Lang, start = false): string => {
+  const s = lang === "es" && isRef(name) ? `el ${name}` : name;
+  return start ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+};
+export const ofJob = (name: string, lang: Lang): string => (lang === "es" ? (isRef(name) ? `del ${name}` : `de ${name}`) : atJob(name, lang));
+
 // The line at the end of a text from the company number, once photos sent
 // back to it go on the job (/api/sms-in) — added by the server, which is the
 // only one that sends from that number. Language by the text's own greeting.
 export const PHOTO_INVITE = { en: "Reply to this text with photos of the work.", es: "Responda a este mensaje con fotos del trabajo." };
 // a PACT job's text carries the whole thread instead (lib/jobFlow's jobAsk:
-// before photos, the square feet, after photos) — never both
+// before photos, then after photos), never both
 const hasAsk = (b: string) => b.includes(PHOTO_INVITE.en) || b.includes(PHOTO_INVITE.es) || /reply with BEFORE photos|responda con fotos de ANTES/.test(b);
 // Twilio takes 1,600 characters. A text over a limit gives up words from its
 // LONGEST paragraph (the work line), cut at a word with "…" — the greeting,

@@ -19,7 +19,7 @@ import { dayMinus, pactKey, relKey } from "./smsIn";
 import { dueBody, dueWork, type DueJob } from "./dueText";
 import { askClaudeSpanish, spanishWorkServer } from "./smartTranslate";
 import { sendTexts, twilioConfigured, type TextOut } from "./twilio";
-import { langOf } from "./crewText";
+import { jobName, langOf } from "./crewText";
 import { folderOf, type Db, type Photo } from "./photoStore";
 import { jobAsk } from "./jobFlow";
 import type { SfLine } from "./measure";
@@ -27,7 +27,7 @@ import type { SfLine } from "./measure";
 export interface FlowEmp { id: string; name?: string | null; phone?: string | null; lang?: string | null; active?: boolean | null }
 interface Row { id: string; day: string; employee_id: string; pact_job_id?: string | null; release_id?: string | null; texted?: boolean | null; texted_at?: string | null; description?: string | null; address?: string | null }
 interface PJob extends DueJob { id: string; notes?: string | null; items?: SfLine[] | null }
-// a PACT job's next-job text ends with its own three steps (before photos, the square feet, after photos)
+// a PACT job's next-job text ends with its own two steps (before photos, after photos)
 const askFor = (j: PJob | undefined, lang?: string | null) => (j ? jobAsk(lang, Array.isArray(j.items) ? j.items : []) : "");
 interface Rel { id: string; rel_number?: string | null; location?: string | null; address?: string | null; canceled?: boolean; notes?: string | null }
 interface Mark { id: string; pact_job_id?: string | null; release_id?: string | null; created_at?: string | null; status?: string | null; note?: string | null; employee_id?: string | null; how?: string | null }
@@ -241,7 +241,7 @@ export async function nobodyFlow(db: Db, o: {
   }
 
   // ---- the worker's answer, now — before anything that could run long ----
-  const reply = `${ackText(missed.label, lang)}\n\n${nextMsg}`;
+  const reply = `${ackText(jobName(missed, lang), lang)}\n\n${nextMsg}`;
   let replied = false;
   if (twilioConfigured() && cleanPhone(o.from)) replied = o.say ? await o.say(cleanPhone(o.from), reply, first(emp)) : (await sendTexts([{ to: cleanPhone(o.from), who: (emp.name || "").trim() || undefined, body: reply }])).sent > 0;
   // they've been told: the row says so (and a text set for later is off)
@@ -285,7 +285,7 @@ export async function nobodyFlow(db: Db, o: {
         if (!r || !to) continue;
         if (nj.kind === "rel" && !(await db.patch(`schedule_days?id=eq.${r.id}&day=eq.${from}`, { day: today, texted: false }))) continue;
         const crew = dueBody({ ...r, day: today }, { emp: e, job: job ? { ...job, start_date: today } : null, rel, work: await workFor(dueWork(r, job), e.lang), moved });
-        out.push({ to, id: r.id, who: (e.name || "").trim() || undefined, body: coworkerText(first(e), first(emp), missed.label, crew, e.lang, true, nj.label, askFor(job, e.lang)) });
+        out.push({ to, id: r.id, who: (e.name || "").trim() || undefined, body: coworkerText(first(e), first(emp), jobName(missed, e.lang), crew, e.lang, true, nj.label, askFor(job, e.lang)) });
       }
       if (out.length && twilioConfigured()) {
         const told = async (msg: TextOut) => {

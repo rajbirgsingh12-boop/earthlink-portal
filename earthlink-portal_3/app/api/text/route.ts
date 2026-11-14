@@ -43,7 +43,7 @@ const overLimit = (userId: string, count: number) => {
 // there but typed wrong (Settings → System check shows it)
 export async function GET(req: Request) {
   const photosIn = configured() && (await photosBackOn());
-  // ?job=<id>: the three-step ask as that job's crew text will carry it, in
+  // ?job=<id>: the ask (before photos, after photos) as that job's crew text will carry it, in
   // both languages — read as the portal itself, so only the words leave here
   const job = (new URL(req.url).searchParams.get("job") || "").trim();
   let ask: { en: string; es: string } | undefined;
@@ -106,8 +106,8 @@ export async function POST(req: Request) {
   }
 
   // once pictures texted back go on the job, the text asks for them — a PACT
-  // job's text asks for the whole thread (before photos, the square feet when
-  // a line is waiting for them, after photos); a release's just for photos
+  // job's text asks for the whole thread (before photos, then after photos);
+  // a release's just for photos
   if (await photosBackOn()) {
     const ids = messages.map((m) => m.id).filter(Boolean);
     const jobOfRow = new Map<string, string>();

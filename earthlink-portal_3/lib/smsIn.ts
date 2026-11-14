@@ -92,7 +92,7 @@ export function refsIn(body: string): Ref[] {
   return out;
 }
 
-export interface MineRow { day: string; pact_job_id?: string | null; release_id?: string | null; texted_at?: string | null }
+export interface MineRow { day: string; pact_job_id?: string | null; release_id?: string | null; texted_at?: string | null; address?: string | null }
 // street and apt: where the job is, so a reply names it the way the crew knows it (lib/crewText jobName)
 export interface JobKey { kind: "pact" | "rel"; id: string; label: string; keys: string[]; street?: string; apt?: string }
 export type Pick =

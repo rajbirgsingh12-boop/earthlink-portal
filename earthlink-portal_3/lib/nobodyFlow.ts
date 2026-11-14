@@ -97,7 +97,8 @@ export async function nobodyFlow(db: Db, o: {
       } else if (r.release_id) {
         const x = relOf.get(r.release_id);
         if (!x || x.canceled) continue;
-        out.push({ ...relKey(x), day: r.day, rowIds: [r.id] });
+        // named by the street its crew text sent: the one typed on the row, else the release's own
+        out.push({ ...relKey({ ...x, address: (r.address || "").trim() || x.address }), day: r.day, rowIds: [r.id] });
       }
     }
     return out;

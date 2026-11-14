@@ -64,7 +64,8 @@ interface RelRow { id: string; rel_number?: string; address?: string; location?:
 // the jobs this worker is on, two weeks either side of today
 async function jobsOf(db: Db, emp: Emp, today: string): Promise<{ rows: MineRow[]; mine: JobKey[] }> {
   const win = `employee_id=eq.${emp.id}&day=gte.${dayMinus(today, 14)}&day=lte.${dayMinus(today, -14)}`;
-  let got = await db.get<MineRow>(`schedule_days?${win}&select=day,pact_job_id,release_id,texted_at&limit=500`);
+  let got = await db.get<MineRow>(`schedule_days?${win}&select=day,pact_job_id,release_id,texted_at,address&limit=500`);
+  if (!got.ok) got = await db.get<MineRow>(`schedule_days?${win}&select=day,pact_job_id,release_id,texted_at&limit=500`); // no address on the crew rows
   if (!got.ok) got = await db.get<MineRow>(`schedule_days?${win}&select=day,pact_job_id,release_id&limit=500`); // before section 21: no texted_at
   if (!got.ok) got = await db.get<MineRow>(`schedule_days?${win}&select=day,release_id&limit=500`); // before PACT crews were on the schedule
   const rows = got.rows;
@@ -74,7 +75,11 @@ async function jobsOf(db: Db, emp: Emp, today: string): Promise<{ rows: MineRow[
     pIds.length ? db.get<PactRow>(`pact_jobs?id=in.(${pIds.join(",")})&select=${PACT_KEY_COLS}`) : Promise.resolve({ ok: true, rows: [] }),
     rIds.length ? db.get<RelRow>(`releases?id=in.(${rIds.join(",")})&select=${REL_KEY_COLS}`) : Promise.resolve({ ok: true, rows: [] }),
   ]);
-  return { rows, mine: [...p.rows.map(pactKey), ...r.rows.map(relKey)] };
+  // a release is named by the street its crew text sent: the one typed on the
+  // crew rows (this worker's, the day nearest today first), else the release's own
+  const near = [...rows].sort((a, b) => Math.abs(Date.parse(a.day) - Date.parse(today)) - Math.abs(Date.parse(b.day) - Date.parse(today)));
+  const rowAddr = (relId: string) => (near.find((x) => x.release_id === relId && (x.address || "").trim())?.address || "").trim();
+  return { rows, mine: [...p.rows.map(pactKey), ...r.rows.map((x) => relKey({ ...x, address: rowAddr(x.id) || x.address }))] };
 }
 
 // a PO named in the text that isn't one of this worker's jobs: any job in the portal with that PO
@@ -149,7 +154,11 @@ async function targetOf(db: Db, b: Batch): Promise<Target | null> {
   }
   if (b.release_id) {
     const r = (await db.get<RelRow>(`releases?id=eq.${b.release_id}&select=${REL_KEY_COLS}`)).rows[0];
-    return r ? relKey(r) : null;
+    if (!r) return null;
+    // the street its crew text sent, typed on a crew row (theirs first), else the release's own
+    const who = b.employee_id ? `&employee_id=eq.${b.employee_id}` : "";
+    const typed = (await db.get<{ address?: string }>(`schedule_days?release_id=eq.${b.release_id}${who}&address=neq.&select=address&order=day.desc&limit=1`)).rows[0]?.address;
+    return relKey({ ...r, address: (typed || "").trim() || r.address });
   }
   return null;
 }

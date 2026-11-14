@@ -6,7 +6,7 @@
 // was missed, which job is next, and the words sent back. No database, no
 // network — /api/sms-in (lib/nobodyFlow.ts) does the doing.
 import { normPo } from "./po";
-import { langOf, longDay, PHOTO_INVITE, theJob, type Lang } from "./crewText";
+import { jobName, langOf, longDay, PHOTO_INVITE, theJob, type Lang } from "./crewText";
 
 // lower case, no accents, no punctuation: "¡No abrió!" → "no abrio"
 const norm = (s: string) => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
@@ -176,7 +176,7 @@ export function ackText(label: string, lang0?: string | null): string {
 // it rides under the "got it" in the same text
 const noGreeting = (crew: string) => crew.replace(/^(Hi|Hola)\b[^.]*?, (this is|le habla) Earth Link\.\s*/, "");
 // …ending with how to say that one's a no too — the number makes it certain
-// `ask`: a PACT job's own three steps (lib/jobFlow jobAsk) in place of the plain photo line
+// `ask`: a PACT job's own two steps, BEFORE photos then AFTER photos (lib/jobFlow jobAsk), in place of the plain photo line
 export function nextText(crew: string, lang0?: string | null, invite = true, label = "", ask = ""): string {
   const lang = langOf(lang0);
   const body = noGreeting(crew);
@@ -195,10 +195,15 @@ export function coworkerText(first: string, reporter: string, missedLabel: strin
     : `Hi${first ? ` ${first}` : ""}, this is Earth Link. ${reporter ? `${reporter} let us know nobody` : "Nobody"} was home at ${missedLabel}; the office will give it a new day.`;
   return `${hi}\n\n${nextText(crew, lang, invite, nextLabel, ask)}`;
 }
+// "NO 9098 (2205 Linden Blvd, Apt 4B)": what to reply, and where that job is
+const noFor = (j: DayJob, lang: Lang) => {
+  const place = jobName({ ...j, label: "" }, lang);
+  return `NO ${(j.label.match(/\d[\w-]*$/) || [j.label])[0]}${place ? ` (${place})` : ""}`;
+};
 // two jobs still open today: which one?
 export function askWhichText(options: DayJob[], lang0?: string | null): string {
   const lang = langOf(lang0);
-  const nums = options.map((j) => `NO ${(j.label.match(/\d[\w-]*$/) || [j.label])[0]}`);
+  const nums = options.map((j) => noFor(j, lang));
   const list = nums.length === 2 ? `${nums[0]} ${lang === "es" ? "o" : "or"} ${nums[1]}` : nums.join(", ");
   return lang === "es"
     ? `¿En qué trabajo no hay nadie? Responda NO con el número, así: ${list}.`
@@ -207,7 +212,7 @@ export function askWhichText(options: DayJob[], lang0?: string | null): string {
 // a plain "no" that could be about the photos just sent: how to report a door
 export function hintText(options: DayJob[], lang0?: string | null): string {
   const lang = langOf(lang0);
-  const nums = options.slice(0, 2).map((j) => `NO ${(j.label.match(/\d[\w-]*$/) || [j.label])[0]}`);
+  const nums = options.slice(0, 2).map((j) => noFor(j, lang));
   const list = nums.length === 2 ? `${nums[0]} ${lang === "es" ? "o" : "or"} ${nums[1]}` : nums[0];
   return lang === "es"
     ? `Si no hay nadie en un trabajo, responda NO con su número, así: ${list}.`

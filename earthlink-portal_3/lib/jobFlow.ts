@@ -309,8 +309,8 @@ export function applyMeasures(items: SfLine[], hits: MeasureHit[], plasterPrice 
       next.push({ description: "Plaster", qty, unit: "SF", unit_price: plasterPrice, key: "plaster" });
       changes.push({ name: "Plaster", qty, was: 0, unit: "SF" });
       // the primer and paint go on the job quietly, by the rooms the job's
-      // words name: with no room named they start at the list's blank (1), so
-      // the answer asks the worker how many rooms, the way any blank line does
+      // words name: with no room named they start at the list's blank (1),
+      // left for the office to set (the crew is never asked)
       if (prep) {
         const rooms = Math.max(1, Math.round(prep.rooms) || 1);
         const has = (key: string, word: RegExp) => next.some((it) => it.key === key || (!it.key && word.test(it.description || "")));

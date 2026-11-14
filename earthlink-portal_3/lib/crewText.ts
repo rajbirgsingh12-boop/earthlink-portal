@@ -93,8 +93,9 @@ export const jobName = (j: { label: string; street?: string | null; apt?: string
   const lang = langOf(lang0);
   const street = flat(j.street).replace(/[.,\s]+$/, "");
   const apt = flat(j.apt).replace(/^(apt\.?|apartment|unit|#)\s*/i, "");
-  // an address that already says the apartment ("2205 Linden Blvd Apt 4B") doesn't get it twice
-  const aptSaid = !!apt && new RegExp(`(^|[^a-z0-9])${apt.replace(/[^a-z0-9]/gi, (c) => `\\${c}`)}($|[^a-z0-9])`, "i").test(street);
+  // an address that already says the apartment ("2205 Linden Blvd Apt 4B", "… #4B") doesn't get it
+  // twice; the same number as a house or street number ("41-10 12th St", apartment 10) is not it
+  const aptSaid = !!apt && new RegExp(`(^|[^a-z0-9])(apt\\.?|apartment|unit|#)\\s*#?\\s*${apt.replace(/[^a-z0-9]/gi, (c) => `\\${c}`)}($|[^a-z0-9])`, "i").test(street);
   const where = street ? [street, apt && !aptSaid && `${lang === "es" ? "Apto" : "Apt"} ${apt}`].filter(Boolean).join(", ") : "";
   const label = flat(j.label);
   return where && label ? `${where} (${label})` : where || label;

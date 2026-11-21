@@ -30,7 +30,7 @@ export interface CrewReport extends TextReport { failed: CrewFail[]; grouped: nu
 interface Row { id: string; day: string; employee_id: string; pact_job_id?: string | null; release_id?: string | null }
 interface Emp { id: string; name?: string | null; phone?: string | null; active?: boolean | null }
 
-const first = (e?: Emp | null) => (e?.name || "").trim().split(/\s+/)[0] || "";
+const first = (e?: Emp | null) => (e?.name || "").trim().replace(/\s*[\u2014\u2013]\s*/g, "-").split(/\s+/)[0] || "";
 // the same words, whatever spacing Twilio hands back
 const same = (a: string, b: string) => a.replace(/\s+/g, " ").trim() === b.replace(/\s+/g, " ").trim();
 // the thread is read back only while there is time for it: the routes that

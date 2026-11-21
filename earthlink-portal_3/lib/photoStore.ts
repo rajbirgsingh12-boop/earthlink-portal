@@ -122,14 +122,22 @@ async function claimBatch(db: Db, b: Batch): Promise<{ row: Batch; had: string |
 // hand since) comes back off the new job's list.
 // `kind`: onto a PACT job, the pile the job's thread puts them on now
 // (before / after) — not the one guessed when they were held with no job.
-// `out.already`: nothing had to move (another request had just put them there)
-export async function fileBatch(db: Db, b0: Batch, t: Target, how = "office", kind?: "before" | "after" | "noaccess", out?: { already?: boolean }): Promise<number> {
+// `out.already`: nothing had to move (another request had just put them
+// there); `out.changed`: the batch went somewhere else since the caller read
+// it (the office's Wrong job?, or another text of the worker's at the same
+// moment), so nothing moved here: the caller reads it again and decides again;
+// `out.from`: the job it was taken off.
+export type FileOut = { already?: boolean; changed?: boolean; from?: { kind: "pact" | "rel"; id: string } | null };
+export async function fileBatch(db: Db, b0: Batch, t: Target, how = "office", kind?: "before" | "after" | "noaccess", out?: FileOut): Promise<number> {
   if (!(Array.isArray(b0.photos) ? b0.photos : []).some((p) => p && p.name && p.path)) return 0;
   const claim = await claimBatch(db, b0);
-  if (!claim) return 0;
+  if (!claim) { if (out) out.changed = true; return 0; }
   const b = claim.row;
+  // (the `how` it ends with is never the claim's own mark)
+  const real = (h?: string | null) => (h === MOVING ? null : h ?? null);
+  const finalHow = how === MOVING ? real(claim.had) ?? "day" : how;
   // (put back as it was when nothing could move)
-  const letGo = () => db.patch(`texted_photos?id=eq.${b.id}&how=eq.${MOVING}`, { how: claim.had === undefined ? how : claim.had });
+  const letGo = () => db.patch(`texted_photos?id=eq.${b.id}&how=eq.${MOVING}`, { how: claim.had === undefined ? finalHow : real(claim.had) });
   const photos = Array.isArray(b.photos) ? b.photos.filter((p) => p && p.name && p.path) : [];
   if (!photos.length) { await letGo(); return 0; }
   // each one into its pile's folder on the job: the pile given, else the one its name says
@@ -139,10 +147,16 @@ export async function fileBatch(db: Db, b0: Batch, t: Target, how = "office", ki
   const named = (n: string) => (kind ? n.replace(/^(before|after|noaccess)_/i, `${kind}_`) : n);
   const want = photos.map((p) => ({ from: p.path, name: named(p.name), to: dirOf(named(p.name)) + named(p.name) }));
   const moving = want.filter((w) => w.from !== w.to);
-  if (out) out.already = same && moving.length === 0;
-  if (!(same && moving.length === 0)) {
+  if (same && moving.length === 0) {
+    if (out) out.already = true;
+  } else {
+    // moved since the caller read it (to another job, out of the inbox, onto the other pile): not this caller's to move
+    const paths = (x: Batch) => (Array.isArray(x.photos) ? x.photos : []).map((p) => p?.path || "").sort().join("|");
+    const jobOf = (x: Batch) => (x.status === "filed" ? x.pact_job_id || x.release_id || "" : "");
+    if (b.status !== b0.status || jobOf(b) !== jobOf(b0) || paths(b) !== paths(b0)) { await letGo(); if (out) out.changed = true; return 0; }
     if (!(await db.attach(t, want.map((w) => ({ name: w.name, path: w.to })), []))) { await letGo(); return 0; }
   }
+  if (out) out.from = was && !same ? was : null;
   const stuck: string[] = [];
   const left: string[] = [];
   for (const w of moving) {
@@ -151,15 +165,46 @@ export async function fileBatch(db: Db, b0: Batch, t: Target, how = "office", ki
   if (stuck.length) await db.attach(t, [], stuck);
   const placed = want.filter((w) => !stuck.includes(w.to)).map((w) => ({ name: w.name, path: w.to }));
   if (!placed.length) { await letGo(); return 0; }
-  await db.patch(`texted_photos?id=eq.${b.id}`, {
-    status: "filed", photos: placed, how,
-    pact_job_id: t.kind === "pact" ? t.id : null, release_id: t.kind === "rel" ? t.id : null,
-  });
+  const row = { status: "filed", photos: placed, how: finalHow, pact_job_id: t.kind === "pact" ? t.id : null, release_id: t.kind === "rel" ? t.id : null };
+  // (tried twice: the pictures are on the job now, and the row is how the next move finds them)
+  if (!(await db.patch(`texted_photos?id=eq.${b.id}`, row))) await db.patch(`texted_photos?id=eq.${b.id}`, row);
+  // a picture that wouldn't move out of the inbox waits on a row of its own
+  // for the office, so it's never left on no list
+  const stuckFrom = new Set(moving.filter((w) => stuck.includes(w.to)).map((w) => w.from));
+  if (stuckFrom.size && b.status === "held") {
+    await db.insert("texted_photos", { employee_id: b.employee_id ?? null, from_phone: b.from_phone ?? null, body: b.body ?? "", status: "held", how: real(claim.had), photos: photos.filter((p) => stuckFrom.has(p.path)) });
+  }
   // off the job they were on (tried twice: a stale entry there would point at
   // nothing). The same job too, when they were renamed onto the other pile:
   // the old names are the files that moved
   if (was && left.length && !(await db.attach(was, [], left))) await db.attach(was, [], left);
   return placed.length;
+}
+
+// A batch off its job, back in the inbox to wait (a door's picture: which
+// door, the worker is asked). The job's list loses them; one that won't move
+// stays on the job on a row of its own. Returns how many wait.
+export async function holdBatch(db: Db, b0: Batch, how: string): Promise<number> {
+  const claim = await claimBatch(db, b0);
+  if (!claim) return 0;
+  const b = claim.row;
+  const real = (h?: string | null) => (h === MOVING ? null : h ?? null);
+  const photos = (Array.isArray(b.photos) ? b.photos : []).filter((p) => p && p.name && p.path);
+  if (b.status === "held") return (await db.patch(`texted_photos?id=eq.${b.id}`, { how })) ? photos.length : 0;
+  const letGo = () => db.patch(`texted_photos?id=eq.${b.id}&how=eq.${MOVING}`, { how: claim.had === undefined ? "day" : real(claim.had) });
+  const was = b.pact_job_id ? { kind: "pact" as const, id: b.pact_job_id } : b.release_id ? { kind: "rel" as const, id: b.release_id } : null;
+  if (!was || !photos.length) { await letGo(); return 0; }
+  const inbox = inboxOf(b.id);
+  const kept: Photo[] = [], left: string[] = [], stuck: Photo[] = [];
+  for (const p of photos) {
+    if (await db.move(p.path, inbox + p.name)) { kept.push({ name: p.name, path: inbox + p.name }); left.push(p.path); } else stuck.push(p);
+  }
+  if (!kept.length) { await letGo(); return 0; }
+  const row = { status: "held", how, photos: kept, pact_job_id: null, release_id: null };
+  if (!(await db.patch(`texted_photos?id=eq.${b.id}`, row))) await db.patch(`texted_photos?id=eq.${b.id}`, row);
+  if (stuck.length) await db.insert("texted_photos", { employee_id: b.employee_id ?? null, from_phone: b.from_phone ?? null, body: b.body ?? "", status: "filed", how: real(claim.had) ?? "day", photos: stuck, pact_job_id: b.pact_job_id ?? null, release_id: b.release_id ?? null });
+  if (!(await db.attach(was, [], left))) await db.attach(was, [], left);
+  return kept.length;
 }
 
 // Throw away a batch nobody could place. A batch already on a job is the

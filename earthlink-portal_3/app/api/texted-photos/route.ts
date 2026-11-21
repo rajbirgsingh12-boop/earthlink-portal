@@ -5,9 +5,9 @@
 // since they sit in a folder no one's own sign-in can move out of.
 import { NextResponse } from "next/server";
 import { pactKey, relKey } from "@/lib/smsIn";
-import { dropBatch, fileBatch, serviceDb, type Batch } from "@/lib/photoStore";
-import { kindOfName, mixedCaption, notDone, photoKindFor, type PhotoKind } from "@/lib/jobFlow";
-import { clearDoneIfNoAfter, closeQuestion, markDone, nyDay, onLastDay, threadJob, type Emp, type ThreadJob } from "@/lib/jobThread";
+import { dropBatch, fileBatch, serviceDb, type Batch, type FileOut } from "@/lib/photoStore";
+import { allDoneSaid, crewEndedText, kindOfName, mixedCaption, notDone, photoKindFor, type PhotoKind } from "@/lib/jobFlow";
+import { clearDoneIfNoAfter, closeQuestion, endEarly, firstName, markDone, nyDay, onLastDay, threadJob, type Emp, type ThreadJob } from "@/lib/jobThread";
 import { currentWorkDay } from "@/lib/workDays";
 import { jobName } from "@/lib/crewText";
 
@@ -37,17 +37,20 @@ export async function POST(req: Request) {
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Bad request" }, { status: 400 }); }
   // a crew picture the office deleted from a job's Documents: off the texted
   // batch that brought it too, so its card counts what's there (a batch with
-  // nothing left goes off the list)
+  // nothing left goes off the list), and off a "nobody home" notice that
+  // shows it (the notice itself stays up)
   if (body.action === "gone") {
     const jobId = body.pact_job_id || body.release_id || "";
     const paths = (Array.isArray(body.paths) ? body.paths : []).filter((x): x is string => typeof x === "string" && !!x && x.length < 500).slice(0, 50);
     if (!uuid.test(jobId) || !paths.length) return NextResponse.json({ error: "Bad request" }, { status: 400 });
     const col = body.pact_job_id ? "pact_job_id" : "release_id";
-    const rows = (await db.get<Batch>(`texted_photos?${col}=eq.${jobId}&status=eq.filed&select=id,photos&limit=200`)).rows;
+    const rows = (await db.get<Batch>(`texted_photos?${col}=eq.${jobId}&status=in.(filed,nobody,opened,seen)&select=id,status,photos&limit=200`)).rows;
     for (const r of rows) {
       const had = r.photos || [];
       const left = had.filter((x) => !paths.includes(x?.path || ""));
-      if (left.length !== had.length) await db.patch(`texted_photos?id=eq.${r.id}&status=eq.filed`, left.length ? { photos: left } : { photos: left, status: "gone" });
+      if (left.length === had.length) continue;
+      const st = encodeURIComponent(r.status || "");
+      await db.patch(`texted_photos?id=eq.${r.id}&status=eq.${st}`, left.length || r.status !== "filed" ? { photos: left } : { photos: left, status: "gone" });
     }
     return NextResponse.json({ ok: true });
   }
@@ -87,11 +90,14 @@ export async function POST(req: Request) {
   const own = b.status === "filed" ? kindOfName((b.photos || [])[0]?.name || "") : null;
   // one waiting goes where its words (or an AFTER or DONE texted with it) put it: BEFORE unless they said AFTER
   kind = door ? "noaccess" : own || (b.how === "after" || b.how === "afterall" ? "after" : photoKindFor(b.body || ""));
-  const was = b.status === "filed" && b.pact_job_id && b.pact_job_id !== (target.kind === "pact" ? target.id : "") ? b.pact_job_id : "";
   // (a door's picture keeps its mark wherever it goes: the crew's next texts know it for one)
-  const n = await fileBatch(db, b, target, door ? "noaccess" : "office", kind);
+  const st: FileOut = {};
+  const n = await fileBatch(db, b, target, door ? "noaccess" : "office", kind, st);
+  // (the worker's own text moved them a moment ago: the card shows where they are now)
+  if (st.changed) return NextResponse.json({ error: "Those photos just moved. Look again before moving them" }, { status: 409 });
   if (!n) return NextResponse.json({ error: "Couldn't move the photos, try again" }, { status: 500 });
   // the job they left: marked done by these, it isn't any more
+  const was = st.from?.kind === "pact" ? st.from.id : "";
   if (was) await clearDoneIfNoAfter(db, was, jobName(target, "en"), now, today, (b.photos || []).some((p) => /^after/i.test(p?.name || "")));
   // after pictures on the job's last day: the job is work done, as when the worker texts them
   let marked = false;
@@ -102,7 +108,15 @@ export async function POST(req: Request) {
     // the day they were texted, not the day the office moved them: that day's job, finished on its work day
     const sent = b.created_at ? nyDay(new Date(b.created_at)) : today;
     const day = sent < today ? sent : today;
-    if (emp && !onLastDay(thread, day).before) marked = await markDone(db, thread, emp, { from: b.from_phone || "", now, finish: currentWorkDay(thread.start_date, thread.work_days, day) });
+    const before = onLastDay(thread, day).before;
+    // ALL DONE said about them (a job of several days, before its last): the
+    // days after that day come off and its crew hears it, as when the number places them
+    if (emp && before && (b.how === "afterall" || allDoneSaid(b.body || ""))) {
+      const emps = (await db.get<Emp>("employees?select=id,name,phone,lang,active")).rows;
+      const key = pactKey(thread);
+      await endEarly(db, thread, { emp, emps, now, today: day, tell: true, words: (e, d) => crewEndedText(firstName(e), jobName(key, e.lang), d, e.lang) });
+      marked = await markDone(db, thread, emp, { from: b.from_phone || "", now, finish: day });
+    } else if (emp && !before) marked = await markDone(db, thread, emp, { from: b.from_phone || "", now, finish: currentWorkDay(thread.start_date, thread.work_days, day) });
   }
   return NextResponse.json({ ok: true, n, label: target.label, marked });
 

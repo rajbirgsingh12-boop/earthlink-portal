@@ -18,8 +18,12 @@ export const longDay = (iso?: string | null, lang: Lang = "en") =>
 const flat = (s?: string | null) => (s || "").replace(/\s+/g, " ").trim();
 // a dash typed into an address or a building ("41–10 Vernon Blvd", "Van Dyke
 // Houses – Bldg 3") reads in a text as a hyphen, or a comma when spaced. One
-// between two numbers ("41—10", the way a phone's punctuation types it) is a hyphen
-const undash = (s?: string | null) => flat(s).replace(/(\d)[\u2014\u2013](?=\d)/g, "$1-").replace(/\s*[\u2014\u2013]\s+|\s+[\u2014\u2013]\s*|\u2014/g, ", ").replace(/\u2013/g, "-");
+// between two numbers ("41—10", "41 – 10", the way a phone's punctuation
+// types it) is a hyphen
+const undash = (s?: string | null) => flat(s).replace(/(\d)\s*[\u2014\u2013]\s*(?=\d)/g, "$1-").replace(/\s*[\u2014\u2013]\s+|\s+[\u2014\u2013]\s*|\u2014/g, ", ").replace(/\u2013/g, "-");
+// …and in a number, an apartment or a name ("PO –4471", "220011—2", "4—B",
+// "Jean–Pierre"), always a hyphen
+export const plainDash = (s?: string | null) => flat(s).replace(/\s*[\u2014\u2013]\s*/g, "-");
 const sameText = (a: string, b: string) => flat(a).toLowerCase() === flat(b).toLowerCase();
 
 export type CrewTextInput = {
@@ -39,19 +43,19 @@ export type CrewTextInput = {
 // the job's own number, the way the office and the partners say it. "PO" and
 // "release" stay as they are in Spanish — that is what everyone calls them.
 const jobRef = (t: CrewTextInput): string => {
-  const po = flat(t.po).replace(/^(po\s*#?|#)\s*/i, "");
+  const po = plainDash(t.po).replace(/^(po\s*#?|#)\s*[-:]?\s*/i, "");
   if (po) return `PO ${po}`;
-  const rel = flat(t.release).replace(/^(release\s*#?|#)\s*/i, "");
+  const rel = plainDash(t.release).replace(/^(release\s*#?|rel\.?\s*#?|#)\s*[-:]?\s*/i, "");
   return rel ? `release ${rel}` : "";
 };
 export function crewText(t: CrewTextInput): string {
   const lang = langOf(t.lang);
-  const first = flat(t.first);
+  const first = plainDash(t.first);
   // a trailing period on a street or building would land mid-sentence
   const street = undash(t.street).replace(/[.\s]+$/, "");
   const building = undash(t.building).replace(/[.\s]+$/, "");
   // "Apt 4B", "Apartment 4B", "Unit 4B", "#4B" — the label is put on here, once
-  const apt = undash(t.apt).replace(/^(apt\.?|apartment|unit|#)\s*/i, "");
+  const apt = plainDash(t.apt).replace(/^(apt\.?|apartment|unit|#)\s*/i, "");
   // the work's own last stop is kept ("Paint everything!" / a cut line's "…"); a period is added only where there is none.
   // A dash typed into a PO ("Bedroom – plaster") reads as a comma in a text
   const work = undash(t.work).replace(/[.\s]+$/, "");
@@ -109,12 +113,12 @@ export function crewText(t: CrewTextInput): string {
 export const jobName = (j: { label: string; street?: string | null; apt?: string | null }, lang0?: string | null): string => {
   const lang = langOf(lang0);
   const street = undash(j.street).replace(/[.,\s]+$/, "");
-  const apt = undash(j.apt).replace(/^(apt\.?|apartment|unit|#)\s*/i, "");
+  const apt = plainDash(j.apt).replace(/^(apt\.?|apartment|unit|#)\s*/i, "");
   // an address that already says the apartment ("2205 Linden Blvd Apt 4B", "… #4B") doesn't get it
   // twice; the same number as a house or street number ("41-10 12th St", apartment 10) is not it
   const aptSaid = !!apt && new RegExp(`(^|[^a-z0-9])(apt\\.?|apartment|unit|#)\\s*#?\\s*${apt.replace(/[^a-z0-9]/gi, (c) => `\\${c}`)}($|[^a-z0-9])`, "i").test(street);
   const where = street ? [street, apt && !aptSaid && `${lang === "es" ? "Apto" : "Apt"} ${apt}`].filter(Boolean).join(", ") : "";
-  const label = undash(j.label);
+  const label = plainDash(j.label);
   return where && label ? `${where} (${label})` : where || label;
 };
 // the street part of an address: "2205 Linden Blvd, Brooklyn, NY 11207" is "2205 Linden Blvd"
@@ -145,9 +149,12 @@ export const PHOTO_INVITE = {
 // the invite as texts already out carried it (a text being re-sent is never asked twice)
 const OLD_INVITE = { en: "Reply to this text with photos of the work.", es: "Responda a este mensaje con fotos del trabajo." };
 // a PACT job's text carries the whole thread instead (lib/jobFlow's jobAsk:
-// before photos, then after photos), never both
-const hasAsk = (b: string) => b.includes(PHOTO_INVITE.en) || b.includes(PHOTO_INVITE.es) || b.includes(OLD_INVITE.en) || b.includes(OLD_INVITE.es)
-  || /with the word AFTER|con la palabra DESPUES/.test(b) || b.split("\n\n").some(isOldAsk);
+// before photos, then after photos), never both. The work line is the work,
+// whatever it quotes: an ask in it is not the text's ask
+const WORK_LINE = /^(Here is the work|El trabajo es): /;
+const asksIn = (b: string) => b.split("\n\n").filter((p) => !WORK_LINE.test(p.trim()));
+const hasAsk = (b: string) => asksIn(b).some((p) => p.includes(PHOTO_INVITE.en) || p.includes(PHOTO_INVITE.es) || p.includes(OLD_INVITE.en) || p.includes(OLD_INVITE.es)
+  || /with the word AFTER|con la palabra DESPUES/.test(p) || isOldAsk(p));
 // Twilio takes 1,600 characters. A text over a limit gives up words from its
 // LONGEST paragraph (the work line), cut at a word with "…" — the greeting,
 // the map link and the ask at the end all stay whole. (A paragraph that is
@@ -187,10 +194,15 @@ export function withPhotoInvite(body: string): string {
   const b = (body || "").trimEnd();
   if (!b) return b;
   const es = /^hola\b/i.test(b.trimStart());
-  // the old invite ("Reply to this text with photos of the work.") gets the rest of the ask
-  if (!b.includes(PHOTO_INVITE.en) && !b.includes(PHOTO_INVITE.es)) {
-    if (b.includes(OLD_INVITE.en)) return b.replace(OLD_INVITE.en, PHOTO_INVITE.en);
-    if (b.includes(OLD_INVITE.es)) return b.replace(OLD_INVITE.es, PHOTO_INVITE.es);
+  // the old invite ("Reply to this text with photos of the work.") gets the
+  // rest of the ask (where it was said, not quoted in the work line)
+  if (!asksIn(b).some((p) => p.includes(PHOTO_INVITE.en) || p.includes(PHOTO_INVITE.es))) {
+    const paras = b.split("\n\n");
+    const oi = paras.findIndex((p) => !WORK_LINE.test(p.trim()) && (p.includes(OLD_INVITE.en) || p.includes(OLD_INVITE.es)));
+    if (oi >= 0) {
+      paras[oi] = paras[oi].includes(OLD_INVITE.en) ? paras[oi].replace(OLD_INVITE.en, PHOTO_INVITE.en) : paras[oi].replace(OLD_INVITE.es, PHOTO_INVITE.es);
+      return paras.join("\n\n");
+    }
     const swapped = swapOldAsk(b, es ? PHOTO_INVITE.es : PHOTO_INVITE.en);
     if (swapped) return swapped;
   }

@@ -42,13 +42,14 @@ const cleanPhone = (s?: string | null): string => {
   if (d.length === 11 && d.startsWith("1")) return `+${d}`;
   return d.length > 11 && d.length <= 15 && (s || "").trim().startsWith("+") ? `+${d}` : ""; // as lib/notify's
 };
-const first = (e?: FlowEmp | null) => (e?.name || "").trim().split(/\s+/)[0] || "";
+const first = (e?: FlowEmp | null) => (e?.name || "").trim().replace(/\s*[\u2014\u2013]\s*/g, "-").split(/\s+/)[0] || "";
 const ids = (xs: (string | null | undefined)[]) => [...new Set(xs.filter(Boolean) as string[])];
 const appendLine = (notes: string | null | undefined, line: string) => `${(notes || "").trim()}${(notes || "").trim() ? "\n" : ""}${line}`;
 const ROW_COLS = "id,day,employee_id,pact_job_id,release_id,texted,texted_at,description,address";
 const jobOfMark = (n: Mark) => n.pact_job_id || n.release_id || "";
 
-export type FlowResult = { handled: false } | { handled: true; reply: string; missed?: DayJob };
+// (`asked`: which job has nobody home wasn't clear, and they're asked)
+export type FlowResult = { handled: false } | { handled: true; reply: string; missed?: DayJob; asked?: boolean };
 
 // crew rows, a few workers at once, up to two weeks out (from further back
 // than today: a PACT job of more days has its crew row on its first day),
@@ -70,8 +71,13 @@ export async function nobodyFlow(db: Db, o: {
   photosIn?: boolean;
   // "NO 2205 Linden": a door only when the number is one of today's (the house, the apartment, the PO)
   candidate?: boolean;
-  say?: (to: string, body: string, who?: string) => Promise<boolean>;   // how the answer goes back (into the thread it came from, say); a plain text to them otherwise
+  // how the answer goes back (into the thread it came from, say); a plain text
+  // to them otherwise. `job`: the job the answer sends them on to (a crew's
+  // thread is about it from then on)
+  say?: (to: string, body: string, who?: string, job?: { kind: "pact" | "rel"; id: string }) => Promise<boolean>;
   hint?: string;   // the job the crew's thread it came in on is about: with two open today, that one
+  // pictures that came just before the "no" and may be of the door: not a job they've been through
+  ignore?: string[];
 }): Promise<FlowResult> {
   const { emp, now } = o;
   const today = nyDay(now);
@@ -133,7 +139,7 @@ export async function nobodyFlow(db: Db, o: {
   const notices = marks.filter((n) => n.status === "nobody" || n.status === "seen" || n.status === "moved" || n.status === "opened");
   const mine = marks.filter((n) => n.employee_id === emp.id);           // every "nobody" answer this worker has had today
   const flagged = new Set(ids(notices.map(jobOfMark)));
-  const myPhotos = photosGot.rows.filter((b) => todays(b) && b.how !== "noaccess");
+  const myPhotos = photosGot.rows.filter((b) => todays(b) && b.how !== "noaccess" && !(o.ignore || []).includes(b.id));
   const visited = new Set(ids(myPhotos.filter((b) => b.status === "filed").map(jobOfMark)));
   const lastPhotos = Math.max(0, ...myPhotos.map(at));
   const lastMine = Math.max(0, ...mine.map(at));
@@ -205,7 +211,7 @@ export async function nobodyFlow(db: Db, o: {
     await remember("Told how to report a door");
     return { handled: true, reply: hintText(open, lang) };
   }
-  if (m2.kind === "ask") { await remember("Asked which job has nobody home"); return { handled: true, reply: askWhichText(m2.options, lang) }; }
+  if (m2.kind === "ask") { await remember("Asked which job has nobody home"); return { handled: true, reply: askWhichText(m2.options, lang), asked: true }; }
   if (m2.kind === "not_today") { await tellOffice(`Said nobody home at ${m2.number}, not a job of theirs today`); return { handled: true, reply: notTodayText(m2.number, lang) }; }
   if (m2.kind === "nothing_today") {
     const any = jobs.some((j) => j.day === today) || visited.size > 0;
@@ -300,10 +306,12 @@ export async function nobodyFlow(db: Db, o: {
   // ---- the worker's answer, now — before anything that could run long ----
   const reply = `${ackText(jobName(missed, lang), lang)}\n\n${nextMsg}`;
   let replied = false;
-  if (twilioConfigured() && cleanPhone(o.from)) replied = o.say ? await o.say(cleanPhone(o.from), reply, first(emp)) : (await sendTexts([{ to: cleanPhone(o.from), who: (emp.name || "").trim() || undefined, body: reply }])).sent > 0;
-  // they've been told: the row says so (and a text set for later is off)
+  const sentOn = nj && (next.kind === "today" || movedOk) ? { kind: nj.kind, id: nj.id } : undefined;
+  if (twilioConfigured() && cleanPhone(o.from)) replied = o.say ? await o.say(cleanPhone(o.from), reply, first(emp), sentOn) : (await sendTexts([{ to: cleanPhone(o.from), who: (emp.name || "").trim() || undefined, body: reply }])).sent > 0;
+  // they've been told: the row says so (and a text set for later is off;
+  // an answer that didn't go out leaves their row as it was)
   const again = already && !!nj && justSent.has(nj.id);
-  if (nj && (next.kind === "today" || movedOk) && !again) {
+  if (nj && (next.kind === "today" || movedOk) && !again && (replied || !twilioConfigured() || !cleanPhone(o.from))) {
     // on their record: the job they were just sent to (their next "no" in the next few minutes isn't about it)
     await db.insert("texted_photos", { employee_id: emp.id, from_phone: o.from, body: "", status: "note", how: "nobody", photos: [], pact_job_id: nj.kind === "pact" ? nj.id : null, release_id: nj.kind === "rel" ? nj.id : null });
     const told = job && next.kind === "move_up"

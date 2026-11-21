@@ -18,7 +18,7 @@ import {
   pickJob, pactKey, relKey, photoName, phoneKey, refsIn, justANumber, noPlace, replyText, dayMinus,
   type JobKey, type MediaIn, type MineRow, type Reply,
 } from "@/lib/smsIn";
-import { fileBatch, inboxOf, pileDir, type Batch, type Db, type Photo, type Target } from "@/lib/photoStore";
+import { fileBatch, holdBatch, inboxOf, pileDir, type Batch, type Db, type FileOut, type Photo, type Target } from "@/lib/photoStore";
 import { countOf, isMediaName, mediaWords, type MediaCount } from "@/lib/media";
 import { bareNo, noAt, nobodyHome, numbersIn, toldOfficeText } from "@/lib/noAccess";
 import { nobodyFlow } from "@/lib/nobodyFlow";
@@ -33,7 +33,7 @@ import {
   billed, cleanPhone, clearDoneIfNoAfter, closeQuestion, continueJob, dayPile, endEarly, firstName, keyOf, markDone, namesOf, nyDay, nyHour, nyWhen, onLastDay,
   openQuestion, putRow, shortDay, threadJob, type Emp, type ThreadJob,
 } from "@/lib/jobThread";
-import { atJob, jobName, langOf } from "@/lib/crewText";
+import { AFTER_HOW, atJob, jobName, langOf } from "@/lib/crewText";
 import { addWorkDays, currentWorkDay, workDaysOf } from "@/lib/workDays";
 import { bookPrice } from "@/lib/priceServer";
 import { roomsIn } from "@/lib/priceBook";
@@ -45,7 +45,8 @@ const env = (k: string) => process.env[k] || "";
 const answer = (msg?: string): string | undefined => msg || undefined;
 const say = (r: Reply, lang?: string | null) => answer(replyText(r, lang));
 // how a text goes back to the worker later (the settled count, the nobody-home answer): one-to-one, or into the thread it came from
-export type Deliver = (to: string, body: string, who?: string) => Promise<boolean>;
+// (`job`: the job the text sends them on to: a crew's thread is about it from then on)
+export type Deliver = (to: string, body: string, who?: string, job?: { kind: "pact" | "rel"; id: string }) => Promise<boolean>;
 export interface Inbound {
   from: string; body: string; sid: string; photos: MediaIn[]; other: number;
   fetchMedia: (url: string) => Promise<{ bytes: ArrayBuffer; type: string } | null>;
@@ -158,7 +159,7 @@ async function settleBurst(db: Db, o: { emp: Emp; batchId: string; target: Targe
       // a text of theirs ends the send (a door's picture too); a row the portal
       // wrote for itself doesn't, and neither does an AFTER said about this
       // send (pictures more than a minute and a half after it are a new send)
-      if (!isPiece(b)) { if (b.msg_sid && (b.how !== "afterflip" || at - (Date.parse(b.created_at || "") || 0) > FRESH_MS)) break; continue; }
+      if (!isPiece(b)) { if (b.msg_sid && (!SAID_ABOUT.has(b.how || "") || msOf(rows[start]) - msOf(b) > FRESH_MS)) break; continue; }
       send.push(b);
       at = t;
     }
@@ -210,28 +211,38 @@ const ARRIVAL_GAP_MS = 60 * 60_000;
 // after photos: the phone sent them with the DONE ("done sending", maybe)
 const DONE_SENT_MS = 2 * 60_000;
 const msOf = (r: { created_at?: string | null }) => Date.parse(r.created_at || "") || 0;
+// a word about the send just made (their AFTER that moved it, the portal's
+// question about it): pictures up to a minute and a half after it are still
+// that send, later ones a new one
+const SAID_ABOUT = new Set(["afterflip", "afterask"]);
 const isEs = (l?: string | null) => !!l && /^(es|spa|esp)/i.test(l);
 const namesIn = (bs: { photos?: Photo[] | null }[]): string[] => bs.flatMap((b) => (b.photos || []).map((p) => p?.name || "")).filter(Boolean);
 // a row's job columns: a PACT job's id, or a job of either kind
 const jobCols = (job?: string | { kind: "pact" | "rel"; id: string } | null): Record<string, string> => (!job ? {} : typeof job === "string" ? { pact_job_id: job } : job.kind === "pact" ? { pact_job_id: job.id } : { release_id: job.id });
 
-interface Win { id: string; jobId: string; kind: "pact" | "rel" | ""; how: string; at: number; empId: string }
+// (`named`: the AFTER said its job's number; `marked`: the DONE that opened it
+// marked the job done; `movedOn`: their photos landed on another job since,
+// so only photos they caption AFTER are its)
+interface Win { id: string; jobId: string; kind: "pact" | "rel" | ""; how: string; at: number; empId: string; named: boolean; marked: boolean; movedOn: boolean }
 // the open window, if any: the job it's for (none: whichever job the photos
 // land on). In a crew's thread (`threadJob`), also the one a co-worker opened
 // on the thread's job (their AFTER, or their DONE the portal asked the photos for)
 async function afterWindow(db: Db, empId: string, now: Date, threadJob?: string): Promise<Win | null> {
-  type W = { id: string; employee_id?: string | null; pact_job_id?: string | null; release_id?: string | null; created_at?: string | null; how?: string | null };
+  type W = { id: string; employee_id?: string | null; pact_job_id?: string | null; release_id?: string | null; created_at?: string | null; how?: string | null; note?: string | null };
   const recent = enc(new Date(now.getTime() - AFTER_WINDOW_MS).toISOString());
   const open = async (who: string, closedBy: (w: W) => string): Promise<Win | null> => {
-    const w = (await db.get<W>(`texted_photos?${who}&how=in.(aftersay,afterwait)&status=eq.note&created_at=gte.${recent}&select=id,employee_id,pact_job_id,release_id,created_at,how&order=created_at.desc&limit=1`)).rows[0];
+    const w = (await db.get<W>(`texted_photos?${who}&how=in.(aftersay,afterwait)&status=eq.note&created_at=gte.${recent}&select=id,employee_id,pact_job_id,release_id,created_at,how,note&order=created_at.desc&limit=1`)).rows[0];
     if (!w?.created_at) return null;
     // the send it was for came in already: a later send is BEFORE again (its
     // own pieces stay with it as one send). Pictures another job's number or
-    // BEFORE put on that job, untouched by it, weren't its send
+    // BEFORE put on that job, untouched by it, weren't its send (but they've
+    // moved on); nor were pictures they captioned BEFORE
     const job = w.pact_job_id || w.release_id || "";
-    const since = (await db.get<Batch>(`texted_photos?${closedBy(w)}&status=in.(held,filed)&created_at=gt.${enc(w.created_at)}&select=id,how,status,photos,pact_job_id,release_id&limit=10`)).rows
-      .filter((b) => b.how !== "noaccess" && !(job && b.status === "filed" && (b.pact_job_id || b.release_id) !== job && namesIn([b]).every((x) => kindOfName(x) !== "after")));
-    return since.length ? null : { id: w.id, jobId: w.pact_job_id || w.release_id || "", kind: w.pact_job_id ? "pact" : w.release_id ? "rel" : "", how: w.how || "", at: msOf(w), empId: w.employee_id || empId };
+    const rows = (await db.get<Batch>(`texted_photos?${closedBy(w)}&status=in.(held,filed)&created_at=gt.${enc(w.created_at)}&select=id,how,status,photos,pact_job_id,release_id,body&limit=10`)).rows
+      .filter((b) => b.how !== "noaccess");
+    const elsewhere = (b: Batch) => !!job && b.status === "filed" && (b.pact_job_id || b.release_id) !== job && namesIn([b]).every((x) => kindOfName(x) !== "after");
+    const since = rows.filter((b) => !elsewhere(b) && captionKind(b.body || "") !== "before");
+    return since.length ? null : { id: w.id, jobId: job, kind: w.pact_job_id ? "pact" : w.release_id ? "rel" : "", how: w.how || "", at: msOf(w), empId: w.employee_id || empId, named: w.note === "named", marked: w.note === "marked", movedOn: rows.some(elsewhere) };
   };
   const mine = await open(`employee_id=eq.${empId}`, () => `employee_id=eq.${empId}`);
   if (mine || !threadJob) return mine;
@@ -254,11 +265,14 @@ interface Sent {
   before: SendRow[];       // the pieces still on the BEFORE pile
   saidBefore: boolean;     // a caption said BEFORE: they meant it
   empId: string;           // who sent it
+  src: { empId?: string; jobId?: string };  // how it was read (to read it again)
 }
-async function justSent(db: Db, o: { empId?: string; jobId?: string; now: Date }): Promise<Sent | null> {
+// (`until`: the send as it stood then: the one a question asked about)
+async function justSent(db: Db, o: { empId?: string; jobId?: string; now: Date; until?: number }): Promise<Sent | null> {
   const since = enc(new Date(o.now.getTime() - 2 * 3_600_000).toISOString());
   const who = o.jobId ? `or=(pact_job_id.eq.${o.jobId},release_id.eq.${o.jobId})&status=in.(held,filed)` : `employee_id=eq.${o.empId}&status=in.(held,filed,measure,note,nobody,reply,seen,opened,moved,done)`;
-  const rows = (await db.get<SendRow>(`texted_photos?${who}&created_at=gte.${since}&order=created_at.desc&select=*&limit=60`)).rows;
+  const upTo = o.until ? `&created_at=lte.${enc(new Date(o.until).toISOString())}` : "";
+  const rows = (await db.get<SendRow>(`texted_photos?${who}&created_at=gte.${since}${upTo}&order=created_at.desc&select=*&limit=60`)).rows;
   const isBatch = (b: SendRow) => b.status === "held" || b.status === "filed";
   const isPiece = (b: SendRow) => isBatch(b) && b.how !== "noaccess" && (b.photos || []).length > 0;
   const top = rows.findIndex(isPiece);
@@ -272,7 +286,7 @@ async function justSent(db: Db, o: { empId?: string; jobId?: string; now: Date }
       // a text of theirs ends the send, and so does a door's picture; a row the
       // portal wrote for itself doesn't, nor an AFTER said about this send
       // (pictures more than a minute and a half after that AFTER are a new send)
-      if (isBatch(b) || (b.msg_sid && (b.how !== "afterflip" || at - msOf(b) > FRESH_MS))) break;
+      if (isBatch(b) || (b.msg_sid && (!SAID_ABOUT.has(b.how || "") || msOf(first) - msOf(b) > FRESH_MS))) break;
       continue;
     }
     if (at - msOf(b) > BURST_MS || jobOf(b) !== jobOf(first) || b.status !== first.status) break;
@@ -284,6 +298,7 @@ async function justSent(db: Db, o: { empId?: string; jobId?: string; now: Date }
     before: pieces.filter((b) => namesIn([b]).some((n) => kindOfName(n) === "before")),
     saidBefore: pieces.some((b) => captionKind(b.body || "") === "before"),
     empId: first.employee_id || "",
+    src: o.jobId ? { jobId: o.jobId } : { empId: o.empId },
   };
 }
 // held photos they said AFTER (or DONE) about: in AFTER, whichever job they
@@ -312,7 +327,7 @@ async function todaysJobs(db: Db, emp: Emp, today: string): Promise<JobKey[]> {
   return mine.filter((k) => ids.has(k.id));
 }
 // "116843 (2205 Linden Blvd, Apt 4B)": a job the way a worker answers with it
-const optionOf = (k: JobKey, lang?: string | null) => { const place = jobName({ ...k, label: "" }, lang); return `${(k.label.match(/\d[\w-]*$/) || [k.label])[0]}${place ? ` (${place})` : ""}`; };
+const optionOf = (k: JobKey, lang?: string | null) => { const place = jobName({ ...k, label: "" }, lang); return `${(k.label.match(/[A-Za-z]?\d[\w-]*$/) || [k.label])[0]}${place ? ` (${place})` : ""}`; };
 // the job a text names by its number ("AFTER 116843", "116843 done"): one of theirs, or any PO in the portal
 async function namedJob(db: Db, o: Said): Promise<JobKey | null> {
   const refs = jobRefsOnly(o.body);
@@ -349,11 +364,23 @@ async function flipToAfter(db: Db, o: Said, s: Sent, why: "after" | "done" | "al
       : `Got it. If the ${one ? (c.v ? "video" : "photo") : mediaWords(c, "en")} ${who || "you"} just sent ${atJob(name, "en")} ${one ? "is" : "are"} the finished work, reply AFTER.`;
     return { text, c, t, thread, asked: true };
   }
-  let moved = 0, already = s.before.length > 0;
-  for (const b of [...s.before].reverse()) { const st: { already?: boolean } = {}; moved += await fileBatch(db, b, t, b.how || "day", "after", st); already = already && !!st.already; }
-  if (s.before.length && !moved) return null;
+  // (the word first: a piece of the send landing while these move sees it)
   await remember(db, o, "afterflip", t);
-  if (already) return { text: "", c, t, thread, already: true };
+  const r = await intoAfter(db, s, t);
+  if (s.before.length && !r.moved) return null;
+  if (r.already) return { text: "", c, t, thread, already: true };
+  // a piece of the same send that landed while these moved (a phone splits a
+  // video off) follows them, and the answer counts it
+  const all = [...s.pieces];
+  for (let i = 0; i < 3; i++) {
+    const again = await justSent(db, { ...s.src, now: new Date() });
+    if (!again || again.held || !again.pieces.some((p) => p.id === s.pieces[0].id)) break;
+    const late = again.before.filter((b) => !all.some((x) => x.id === b.id) && (b.pact_job_id || b.release_id) === t.id && !captionKind(b.body || ""));
+    if (!late.length) break;
+    if (!(await intoAfter(db, { ...again, before: late }, t)).moved) break;
+    all.push(...late);
+  }
+  if (all.length > s.pieces.length) Object.assign(c, countOf(namesIn(all)));
   // on a job only the day's guess picked, of two that day: they hear how to move them
   const hint = s.pieces.some((b) => b.how === "day") && (await todaysJobs(db, o.emp, o.today)).length > 1;
   if (!thread) return { text: flippedText(c, name, lang, false, { hint, who }), c, t, thread, guessed: hint };
@@ -365,6 +392,27 @@ async function flipToAfter(db: Db, o: Said, s: Sent, why: "after" | "done" | "al
   const marked = !notDone(caption) && !mixedCaption(caption) ? await markDone(db, thread, o.emp, { from: o.from, now: o.now, finish: dayPile(thread, o.today).cur }) : false;
   return { text: flippedText(c, name, lang, marked, { hint, who }), c, t, thread, guessed: hint };
 }
+// the portal's "If they're the finished work, reply AFTER" (how 'afterask'),
+// still open: the last quarter hour, with nothing said since but pictures. In
+// a crew's thread, one asked about the thread's job, whoever's DONE it answered
+type Ask = { id: string; at: number; empId: string; job: { kind: "pact" | "rel"; id: string } | null };
+async function openAsk(db: Db, empId: string, now: Date, threadId?: string): Promise<Ask | null> {
+  type A = { id: string; employee_id?: string | null; pact_job_id?: string | null; release_id?: string | null; created_at?: string | null };
+  const who = (also = "") => (threadId ? `or=(employee_id.eq.${empId},${also}pact_job_id.eq.${threadId},release_id.eq.${threadId})` : `employee_id=eq.${empId}`);
+  const a = (await db.get<A>(`texted_photos?${who()}&how=eq.afterask&status=eq.note&created_at=gte.${enc(new Date(now.getTime() - FLIP_MS).toISOString())}&order=created_at.desc&limit=1&select=id,employee_id,pact_job_id,release_id,created_at`)).rows[0];
+  if (!a?.created_at) return null;
+  const job = a.pact_job_id ? { kind: "pact" as const, id: a.pact_job_id } : a.release_id ? { kind: "rel" as const, id: a.release_id } : null;
+  if (threadId && job && job.id !== threadId) return null;
+  const by = a.employee_id && a.employee_id !== empId ? `employee_id.eq.${a.employee_id},` : "";
+  const since = (await db.get<{ status?: string | null }>(`texted_photos?${who(by)}&msg_sid=not.is.null&created_at=gt.${enc(a.created_at)}&select=status&limit=20`)).rows;
+  if (since.some((r) => r.status !== "held" && r.status !== "filed")) return null;
+  return { id: a.id, at: msOf(a), empId: a.employee_id || empId, job };
+}
+// a voice note or a file with the words: not kept, and they hear so
+const notKeptLine = (other: number, lang?: string | null) => (!other ? "" : isEs(lang)
+  ? `${other === 1 ? "La nota de voz o el archivo no se guarda" : "Las notas de voz o los archivos no se guardan"}: solo se guardan fotos y videos.`
+  : `${other === 1 ? "The voice note or file isn't kept" : "The voice notes or files aren't kept"}: only photos and videos go on the job.`);
+
 // the jobs with a "nobody home" notice still up today
 async function flaggedToday(db: Db, ids: string[], now: Date, today: string): Promise<Set<string>> {
   const list = ids.filter(Boolean).join(",");
@@ -409,10 +457,19 @@ async function openAfter(db: Db, o: Said, named: JobKey | null): Promise<string>
       if (found && "job" in found) job = keyOf(found.job);
     }
   }
-  await putRow(db, { employee_id: o.emp.id, from_phone: o.from, body: o.body, status: "note", how: "aftersay", photos: [], msg_sid: o.sid || null, ...jobCols(job) });
-  // pictures that got here while this was being written (sent with the word): they're the ones
-  const s = await justSent(db, { empId: o.emp.id, now: o.now });
+  // (note "named": the AFTER said its job's number: photos naming another job aren't its send)
+  await putRow(db, { employee_id: o.emp.id, from_phone: o.from, body: o.body, status: "note", how: "aftersay", photos: [], msg_sid: o.sid || null, ...jobCols(job), ...(named ? { note: "named" } : {}) });
+  // pictures that got here while this was being written (sent with the word):
+  // they're the ones (in a crew's thread, the newest posted there too)
+  let s = await justSent(db, { empId: o.emp.id, now: o.now });
+  if (o.hint) { const t = await justSent(db, { jobId: o.hint.id, now: o.now }); if (t && (!s || t.newest > s.newest)) s = t; }
   if (s && !s.saidBefore && s.newest >= o.now.getTime() - FRESH_MS) {
+    // (on the job the AFTER named, whichever job they landed on)
+    const sendJob = s.held ? "" : s.pieces[0].pact_job_id || s.pieces[0].release_id || "";
+    if (named && sendJob !== named.id) {
+      const r = await placeOn(db, { ...o, sid: "" }, s.pieces, named, { force: "after" });
+      if (r) { await closeWindows(db, o.emp.id, o.now); return r; }
+    }
     if (s.held) {
       await markHeldAfter(db, s);
       await closeWindows(db, o.emp.id, o.now);
@@ -430,7 +487,8 @@ async function openAfter(db: Db, o: Said, named: JobKey | null): Promise<string>
 // that job that got here while the answer was written (sent with the DONE,
 // still downloading when it looked) are the ones, as with AFTER
 async function sentWithDone(db: Db, o: Said, jobId: string): Promise<string | null> {
-  const s = await justSent(db, { empId: o.emp.id, now: o.now });
+  let s = await justSent(db, { empId: o.emp.id, now: o.now });
+  if (o.hint) { const t = await justSent(db, { jobId: o.hint.id, now: o.now }); if (t && (!s || t.newest > s.newest)) s = t; }
   if (!s || s.saidBefore || s.newest < o.now.getTime() - FRESH_MS) return null;
   const lang = o.emp.lang;
   if (s.held) {
@@ -471,24 +529,39 @@ async function afterOrDone(db: Db, o: Said, w: { after: boolean; done: DoneSaid 
   if (s && !s.saidBefore) {
     const sendJob = s.held ? "" : s.pieces[0].pact_job_id || s.pieces[0].release_id || "";
     if (s.held) {
-      // (with the job's number: on it now)
-      if (named) { const r = await placeOn(db, o, s.pieces, named, { force: "after", all: w.done === "all" }); if (r) return r; }
+      // (with the job's number: on it now; the row says so, so the next send isn't these)
+      if (named) { const r = await placeOn(db, o, s.pieces, named, { force: "after", all: w.done === "all" }); if (r) { await remember(db, o, "afterflip", named); return r; } }
       await markHeldAfter(db, s, w.done === "all" ? "afterall" : "after");
       await remember(db, o, "afterflip");
       const opts = (await todaysJobs(db, o.emp, o.today)).slice(0, 3).map((k) => optionOf(k, lang));
       return heldAfterText(countOf(namesIn(s.pieces)), opts.length > 1 ? opts : [], lang);
     } else if (named && named.id !== sendJob) {
       // AFTER with another job's number: the send goes there, in AFTER (a DONE about another job is doneIn's)
-      if (w.after) { const r = await placeOn(db, o, s.pieces, named, { force: "after" }); if (r) return r; }
+      if (w.after) { const r = await placeOn(db, o, s.pieces, named, { force: "after" }); if (r) { await remember(db, o, "afterflip", named); return r; } }
     } else if (!s.before.length) {
       // in AFTER already: nothing to move (a DONE still marks the job, or ends it: doneIn)
       const t = w.after ? await targetOf(db, s.pieces[0]) : null;
       if (t) { await remember(db, o, "afterflip", t); return alreadyAfterText(countOf(namesIn(s.pieces)), jobName(t, lang), lang); }
     } else {
+      // the morning's question about another job, asked today and still open:
+      // a DONE right after the next job's arrival photos answers it
+      if (!w.after && w.done === "done") {
+        const q = await openQuestion(db, o.emp.id, o.now);
+        const t = q && q.open && q.jobId !== sendJob && nyDay(new Date(q.at)) === o.today ? await targetOf(db, s.pieces[0]) : null;
+        if (q && t && (await arrivalOnly(db, t, t.kind === "pact" ? await threadJob(db, t.id) : null, s.oldest, o.today))) {
+          const qj = await threadJob(db, q.jobId);
+          if (qj && !qj.canceled) { const d = await doneIn(db, o, w.done, qj, { day: q.day }); if (d !== null) return d; }
+        }
+      }
+      // (ALL DONE said twice about the job the day's guess picked: it's meant)
+      const prev = w.done === "all" ? (await db.get<{ how?: string | null; body?: string | null; pact_job_id?: string | null; status?: string | null }>(`texted_photos?employee_id=eq.${o.emp.id}&msg_sid=not.is.null&created_at=gte.${enc(new Date(o.now.getTime() - FLIP_MS).toISOString())}&order=created_at.desc&limit=8&select=how,body,pact_job_id,status`)).rows.find((r) => r.status !== "held" && r.status !== "filed") : undefined;
+      const twice = !!prev && prev.how === "afterflip" && !!prev.pact_job_id && prev.pact_job_id === sendJob && doneSaid(prev.body || "") === "all";
       const f = await flipToAfter(db, o, s, w.done === "all" ? "all" : w.after ? "after" : "done");
       if (f?.already) return "";
-      if (f && w.done === "all" && f.thread && !f.asked && !f.guessed) {
+      if (f && w.done === "all" && f.thread && !f.asked && (!f.guessed || twice)) {
         const d = await doneIn(db, { ...o, sid: "" }, "all", f.thread);
+        // (the guess's "is the whole job finished?" was answered: the count, then the end)
+        if (d && f.guessed) return `${gotPhotosText(f.c, "after", jobName(f.t, lang), lang)} ${d}`;
         return d ? `${f.text} ${d}` : f.text;
       }
       if (f) return f.text;
@@ -502,11 +575,16 @@ async function afterOrDone(db: Db, o: Said, w: { after: boolean; done: DoneSaid 
 const itemsOf = (j: ThreadJob): SfLine[] => workLines(Array.isArray(j.items) ? j.items : []);
 // the job a measurement is for: the PO said in the text, else the one job
 // today; the square feet themselves ("120", "10x12") must not read as a job number
-const jobRefsOnly = (body: string): string => [
-  ...(body || "").matchAll(/\b(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:\-]?\s*\d{1,12}\b/gi),
-  ...(body || "").matchAll(/(?:^|[^\w#])#\s*(\d{1,12})\b/g),
-  ...(body || "").matchAll(/\b\d{5,12}\b/g),
-].map((m) => (m[1] ? `#${m[1]}` : m[0])).join(" ");
+// ("#12" is a job's only alone or with one word, "AFTER #12", "#12 done": "bedroom #2" is a room)
+const jobRefsOnly = (body: string): string => {
+  const b = body || "";
+  const short = b.replace(/#\s*\d{1,12}\b/g, " ").trim().split(/\s+/).filter(Boolean).length <= 1;
+  return [
+    ...b.matchAll(/\b(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:\-]?\s*\d{1,12}\b/gi),
+    ...[...b.matchAll(/(?:^|[^\w#])#\s*(\d{1,12})\b/g)].filter((m) => m[1].length >= 5 || short),
+    ...b.matchAll(/\b\d{5,12}\b/g),
+  ].map((m) => (m[1] ? `#${m[1]}` : m[0])).join(" ");
+};
 // "plaster 120 sf": onto the job's lines, so the proposal and the invoice
 // carry it; a note on the job and a line for the office. The reply, or
 // nothing when the text wasn't a measurement. A bare number ("4521", "12")
@@ -585,38 +663,57 @@ async function measureOnJob(db: Db, job: ThreadJob, hits: Parameters<typeof appl
 type Found = { job: ThreadJob; asked: boolean; askedDay: string; answered?: boolean } | { options: JobKey[] } | { unknown: string } | { rel: JobKey } | null;
 // the portal's own prompts about a job, written as the worker's rows: not "something from them after the question"
 const PROMPTED = new Set(["nodone", "answered"]);
-async function jobToAnswer(db: Db, o: { emp: Emp; body: string; today: string; now: Date; verb: "done" | "notdone"; hint?: Hint }): Promise<Found> {
+async function jobToAnswer(db: Db, o: { emp: Emp; body: string; today: string; now: Date; verb: "done" | "notdone"; hint?: Hint; all?: boolean }): Promise<Found> {
   const { rows, mine } = await jobsOf(db, o.emp, o.today);
   const refs = jobRefsOnly(o.body);
+  const relOf = (id: string) => mine.find((k) => k.kind === "rel" && k.id === id);
   if (refs) {
     const pick = pickJob(refs, rows, mine, o.today, await anyPoOf(db, refs, mine));
     if (pick.kind === "pact" && pick.why === "number") { const j = await threadJob(db, pick.id); if (j) return { job: j, asked: false, askedDay: "" }; }
+    // (a release's number: DONE puts its next photos in AFTER; NOT DONE about it is the office's)
+    if (pick.kind === "rel" && pick.why === "number") { const k = relOf(pick.id); if (k) return { rel: k }; }
     if (pick.kind === "ask" && pick.why === "unknown") return { unknown: pick.number || "" };
   }
   const todayIds = [...new Set(rows.filter((r) => r.day === o.today && r.pact_job_id).map((r) => r.pact_job_id as string))];
+  const relsToday = [...new Set(rows.filter((r) => r.day === o.today && r.release_id).map((r) => r.release_id as string))];
   if (o.hint?.kind === "pact" && todayIds.includes(o.hint.id)) {
     const j = await threadJob(db, o.hint.id);
     if (j && !j.canceled) return { job: j, asked: false, askedDay: "" };
   }
+  if (o.hint?.kind === "rel" && relsToday.includes(o.hint.id)) { const k = relOf(o.hint.id); if (k) return { rel: k }; }
   const since = enc(new Date(o.now.getTime() - 3 * 86_400_000).toISOString());
   // what came from them lately (their own texts and pictures), newest first
-  const own = (await db.get<{ how?: string | null; status?: string | null; pact_job_id?: string | null; release_id?: string | null; created_at?: string | null }>(`texted_photos?employee_id=eq.${o.emp.id}&msg_sid=not.is.null&created_at=gte.${since}&select=how,status,pact_job_id,release_id,created_at&order=created_at.desc&limit=30`)).rows;
+  const own = (await db.get<{ how?: string | null; status?: string | null; pact_job_id?: string | null; release_id?: string | null; created_at?: string | null; photos?: Photo[] | null }>(`texted_photos?employee_id=eq.${o.emp.id}&msg_sid=not.is.null&created_at=gte.${since}&select=how,status,pact_job_id,release_id,created_at,photos&order=created_at.desc&limit=30`)).rows;
   const at = (r: { created_at?: string | null }) => Date.parse(r.created_at || "") || 0;
   const q = await openQuestion(db, o.emp.id, o.now, true);
+  const withQ = (j: ThreadJob): Found => ({ job: j, asked: !!q && q.jobId === j.id && q.open, askedDay: q && q.jobId === j.id ? q.day : "", answered: !!q && q.jobId === j.id && !q.open });
   // the portal just asked about a job ("If X isn't finished, reply NOT DONE"): that one
   const prompt = own[0] && PROMPTED.has(own[0].how || "") && own[0].pact_job_id && o.now.getTime() - at(own[0]) < 30 * 60_000 ? own[0].pact_job_id : "";
   if (prompt) {
     const j = await threadJob(db, prompt);
-    if (j && !j.canceled) return { job: j, asked: !!q && q.jobId === j.id && q.open, askedDay: q && q.jobId === j.id ? q.day : "", answered: !!q && q.jobId === j.id && !q.open };
+    if (j && !j.canceled) return withQ(j);
   }
-  // the job of the pictures they just sent (a quarter hour; not a door's): that one
-  const sent = own.find((r) => r.status === "filed" && r.pact_job_id && r.how !== "noaccess" && o.now.getTime() - at(r) < FLIP_MS);
+  // the job of the pictures they just sent (a quarter hour; not a door's): that one, a release's too
+  const sent = own.find((r) => r.status === "filed" && (r.pact_job_id || r.release_id) && r.how !== "noaccess" && o.now.getTime() - at(r) < FLIP_MS);
+  if (sent?.release_id && !sent.pact_job_id) { const k = relOf(sent.release_id); if (k) return { rel: k }; }
   if (sent?.pact_job_id) {
     const j = await threadJob(db, sent.pact_job_id);
-    if (j && !j.canceled) return { job: j, asked: !!q && q.jobId === j.id && q.open, askedDay: q && q.jobId === j.id ? q.day : "", answered: !!q && q.jobId === j.id && !q.open };
+    if (j && !j.canceled) return withQ(j);
+  }
+  // the portal's own last word to them, about one of today's jobs ("in AFTER
+  // now … Reply ALL DONE", "If they're the finished work, reply AFTER"), the
+  // last two hours: the job it was about, while it is still open
+  const last = own[0];
+  if (last && SAID_ABOUT.has(last.how || "") && o.now.getTime() - at(last) < 2 * 3_600_000) {
+    if (last.pact_job_id && todayIds.includes(last.pact_job_id)) {
+      const j = await threadJob(db, last.pact_job_id);
+      if (j && !j.canceled && !j.work_done) return withQ(j);
+    } else if (last.release_id && relsToday.includes(last.release_id)) { const k = relOf(last.release_id); if (k) return { rel: k }; }
   }
   if (q) {
-    const after = own.filter((r) => at(r) > q.at && !PROMPTED.has(r.how || ""));
+    // (another job's BEFORE pictures since, the arrival at the next job, aren't an answer to it)
+    const arrival = (r: (typeof own)[number]) => r.status === "filed" && (r.pact_job_id || r.release_id || "") !== q.jobId && namesIn([r]).every((x) => kindOfName(x) !== "after");
+    const after = own.filter((r) => at(r) > q.at && !PROMPTED.has(r.how || "") && !arrival(r));
     // pictures today on another job: they've moved on, and words about "done" are about that one
     const elsewhere = own.some((r) => r.status === "filed" && (r.pact_job_id || r.release_id) && (r.pact_job_id || "") !== q.jobId && nyDay(new Date(at(r))) === o.today);
     if (!after.length && (o.now.getTime() - q.at < 2 * 3_600_000 || !elsewhere)) {
@@ -625,32 +722,46 @@ async function jobToAnswer(db: Db, o: { emp: Emp; body: string; today: string; n
     }
   }
   const pactIds = mine.filter((k) => k.kind === "pact").map((k) => k.id);
+  const todays = (await Promise.all(todayIds.slice(0, 6).map((id) => threadJob(db, id)))).filter((j): j is ThreadJob => !!j && !j.canceled);
+  // (today's job not begun: no pictures of theirs today)
+  const startedToday = own.some((r) => r.status === "filed" && nyDay(new Date(at(r))) === o.today);
+  // the last day before today they sent pictures, and its job
+  const lastFiled = own.find((r) => r.status === "filed" && r.how !== "noaccess" && r.pact_job_id && nyDay(new Date(at(r))) < o.today);
+  const lastWorked = lastFiled ? nyDay(new Date(at(lastFiled))) : "";
   if (o.verb === "notdone") {
     const who = pactIds.length ? `or=(employee_id.eq.${o.emp.id},pact_job_id.in.(${pactIds.join(",")}))` : `employee_id=eq.${o.emp.id}`;
     const d = (await db.get<{ pact_job_id?: string | null; created_at?: string | null }>(`texted_photos?how=eq.done&status=in.(done,seen)&${who}&created_at=gte.${since}&select=pact_job_id,created_at&order=created_at.desc&limit=1`)).rows[0];
     // pictures of another job since that mark: they've moved on
     const movedOn = !!d && own.some((r) => r.status === "filed" && at(r) > at(d) && (r.pact_job_id || r.release_id) && r.pact_job_id !== d.pact_job_id);
     // (today's job not started yet: a NOT DONE first thing is about the last
-    // work day's: Saturday's on a Monday)
-    const startedToday = own.some((r) => r.status === "filed" && nyDay(new Date(at(r))) === o.today);
-    const fresh = !!d?.created_at && !movedOn && (o.now.getTime() - at(d) < 2 * 3_600_000 || !todayIds.length || (!startedToday && nyDay(new Date(at(d))) >= addWorkDays(o.today, -1)));
+    // day they worked: Saturday's on a Monday, or Friday's when nobody worked Saturday)
+    const fresh = !!d?.created_at && !movedOn && (o.now.getTime() - at(d) < 2 * 3_600_000 || !todayIds.length || (!startedToday && nyDay(new Date(at(d))) >= (lastWorked || addWorkDays(o.today, -1))));
     if (d?.pact_job_id && fresh) { const j = await threadJob(db, d.pact_job_id); if (j && j.work_done && !j.canceled) return { job: j, asked: false, askedDay: "" }; }
+    // today's job not begun, and the last day they worked was on another job: they're asked which
+    if (!startedToday && lastFiled?.pact_job_id && todays.length && !todayIds.includes(lastFiled.pact_job_id)) {
+      const lj = await threadJob(db, lastFiled.pact_job_id);
+      if (lj && !lj.canceled && !billed(lj)) return { options: [keyOf(lj), ...todays.map(keyOf)] };
+    }
   }
-  const todays = (await Promise.all(todayIds.slice(0, 6).map((id) => threadJob(db, id)))).filter((j): j is ThreadJob => !!j && !j.canceled);
   const open = todays.filter((j) => !j.work_done);
   const cands = open.length ? open : todays;
+  // a release today too: its pictures the newest today make it the release's;
+  // otherwise NOT DONE is asked which (never a PACT job picked by a guess)
+  const rels = relsToday.map(relOf).filter((k): k is JobKey => !!k);
+  if (rels.length && cands.length) {
+    const newest = own.find((r) => r.status === "filed" && r.how !== "noaccess" && (r.pact_job_id || r.release_id) && nyDay(new Date(at(r))) === o.today);
+    if (newest?.release_id && !newest.pact_job_id) { const k = relOf(newest.release_id); if (k) return { rel: k }; }
+    if (o.verb === "notdone" || !newest?.pact_job_id) return { options: [...cands.map(keyOf), ...rels] };
+  }
   if (cands.length === 1) return { job: cands[0], asked: false, askedDay: "" };
   if (cands.length > 1) {
-    const working = cands.filter((j) => { const p = dayPile(j, o.today); return p.beforeN > 0 && p.afterN === 0; });
+    // (ALL DONE ends a job: with two open today it's never a guess)
+    const working = o.all ? [] : cands.filter((j) => { const p = dayPile(j, o.today); return p.beforeN > 0 && p.afterN === 0; });
     if (working.length === 1) return { job: working[0], asked: false, askedDay: "" };
     return { options: cands.map(keyOf) };
   }
   // a release today and no PACT job: the DONE is the release's, never an older PACT job's
-  const relsToday = [...new Set(rows.filter((r) => r.day === o.today && r.release_id).map((r) => r.release_id as string))];
-  if (relsToday.length) {
-    const rel = relsToday.length === 1 && o.verb === "done" ? mine.find((k) => k.kind === "rel" && k.id === relsToday[0]) : undefined;
-    return rel ? { rel } : null;
-  }
+  if (relsToday.length) return relsToday.length === 1 && rels[0] ? { rel: rels[0] } : null;
   if (q && q.open) { const j = await threadJob(db, q.jobId); if (j && !j.canceled) return { job: j, asked: true, askedDay: q.day }; }
   const f = own.find((r) => r.status === "filed" && r.pact_job_id);
   if (f?.pact_job_id) { const j = await threadJob(db, f.pact_job_id); if (j && !j.canceled) return { job: j, asked: false, askedDay: "" }; }
@@ -668,7 +779,12 @@ const remember = (db: Db, o: Said, how: string, job?: string | { kind: "pact" | 
 async function notDoneIn(db: Db, o: Said, known?: ThreadJob): Promise<string> {
   const lang = o.emp.lang;
   const found: Found = known ? { job: known, asked: false, askedDay: "" } : await jobToAnswer(db, { ...o, verb: "notdone" });
-  if (!found || "unknown" in found || "rel" in found) {
+  // (a release runs on by the office: its words go to them)
+  if (found && "rel" in found) {
+    await remember(db, o, "notdone", found.rel, `${firstName(o.emp)} texted NOT DONE about ${found.rel.label}`, "reply");
+    return toldOfficeText(lang);
+  }
+  if (!found || "unknown" in found) {
     await remember(db, o, "notdone", undefined, "Texted NOT DONE, the portal couldn't tell which job", "reply");
     return whichJobText("notdone", [], lang);
   }
@@ -706,13 +822,15 @@ async function notDoneIn(db: Db, o: Said, known?: ThreadJob): Promise<string> {
 // so a DONE nobody asked for, with no AFTER photos for the day, asks for them;
 // the answer to the morning's "Finished?" marks it done. On a day before the
 // job's last, DONE is the day's; ALL DONE finishes the job early.
-// `known`: the job it's about is already known (ALL DONE right after its photos), read again here
-async function doneIn(db: Db, o: Said, said: DoneSaid | "yes", known?: ThreadJob): Promise<string | null> {
+// `known`: the job it's about is already known (ALL DONE right after its
+// photos, which finish it), read again here; `asked`: the morning asked about it
+async function doneIn(db: Db, o: Said, said: DoneSaid | "yes", known?: ThreadJob, asked?: { day: string }): Promise<string | null> {
   const lang = o.emp.lang;
   const again = known ? await threadJob(db, known.id) : null;
-  const found: Found = known ? { job: again || known, asked: false, askedDay: "" } : await jobToAnswer(db, { ...o, verb: "done" });
+  const found: Found = known ? { job: again || known, asked: !!asked, askedDay: asked?.day || "" } : await jobToAnswer(db, { ...o, verb: "done", all: said === "all" });
   if (!found || "unknown" in found) return null; // no job to say it about: it's words for the office
-  if ("options" in found) { await remember(db, o, "donetext"); return whichJobText("done", found.options, lang); }
+  // (the row says it was ALL DONE: the number that answers it finishes the job)
+  if ("options" in found) { await remember(db, o, "donetext", undefined, said === "all" ? "all" : ""); return whichJobText(said === "all" ? "all" : "done", found.options, lang); }
   if ("rel" in found) {
     // a release isn't marked work done by text: its next photos go in AFTER (or the ones sent with this)
     await remember(db, o, "afterwait", found.rel);
@@ -721,9 +839,9 @@ async function doneIn(db: Db, o: Said, said: DoneSaid | "yes", known?: ThreadJob
   const job = found.job;
   const key = keyOf(job);
   const name = jobName(key, lang);
-  // a door nobody opened today ("no" with its picture, then "done"): done
-  // there, not a finished job. Its words go to the office
-  if (!known && !jobRefsOnly(o.body) && (await flaggedToday(db, [job.id], o.now, o.today)).size) return null;
+  // a door nobody opened a moment ago ("no" with its picture, then "done"):
+  // done there, not a finished job. Its words go to the office
+  if (!known && !jobRefsOnly(o.body) && (await flaggedToday(db, [job.id], o.now, o.today)).size && (await doorJustNow(db, o.emp.id, job.id, o.now))) return null;
   if (job.work_done) { await closeQuestion(db, job.id); await remember(db, o, "donetext", job.id); return alreadyDoneText(name, lang); }
   const L = onLastDay(job, o.today);
   const hasAfter = dayPile(job, o.today).afterN > 0;
@@ -734,6 +852,9 @@ async function doneIn(db: Db, o: Said, said: DoneSaid | "yes", known?: ThreadJob
   }
   if (!found.asked && !hasAfter && said !== "all" && said !== "yes") { await remember(db, o, "afterwait", job.id); return (await sentWithDone(db, o, job.id)) ?? sendAfterText(name, lang); }
   const who = firstName(o.emp);
+  // marked without its after photos: the next photos they send go in AFTER
+  // (the window opens first, so photos landing while it's marked see it)
+  if (!hasAfter) await remember(db, o, "afterwait", job.id, "marked");
   const dropped = L.before ? await endEarly(db, job, {
     emp: o.emp, emps: o.emps, now: o.now, today: o.today, tell: !o.hint,
     words: (e, d) => crewEndedText(firstName(e), jobName(key, e.lang), d, e.lang),
@@ -742,12 +863,52 @@ async function doneIn(db: Db, o: Said, said: DoneSaid | "yes", known?: ThreadJob
   // Sunday ALL DONE is its last work day before it)
   const worked = workDaysOf(job.start_date, job.work_days).filter((d) => d <= o.today);
   const finish = found.asked && found.askedDay && found.askedDay <= o.today ? found.askedDay : worked.length && !worked.includes(o.today) ? worked[worked.length - 1] : o.today;
-  const marked = await markDone(db, job, o.emp, { from: o.from, now: o.now, finish, sid: o.sid, how: "text" });
+  // (photos that reached it finish it: the mark comes off if they move to another job)
+  const marked = await markDone(db, job, o.emp, { from: o.from, now: o.now, finish, sid: o.sid, how: known && !asked ? "photos" : "text" });
   await closeQuestion(db, job.id);
-  if (!marked) { await remember(db, o, "donetext", job.id, `${who} texted DONE · the work-done mark couldn't be saved`, "reply"); return toldOfficeText(lang); }
-  // marked without its after photos: the next photos they send go in AFTER
-  if (!hasAfter) await remember(db, o, "afterwait", job.id);
+  if (!marked) {
+    // (the window opened for it closes: nothing was marked)
+    if (!hasAfter) await db.patch(`texted_photos?employee_id=eq.${o.emp.id}&how=eq.afterwait&status=eq.note&note=eq.marked&pact_job_id=eq.${job.id}`, { status: "seen" });
+    await remember(db, o, "donetext", job.id, `${who} texted DONE · the work-done mark couldn't be saved`, "reply");
+    return toldOfficeText(lang);
+  }
+  // the photos sent with it, still on their way when it looked: in AFTER now
+  const came = hasAfter ? null : await flipFresh(db, o, job);
+  if (came) return `${gotPhotosText(came, "after", name, lang)} ${dropped.length ? endedEarlyText(name, dropped, lang) : doneMarkedText(name, false, lang)}`;
   return dropped.length ? endedEarlyText(name, dropped, lang, !hasAfter) : doneMarkedText(name, !hasAfter, lang);
+}
+
+// the send's BEFORE pieces into AFTER on its job. `already`: another request
+// had just put them there (its answer says so)
+async function intoAfter(db: Db, s: Sent, t: Target): Promise<{ moved: number; already: boolean }> {
+  let moved = 0, already = s.before.length > 0;
+  for (const b of [...s.before].reverse()) {
+    const st: FileOut = {};
+    moved += await fileBatch(db, b, t, b.how || "day", "after", st);
+    already = already && !!st.already;
+  }
+  return { moved, already };
+}
+// the send just made on this job (the last minute and a half, nothing said
+// BEFORE with it), into AFTER: the photos sent with a DONE that marked it
+async function flipFresh(db: Db, o: Said, job: ThreadJob): Promise<MediaCount | null> {
+  const s = await justSent(db, o.hint?.id === job.id ? { jobId: job.id, now: o.now } : { empId: o.emp.id, now: o.now });
+  if (!s || s.held || s.saidBefore || s.newest < o.now.getTime() - FRESH_MS || !s.before.length || s.pieces[0].pact_job_id !== job.id) return null;
+  const t = await targetOf(db, s.pieces[0]);
+  if (!t) return null;
+  const r = await intoAfter(db, s, t);
+  if (!r.moved) return null;
+  await closeWindows(db, o.emp.id, o.now);
+  // (the photos' own answer said it already)
+  return r.already ? null : countOf(namesIn(s.pieces));
+}
+// their "no" for this job's door a moment ago (half an hour), with nothing
+// from them since but the door's pictures
+async function doorJustNow(db: Db, empId: string, jobId: string, now: Date): Promise<boolean> {
+  const rows = (await db.get<{ how?: string | null; pact_job_id?: string | null; release_id?: string | null }>(`texted_photos?employee_id=eq.${empId}&msg_sid=not.is.null&created_at=gte.${enc(new Date(now.getTime() - 30 * 60_000).toISOString())}&order=created_at.desc&select=how,pact_job_id,release_id&limit=10`)).rows;
+  const r = rows.find((x) => x.how !== "noaccess");
+  const on = r ? r.pact_job_id || r.release_id || "" : "";
+  return !!r && r.how === "nobody" && (!on || on === jobId);
 }
 
 // ---- a job's number for pictures: ones waiting for it, or a send on the wrong job ----
@@ -758,9 +919,10 @@ async function doneIn(db: Db, o: Said, said: DoneSaid | "yes", known?: ThreadJob
 // with any of them or right after, else BEFORE; and a piece of the same send
 // already on this job, with nothing said, goes with an AFTER said on a later
 // piece. `force`: AFTER said with the number; `all`: ALL DONE with it (or
-// said about the ones waiting). The answer is the thread's next step; null
+// said about the ones waiting); `noMark`: placed only (a NOT DONE answered
+// by the number comes after). The answer is the thread's next step; null
 // when nothing could move.
-async function placeOn(db: Db, o: Said, group: Batch[], pick: Target, opt: { force?: "after"; all?: boolean } = {}): Promise<string | null> {
+async function placeOn(db: Db, o: Said, group: Batch[], pick: Target, opt: { force?: "after"; all?: boolean; noMark?: boolean } = {}): Promise<string | null> {
   const lang = o.emp.lang;
   const name = jobName(pick, lang);
   const onIt = (b: Batch) => b.status === "filed" && (pick.kind === "pact" ? b.pact_job_id === pick.id : b.release_id === pick.id);
@@ -771,9 +933,9 @@ async function placeOn(db: Db, o: Said, group: Batch[], pick: Target, opt: { for
   // AFTER (or DONE, ALL DONE) said with the waiting ones, or right after them
   const heldAfter = group.some((b) => b.status === "held" && (saidAfterHeld(b) || said(b) === "after"));
   const heldAll = group.some((b) => b.status === "held" && b.how === "afterall");
-  // the pieces of a send an AFTER on a waiting piece was said about, already on this job with nothing said
+  // the pieces of a send an AFTER on a waiting piece was said about, on a job with nothing said (this one or the guess's)
   const afterAt = group.filter((b) => b.status === "held" && (saidAfterHeld(b) || said(b) === "after")).map(msOf);
-  const sameSend = (b: Batch) => onIt(b) && !said(b) && beforeNames(b) && afterAt.some((t) => Math.abs(t - msOf(b)) <= SPLIT_MS);
+  const sameSend = (b: Batch) => b.status === "filed" && !said(b) && beforeNames(b) && afterAt.some((t) => Math.abs(t - msOf(b)) <= SPLIT_MS);
   const kindOf = (b: Batch): PhotoKind | undefined => {
     if (force) return force;
     if (b.status === "held") return saidAfterHeld(b) ? "after" : said(b) || (heldAfter ? "after" : "before");
@@ -787,12 +949,23 @@ async function placeOn(db: Db, o: Said, group: Batch[], pick: Target, opt: { for
     const c = countOf(namesIn(group.filter(onIt)));
     return c.n ? replyText({ k: "moved", n: c.n, v: c.v, label: name }, lang) : null;
   }
-  // the jobs the moved pictures leave: one marked done by them isn't, without them
-  const leaving = [...new Set(toMove.filter((b) => b.status === "filed" && b.pact_job_id && b.pact_job_id !== pick.id).map((b) => b.pact_job_id as string))];
+  // the jobs the moved pictures leave (as they were when they moved): one marked done by them isn't, without them
+  const leaving = new Map<string, boolean>();
   let n = 0;
-  for (const b of [...toMove].reverse()) n += await fileBatch(db, b, pick, "number", kindOf(b));
+  for (const b0 of [...toMove].reverse()) {
+    let b = b0;
+    let st: FileOut = {};
+    let got = await fileBatch(db, b, pick, "number", kindOf(b), st);
+    // (moved a moment ago, by the office or another text of theirs: the number they sent still puts it here)
+    if (st.changed) {
+      const fresh = (await db.get<Batch>(`texted_photos?id=eq.${b0.id}&select=*`)).rows[0];
+      if (fresh && (fresh.status === "held" || fresh.status === "filed") && !(onIt(fresh) && !(force === "after" && beforeNames(fresh)))) { b = fresh; st = {}; got = await fileBatch(db, b, pick, "number", kindOf(b), st); }
+    }
+    if (got && st.from?.kind === "pact" && st.from.id !== pick.id) leaving.set(st.from.id, (leaving.get(st.from.id) || false) || wasAfter(b));
+    n += got;
+  }
   if (!n) return null;
-  for (const id of leaving) await clearDoneIfNoAfter(db, id, jobName(pick, "en"), o.now, o.today, toMove.some((b) => b.pact_job_id === id && wasAfter(b)));
+  for (const [id, after] of leaving) await clearDoneIfNoAfter(db, id, jobName(pick, "en"), o.now, o.today, after);
   // what is on the job now, of these, by pile
   const back = (await db.get<Batch>(`texted_photos?id=in.(${group.map((b) => b.id).join(",")})&select=id,status,photos,pact_job_id,release_id`)).rows.filter(onIt);
   const names = namesIn(back);
@@ -807,6 +980,7 @@ async function placeOn(db: Db, o: Said, group: Batch[], pick: Target, opt: { for
   if (!ca.n) return gotBeforeText(cb, name, lang);
   const lead = cb.n ? `${gotPhotosText(cb, "before", name, lang)} ` : "";
   await closeQuestion(db, thread.id);
+  if (opt.noMark) return `${lead}${gotPhotosText(ca, "after", name, lang)}`;
   // the words the pictures came with still count: "not done yet" runs it on, "kitchen done, starting the bath" asks
   const caption = toMove.map((b) => b.body || "").join(" ");
   if (notDoneStrong(caption)) return `${lead}${gotPhotosText(ca, "after", name, lang)} ${await notDoneIn(db, { ...o, sid: "" }, thread)}`;
@@ -814,11 +988,15 @@ async function placeOn(db: Db, o: Said, group: Batch[], pick: Target, opt: { for
   const sent = Math.min(...toMove.map(msOf).filter(Boolean)) || o.now.getTime();
   const day = nyDay(new Date(sent)) < o.today ? nyDay(new Date(sent)) : o.today;
   const L = onLastDay(thread, day);
+  // (ALL DONE about them: finished the day they were texted)
   if (opt.all || heldAll || (L.before && allDoneSaid(caption))) {
-    const d = await doneIn(db, { ...o, sid: "" }, "all", thread);
+    const d = await doneIn(db, { ...o, sid: "", today: day }, "all", thread);
     if (d) return `${lead}${gotPhotosText(ca, "after", name, lang)} ${d}`;
   }
-  if (L.before) return `${lead}${gotAfterDayText(ca, name, { day: L.day, of: L.of, next: L.next, today: o.today }, lang)}`;
+  // (yesterday's after photos, placed today: it goes on today, or after today
+  // once today's after photos are in)
+  const next = day < o.today && dayPile(thread, o.today).afterN > 0 ? onLastDay(thread, o.today).next : L.next;
+  if (L.before && next) return `${lead}${gotAfterDayText(ca, name, { day: L.day, of: L.of, next, today: o.today }, lang)}`;
   if (mixedCaption(caption)) return `${lead}${gotPhotosText(ca, "after", name, lang)} ${finishedAskText(lang)}`;
   const marked = await markDone(db, thread, o.emp, { from: o.from, now: o.now, finish: currentWorkDay(thread.start_date, thread.work_days, day) });
   return `${lead}${gotAfterText(ca, name, lang, marked)}`;
@@ -856,11 +1034,20 @@ async function heldDoors(db: Db, empId: string, now: Date): Promise<Batch[]> {
   const top = rows.length ? msOf(rows[0]) : 0;
   return rows.filter((b) => top - msOf(b) <= 30 * 60_000);
 }
-// a caption only about the door: "door", "puerta cerrada", "closed", "front door locked"
-const DOOR_ONLY = /^(?:(?:the|la|el|front|main|entry|entrance|apartment|apt|unit|their|su)\s+)*(?:door|puerta)(?:\s+(?:is|was|esta|estaba))?(?:\s+(?:closed|locked|shut|cerrada|cerrado|con llave))?$|^(?:closed|locked|cerrad[ao])(?:\s+(?:door|puerta))?$/;
-const doorOnly = (body: string) => DOOR_ONLY.test((body || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim());
+// a caption only about the door: "door", "puerta cerrada", "closed", "front
+// door locked", "door's locked", "pic of the door", "video de la puerta",
+// "puerta 4B", "cerrado con llave", "door again, nobody": a door word (or
+// closed, locked) and nothing about the work ("door frame done", "new door")
+const DOOR_WORDS = new Set(["door", "doors", "puerta", "puertas", "closed", "locked", "shut", "cerrada", "cerrado", "cerradas", "cerrados"]);
+const DOOR_FILL = new Set(["the", "la", "el", "las", "los", "a", "an", "front", "main", "principal", "entry", "entrance", "apartment", "apt", "unit", "their", "su", "his", "her", "its", "my", "of", "de", "del", "is", "was", "are", "esta", "estaba", "estan", "still", "again", "otra", "vez", "todavia", "aun", "here", "heres", "this", "aqui", "es", "nobody", "nadie", "no", "answer", "hay", "en", "casa", "home", "at", "with", "con", "llave", "and", "y", "pic", "pics", "picture", "pictures", "photo", "photos", "foto", "fotos", "video", "videos", "vid", "imagen", "image", "knocked", "knock", "tocamos", "toque", "contesta", "contestan", "responde"]);
+const doorOnly = (body: string) => {
+  const t = (body || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/['\u2019]/g, "").replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  const words = t ? t.split(" ") : [];
+  // (an apartment or a house number: "4B", "2205")
+  return words.some((w) => DOOR_WORDS.has(w)) && words.every((w) => DOOR_WORDS.has(w) || DOOR_FILL.has(w) || /^\d{1,4}[a-z]{0,2}$|^[a-z]\d{1,4}$/.test(w));
+};
 // a "wrong job" fix said in so many words, not just the number
-const FIX_WORDS = /\b(wrong|equivocad[oa]|right one|correct (?:po|one|job)|should be|el correcto|it'?s|its|it is|es el|era el)\b/i;
+const FIX_WORDS = /\b(wrong|equivocad[oa]|right one|correct (?:po|one|job)|should be|el correcto)\b/i;
 
 // a text in: the answer to send back, or nothing. `seen` is filled in for the
 // caller (who it was from, what it carried) once the text is known to be new.
@@ -897,8 +1084,31 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
     }
     // a voice note or a contact card isn't kept, and they hear so (words sent
     // with one are read as usual, and reach the office with a word about it)
-    if (other > 0 && (!body.trim() || isAck(body))) return say({ k: "notphoto" }, lang);
+    if (other > 0 && (!body.trim() || (isAck(body) && !yesWord(body)))) return say({ k: "notphoto" }, lang);
     const said: Said = { emp, emps: emps.rows, body, from, sid, now, today, hint: inb.jobHint };
+    // (the answer to the words carries the voice note's line, unless it says it already)
+    const told = { notKept: false };
+    const r = await (async (): Promise<string | undefined> => {
+
+    // the portal's "If they're the finished work, reply AFTER" a moment ago
+    // (one to one, or in the crew's thread about its job): a yes, or AFTER,
+    // moves the send it asked about to AFTER, however long ago it came; a no
+    // keeps it in BEFORE, and is never a door nobody opened
+    if (!/\d/.test(body) && (yesWord(body) || noWord(body) || afterSaid(body))) {
+      const ask = await openAsk(db, emp.id, now, inb.jobHint?.id);
+      if (ask) {
+        await db.patch(`texted_photos?id=eq.${ask.id}&status=eq.note`, { status: "seen" });
+        if (noWord(body)) {
+          await remember(db, said, "askno", ask.job);
+          return answer(isEs(lang) ? `Entendido, se quedan en ANTES. ${AFTER_HOW.es}` : `OK, they stay in BEFORE. ${AFTER_HOW.en}`);
+        }
+        const s = await justSent(db, { ...(inb.jobHint ? { jobId: inb.jobHint.id } : { empId: ask.empId }), now: new Date(ask.at), until: ask.at + FRESH_MS });
+        if (s && s.before.length) {
+          const f = await flipToAfter(db, said, s, "after");
+          if (f) { await closeWindows(db, emp.id, now); return answer(f.already ? undefined : f.text); }
+        }
+      }
+    }
 
     // a plain yes / no: the answer to the morning's "Finished?" when that is
     // the last thing between the portal and them; right after the work-done
@@ -909,8 +1119,6 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
       // something said; their own AFTER is, and a yes after it isn't an answer to the morning)
       const last = (await db.get<{ how?: string | null; status?: string | null; pact_job_id?: string | null; created_at?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&or=(how.is.null,how.neq.afterwait)&select=how,status,pact_job_id,created_at&order=created_at.desc&limit=1`)).rows[0];
       const age = last?.created_at ? now.getTime() - Date.parse(last.created_at) : Infinity;
-      // "If they're the finished work, reply AFTER": a yes is that AFTER
-      if (last?.how === "afterask" && yesWord(body) && age < FLIP_MS) { const r = await afterOrDone(db, said, { after: true, done: null }); if (r !== null) return answer(r || undefined); }
       const lastJob = last?.pact_job_id && age < 24 * 3_600_000 && (last.how === "asked" || (last.how === "done" && age < 2 * 3_600_000) || (last.how === "nodone" && age < 30 * 60_000)) ? await threadJob(db, last.pact_job_id) : null;
       if (lastJob && last) {
         const label = jobName(keyOf(lastJob), lang);
@@ -951,31 +1159,31 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
     // "no" (or "nobody home", or "NO 116843" naming the job they went on) a
     // moment after pictures with no words but the door's (the phone sent the
     // picture first, or they sent the door's picture and then reported it, the
-    // way the portal teaches): the pictures were of the door. They come off
-    // the BEFORE pile onto the door's, so the door counts as not got into (and
-    // a co-worker's report it made "got in" is up again). With no number, only
-    // when that job is the door it can be: another job of theirs today with no
-    // pictures (nobody reported) leaves it to "which one?". Pictures still
-    // waiting for their job's number wait as the door's: its number puts them on it
-    if (bareNo(body) || nobodyHome(body)) {
-      const s = await justSent(db, { empId: emp.id, now });
+    // way the portal teaches): the pictures were of the door. Which door is
+    // decided first (lib/nobodyFlow, with those pictures not counted as a job
+    // they've been through), and they go on its Nobody home pile, off the job
+    // the day's guess put them on (a co-worker's report they made "got in" is
+    // up again). Which door it was isn't clear: they wait as the door's, for
+    // its number. Pictures still waiting for their job's number wait as the
+    // door's too (with "NO <one of today's jobs>" as well)
+    let doorPieces: SendRow[] = [];
+    let doorOn: Target | null = null;
+    let doorNamed = false;
+    if (nobodyHome(body)) {
+      let s = await justSent(db, { empId: emp.id, now });
+      // (nothing just sent: the door's picture may still be on its way, sent with the word)
+      const wait = afterWaitMs();
+      if ((!s || s.newest < now.getTime() - FRESH_MS) && wait) { await sleep(wait); s = (await justSent(db, { empId: emp.id, now })) || s; }
       const nums = numbersIn(body);
       const door = !!s && now.getTime() - s.newest <= 5 * 60_000 && s.pieces.every((b) => !(b.body || "").trim() || doorOnly(b.body || "")) && s.before.length === s.pieces.length;
       if (s && door && s.held) {
-        if (!nums.length) for (const b of s.pieces) await db.patch(`texted_photos?id=eq.${b.id}&status=eq.held`, { how: "noaccess" });
+        const todayKeys = (await todaysJobs(db, emp, today)).flatMap((k) => k.keys);
+        if (!nums.length || nums.some((n) => todayKeys.includes(n))) for (const b of s.pieces) await db.patch(`texted_photos?id=eq.${b.id}&status=eq.held`, { how: "noaccess" });
       } else if (s && door) {
-        const t = await targetOf(db, s.pieces[0]);
-        const named = !!t && nums.some((n) => ((t as JobKey).keys || []).includes(n));
-        if (t && (!nums.length || named)) {
-          const col = t.kind === "pact" ? "pact_job_id" : "release_id";
-          const ids = new Set(s.pieces.map((b) => b.id));
-          const others = (await db.get<{ id: string; created_at?: string | null; how?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&status=eq.filed&${col}=eq.${t.id}&created_at=gte.${since(20 * 3_600_000)}&select=id,created_at,how`)).rows
-            .filter((r) => !ids.has(r.id) && r.how !== "noaccess" && r.created_at && nyDay(new Date(r.created_at)) === today);
-          if (!others.length && (named || !(await openDoorToday(db, emp, t.id, now, today)))) {
-            for (const b of [...s.pieces].reverse()) await fileBatch(db, b, t, "noaccess", "noaccess");
-            await doorShutAgain(db, t, emp, today);
-          }
-        }
+        doorPieces = s.pieces;
+        doorOn = await targetOf(db, s.pieces[0]);
+        // (the job they're on is named: its number in the "no", the crew's thread, or the pictures' own number)
+        doorNamed = !!doorOn && (nums.some((n) => ((doorOn as JobKey).keys || []).includes(n)) || inb.jobHint?.id === doorOn.id || s.pieces.every((b) => b.how === "number" || b.how === "burst"));
       }
     }
     // "no" / "nobody home" / "nadie": the job is flagged for a new day and
@@ -983,8 +1191,23 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
     // only when the number is one of today's doors (the house or the apartment)
     const candidate = !nobodyHome(body) && noAt(body);
     if (nobodyHome(body) || candidate) {
-      const flow = await nobodyFlow(db, { emp, emps: emps.rows, body, from, sid, now, say: inb.deliver, candidate, hint: inb.jobHint?.id });
+      const hint = inb.jobHint?.id || (doorNamed && doorOn ? doorOn.id : undefined);
+      const flow = await nobodyFlow(db, { emp, emps: emps.rows, body, from, sid, now, say: inb.deliver, candidate, hint, ignore: doorPieces.map((b) => b.id) });
       if (flow.handled) {
+        if (doorOn && doorPieces.length && (flow.missed || flow.asked)) {
+          // (their own pictures of that job today, besides these: they got in there)
+          const col = doorOn.kind === "pact" ? "pact_job_id" : "release_id";
+          const ids = new Set(doorPieces.map((b) => b.id));
+          const others = (await db.get<{ id: string; created_at?: string | null; how?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&status=eq.filed&${col}=eq.${doorOn.id}&created_at=gte.${since(20 * 3_600_000)}&select=id,created_at,how`)).rows
+            .filter((r) => !ids.has(r.id) && r.how !== "noaccess" && r.created_at && nyDay(new Date(r.created_at)) === today);
+          let n = 0;
+          if (flow.missed && (flow.missed.id !== doorOn.id || !others.length)) {
+            for (const b of [...doorPieces].reverse()) n += await fileBatch(db, b, flow.missed, "noaccess", "noaccess");
+          } else if (flow.asked && !others.length) {
+            for (const b of doorPieces) n += await holdBatch(db, b, "noaccess");
+          }
+          if (n && !others.length) await doorShutAgain(db, doorOn, emp, today);
+        }
         // the pictures of that door waiting for its number go on it
         if (flow.missed) for (const d of await heldDoors(db, emp.id, now)) await fileBatch(db, d, flow.missed, "noaccess", "noaccess");
         return answer(flow.reply);
@@ -1005,9 +1228,11 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
       // (or the question itself, a moment ago, when the office has placed its picture already)
       const asked = doors.length ? undefined : (await db.get<{ note?: string | null; created_at?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&how=eq.nobody&status=eq.note&msg_sid=not.is.null&created_at=gte.${since(30 * 60_000)}&order=created_at.desc&limit=1&select=note,created_at`)).rows.find((r) => /^Asked which job/.test(r.note || ""));
       const from0 = doors.length ? doors[0].created_at || "" : asked?.created_at || "";
-      // (pictures waiting for a number since the door's: the number is theirs)
-      const newer = from0 ? (await db.get<{ id: string; how?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&status=eq.held&created_at=gt.${enc(from0)}&select=id,how&limit=5`)).rows.some((b) => b.how !== "noaccess") : false;
-      if ((doors.length || asked) && !newer) {
+      // (pictures since the door's, waiting or placed: the number is theirs; and
+      // the question answered only while nothing else came from them since)
+      const newer = from0 ? (await db.get<{ id: string; how?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&status=in.(held,filed)&created_at=gt.${enc(from0)}&select=id,how&limit=5`)).rows.some((b) => b.how !== "noaccess") : false;
+      const talked = asked?.created_at ? (await db.get<{ id: string }>(`texted_photos?employee_id=eq.${emp.id}&msg_sid=not.is.null&created_at=gt.${enc(asked.created_at)}&select=id&limit=1`)).rows.length > 0 : false;
+      if ((doors.length || (asked && !talked)) && !newer) {
         const n = refsIn(noPlace(body))[0]?.n || "";
         const flow = await nobodyFlow(db, { emp, emps: emps.rows, body: `NO ${n}`, from, sid, now, say: inb.deliver });
         if (flow.handled) {
@@ -1028,6 +1253,7 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
     // (a voice note or a file with the words: not kept, and they hear so)
     const notKept = other > 0 ? replyText({ k: "notphoto" }, lang) : "";
     const words = async (): Promise<string | undefined> => {
+      told.notKept = other > 0;
       if (isAck(body)) return firstEver ? say({ k: "connected" }, lang) : answer(notKept || undefined);
       await remember(db, said, "words", undefined, notKept ? `Sent with ${other === 1 ? "a voice note or a file" : `${other} voice notes or files`} the portal can't keep` : "", "reply");
       if (firstEver) return say({ k: "connected" }, lang);
@@ -1045,6 +1271,28 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
     // (the job's place copied with its number, as the question listed it, is the number)
     const nbody = noPlace(body);
     if (!refsIn(nbody).length || !justANumber(body)) return words();
+    // the question their DONE or NOT DONE got a moment ago ("Which job is
+    // finished? Reply like: DONE 116843 …"), the last thing from them: the
+    // number answers it. Photos waiting for "which job?" from before it go on
+    // the job too (their own pile; with NOT DONE, nothing is marked)
+    const lastSaid = (await db.get<{ how?: string | null; note?: string | null; pact_job_id?: string | null; release_id?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&msg_sid=not.is.null&created_at=gte.${since(30 * 60_000)}&order=created_at.desc&limit=1&select=how,note,pact_job_id,release_id`)).rows[0];
+    if (lastSaid && (lastSaid.how === "donetext" || lastSaid.how === "notdone") && !lastSaid.pact_job_id && !lastSaid.release_id) {
+      const { rows, mine } = await jobsOf(db, emp, today);
+      const p = pickJob(nbody, rows, mine, today, await anyPoOf(db, nbody, mine));
+      if (p.kind !== "ask" && p.why === "number") {
+        const not = lastSaid.how === "notdone";
+        const all = !not && lastSaid.note === "all";
+        const held = (await db.get<Batch>(`texted_photos?employee_id=eq.${emp.id}&status=eq.held&created_at=gte.${since(2 * 3_600_000)}&order=created_at.desc&limit=20&select=*`)).rows.filter((b) => b.how !== "noaccess");
+        const top = held.length ? msOf(held[0]) : 0;
+        const placed = held.length ? await placeOn(db, { ...said, sid: "" }, held.filter((b) => top - msOf(b) <= BURST_MS), p, { noMark: not, all }) : null;
+        if (!not && placed && p.kind === "pact" && (await threadJob(db, p.id))?.work_done) return answer(placed);
+        const word = not ? "NOT DONE" : all ? "ALL DONE" : "DONE";
+        const said2: Said = { ...said, body: `${word} ${p.label}` };
+        const r2 = not ? await notDoneIn(db, said2) : await doneIn(db, said2, all ? "all" : "done");
+        const both = [placed, r2].filter(Boolean).join(" ");
+        if (both) return answer(both);
+      }
+    }
     const recent = (await db.get<Batch>(`texted_photos?employee_id=eq.${emp.id}&or=(and(status.eq.held,created_at.gte.${since(2 * 86_400_000)}),and(status.eq.filed,created_at.gte.${since(2 * 3_600_000)}))&order=created_at.desc&limit=20&select=*`)).rows
       .filter((b) => b.how !== "noaccess");
     if (!recent.length) return words();
@@ -1052,13 +1300,17 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
     // (the newest piece's own send: pieces a minute and a half apart, the PO on any of them)
     const send = new Set<string>();
     for (let i = 0, at = lastAt; i < recent.length && at - msOf(recent[i]) <= SPLIT_MS; at = msOf(recent[i]), i++) send.add(recent[i].id);
-    let group = recent.filter((b) => msOf(b) >= lastAt - BURST_MS && (send.has(b.id) || b.status === "held" || !refsIn(b.body || "").length));
-    // the newest send went on its job by a number already, and older photos
-    // still wait for one (they were asked "Which job?"): a bare number is
-    // theirs ("wrong job, it's 116843" is the way to move the newest)
-    if (group.every((b) => b.status === "filed" && b.how === "number") && !FIX_WORDS.test(body)) {
-      const waiting = recent.filter((b) => b.status === "held");
-      if (waiting.length) { const top = msOf(waiting[0]); group = waiting.filter((b) => top - msOf(b) <= BURST_MS); }
+    // (pieces an earlier number answer placed stay where it put them: only the newest send moves with them)
+    let group = recent.filter((b) => msOf(b) >= lastAt - BURST_MS && (send.has(b.id) || b.status === "held" || (b.how !== "number" && !refsIn(b.body || "").length)));
+    // the newest send went on its job by its own number already (each of its
+    // pieces), and older photos still wait for one (they were asked "Which
+    // job?"): a bare number is theirs ("wrong job, it's 116843" is the way to
+    // move the newest)
+    const newest = recent.filter((b) => send.has(b.id));
+    const waiting = recent.filter((b) => b.status === "held" && !send.has(b.id));
+    if (!FIX_WORDS.test(body) && waiting.length && newest.length && newest.every((b) => b.status === "filed" && ["number", "burst"].includes(b.how || "")) && newest.some((b) => b.how === "number")) {
+      const top = msOf(waiting[0]);
+      group = waiting.filter((b) => top - msOf(b) <= BURST_MS);
     }
     const { rows, mine } = await jobsOf(db, emp, today);
     const pick = pickJob(nbody, rows, mine, today, await anyPoOf(db, nbody, mine));
@@ -1068,6 +1320,11 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
       return say({ k: "unknown", number: pick.number || "", n: c.n, v: c.v }, lang);
     }
     return words();
+    })();
+    const line = other > 0 && !told.notKept ? notKeptLine(other, lang) : "";
+    if (!line) return r;
+    // (in a crew's thread, nothing is posted for a voice note alone)
+    return answer(r ? `${r}\n${line}` : inb.jobHint ? undefined : line);
   }
 
   // fetch each picture from Twilio and store it in that folder, all at once,
@@ -1087,7 +1344,9 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
   const lostLine = (n: number) => (emp ? replyText({ k: "lost", n }, lang) : `${replyText({ k: "lost", n }, "en")} / ${replyText({ k: "lost", n }, "es")}`);
   const withLost = (msg: string, stored: number) => (photos.length > stored && stored > 0 ? `${msg}\n${lostLine(photos.length - stored)}` : msg);
   // the door's pictures of this send so far (a phone splits a video and a photo into two texts): the count in all
-  const doorCount = (names: string[]) => countOf(names.filter((x) => photoAt(x) >= now.getTime() - SPLIT_MS - 1_000));
+  // (theirs only: a co-worker's door pictures on the same notice aren't this send's; photoName carries the first name)
+  const me = (emp?.name || "").trim().split(/\s+/)[0].toLowerCase().normalize("NFD").replace(/[^a-z]/g, "").slice(0, 12) || "crew";
+  const doorCount = (names: string[]) => countOf(names.filter((x) => photoAt(x) >= now.getTime() - SPLIT_MS - 1_000 && x.split("_")[3] === me));
 
   // a picture of a door nobody opened: within five minutes of their own "no"
   // (a phone sends the words and the picture as two texts), or with only the
@@ -1186,8 +1445,11 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
   // the send doesn't, for the minute and a half its pieces take to come in)
   if (emp && burst.length) {
     // (a text of theirs, not a row the portal wrote for itself, which has no message id)
-    const talk = (await db.get<{ created_at?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&status=in.(measure,note,nobody,reply,seen,opened,moved,done)&msg_sid=not.is.null&or=(how.is.null,how.neq.afterflip,created_at.lt.${since(FRESH_MS)})&created_at=gte.${since(BURST_MS)}&order=created_at.desc&select=created_at&limit=1`)).rows[0];
-    if (talk?.created_at) burst = burst.filter((b) => (b.created_at || "") > talk.created_at!);
+    const talk = (await db.get<{ created_at?: string | null; how?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&status=in.(measure,note,nobody,reply,seen,opened,moved,done)&msg_sid=not.is.null&or=(how.is.null,and(how.neq.afterflip,how.neq.afterask),created_at.lt.${since(FRESH_MS)})&created_at=gte.${since(BURST_MS)}&order=created_at.desc&select=created_at,how&limit=1`)).rows[0];
+    // (an AFTER said about the send, a minute and a half ago or more: its pieces
+    // are the ones up to a minute and a half after it, and these are a new send)
+    const cut = talk?.created_at ? msOf(talk) + (SAID_ABOUT.has(talk.how || "") ? FRESH_MS : 0) : 0;
+    if (cut) burst = burst.filter((b) => msOf(b) > cut);
   }
   let pick: ReturnType<typeof pickJob> = { kind: "ask", why: "none" };
   // (the job named by this text's own number)
@@ -1217,6 +1479,8 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
   // (a window for a job that isn't one of today's, while they have one today:
   // only for the photos sent right away, or the ones they caption AFTER)
   if (win && win.jobId && todayIds.size && !todayIds.has(win.jobId) && now.getTime() - win.at > ELSEWHERE_WINDOW_MS && cap !== "after") win = null;
+  // (their photos went on another job since it opened: they've moved on, and only photos captioned AFTER are its)
+  if (win && win.movedOn && cap !== "after") win = null;
   // pictures captioned BEFORE ("before", "just got here") are an arrival, not
   // the window's; pictures posted in one of today's jobs' threads are that
   // job's, whatever another job's window says
@@ -1255,7 +1519,7 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
   // the send's last piece: on this job, waiting, or coming over with this one
   // (one waiting that they said AFTER about is in AFTER, wherever it goes)
   const lastOfSend = [...burst].reverse().find((b) => (b.photos || []).length && (!target || b.status === "held" || onTarget(b) || strays.includes(b)));
-  const pileOfPiece = (b: Batch): PhotoKind | null => (b.status === "held" && b.how === "after" ? "after" : kindOfName(b.photos![0].name));
+  const pileOfPiece = (b: Batch): PhotoKind | null => (saidAfterHeld(b) ? "after" : kindOfName(b.photos![0].name));
   // a DONE a moment ago, answered by asking for the after photos, and nothing
   // on the job's day from an hour before: the phone sent these with the DONE
   // ("done sending", maybe). They stay BEFORE, and they're asked
@@ -1263,8 +1527,9 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
   // (the AFTER photos asked for, or said, are the window's job's; AFTER they
   // texted with no job named in it is about the next send, and so is one on a
   // job these photos name by their own number)
-  let afterAsked = !!win && (!win.jobId || (!!target && target.id === win.jobId) || (win.how === "aftersay" && ownNumber));
-  if (win && win.how === "afterwait" && now.getTime() - win.at < DONE_SENT_MS && target && (!win.jobId || target.id === win.jobId) && !cap && (await arrivalOnly(db, target, thread, now.getTime(), today))) { afterAsked = false; askAfter = true; }
+  let afterAsked = !!win && (!win.jobId || (!!target && target.id === win.jobId) || (win.how === "aftersay" && ownNumber && !win.named));
+  // (not when the DONE marked the job done: those are the photos it asked for)
+  if (win && win.how === "afterwait" && !win.marked && !thread?.work_done && now.getTime() - win.at < DONE_SENT_MS && target && (!win.jobId || target.id === win.jobId) && !cap && (await arrivalOnly(db, target, thread, now.getTime(), today))) { afterAsked = false; askAfter = true; }
   let kind: PhotoKind = photoKindFor(body, { afterAsked, burst: lastOfSend ? pileOfPiece(lastOfSend) : null });
   // held instead of guessed: "which job?", with the jobs it could be by name
   let holdFor: JobKey[] = [];
@@ -1307,16 +1572,65 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
   let quiet = quietFor(kind);
   // AFTER texted while these were on their way (the phone sent the word and
   // the pictures as two texts, both at once), that the window above didn't
-  // see: these are the after pictures. One about another job isn't about
-  // these; a DONE's ask for the after photos, with these the job's arrival,
-  // asks about them instead ("done sending", maybe)
-  const lateAfter = async (): Promise<"after" | "ask" | null> => {
+  // see: these are the after pictures (in a crew's thread, a co-worker's word
+  // on its job too). One about another job isn't about these, unless it named
+  // that job and only the day's guess put these here: they go there. A DONE's
+  // ask for the after photos, with these the job's arrival (and the job not
+  // marked by it), asks about them instead ("done sending", maybe), and so
+  // does the portal's own question about the send. A piece of the same send
+  // captioned AFTER that landed meanwhile takes these along
+  type Late = { how: "after" | "ask"; to?: { kind: "pact" | "rel"; id: string } };
+  const lateAfter = async (): Promise<Late | null> => {
     if (!emp || kind !== "before" || cap || askAfter) return null;
-    const late = (await db.get<{ id: string; how?: string | null; pact_job_id?: string | null; release_id?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&how=in.(aftersay,afterwait,afterflip)&created_at=gte.${enc(new Date(now.getTime() - 2_000).toISOString())}&order=created_at.desc&select=id,how,pact_job_id,release_id&limit=3`)).rows
-      .filter((r) => r.id !== win?.id && (!target || !(r.pact_job_id || r.release_id) || (r.pact_job_id || r.release_id) === target.id));
-    if (!late.length) return null;
+    const recent2 = enc(new Date(now.getTime() - 2_000).toISOString());
+    const who = threadToday ? `or=(employee_id.eq.${emp.id},pact_job_id.eq.${threadToday},release_id.eq.${threadToday})` : `employee_id=eq.${emp.id}`;
+    type LateRow = { id: string; how?: string | null; note?: string | null; pact_job_id?: string | null; release_id?: string | null };
+    const rows = (await db.get<LateRow>(`texted_photos?${who}&how=in.(aftersay,afterwait,afterflip,afterask)&created_at=gte.${recent2}&order=created_at.desc&select=id,how,note,pact_job_id,release_id&limit=3`)).rows
+      .filter((r) => r.id !== win?.id);
+    const jobOfRow = (r: LateRow) => r.pact_job_id || r.release_id || "";
+    let r = rows.find((x) => !target || !jobOfRow(x) || jobOfRow(x) === target.id);
+    let to: Late["to"];
+    if (!r) {
+      const named = rows.find((x) => x.how === "aftersay" && x.note === "named" && jobOfRow(x));
+      if (named && (!target || how === "day")) { r = named; to = { kind: named.pact_job_id ? "pact" : "rel", id: jobOfRow(named) }; }
+    }
+    if (!r) {
+      const mate = (await db.get<Batch>(`texted_photos?employee_id=eq.${emp.id}&status=in.(held,filed)&created_at=gte.${recent2}&id=neq.${batchId}&order=created_at.desc&limit=3&select=id,status,body,how,pact_job_id,release_id`)).rows
+        .find((b) => (captionKind(b.body || "") === "after" || saidAfterHeld(b)) && (target ? b.status === "filed" && onTarget(b) : b.status === "held"));
+      return mate ? { how: "after" } : null;
+    }
+    // (a window these used: closed, a co-worker's too)
+    if (r.how === "aftersay" || r.how === "afterwait") await db.patch(`texted_photos?id=eq.${r.id}&status=eq.note`, { status: "seen" });
     await closeWindows(db, emp.id, now);
-    return late[0].how === "afterwait" && target && (await arrivalOnly(db, target, thread, now.getTime(), today)) ? "ask" : "after";
+    if (r.how === "afterask") return { how: "ask" };
+    if (r.how === "afterwait" && r.note !== "marked" && target && !to) {
+      const th = thread ? await threadJob(db, thread.id) : null;
+      if (!th?.work_done && (await arrivalOnly(db, target, th, now.getTime(), today))) return { how: "ask" };
+    }
+    return { how: "after", to };
+  };
+  // their "no" landed while these came in (the phone sent the words and the
+  // picture as two texts): with no words but the door's, these are the door's.
+  // A door they were asked about ("which job has nobody home?") or reported
+  // after hours: they wait as the door's
+  const lateDoor = async (): Promise<string | undefined | null> => {
+    if (!emp || cap || (body.trim() && !doorCap) || refsIn(body).length) return null;
+    type N = { id: string; status?: string | null; note?: string | null; pact_job_id?: string | null; release_id?: string | null };
+    const n = (await db.get<N>(`texted_photos?employee_id=eq.${emp.id}&how=eq.nobody&status=in.(nobody,note,reply)&msg_sid=not.is.null&created_at=gte.${enc(new Date(now.getTime() - 2_000).toISOString())}&order=created_at.desc&limit=1&select=id,status,note,pact_job_id,release_id`)).rows[0];
+    if (!n) return null;
+    const mine = (await db.get<Batch>(`texted_photos?id=eq.${batchId}&select=*`)).rows[0];
+    if (!mine) return null;
+    if (n.status === "nobody" && (n.pact_job_id || n.release_id)) {
+      const t2 = await targetOf(db, { id: "", pact_job_id: n.pact_job_id || null, release_id: n.pact_job_id ? null : n.release_id || null });
+      if (!t2 || !(await fileBatch(db, mine, t2, "noaccess", "noaccess"))) return null;
+      const back = (await db.get<Batch>(`texted_photos?id=eq.${batchId}&select=photos`)).rows[0]?.photos || [];
+      return answer(withLost(doorGotText(countOf(back.map((p) => p.name)), lang), back.length));
+    }
+    if (n.status === "note" && !n.pact_job_id && !n.release_id && /^Asked which job|after hours/i.test(n.note || "")) {
+      if (!(await holdBatch(db, mine, "noaccess"))) return null;
+      return answer(withLost(doorGotText(countOf(put.map((p) => p.name)), lang), put.length));
+    }
+    return null;
   };
   // (the AFTER's own request moved these first: its answer is the one they get)
   let answeredThere = false;
@@ -1333,14 +1647,22 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
     await db.insert("texted_photos", { ...row, status: "filed", how, ...jobCols(target) });
     // (a co-worker's window in the crew's thread, used by these: it's closed)
     if (emp && win && afterAsked && win.empId !== emp.id) await db.patch(`texted_photos?id=eq.${win.id}&status=eq.note`, { status: "seen" });
+    // (their "no" came with these: the door's)
+    const door = await lateDoor();
+    if (door !== null) return door;
     const late = await lateAfter();
-    if (late === "ask") askAfter = true;
-    else if (late === "after") {
+    if (late?.how === "ask") askAfter = true;
+    else if (late?.how === "after") {
       const mine = (await db.get<Batch>(`texted_photos?id=eq.${batchId}&select=*`)).rows[0];
-      const st: { already?: boolean } = {};
-      const flipped = !!mine && namesIn([mine]).every((x) => kindOfName(x) === "after");
-      if (mine && (flipped || (await fileBatch(db, mine, target, how, "after", st)))) {
+      const st: FileOut = {};
+      // (the AFTER named another job, and only the guess put these here: they go there)
+      const to = late.to && late.to.id !== target.id ? await targetOf(db, { id: "", pact_job_id: late.to.kind === "pact" ? late.to.id : null, release_id: late.to.kind === "rel" ? late.to.id : null }) : null;
+      const flipped = !to && !!mine && namesIn([mine]).every((x) => kindOfName(x) === "after");
+      if (mine && (flipped || (await fileBatch(db, mine, to || target, to ? "aftersaid" : how, "after", st)))) {
         kind = "after";
+        if (to) { target = { kind: to.kind, id: to.id, label: to.label, street: to.street, apt: to.apt, why: "number" }; how = "aftersaid"; }
+        // (read again: an ALL DONE at the same moment may have ended it)
+        thread = target.kind === "pact" ? await threadJob(db, target.id) : null;
         quiet = quietFor(kind);
         answeredThere = flipped || !!st.already;
         const moved = (await db.get<{ photos?: Photo[] | null }>(`texted_photos?id=eq.${batchId}&select=photos`)).rows[0]?.photos;
@@ -1353,8 +1675,8 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
     let moved = 0;
     if (strays.length) {
       const leaving = [...new Set(strays.filter((b) => b.status === "filed" && b.pact_job_id).map((b) => b.pact_job_id as string))];
-      // (one waiting they said AFTER about stays AFTER)
-      for (const b of strays) moved += await fileBatch(db, b, target, "number", b.status === "held" && b.how === "after" ? "after" : kind);
+      // (one waiting they said AFTER about stays AFTER; one captioned keeps its own words)
+      for (const b of strays) moved += await fileBatch(db, b, target, "number", saidAfterHeld(b) ? "after" : captionKind(b.body || "") || kind);
       for (const id of leaving) await clearDoneIfNoAfter(db, id, jobName(target, "en"), now, today, strays.some((b) => b.pact_job_id === id && wasAfter(b)));
     }
     // AFTER said on this piece: the pieces of the same send just before
@@ -1404,8 +1726,8 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
       // invoice; on a day before it, the day is done and it goes on
       const L = onLastDay(thread, today);
       if (kind === "after" && emp) await closeQuestion(db, thread.id);
-      // ("all done" with them on a day before its last: finished early, the days after come off)
-      if (said2 && kind === "after" && L.before && allDoneSaid(body)) {
+      // ("all done" with them, or said about the ones waiting that came along: finished early, the days after come off)
+      if (said2 && kind === "after" && L.before && (allDoneSaid(body) || strays.some((b) => b.how === "afterall"))) {
         const d = await doneIn(db, said2, "all", thread);
         if (d) { settle(c); return said(`${gotPhotosText(c, kind, name, lang)} ${d}`); }
       }
@@ -1435,12 +1757,47 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
   // answer asks for), unless there's no place to keep them waiting (RUN_ME
   // section 20 not run), and then the worker is asked to send them again with the number
   // (an AFTER said with them, or texted just before, stays with them while they wait)
-  if (!(await db.insert("texted_photos", { ...row, status: "held", ...(kind === "after" ? { how: "after" } : {}) }))) {
+  // (and an ALL DONE said about the send's piece before, waiting too, stays one)
+  const heldHow = lastOfSend && lastOfSend.status === "held" && lastOfSend.how === "afterall" ? "afterall" : "after";
+  if (!(await db.insert("texted_photos", { ...row, status: "held", ...(kind === "after" ? { how: heldHow } : {}) }))) {
     await db.remove(put.map((p) => p.path));
     return say({ k: "resend" }, lang);
   }
+  // (their "no" came with these: the door's, waiting for its number)
+  if (emp && !holdFor.length) { const door = await lateDoor(); if (door !== null) return door; }
   // (AFTER texted while they were on their way: they're the after pictures, wherever they go)
-  if ((await lateAfter()) === "after") { kind = "after"; await db.patch(`texted_photos?id=eq.${batchId}&status=eq.held`, { how: "after" }); }
+  const late = await lateAfter();
+  if (late?.how === "after") {
+    kind = "after";
+    await db.patch(`texted_photos?id=eq.${batchId}&status=eq.held`, { how: "after" });
+    // (the AFTER named their job: on it now, in AFTER, as its window would have put them)
+    const to = late.to && emp ? await targetOf(db, { id: "", pact_job_id: late.to.kind === "pact" ? late.to.id : null, release_id: late.to.kind === "rel" ? late.to.id : null }) : null;
+    const mine = to ? (await db.get<Batch>(`texted_photos?id=eq.${batchId}&select=*`)).rows[0] : undefined;
+    if (to && emp && mine && (await fileBatch(db, mine, to, "aftersaid", "after"))) {
+      const c2 = countOf(put.map((p) => p.name));
+      const name2 = jobName(to, lang);
+      const th = to.kind === "pact" ? await threadJob(db, to.id) : null;
+      if (!th) return said(replyText({ k: "filed", n: c2.n, v: c2.v, label: name2, kind: "after" }, lang));
+      await closeQuestion(db, th.id);
+      const L2 = onLastDay(th, today);
+      if (L2.before) return said(gotAfterDayText(c2, name2, { day: L2.day, of: L2.of, next: L2.next, today }, lang, lost));
+      const marked2 = await markDone(db, th, emp, { from, now, finish: dayPile(th, today).cur });
+      return said(gotAfterText(c2, name2, lang, marked2, lost));
+    }
+  }
+  // (the send's piece before this one was put on its job by their number a
+  // moment ago, while this one came in: this one goes with it, on its pile)
+  const waitedWith = burst.filter((b) => b.status === "held" && chain.has(b.id)).map((b) => b.id);
+  if (emp && !holdFor.length && waitedWith.length) {
+    const mate = (await db.get<Batch>(`texted_photos?id=in.(${waitedWith.join(",")})&status=eq.filed&how=in.(number,burst)&order=created_at.desc&limit=1&select=*`)).rows[0];
+    const t2 = mate ? await targetOf(db, mate) : null;
+    const mine = t2 ? (await db.get<Batch>(`texted_photos?id=eq.${batchId}&select=*`)).rows[0] : undefined;
+    const pile: PhotoKind = kind === "after" ? "after" : kindOfName((mate?.photos || [])[0]?.name || "") || "before";
+    if (t2 && mine && (await fileBatch(db, mine, t2, "burst", pile))) {
+      waitUntil(settleBurst(db, { emp, batchId, target: t2, kind: pile, said: { n: 0, v: 0 }, lang, from, now, deliver: inb.deliver }));
+      return hush();
+    }
+  }
   // (quiet, unless this is the first piece of the send held to ask "which job?")
   if (quiet && !(holdFor.length && lastOfSend?.status !== "held")) return hush();
   const pc = countOf(put.map((p) => p.name));
@@ -1505,8 +1862,9 @@ async function doorShutAgain(db: Db, t: Target, emp: Emp, today: string): Promis
 async function doorOpened(db: Db, t: Target, emp: Emp, now: Date, today: string): Promise<void> {
   const col = t.kind === "pact" ? "pact_job_id" : "release_id";
   // (the reporter's own picture of the door, right after their "no", went on the notice: these are work pictures)
-  const open = (await db.get<{ id: string; note?: string | null; created_at?: string | null }>(`texted_photos?${col}=eq.${t.id}&status=eq.nobody&select=id,note,created_at&limit=5`)).rows
-    .filter((n) => n.created_at && nyDay(new Date(n.created_at)) === today);
+  // (nor their own "no" of the last minute: the phone sent it with these)
+  const open = (await db.get<{ id: string; note?: string | null; created_at?: string | null; employee_id?: string | null }>(`texted_photos?${col}=eq.${t.id}&status=eq.nobody&select=id,note,created_at,employee_id&limit=5`)).rows
+    .filter((n) => n.created_at && nyDay(new Date(n.created_at)) === today && !(n.employee_id === emp.id && now.getTime() - msOf(n) < 60_000));
   const when = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" }).format(now);
   for (const n of open) {
     const note = `${(n.note || "").trim()}${(n.note || "").trim() ? " · " : ""}${firstName(emp) || "The crew"} got in at ${when} and sent photos`;

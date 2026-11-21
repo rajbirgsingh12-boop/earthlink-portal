@@ -36,7 +36,7 @@ const SAID = new RegExp([
   `\\b${TENANT} (want|wants|asked|asks|need|needs)( us| me)? to reschedul\\w*`, `\\b${TENANT} reschedul\\w*`,
   "\\b(appointment|appt) (got |was |is )?cancel+\\w*",
   // español
-  "^nadie$", "\\bno (hay|habia) nadie\\b", "\\bnadie (en casa|abre|abrio|abren|contesta|contesto|responde|respondio|esta|estaba|aqui|alli|ahi)\\b",
+  "^nadie$", "\\bno (hay|habia) nadie\\b", "\\btampoco (hay|habia) nadie\\b", "\\bnadie tampoco\\b", "\\bnadie (en casa|abre|abrio|abren|contesta|contesto|responde|respondio|esta|estaba|aqui|alli|ahi)\\b",
   "^(el |la )?(inquilin[oa]s?|senor(a|es)?|duen[oa]s?|familia)? ?no (esta|estan|estaba|estaban)( (en casa|aqui|ahi|alli|nadie))?$",
   "\\bno (esta|estan|estaba|estaban) (en casa|nadie)\\b",
   "\\bno (abre|abren|abrio|abrieron|abrian)\\b", "\\bno (me|nos) (abre|abren|abrio|abrieron|deja|dejan|dejaron) ?(entrar)?\\b",
@@ -50,7 +50,7 @@ const BARE = /^(no+|nope|nah|no po|no no)$/;
 // "no problem", "no worries" — a no that isn't about the door
 const NOT_IT = /\b(no problem|no prob|no worries|no worry|no hay problema|no te preocupes|no se preocupe|no pasa nada|wrong job|equivocad\w*)\b/;
 
-const withoutNumbers = (t: string) => t.replace(/\b(po|p o|release|rel|#)\b/g, " ").replace(/\d+/g, " ").replace(/\s+/g, " ").trim();
+const withoutNumbers = (t: string) => t.replace(/\b(po|p o|release|rel|#)\b/g, " ").replace(/\b[a-z]\d{4,}[\w-]*/g, " ").replace(/\d+/g, " ").replace(/\s+/g, " ").trim();
 // the text says nobody let them in (or the tenant can't do it today)
 export function nobodyHome(body: string): boolean {
   const t = norm(unplaced(body));
@@ -67,9 +67,14 @@ export const bareNo = (body: string): boolean => {
 // "NO 2205 Linden", "no 4B": a no with a number and a few words, which is a
 // door only when the number is the house or the apartment of one of today's
 // jobs (lib/nobodyFlow checks; "no 5 gallons left" is not one)
-export const noAt = (body: string): boolean => /^no+ #?\d[\w-]*( [a-z0-9#-]+){0,4}$/.test(norm(unplaced(body))) && !NOT_IT.test(norm(unplaced(body)));
+export const noAt = (body: string): boolean => /^no+ #?[a-z]?\d[\w-]*( [a-z0-9#-]+){0,4}$/.test(norm(unplaced(body))) && !NOT_IT.test(norm(unplaced(body)));
 // every number in the text, stripped like a PO ("NO 0116843" → "116843")
-export const numbersIn = (body: string): string[] => [...new Set((unplaced(body).match(/\d{1,12}/g) || []).map((n) => normPo(n)).filter(Boolean))];
+// (a PO with a letter or a dash in it, "A220011", "220011-2", also the way its key reads)
+export const numbersIn = (body: string): string[] => {
+  const t = unplaced(body);
+  const whole = (t.match(/\b[A-Za-z]?\d[\w-]*/g) || []).filter((x) => /[A-Za-z-]/.test(x) && /\d{4}/.test(x));
+  return [...new Set([...(t.match(/\d{1,12}/g) || []), ...whole].map((n) => normPo(n)).filter(Boolean))];
+};
 
 // ---- which job, which next ----
 export interface DayJob {
@@ -233,7 +238,7 @@ export function coworkerText(first: string, reporter: string, missedLabel: strin
 // "NO 9098 (2205 Linden Blvd, Apt 4B)": what to reply, and where that job is
 const noFor = (j: DayJob, lang: Lang) => {
   const place = jobName({ ...j, label: "" }, lang);
-  return `NO ${(j.label.match(/\d[\w-]*$/) || [j.label])[0]}${place ? ` (${place})` : ""}`;
+  return `NO ${(j.label.match(/[A-Za-z]?\d[\w-]*$/) || [j.label])[0]}${place ? ` (${place})` : ""}`;
 };
 // two jobs still open today: which one?
 export function askWhichText(options: DayJob[], lang0?: string | null): string {

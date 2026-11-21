@@ -34,7 +34,7 @@ export const keyOf = (j: ThreadJob): JobKey => pactKey({ ...j, id: j.id });
 // a job the office has billed: nothing a text says rewrites it
 export const billed = (j: { invoice_sent?: string | null; received?: boolean | null }) => !!j.invoice_sent || !!j.received;
 export const withNote = (notes: string | null | undefined, line: string) => `${(notes || "").trim()}${(notes || "").trim() ? "\n" : ""}${line}`;
-export const firstName = (e?: { name?: string | null } | null) => (e?.name || "").trim().split(/\s+/)[0] || "";
+export const firstName = (e?: { name?: string | null } | null) => (e?.name || "").trim().replace(/\s*[\u2014\u2013]\s*/g, "-").split(/\s+/)[0] || "";
 export const nyDay = (d: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 export const nyWhen = (d: Date) => new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(d).replace(/,/g, "");
 export const nyHour = (d: Date) => Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hourCycle: "h23" }).format(d)) % 24;
@@ -125,8 +125,15 @@ export async function clearDoneIfNoAfter(db: Db, jobId: string, toLabel: string,
   // hand or a worker's DONE (the answer to the morning's question) put on
   const marks = (await db.get<{ note?: string | null }>(`texted_photos?pact_job_id=eq.${jobId}&how=eq.done&status=in.(done,seen)&select=note&order=created_at.desc&limit=1`)).rows;
   if (!marks.length || /texted DONE/.test(marks[0].note || "")) return;
-  const notes = withNote(job.notes, unmarkedNoteLine(nyWhen(now), toLabel));
-  if (!(await db.patch(`pact_jobs?id=eq.${jobId}`, { work_done: false, finish_date: "", notes })) && !(await db.patch(`pact_jobs?id=eq.${jobId}`, { work_done: false, notes }))) return;
+  // an ALL DONE with those photos cut the days after (the ✂ line just before
+  // the mark's ✅): they're back on
+  const lines = (job.notes || "").split("\n");
+  const tick = lines.map((l) => l.startsWith("✅ ")).lastIndexOf(true);
+  const cut = tick > 0 ? /^✂ .* the days after \((.+)\) are off$/.exec(lines[tick - 1]) : null;
+  const back = cut ? cut[1].split(", ").filter(Boolean) : [];
+  const days = back.length && Number(job.work_days) > 0 ? { work_days: Number(job.work_days) + back.length } : {};
+  const notes = withNote(job.notes, `${unmarkedNoteLine(nyWhen(now), toLabel)}${back.length ? ` · ${back.join(", ")} back on` : ""}`);
+  if (!(await db.patch(`pact_jobs?id=eq.${jobId}`, { work_done: false, finish_date: "", ...days, notes })) && !(await db.patch(`pact_jobs?id=eq.${jobId}`, { work_done: false, ...days, notes })) && !(await db.patch(`pact_jobs?id=eq.${jobId}`, { work_done: false, notes }))) return;
   await cardsOff(db, jobId);
 }
 

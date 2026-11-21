@@ -104,7 +104,7 @@ export async function POST(req: Request) {
   if (ids.length) {
     // told_day (RUN_ME section 23): the day each was last told, put back if a send is let go
     const rq = `schedule_days?id=in.(${ids.join(",")})&select=id,day,pact_job_id,release_id`;
-    // (texted_at: when they were first told today, kept by a resend below)
+    // (texted_at: when they were first told about that day, kept by a resend below)
     ((await read<DayRow>(`${rq},told_day,texted_at`)) ?? (await read<DayRow>(`${rq},told_day`)) ?? (await read<DayRow>(rq)) ?? []).forEach((r) => rowOf.set(r.id, r));
     const jobIds = [...new Set([...rowOf.values()].map((r) => r.pact_job_id).filter((j): j is string => !!j))];
     if (jobIds.length) {
@@ -201,12 +201,15 @@ export async function POST(req: Request) {
         method: "PATCH", headers: supaHeaders, body: JSON.stringify({ texted: true }),
       }).catch(() => {});
       // when it went (RUN_ME section 21) — its own write, so a database without
-      // the column still gets the TEXTED mark. A resend of a text they had
-      // today keeps the first time: it isn't a new job (the inbox reads the
-      // job texted last as the one their next pictures are of); a text about
-      // a job that moved since they were told is new
+      // the column still gets the TEXTED mark. A resend of a text about today's
+      // work keeps the first time (last night's too): it isn't a new job (the
+      // inbox reads the job texted last today as the one their next pictures
+      // are of). A text about a later day is new each time (a plain "no"
+      // right after it answers it), and so is one about a job that moved
+      // since they were told
       const r = rowOf.get(m.id);
-      const resent = !!r?.texted_at && nyDay(new Date(r.texted_at)) === today && (!r.told_day || r.told_day === r.day);
+      const aboutToday = !!r && (r.day || "") <= today && (lastDayOf(r, r.pact_job_id ? jobOf.get(r.pact_job_id) : undefined) || r.day || "") >= today;
+      const resent = aboutToday && !!r?.texted_at && (!r.told_day || r.told_day === r.day);
       if (!resent) await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, {
         method: "PATCH", headers: supaHeaders, body: JSON.stringify({ texted_at: new Date().toISOString() }),
       }).catch(() => {});

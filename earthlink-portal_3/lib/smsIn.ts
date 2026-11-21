@@ -5,7 +5,7 @@
 // every case can be tried on its own. Server-only (it signs with node:crypto).
 import { createHmac, timingSafeEqual } from "crypto";
 import { normPo } from "./po";
-import { AFTER_HOW, atJob, langOf, streetOf, type Lang } from "./crewText";
+import { AFTER_HOW, atJob, langOf, plainDash, streetOf, type Lang } from "./crewText";
 import { extOfType, mediaWords } from "./media";
 
 export type Params = [string, string][];
@@ -95,6 +95,9 @@ export function refsIn(body: string): Ref[] {
   // not asked about — it may be a phone number or a unit)
   const long = /\d{5,12}/g;
   while ((m = long.exec(text))) add(m[0], false);
+  // a PO with a letter or a dash in it ("A220011", "220011-2"), the way its key reads
+  const whole = /\b[A-Za-z]?\d+(?:-[\dA-Za-z]+)+\b|\b[A-Za-z]\d{4,11}\b/g;
+  while ((m = whole.exec(text))) add(m[0], false);
   return out;
 }
 
@@ -112,12 +115,12 @@ const bare = (s: string, label: RegExp) => s.trim().replace(label, "").trim();
 export const pactKey = (j: { id: string; po_number?: string | null; job_number?: string | null; address?: string | null; development?: string | null; property_unit?: string | null }): JobKey => {
   const po = (j.po_number || "").trim(), job = (j.job_number || "").trim();
   return {
-    kind: "pact", id: j.id, label: `PO ${bare(po || job, /^(p\.?\s*o\.?\s*#?|#)\s*/i)}`.trim(), keys: [normPo(po), normPo(job)].filter(Boolean),
+    kind: "pact", id: j.id, label: `PO ${bare(plainDash(po || job), /^(p\.?\s*o\.?\s*#?|#)\s*[-:]?\s*/i)}`.trim(), keys: [normPo(po), normPo(job)].filter(Boolean),
     street: streetOf(j.address) || (j.development || "").trim(), apt: (j.property_unit || "").trim(),
   };
 };
 export const relKey = (r: { id: string; rel_number?: string | null; address?: string | null; location?: string | null }): JobKey =>
-  ({ kind: "rel", id: r.id, label: `release ${bare(r.rel_number || "", /^(release\s*#?|rel\.?\s*#?|#)\s*/i)}`.trim(), keys: [normPo(r.rel_number)].filter(Boolean), street: streetOf(r.address) || (r.location || "").trim() });
+  ({ kind: "rel", id: r.id, label: `release ${bare(plainDash(r.rel_number), /^(release\s*#?|rel\.?\s*#?|#)\s*[-:]?\s*/i)}`.trim(), keys: [normPo(r.rel_number)].filter(Boolean), street: streetOf(r.address) || (r.location || "").trim() });
 // a job picked, with what names it
 const picked = (j: JobKey, why: "number" | "today" | "recent" | "told"): Pick => ({ kind: j.kind, id: j.id, label: j.label, street: j.street, apt: j.apt, why });
 
@@ -214,6 +217,9 @@ export type Reply =
 // "3 photos", "1 video", "2 photos and 1 video"
 const photos = (n: number, lang: Lang, v = 0) => mediaWords({ n, v }, lang);
 const one = (n: number, v = 0) => n === 1 && v <= 1;
+// "su foto", "sus 3 fotos", "sus 2 fotos y 1 video"; one photo with videos
+// takes no article: "1 foto y 2 videos"
+const susEs = (n: number, v = 0) => (one(n, v) ? (v ? "su video" : "su foto") : v && n - v === 1 ? photos(n, "es", v) : `sus ${photos(n, "es", v)}`);
 export function replyText(r: Reply, lang0?: string | null): string {
   const lang = langOf(lang0);
   const es = lang === "es";
@@ -229,22 +235,22 @@ export function replyText(r: Reply, lang0?: string | null): string {
     }
     case "held":
       return es
-        ? `Recibimos ${one(r.n, r.v) ? (r.v ? "su video" : "su foto") : `sus ${photos(r.n, lang, r.v)}`}. ¿De qué trabajo ${one(r.n, r.v) ? "es" : "son"}? Responda con el número de PO o de release.`
+        ? `Recibimos ${susEs(r.n, r.v)}. ¿De qué trabajo ${one(r.n, r.v) ? "es" : "son"}? Responda con el número de PO o de release.`
         : `Got your ${photos(r.n, lang, r.v)}. Which job ${r.n === 1 ? "is it" : "are they"} for? Reply with the PO or release number.`;
     case "which": {
       const list = r.options.length === 2 ? `${r.options[0]} ${es ? "o" : "or"} ${r.options[1]}` : r.options.join(", ");
       return es
-        ? `Recibimos ${one(r.n, r.v) ? (r.v ? "su video" : "su foto") : `sus ${photos(r.n, lang, r.v)}`}. ¿De qué trabajo ${one(r.n, r.v) ? "es" : "son"}? Responda con el número: ${list}.`
+        ? `Recibimos ${susEs(r.n, r.v)}. ¿De qué trabajo ${one(r.n, r.v) ? "es" : "son"}? Responda con el número: ${list}.`
         : `Got your ${photos(r.n, lang, r.v)}. Which job ${r.n === 1 ? "is it" : "are they"} for? Reply with the number: ${list}.`;
     }
     case "moved":
       return es
-        ? `Listo: ${one(r.n, r.v) ? (r.v ? "su video" : "su foto") : `sus ${photos(r.n, lang, r.v)}`} ahora ${r.n === 1 ? "está" : "están"} ${atJob(r.label, lang)}.`
+        ? `Listo: ${susEs(r.n, r.v)} ahora ${r.n === 1 ? "está" : "están"} ${atJob(r.label, lang)}.`
         : `Done: your ${photos(r.n, lang, r.v)} ${r.n === 1 ? "is" : "are"} ${atJob(r.label, lang)} now.`;
     case "unknown": {
       // "your photos", "your video", "your 2 photos and 1 video"
       const n = r.n || 0, v = r.v || 0;
-      const yours = !n ? (es ? "sus fotos" : "your photos") : one(n, v) ? (es ? (v ? "su video" : "su foto") : v ? "your video" : "your photo") : es ? `sus ${photos(n, lang, v)}` : `your ${photos(n, lang, v)}`;
+      const yours = !n ? (es ? "sus fotos" : "your photos") : es ? susEs(n, v) : one(n, v) ? (v ? "your video" : "your photo") : `your ${photos(n, lang, v)}`;
       return es
         ? `No encontramos el número ${r.number} en sus trabajos. La oficina pondrá ${yours} en el trabajo correcto.`
         : `Couldn't find ${r.number} on your jobs. The office will put ${yours} on the right job.`;
@@ -275,7 +281,7 @@ export function replyText(r: Reply, lang0?: string | null): string {
       if (!(r.n > 0)) return "Earth Link: this number takes job photos from the crew. This phone isn't on the crew list; ask the office to add it. / Este número recibe fotos de trabajo del equipo. Este teléfono no está en la lista; pida a la oficina que lo agregue.";
       const v = r.v || 0, single = one(r.n, v);
       const en = single ? (v ? "your video" : "your photo") : `your ${photos(r.n, "en", v)}`;
-      const es1 = single ? (v ? "su video" : "su foto") : `sus ${photos(r.n, "es", v)}`;
+      const es1 = susEs(r.n, v);
       // (la foto: la; el video: lo; las fotos: las; videos, or photos with videos: los)
       const it = single ? (v ? "lo" : "la") : v ? "los" : "las";
       return `Earth Link: got ${en}. This phone isn't on the crew list yet, so the office will put ${single ? "it" : "them"} on the job. / Recibimos ${es1}. Este teléfono aún no está en la lista del equipo; la oficina ${it} pondrá en el trabajo.`;

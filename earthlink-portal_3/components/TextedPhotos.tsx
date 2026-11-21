@@ -117,7 +117,8 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
       const token = (await sb().auth.getSession()).data.session?.access_token || "";
       const res = await fetch("/api/texted-photos", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ id: b.id, ...body }) });
       const j = (await res.json().catch(() => ({}))) as { error?: string; n?: number; label?: string };
-      if (!res.ok) { flash(j.error || "Couldn't do that. Try again."); return; }
+      // (moved by the worker's own text a moment ago: the list shows where they are now)
+      if (!res.ok) { flash(j.error || "Couldn't do that. Try again."); if (res.status === 409) { setPicking(null); await load(); } return; }
       // (a file that wouldn't move stays behind: then it says how many of them did)
       const all = (b.photos || []).length;
       flash(body.action === "throw" ? "Photos thrown away ✓" : body.action === "seen" ? "Cleared from the list ✓" : `${j.n && j.n < all ? `${j.n} of ` : ""}${mediaOf(b)} on ${j.label} ✓`);

@@ -271,12 +271,15 @@ async function jobToAnswer(db: Db, o: { emp: Emp; body: string; today: string; n
   if (q) { const j = await threadJob(db, q.jobId); if (j && !j.canceled) return { job: j, asked: true, askedDay: q.day }; }
   const pactIds = mine.filter((k) => k.kind === "pact").map((k) => k.id);
   const since = enc(new Date(o.now.getTime() - 3 * 86_400_000).toISOString());
+  const todayIds = [...new Set(rows.filter((r) => r.day === o.today && r.pact_job_id).map((r) => r.pact_job_id as string))];
+  // NOT DONE: the job marked done today (by their AFTER photos, or a co-worker's);
+  // one marked done on an earlier day only when they have no job today
   if (o.verb === "notdone") {
     const who = pactIds.length ? `or=(employee_id.eq.${o.emp.id},pact_job_id.in.(${pactIds.join(",")}))` : `employee_id=eq.${o.emp.id}`;
-    const d = (await db.get<{ pact_job_id?: string | null }>(`texted_photos?how=eq.done&${who}&created_at=gte.${since}&select=pact_job_id&order=created_at.desc&limit=1`)).rows[0];
-    if (d?.pact_job_id) { const j = await threadJob(db, d.pact_job_id); if (j && j.work_done && !j.canceled) return { job: j, asked: false, askedDay: "" }; }
+    const d = (await db.get<{ pact_job_id?: string | null; created_at?: string | null }>(`texted_photos?how=eq.done&${who}&created_at=gte.${since}&select=pact_job_id,created_at&order=created_at.desc&limit=1`)).rows[0];
+    const fresh = !!d?.created_at && (nyDay(new Date(d.created_at)) === o.today || !todayIds.length);
+    if (d?.pact_job_id && fresh) { const j = await threadJob(db, d.pact_job_id); if (j && j.work_done && !j.canceled) return { job: j, asked: false, askedDay: "" }; }
   }
-  const todayIds = [...new Set(rows.filter((r) => r.day === o.today && r.pact_job_id).map((r) => r.pact_job_id as string))];
   const todays = (await Promise.all(todayIds.slice(0, 6).map((id) => threadJob(db, id)))).filter((j): j is ThreadJob => !!j && !j.canceled);
   const open = todays.filter((j) => !j.work_done);
   const cands = open.length ? open : todays;
@@ -373,6 +376,7 @@ async function doneIn(db: Db, o: Said, said: DoneSaid | "yes"): Promise<string |
 // "ok", "thanks", "on my way": nothing to do and nothing for the office. Anything else a worker texts is kept for the office's card
 const ACK = /^(ok(ay)?|k+|kk|okey|oki|thanks?( you)?( so much)?|thx|ty|tks|gracias|muchas gracias|mil gracias|yes|yeah|yep|yup|si|sí|got it|on my way|omw|otw|coming|here|aqui|aquí|llegando|voy|en camino|perfect|perfecto|bien|ok gracias|okay thanks|ok thanks|thank u|cool|great|good|bueno|vale|entendido|copy|roger|will do|claro|dale|listo|de nada|np|no problem|sure|alright|all right)$/;
 const isAck = (body: string) => {
+  if (/\d/.test(body || "")) return false; // a number means something: the office sees it
   const t = (body || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
   return !t || ACK.test(t);
 };
@@ -425,7 +429,11 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
     if ((yesWord(body) || noWord(body)) && !/\d/.test(body)) {
       const last = (await db.get<{ how?: string | null; status?: string | null; pact_job_id?: string | null; created_at?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&select=how,status,pact_job_id,created_at&order=created_at.desc&limit=1`)).rows[0];
       const age = last?.created_at ? now.getTime() - Date.parse(last.created_at) : Infinity;
-      if (last?.how === "asked" && last.status === "note" && age < 4 * 3_600_000) {
+      // within four hours of the question it's the answer; later than that only
+      // when they have no job today it could be a door at (within the day)
+      const answering = last?.how === "asked" && last.status === "note"
+        && (age < 4 * 3_600_000 || (age < 24 * 3_600_000 && !(await jobsOf(db, emp, today)).rows.some((r) => r.day === today)));
+      if (answering) {
         if (yesWord(body)) { const r = await doneIn(db, said, "yes"); if (r) return answer(r); }
         else return answer(await notDoneIn(db, said));
       }

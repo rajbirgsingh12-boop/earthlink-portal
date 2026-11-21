@@ -51,7 +51,7 @@ const AFTER_WORDS = /\b(after|despues|final)\b/;
 const DONE_WORDS = /\b(done|finished|finish|complete|completed|terminado|terminada|terminados|terminamos|termine|termino|listo|lista|listos|acabado|acabamos|acabe|all set)\b/;
 export function photoKindFor(body: string, stage: Stage, burstKind?: PhotoKind | null): PhotoKind {
   const neg = notDone(body);
-  const t = neg ? norm(body).replace(NOT_DONE_G, " ") : norm(body);
+  const t = neg ? norm(straight(body)).replace(NOT_DONE_G, " ") : norm(body);
   if (!neg && DONE_WORDS.test(t)) return "after";
   if (BEFORE_WORDS.test(t)) return "before";
   if (AFTER_WORDS.test(t)) return "after";
@@ -476,9 +476,10 @@ export function gotAfterText(n: number, label: string, lang0?: string | null, ma
 }
 // "not done", "no terminado": the job isn't finished (the work-done mark
 // comes off, and it runs one more work day)
-const NOT_DONE_SRC = String.raw`\b(not done|not finished|not complete|not completed|not yet|still working|still going|need(?:s)? (?:another|one more) day|(?:come|coming) back tomorrow|back tomorrow|no terminado|no terminada|no termine|no terminamos|no hemos terminado|no esta terminado|no esta listo|todavia no|aun no|volvemos manana|regresamos manana|seguimos manana|manana seguimos)\b`;
+const NOT_DONE_SRC = String.raw`\b(not done|not finished|not complete|not completed|not yet|still working|still going|need(?:s)? (?:another|one more) day|(?:come|coming) back tomorrow|back tomorrow|(?:haven'?t|have not|hasn'?t|has not) (?:finished|done|completed|been finished)|(?:isn'?t|is not|wasn'?t|was not|aren'?t|are not|ain'?t) (?:done|finished|complete|completed|ready)|(?:didn'?t|did not|couldn'?t|could not) (?:finish|complete|get (?:it )?done)|no terminado|no terminada|no termine|no termino|no terminamos|no terminaron|no lo (?:termine|terminamos|acabe|acabamos)|no acabamos|no acabe|no (?:he|hemos|ha|han) (?:terminado|acabado)|no esta (?:terminado|terminada|listo|lista|acabado)|todavia no|aun no|volvemos manana|regresamos manana|seguimos manana|manana seguimos)\b`;
 const NOT_DONE_G = new RegExp(NOT_DONE_SRC, "g");
-export const notDone = (body: string): boolean => new RegExp(NOT_DONE_SRC).test(norm(body));
+const straight = (s: string) => (s || "").replace(/[\u2018\u2019`\u00b4]/g, "'");
+export const notDone = (body: string): boolean => new RegExp(NOT_DONE_SRC).test(norm(straight(body)));
 // "done", "terminé", "all done" with no pictures: the job (or the day) is
 // finished. A short text that says only that; a question ("done?") or a
 // sentence about something else ("done with the kitchen, starting the
@@ -492,6 +493,9 @@ export function doneSaid(body: string): DoneSaid {
   const raw = (body || "").trim();
   const t = norm(raw).replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
   if (!t || raw.includes("?") || notDone(raw) || t.length > 40) return null;
+  // any no / not / yet in a text this short and it isn't a plain "done": "no, we didn't finish it",
+  // "haven't finished", "no lo acabamos". Those go to the office as words, never mark a job done
+  if (/\b(no|not|never|nunca|nada|todavia|aun|yet|falta|faltan)\b|n t\b/.test(t)) return null;
   if (/\b(starting|empezando|now|ahora|next|tomorrow|manana|with the|con el|con la)\b/.test(t) && !ALL_DONE.test(t)) return null;
   if (ALL_DONE.test(t)) return "all";
   if (!DONE_SAID.test(t)) return null;

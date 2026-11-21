@@ -115,8 +115,10 @@ export async function fileBatch(db: Db, b: Batch, t: Target, how = "office", kin
     status: "filed", photos: placed, how,
     pact_job_id: t.kind === "pact" ? t.id : null, release_id: t.kind === "rel" ? t.id : null,
   });
-  // off the job they were on (tried twice — a stale entry there would point at nothing)
-  if (was && !same && left.length && !(await db.attach(was, [], left))) await db.attach(was, [], left);
+  // off the job they were on (tried twice: a stale entry there would point at
+  // nothing). The same job too, when they were renamed onto the other pile:
+  // the old names are the files that moved
+  if (was && left.length && !(await db.attach(was, [], left))) await db.attach(was, [], left);
   return placed.length;
 }
 

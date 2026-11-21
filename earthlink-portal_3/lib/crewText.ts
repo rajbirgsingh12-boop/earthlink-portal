@@ -29,6 +29,8 @@ export type CrewTextInput = {
   lang?: string | null;             // the worker's language — "es" for Spanish, else English
   po?: string | null;               // a PACT job's PO number
   release?: string | null;          // a NYCHA release number
+  last?: string | null;             // a job that runs more than one day: its last work day (lib/workDays)
+  days?: number | null;             // …and how many work days that is
 };
 // the job's own number, the way the office and the partners say it. "PO" and
 // "release" stay as they are in Spanish — that is what everyone calls them.
@@ -46,12 +48,21 @@ export function crewText(t: CrewTextInput): string {
   const building = flat(t.building).replace(/[.\s]+$/, "");
   // "Apt 4B", "Apartment 4B", "Unit 4B", "#4B" — the label is put on here, once
   const apt = flat(t.apt).replace(/^(apt\.?|apartment|unit|#)\s*/i, "");
-  // the work's own last stop is kept ("Paint everything!" / a cut line's "…"); a period is added only where there is none
-  const work = flat(t.work).replace(/[.\s]+$/, "");
+  // the work's own last stop is kept ("Paint everything!" / a cut line's "…"); a period is added only where there is none.
+  // A dash typed into a PO ("Bedroom – plaster") reads as a comma in a text
+  const work = flat(t.work).replace(/\s*[\u2014\u2013]\s+|\s+[\u2014\u2013]\s*|\u2014/g, ", ").replace(/\u2013/g, "-").replace(/[.\s]+$/, "");
   const stop = /[!?…]$/.test(work) ? "" : ".";
   // a "move" to the same day is not a move — the old day is not repeated
   const moved = t.moved && t.moved.from && t.moved.from === t.moved.to ? { to: t.moved.to } : t.moved;
   const ref = jobRef(t);
+  // more than one day: "Friday, November 20 to Monday, November 23 (3 days)"
+  const days = Math.round(Number(t.days) || 1);
+  const span = (from: string | null | undefined, es: boolean): string => {
+    const a = longDay(from, es ? "es" : "en"), b = days > 1 ? longDay(t.last, es ? "es" : "en") : "";
+    if (!a) return "";
+    if (!b || t.last === from) return es ? `el ${a}` : `on ${a}`;
+    return es ? `del ${a} al ${b} (${days} días)` : `${a} to ${b} (${days} days)`;
+  };
   // "Van Dyke (370 Blake Avenue, Brooklyn, NY 11212), Apt 4B" — the building only when the street doesn't already name it
   const showBuilding = !!building && !sameText(building, street) && !(street && street.toLowerCase().includes(building.toLowerCase()));
   const place = building && street ? (showBuilding ? `${building} (${street})` : street) : street || building;
@@ -61,10 +72,11 @@ export function crewText(t: CrewTextInput): string {
     const hello = `Hola${first ? ` ${first}` : ""}, le habla Earth Link.`;
     if (moved) {
       const to = longDay(moved.to, "es"), from = longDay(moved.from, "es");
-      paras.push(`${hello} El trabajo${where ? ` en ${where}` : ""} se cambió ${to ? `al ${to}` : "a otro día"}.${from ? ` Antes era el ${from}.` : ""}`);
+      const more = days > 1 && t.last && t.last !== moved.to ? ` (${days} días, hasta el ${longDay(t.last, "es")})` : "";
+      paras.push(`${hello} El trabajo${where ? ` en ${where}` : ""} se cambió ${to ? `al ${to}${more}` : "a otro día"}.${from ? ` Antes era el ${from}.` : ""}`);
     } else {
-      const day = longDay(t.day, "es");
-      paras.push(`${hello} Tiene trabajo${day ? ` el ${day}` : ""}${where ? ` en ${where}` : ""}.${day ? "" : " El día se le avisará pronto."}${where ? "" : " La dirección se le enviará después."}`);
+      const day = span(t.day, true);
+      paras.push(`${hello} Tiene trabajo${day ? ` ${day}` : ""}${where ? ` en ${where}` : ""}.${day ? "" : " El día se le avisará pronto."}${where ? "" : " La dirección se le enviará después."}`);
     }
     if (work) paras.push(`El trabajo es: ${work}${stop}`);
     if (ref) paras.push(`Este trabajo es el ${ref}.`);
@@ -74,10 +86,11 @@ export function crewText(t: CrewTextInput): string {
   const hello = `Hi${first ? ` ${first}` : ""}, this is Earth Link.`;
   if (moved) {
     const to = longDay(moved.to), from = longDay(moved.from);
-    paras.push(`${hello} The job${where ? ` at ${where}` : ""} has moved to ${to || "a new day"}.${from ? ` It was on ${from}.` : ""}`);
+    const more = days > 1 && t.last && t.last !== moved.to ? ` (${days} days, through ${longDay(t.last)})` : "";
+    paras.push(`${hello} The job${where ? ` at ${where}` : ""} has moved to ${to ? `${to}${more}` : "a new day"}.${from ? ` It was on ${from}.` : ""}`);
   } else {
-    const day = longDay(t.day);
-    paras.push(`${hello} You are scheduled to work${day ? ` on ${day}` : ""}${where ? ` at ${where}` : ""}.${day ? "" : " The day will be set soon."}${where ? "" : " The address will follow."}`);
+    const day = span(t.day, false);
+    paras.push(`${hello} You are scheduled to work${day ? ` ${day}` : ""}${where ? ` at ${where}` : ""}.${day ? "" : " The day will be set soon."}${where ? "" : " The address will follow."}`);
   }
   if (work) paras.push(`Here is the work: ${work}${stop}`);
   if (ref) paras.push(`This job is ${ref}.`);

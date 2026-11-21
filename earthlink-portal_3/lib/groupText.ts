@@ -29,14 +29,14 @@ export function groupProblem(): string {
 export const groupsOn = (): boolean => !groupProblem();
 
 interface Api { ok: boolean; status: number; json: Record<string, unknown> }
-async function api(method: "GET" | "POST" | "DELETE", path: string, form?: Record<string, string | string[]>): Promise<Api> {
+async function api(method: "GET" | "POST" | "DELETE", path: string, form?: Record<string, string | string[]>, waitMs = 6_000): Promise<Api> {
   const basic = `Basic ${Buffer.from(`${env("TWILIO_ACCOUNT_SID")}:${env("TWILIO_AUTH_TOKEN")}`).toString("base64")}`;
   const body = new URLSearchParams();
   for (const [k, v] of Object.entries(form || {})) (Array.isArray(v) ? v : [v]).forEach((x) => body.append(k, x));
   try {
     const r = await fetch(`${convBase()}${path}`, {
       method, headers: { Authorization: basic, ...(form ? { "Content-Type": "application/x-www-form-urlencoded" } : {}) },
-      body: form ? body.toString() : undefined, cache: "no-store", signal: AbortSignal.timeout(6_000),
+      body: form ? body.toString() : undefined, cache: "no-store", signal: AbortSignal.timeout(waitMs),
     });
     const json = ((await r.json().catch(() => ({}))) || {}) as Record<string, unknown>;
     return { ok: r.ok, status: r.status, json };
@@ -126,6 +126,18 @@ export async function postToGroupStatus(sid: string, body: string): Promise<{ ok
   const r = await api("POST", `/v1/Conversations/${sid}/Messages`, { Author: PORTAL_IDENTITY, Body: body });
   lastError = r.ok ? "" : twilioWords(r);
   return { ok: r.ok, status: r.status };
+}
+// What the portal itself posted into a thread since a moment: the bodies of
+// its last few messages there, newest first. A post that timed out may
+// still have gone in, and the thread is the only place that knows; null
+// when the thread couldn't be read either. Short on purpose: it is asked
+// in the middle of a send that has its own time limit.
+export async function groupPostsSince(sid: string, sinceMs: number): Promise<string[] | null> {
+  const r = await api("GET", `/v1/Conversations/${sid}/Messages?Order=desc&PageSize=5`, undefined, 4_000);
+  if (!r.ok || !Array.isArray(r.json.messages)) return null;
+  return (r.json.messages as { author?: string; body?: string; date_created?: string }[])
+    .filter((m) => m.author === PORTAL_IDENTITY && (Date.parse(m.date_created || "") || 0) >= sinceMs)
+    .map((m) => String(m.body || ""));
 }
 // what a thread is about, kept on the thread itself: its people and the job
 // the last crew text in it was for — so a reply in it with no PO named

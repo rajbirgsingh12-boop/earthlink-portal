@@ -20,6 +20,7 @@ interface Photo { name: string; path: string }
 export interface Batch {
   id: string; employee_id?: string | null; from_phone?: string | null; body?: string | null; photos?: Photo[] | null;
   status: string; pact_job_id?: string | null; release_id?: string | null; created_at: string; note?: string | null;
+  how?: string | null;   // finished: the morning asked the crew "Finished?"; notdone: a worker's NOT DONE; words: anything else they texted
 }
 interface Spot { kind: "pact" | "rel"; id: string; label: string; sub: string }
 const LATELY_DAYS = 3;
@@ -56,7 +57,7 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
 
   const load = async () => {
     const since = new Date(Date.now() - LATELY_DAYS * 86_400_000).toISOString();
-    const cols = "id,employee_id,from_phone,body,photos,status,pact_job_id,release_id,created_at";
+    const cols = "id,employee_id,from_phone,body,photos,status,pact_job_id,release_id,created_at,how";
     // the waiting ones on their own: a busy few days of placed ones never push one off
     const [h, f, n0] = await Promise.all([
       sb().from("texted_photos").select(cols).eq("status", "held").order("created_at", { ascending: false }).limit(200),
@@ -208,13 +209,25 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
           </div>
         );
       })}
-      {replies.map((b) => (
-        <div key={b.id} className="anim-row border-t border-rulesoft py-2.5" data-reply={b.id}>
-          <div className="text-[14px]"><b>{who(b)}</b> texted “{(b.body || "").trim()}” · {when(b.created_at)}</div>
+      {replies.map((b) => {
+        const at = spots[b.pact_job_id || b.release_id || ""];
+        const job = at ? <> · <b>{at.label}</b>{at.sub ? <span className="text-inksoft"> · {at.sub}</span> : null}</> : null;
+        return (
+        <div key={b.id} className="anim-row border-t border-rulesoft py-2.5" data-reply={b.id} data-reply-how={b.how || undefined}>
+          {b.how === "finished"
+            // the morning's question to the crew, until someone answers (or the AFTER photos come in)
+            ? <div className="text-[14px]"><b className="text-alert">⏳ Finished?</b>{job} · {when(b.created_at)}</div>
+            : b.how === "notdone"
+              ? <div className="text-[14px]"><b className="text-alert">↩ Not finished</b>{job} · {who(b)} · {when(b.created_at)}</div>
+              : <div className="text-[14px]"><b>{who(b)}</b> texted “{(b.body || "").trim()}”{job} · {when(b.created_at)}</div>}
           {(b.note || "").trim() && <div className="text-[12px] text-inksoft">{(b.note || "").trim()}</div>}
-          <button type="button" className={`btn btn-ghost btn-sm mt-1.5${spin(`${b.id}:seen`)}`} onClick={() => act(b, { action: "seen" })} {...busyOn(`${b.id}:seen`)} data-seen>✓ Got it</button>
+          <div className="mt-1.5 flex flex-wrap gap-2">
+            {onShow && b.pact_job_id && (b.how === "finished" || b.how === "notdone") && <button type="button" className="btn btn-ghost btn-sm" onClick={() => onShow(b)} data-show-job>Open on the calendar</button>}
+            <button type="button" className={`btn btn-ghost btn-sm${spin(`${b.id}:seen`)}`} onClick={() => act(b, { action: "seen" })} {...busyOn(`${b.id}:seen`)} data-seen>✓ Got it</button>
+          </div>
         </div>
-      ))}
+        );
+      })}
       {held.map((b) => (
         <div key={b.id} className="anim-row border-t border-rulesoft py-2.5" data-held={b.id}>
           <div className="text-[14px]"><b>{who(b)}</b> texted {photosN((b.photos || []).length)} · {when(b.created_at)}</div>

@@ -31,7 +31,7 @@ export async function sendServerTexts(
   messages: { to: string; body: string; id?: string }[],
   token: string | null,
   opts?: { skipTexted?: boolean }
-): Promise<{ ok: boolean; status: number; configured?: boolean; sent?: number; skipped?: number; failed?: { to: string; error: string }[]; error?: string; grouped?: number; groupProblem?: string }> {
+): Promise<{ ok: boolean; status: number; configured?: boolean; sent?: number; skipped?: number; failed?: { to: string; error: string; maybe?: boolean }[]; error?: string; grouped?: number; groupProblem?: string }> {
   try {
     const res = await fetch("/api/text", {
       method: "POST",
@@ -49,13 +49,16 @@ export async function textMachineReady(): Promise<boolean> {
   return (await textMachine()).configured;
 }
 // …and whether photos texted back to it go on the job (then every text from
-// it ends asking for them)
-export async function textMachine(): Promise<{ configured: boolean; photosIn: boolean }> {
+// it ends asking for them), and whether a crew's texts go into one group
+// thread with the owner (then a send for the whole crew is one message
+// greeting them all, in every language the crew reads: lib/groupWords
+// threadPreview builds what that looks like)
+export async function textMachine(): Promise<{ configured: boolean; photosIn: boolean; group: boolean }> {
   try {
     const res = await fetch("/api/text");
-    const j = (await res.json()) as { configured?: boolean; photosIn?: boolean };
-    return { configured: !!j.configured, photosIn: !!j.configured && !!j.photosIn };
-  } catch { return { configured: false, photosIn: false }; }
+    const j = (await res.json()) as { configured?: boolean; photosIn?: boolean; group?: boolean };
+    return { configured: !!j.configured, photosIn: !!j.configured && !!j.photosIn, group: !!j.configured && !!j.group };
+  } catch { return { configured: false, photosIn: false, group: false }; }
 }
 
 // ---- the one way a crew gets texted ----
@@ -66,7 +69,7 @@ export async function textMachine(): Promise<{ configured: boolean; photosIn: bo
 import { sb } from "./supabase";
 export interface TextTarget { rowId: string; to: string; body: string; first: string; lang?: string | null }
 export type TextOutcome =
-  | { status: "sent"; sent: number; skipped: number; failed: { to: string; error: string }[]; message: string }
+  | { status: "sent"; sent: number; skipped: number; failed: { to: string; error: string; maybe?: boolean }[]; message: string }
   | { status: "fallback"; message: string; rowIds: string[] }
   | { status: "error"; message: string };
 export async function textRows(targets: TextTarget[], opts: { skipTexted?: boolean } = {}): Promise<TextOutcome> {
@@ -79,9 +82,13 @@ export async function textRows(targets: TextTarget[], opts: { skipTexted?: boole
     const sent = res.sent || 0, skipped = res.skipped || 0;
     // Twilio's own reason for the first one that failed: a trial account, a
     // number that isn't registered yet, a worker who texted STOP — none of
-    // those is fixed by checking the worker's number
-    const message = fails.length > 0
-      ? `Sent ${sent}, but ${fails.length} didn't go through. ${prettyPhone(fails[0].to)}: ${fails[0].error}`
+    // those is fixed by checking the worker's number. A thread post Twilio
+    // didn't answer in time may be on the crew's phones all the same
+    // (`maybe`): never "didn't go through" for that one, or the office sends it again
+    const sure = fails.filter((f) => !f.maybe);
+    const message = sure.length > 0
+      ? `Sent ${sent}, but ${sure.length} didn't go through. ${prettyPhone(sure[0].to)}: ${sure[0].error}${sure.length < fails.length ? ". Others may have gone: check the crew's thread before sending again" : ""}`
+      : fails.length > 0 ? `${sent ? `Sent ${sent}. ` : ""}${fails[0].error.charAt(0).toUpperCase()}${fails[0].error.slice(1)}`
       // never a ✓ when nothing went out — that is how a crew ends up never told
       : sent === 0 ? "Everyone here was already texted, nothing new went out"
       : `Sent ${sent} text${sent === 1 ? "" : "s"} ${res.grouped ? `into the crew's thread${res.grouped === 1 ? "" : "s"}` : "from the company number"} ✓${skipped ? ` (${skipped} already texted, skipped)` : ""}${res.groupProblem ? ` · no thread for this one: ${res.groupProblem}` : ""}`;

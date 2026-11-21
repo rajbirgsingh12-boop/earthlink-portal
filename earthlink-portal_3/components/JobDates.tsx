@@ -1,6 +1,7 @@
 "use client";
 import { useRef, useState } from "react";
 import { addDays, localISO, prettyDate } from "@/lib/docs";
+import { dayCount, lastWorkDay, MAX_WORK_DAYS } from "@/lib/workDays";
 
 // The days on a job, built for a business where the tenant doesn't open the
 // door: move it a day or a week, log a no-access visit with the reason and
@@ -9,6 +10,7 @@ import { addDays, localISO, prettyDate } from "@/lib/docs";
 // partner asks how many trips were made.
 export type DatedJob = {
   id: string; start_date?: string | null; finish_date?: string | null; notes?: string | null; work_done?: boolean;
+  work_days?: number | null;   // how many work days it runs from its start, Monday to Saturday (RUN_ME section 23)
 };
 export const MOVE_REASONS = ["No access, nobody home", "Tenant asked to move it", "Partner moved it", "Crew tied up elsewhere", "Weather", "Other"];
 // visits that ended at a closed door, counted off the notes
@@ -18,7 +20,7 @@ export const lastNote = (notes?: string | null) => (notes || "").trim().split("\
 
 const appendNote = (notes: string | null | undefined, line: string) => `${(notes || "").trim()}${(notes || "").trim() ? "\n" : ""}${line}`;
 
-export default function JobDates({ job, canEdit, onSave, showNotes = true, crew, onMoved }: {
+export default function JobDates({ job, canEdit, onSave, showNotes = true, crew, onMoved, onDays }: {
   job: DatedJob;
   canEdit: boolean;
   // may answer false when the save was refused: then nothing else happens
@@ -27,6 +29,8 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true, crew,
   // the crew on the job, when there is one: the Move it… box offers to text them the new day
   crew?: { names: string[]; told: boolean };
   onMoved?: (from: string, to: string) => Promise<void> | void;
+  // the number of days changed with a crew already told: text them the new days
+  onDays?: () => Promise<void> | void;
 }) {
   const [moving, setMoving] = useState(false);
   const [to, setTo] = useState("");
@@ -46,6 +50,17 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true, crew,
     try { await f(); } finally { savingNow.current = false; setSaving(false); }
   };
   const today = localISO(new Date());
+  // how many days the job runs: the crew sends BEFORE and AFTER photos every
+  // day, and it's marked work done on its last (a worker's NOT DONE adds one)
+  const n = dayCount(job.work_days);
+  const [daysChanged, setDaysChanged] = useState(false);
+  const setDays = (to: number) => once(async () => {
+    const next = Math.max(1, Math.min(MAX_WORK_DAYS, to));
+    if (next === n) return;
+    const ok = await onSave({ work_days: next });
+    if (ok !== false && crew?.told && crew.names.length && onDays) setDaysChanged(true);
+  });
+  const last = job.start_date ? lastWorkDay(job.start_date, n) : "";
   const trips = noAccessCount(job.notes);
   const base = job.start_date || today;
 
@@ -83,12 +98,25 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true, crew,
               onChange={(e) => canEdit && onSave({ finish_date: e.target.value })} />
           </label>
         )}
+        <span className="flex items-center gap-1.5 text-[11px] uppercase tracking-widest text-inksoft" data-work-days>Days
+          {canEdit && !job.work_done && <button type="button" className="btn btn-ghost btn-sm min-h-[44px] min-w-[44px]" aria-label="One day fewer" disabled={saving || n <= 1} onClick={() => setDays(n - 1)}>−</button>}
+          <span className="min-w-[1.5em] text-center font-mono text-[13px] normal-case tracking-normal text-ink">{n}</span>
+          {canEdit && !job.work_done && <button type="button" className="btn btn-ghost btn-sm min-h-[44px] min-w-[44px]" aria-label="One day more" disabled={saving || n >= MAX_WORK_DAYS} onClick={() => setDays(n + 1)}>+</button>}
+        </span>
+        {n > 1 && job.start_date && <span className="text-[12px] text-inksoft" data-work-span>{prettyDate(job.start_date)} to {prettyDate(last)}, Monday to Saturday</span>}
         {trips > 0 && <span className="chip text-alert">⛔ No access ×{trips}</span>}
         {!job.start_date && !job.work_done && <span className="chip text-inksoft">No day yet</span>}
         {canEdit && !job.work_done && (
           <button type="button" className={quick} aria-expanded={moving} onClick={() => (moving ? setMoving(false) : openMove())}>📅 Move it…</button>
         )}
       </div>
+      {daysChanged && crew && onDays && (
+        <div className="anim-open mt-2 flex flex-wrap items-center gap-2 text-[13px]">
+          <span>{crew.names.join(", ")} {crew.names.length === 1 ? "was" : "were"} told the old days.</span>
+          <button type="button" className={`btn btn-primary btn-sm min-h-[44px]${saving ? " btn-busy" : ""}`} disabled={saving} onClick={() => once(async () => { await onDays(); setDaysChanged(false); })}>📱 Text {crew.names.length === 1 ? crew.names[0] : "them"} the new days</button>
+          <button type="button" className="btn btn-ghost btn-sm min-h-[44px]" onClick={() => setDaysChanged(false)}>Not now</button>
+        </div>
+      )}
       {moving && (
         <div className="anim-open mt-2 rounded-sm border border-rulesoft bg-paper p-3">
           <div className="section-label mb-1.5">What happened?</div>

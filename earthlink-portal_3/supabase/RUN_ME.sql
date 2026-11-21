@@ -35,6 +35,9 @@
 -- up for later (19), photos the crew texts back to the
 -- company number land on the job (20), and a worker who
 -- texts "no" (nobody home) is sent their next job (21).
+-- Nov additions: a job's thread by text (22), and jobs that
+-- run more than one day, Monday to Saturday, with the crew
+-- asked the next morning when a job went quiet (23).
 -- ============================================================
 
 -- ---------- from upgrade_invoices_aging_docs.sql ----------
@@ -861,3 +864,51 @@ create trigger schedule_days_nobody_rebooked
 --     office's per-job card. (The PACT Schedule reads its marks for all jobs
 --     at once by created_at, which the table's own order serves.)
 create index if not exists texted_photos_job on texted_photos (pact_job_id, created_at desc) where pact_job_id is not null;
+
+-- 23) Jobs that take more than one day, and a job that isn't finished.
+--     work_days: how many days a PACT job runs from its start_date, Monday
+--     to Saturday (a Sunday is skipped). The office sets it on the job's
+--     card; a worker's NOT DONE adds the next work day by itself. The crew
+--     sends BEFORE and AFTER photos every day, and the job is marked work
+--     done only on its last day. checked_day: the day the morning run last
+--     looked at the job (texted the crew "day 2 of 3", or asked them
+--     "Finished?"), so the timer and an open portal on the same morning
+--     never text twice. told_day on a crew row: the day that worker was
+--     last told, so a job moved after they were told is texted as a move.
+--     Needs sections 14, 20 and 21.
+alter table pact_jobs add column if not exists work_days integer not null default 1;
+alter table pact_jobs add column if not exists checked_day text not null default '';
+do $$ begin
+  alter table pact_jobs add constraint pact_jobs_work_days_range check (work_days between 1 and 30);
+exception when duplicate_object then null; end $$;
+alter table schedule_days add column if not exists told_day text not null default '';
+update schedule_days set told_day = day where texted and told_day = '';
+create or replace function public.schedule_days_told() returns trigger
+language plpgsql as $$
+begin
+  if new.texted and (tg_op = 'INSERT' or not coalesce(old.texted, false)) then
+    new.told_day := new.day;
+  end if;
+  return new;
+end $$;
+drop trigger if exists schedule_days_told on schedule_days;
+create trigger schedule_days_told
+  before insert or update of texted on schedule_days
+  for each row execute function public.schedule_days_told();
+-- the work-done mark taken off (the calendar's stamp, the Billing tab, a
+-- worker's NOT DONE): its "ready to invoice" card goes with it
+create or replace function public.pact_job_undone() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if coalesce(old.work_done, false) and not coalesce(new.work_done, false) then
+    update texted_photos set status = 'seen' where pact_job_id = new.id and status = 'done';
+  end if;
+  return new;
+end $$;
+drop trigger if exists pact_job_undone on pact_jobs;
+create trigger pact_job_undone
+  after update of work_done on pact_jobs
+  for each row execute function public.pact_job_undone();
+-- the morning's "Finished?" question goes out once per job per last day
+create unique index if not exists texted_photos_one_ask on texted_photos (pact_job_id, day)
+  where how = 'finished' and day is not null;

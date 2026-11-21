@@ -17,7 +17,8 @@ import JobDates, { lastNote } from "@/components/JobDates";
 import Calendar, { type CalEvent, type CalView } from "@/components/Calendar";
 import CrewPanel from "@/components/CrewPanel";
 import TextedPhotos from "@/components/TextedPhotos";
-import { CAL_JOB_COLS, CREW_JOB_COLS, WORKER_COLS, WORKER_COLS_OLD, crewLine, crewMessageFor, crewState, offCalendar, siteOf, type CrewRow, type Worker } from "@/lib/pactCrew";
+import { CAL_JOB_COLS, CAL_JOB_COLS_OLD, CREW_JOB_COLS, WORKER_COLS, WORKER_COLS_OLD, crewLine, crewMessageFor, crewState, daysOfJob, offCalendar, siteOf, type CrewRow, type Worker } from "@/lib/pactCrew";
+import { addWorkDays } from "@/lib/workDays";
 import { textRows, stampRows } from "@/lib/notify";
 import { intakePoFile, addJobByHand } from "@/lib/pactIntake";
 import { loadPrices } from "@/lib/priceBook";
@@ -28,6 +29,7 @@ interface Job {
   id: string; partner: string; po_number?: string; job_number: string; address?: string; development?: string;
   property_unit?: string; description: string; work_done: boolean; canceled: boolean;
   start_date?: string; finish_date?: string; notes?: string; created_at?: string; priced?: boolean | null;
+  work_days?: number | null;
 }
 type DayRow = CrewRow;
 type Emp = Worker;
@@ -105,6 +107,9 @@ export default function PactCalendar() {
   const load = async () => {
     const fetchJobs = async () => {
       let res = await sb().from("pact_jobs").select(CAL_JOB_COLS).order("created_at", { ascending: false }) as { data: unknown; error: { message: string } | null };
+      if (res.error && /work_days|column|schema cache/i.test(res.error.message)) { // before RUN_ME section 23: every job is one day
+        res = await sb().from("pact_jobs").select(CAL_JOB_COLS_OLD).order("created_at", { ascending: false });
+      }
       if (res.error && /priced|column|schema cache/i.test(res.error.message)) { // before RUN_ME section 15: every job stays on
         res = await sb().from("pact_jobs").select(CREW_JOB_COLS).order("created_at", { ascending: false });
       }
@@ -309,10 +314,29 @@ export default function PactCalendar() {
       const e = empById.get(r.employee_id);
       const first = (e?.name || "").split(" ")[0];
       // told the old day → reads as a move; never told → the plain first text
-      return { rowId: r.id, to: e?.phone || "", body: await crewMessageFor(moved, first, r.description || "", r.texted ? { from, to } : undefined, e?.lang), first, lang: e?.lang };
+      const told = (r.told_day || "").trim() || (r.texted ? from : "");
+      return { rowId: r.id, to: e?.phone || "", body: await crewMessageFor(moved, first, r.description || "", told && told !== to ? { from: told, to } : undefined, e?.lang), first, lang: e?.lang };
     }));
     // the trigger clears the old stamps; clear them here too so the server
     // doesn't skip anyone where the trigger isn't in yet
+    await stampRows(rows.map((r) => r.id), false);
+    const out = await textRows(targets);
+    if (out.status === "fallback") {
+      setTimeout(async () => {
+        if (window.confirm(`Did the text${targets.length > 1 ? "s" : ""} send? OK marks ${targets.map((t) => t.first).join(", ")} TEXTED ✓`)) { await stampRows(out.rowIds); await load(); }
+      }, 600);
+    }
+    flash(out.message);
+    await load();
+  };
+  // the number of days changed after the crew was told: each one gets the job's days again
+  const textDays = async (j: Job) => {
+    const rows = crewOf(j);
+    const targets = await Promise.all(rows.map(async (r) => {
+      const e = empById.get(r.employee_id);
+      const first = (e?.name || "").split(" ")[0];
+      return { rowId: r.id, to: e?.phone || "", body: await crewMessageFor(j, first, r.description || "", undefined, e?.lang), first, lang: e?.lang };
+    }));
     await stampRows(rows.map((r) => r.id), false);
     const out = await textRows(targets);
     if (out.status === "fallback") {
@@ -336,10 +360,13 @@ export default function PactCalendar() {
   // a PO dragged to another day on the calendar itself. The crew rows follow
   // (RUN_ME section 14's trigger) and show as needing the new day; a crew
   // that was already told is offered a text right here.
-  const dragMove = async (e: CalEvent, iso: string) => {
+  const dragMove = async (e: CalEvent, iso0: string) => {
     const j = jobs.find((x) => `pact:${x.id}` === e.id);
     if (!j || !canEdit) return;
     const was = (j.start_date || "").trim();
+    // a job of more days, dragged by one of its later days: that day lands where it's dropped
+    const at = daysOfJob(j).indexOf(e.day);
+    const iso = at > 0 ? addWorkDays(iso0, -at) : iso0;
     if (was === iso) return;
     const line = `📅 Moved to ${prettyDate(iso)} on the calendar${was ? ` (was ${prettyDate(was)})` : ""}`;
     if (!(await save(j, { start_date: iso, notes: appendNote(j.notes, line) }))) return;
@@ -424,21 +451,28 @@ export default function PactCalendar() {
   };
 
   // ---- everything on the calendar: rebuilt only when the jobs, the crews, the names or the marks change ----
-  const events = useMemo<CalEvent[]>(() => list.filter((j) => (j.start_date || "").trim()).map((j) => {
+  // a job of more days is on each of its work days (Monday to Saturday), "day 2/3"
+  const events = useMemo<CalEvent[]>(() => list.filter((j) => (j.start_date || "").trim()).flatMap((j) => {
     const crew = rowsByJob.get(j.id) || [];
     const where = [(j.address || j.development || "").split(",")[0], j.property_unit && `Apt ${j.property_unit}`].filter(Boolean).join(" · ");
-    return {
-      id: `pact:${j.id}`, day: j.start_date!, kind: "pact" as const, done: j.work_done,
-      title: poOf(j) ? `PO ${poOf(j)}` : where || j.partner || "Job",
-      short: poOf(j) || (j.address || j.partner || "").split(",")[0],
+    const days = daysOfJob(j);
+    // its days are behind us and it isn't marked done: the crew is asked the next morning, the office sees it here
+    const unfinished = !j.work_done && crew.length > 0 && days.length > 0 && days[days.length - 1] < today;
+    return days.map((day, i) => ({
+      id: `pact:${j.id}`, day, kind: "pact" as const, done: j.work_done,
+      title: `${poOf(j) ? `PO ${poOf(j)}` : where || j.partner || "Job"}${days.length > 1 ? ` · day ${i + 1}/${days.length}` : ""}`,
+      short: `${poOf(j) || (j.address || j.partner || "").split(",")[0]}${days.length > 1 ? ` ${i + 1}/${days.length}` : ""}`,
       subtitle: [where, j.partner].filter(Boolean).join(" · "),
       people: crew.map((r) => (empById.get(r.employee_id)?.name || "").split(" ")[0]).filter(Boolean),
-      flag: nobody.has(j.id) ? "nobody home, needs a new day" : crewState(crew, j) === "not_told" ? "crew not told" : undefined,
-    };
-  }), [list, rowsByJob, empById, nobody]);
+      flag: nobody.has(j.id) ? "nobody home, needs a new day" : unfinished ? "not marked done" : crewState(crew, j) === "not_told" ? "crew not told" : undefined,
+    }));
+  }), [list, rowsByJob, empById, nobody, today]);
 
-  const card = (j: Job) => {
+  const card = (j: Job, iso?: string) => {
     const crew = crewOf(j);
+    const days = daysOfJob(j);
+    const dayN = iso ? days.indexOf(iso) + 1 : 0;
+    const unfinished = !j.work_done && crew.length > 0 && days.length > 0 && days[days.length - 1] < today;
     const state = crewState(crew, j);
     const names = crew.map((r) => firstName(r.employee_id)).filter(Boolean);
     const site = siteOf(j);
@@ -453,7 +487,9 @@ export default function PactCalendar() {
             <div className="max-w-[520px] truncate text-[12px] text-inksoft">{j.partner}{j.description ? ` · ${j.description}` : ""}</div>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {days.length > 1 && dayN > 0 && <span data-day-stamp><Stamp label={`DAY ${dayN} OF ${days.length}`} tone="work" /></span>}
             {nobody.has(j.id) && <span data-nobody-stamp><Stamp label="⚠ NOBODY HOME" tone="alert" /></span>}
+            {!nobody.has(j.id) && unfinished && <span data-unfinished-stamp><Stamp label="⚠ NOT MARKED DONE" tone="alert" /></span>}
             {/* priced but still ahead: it stays until its day has passed */}
             {j.priced && <Stamp label="PRICED" tone="ok" />}
             {/* the work-done flag: a ghost button until it's set, then the stamp (a tap takes it back off) */}
@@ -465,7 +501,7 @@ export default function PactCalendar() {
         </div>
         <div className="mt-2">
           <JobDates job={j} canEdit={canEdit} onSave={(p) => save(j, p as Partial<Job>)} showNotes={false}
-            crew={{ names, told: crew.some((r) => r.texted) }} onMoved={(from, to) => textMove(j, from, to)} />
+            crew={{ names, told: crew.some((r) => r.texted) }} onMoved={(from, to) => textMove(j, from, to)} onDays={() => textDays({ ...jobsRef.current.find((x) => x.id === j.id) || j })} />
           {/* the last note on one line; a tap unfolds the whole history */}
           {lastNote(j.notes) && (
             <>
@@ -513,15 +549,15 @@ export default function PactCalendar() {
   // a box to put any other job on the day; the ones with no day yet come
   // first, and a priced job that slipped off the calendar can be put back
   const dayPanel = (iso: string) => {
-    const pact = list.filter((j) => j.start_date === iso).sort((a, b) => Number(!!a.work_done) - Number(!!b.work_done) || byPo(a, b));
+    const pact = list.filter((j) => daysOfJob(j).includes(iso)).sort((a, b) => Number(!!a.work_done) - Number(!!b.work_done) || byPo(a, b));
     const aq = addQ.trim().toLowerCase();
     const pick = jobs
-      .filter((j) => j.start_date !== iso && !j.work_done)
+      .filter((j) => !daysOfJob(j).includes(iso) && !j.work_done)
       .filter((j) => matches(aq, j.partner, poOf(j), j.address, j.property_unit, j.description))
       .sort((a, b) => Number(!!(a.start_date || "").trim()) - Number(!!(b.start_date || "").trim()) || (b.created_at || "").localeCompare(a.created_at || ""));
     return (
       <div>
-        {pact.length > 0 && <div className="divide-y divide-rulesoft">{pact.map(card)}</div>}
+        {pact.length > 0 && <div className="divide-y divide-rulesoft">{pact.map((j) => card(j, iso))}</div>}
         {pact.length === 0 && <div className="empty m-3.5">Nothing on {prettyDate(iso)}.{canEdit ? " Put a PO on it below, or drag one here from another day." : ""}</div>}
         {canEdit && (
           <div className="border-t border-rulesoft p-3.5">
@@ -556,7 +592,7 @@ export default function PactCalendar() {
       </div>
     </div>
   );
-  const onCal = events.filter((e) => !e.done).length;
+  const onCal = new Set(events.filter((e) => !e.done).map((e) => e.id)).size; // a job of more days counts once
 
   return (
     <div>

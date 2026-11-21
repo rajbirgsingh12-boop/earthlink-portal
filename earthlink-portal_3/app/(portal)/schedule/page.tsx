@@ -25,7 +25,7 @@ import { cleanPhone, smsHref, sendServerTexts, textMachineReady, textRows, stamp
 import { normText, saveWorkerLang } from "@/lib/pactCrew";
 import { crewText, langOf, LANG_LABEL, type Lang } from "@/lib/crewText";
 import { spanishKnown, spanishNow, spanishWork } from "@/lib/spanish";
-import { goesOnItsOwn, isLate, isQueued, prettyWhen, queueRows, sendDueNow, unqueueRows } from "@/lib/sendLater";
+import { dayPassed, goesOnItsOwn, isLate, isQueued, prettyWhen, queuedTooLate, queueRows, sendDueNow, sendLaterOpen, TOO_LATE_WORDS, unqueueRows } from "@/lib/sendLater";
 import LangToggle from "@/components/LangToggle";
 
 interface Emp { id: string; name: string; trade: string; active?: boolean; phone?: string | null; lang?: string | null; }
@@ -39,6 +39,8 @@ const plain = (s: string) => s.replace(/\s+[\u2014\u2013]\s+/g, ": ").replace(/[
 const SAVE_FAILED = "Couldn't save. Check your signal and try again.";
 const upgradeMsg = "This day can't load until the database update is run (Settings → System check)";
 const addrUpgradeMsg = "The address can't be saved until the database update is run (Settings → System check)";
+// a day before today (New York): its crew is not texted any more
+const PASSED_WORDS = "This day has passed. Put the release on a day ahead to text the crew";
 
 // the crew, the releases and the contracts as last seen on this device: painted
 // at once on the next open, replaced by the database's answer one round trip later
@@ -265,6 +267,8 @@ export default function Schedule() {
   // company number set up the texts go out silently from that number;
   // otherwise it opens a group text on this phone.
   const textCrew = async (rel: RelRow) => {
+    // never a text about a day that has gone by (the server holds the same line)
+    if (dayPassed(day)) { flash(PASSED_WORDS); return; }
     const assigned = rows.filter((x) => x.release_id === rel.id);
     const targets = assigned
       .map((row) => ({ row, emp: emps.find((e) => e.id === row.employee_id) }))
@@ -436,6 +440,8 @@ export default function Schedule() {
         const q = addQ.trim().toLowerCase();
         const match = emps.filter((e) => !inCard.has(e.id)).filter((e) => matches(q, e.name));
         const contract = contracts.find((x) => x.id === rel.contract_id);
+        // a day gone by: its crew is history, nothing on it is texted
+        const passed = dayPassed(day);
         return (
           <div key={rel.id} className="card mb-3 p-3.5" data-rel-card={rel.id}>
             <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
@@ -473,16 +479,19 @@ export default function Schedule() {
                     flash(`${first} gets texts in ${LANG_LABEL[l]}`);
                   }} />
                   {row.texted && <Stamp label="TEXTED ✓" tone="ok" />}
-                  {isQueued(row) && <Stamp label={`${isLate(row) ? "STILL WAITING · " : "GOES OUT "}${prettyWhen(row.send_at)}`} tone={isLate(row) ? "alert" : "work"} />}
+                  {isQueued(row) && (queuedTooLate(row, day)
+                    // set up for after the morning of its day: it would reach the crew too late, so it says so
+                    ? <Stamp label={`TOO LATE · ${prettyWhen(row.send_at)}`} tone="alert" />
+                    : <Stamp label={`${isLate(row) ? "STILL WAITING · " : "GOES OUT "}${prettyWhen(row.send_at)}`} tone={isLate(row) ? "alert" : "work"} />)}
                   {!row.texted && !isQueued(row) && <Stamp label="NOT TEXTED" tone="mute" />}
                   {!ok && <span className="text-[12px] text-inksoft">no number in the crew list</span>}
                   <span className="ml-auto flex items-center gap-1">
-                    {ok && !machine && (
+                    {ok && !machine && !passed && (
                       // their text opens on this phone; the stamp waits for the person to say it went
                       <a className="btn-link text-inksoft" href={smsHref(emp.phone || "", msgFor(rel, rel.id, first, emp.lang))}
                         onClick={() => setTimeout(() => { if (window.confirm(`Did the text to ${first} send? OK stamps TEXTED ✓`)) markTexted(row.id); }, 600)}>Resend</a>
                     )}
-                    {ok && machine && canEdit && (
+                    {ok && machine && canEdit && !passed && (
                       <button type="button" className="btn-link text-inksoft"
                         onClick={async () => {
                           const res = await sendServerTexts(
@@ -521,10 +530,13 @@ export default function Schedule() {
             {canEdit && addFor !== rel.id && (() => {
               const waiting = assigned.filter((r) => isQueued(r));
               const late = waiting.length > 0 && isLate(waiting[0]);
+              // one set up for a time the day's rule no longer allows: a warning, not a promise
+              const tooLate = waiting.some((r) => queuedTooLate(r, day));
               const setUp = async (t: Date) => {
                 const ids = assigned.filter((r) => !r.texted || isQueued(r)).map((r) => r.id);
                 if (ids.length === 0) { flash("Everyone here has already been texted"); return; }
-                const bad = await queueRows(ids, t);
+                // the day's rule (lib/sendLater): nothing set for after the morning of the day
+                const bad = await queueRows(ids, t, day);
                 if (bad) { flash(bad); return; }
                 setLaterFor(null);
                 flash(`${ids.length === 1 ? "The text goes" : `${ids.length} texts go`} out ${prettyWhen(t.toISOString())}`);
@@ -533,27 +545,30 @@ export default function Schedule() {
               return (
               <>
               <CardToolbar className="mt-2"
-                primary={assigned.length > 0 ? (
+                primary={assigned.length > 0 && passed ? (
+                  // the day is history: a note for anyone never told, nothing to tap
+                  assigned.some((r) => !r.texted) ? <span className="text-[13px] text-inksoft" data-day-passed>{PASSED_WORDS}.</span> : undefined
+                ) : assigned.length > 0 ? (
                   <button type="button" className={`btn btn-primary${sending === rel.id ? " btn-busy" : ""}`} aria-busy={sending === rel.id || undefined} disabled={sending === rel.id} onClick={() => textCrew(rel)}>
                     {assigned.length === 1 ? "📱 Text worker" : `📱 Text crew (${assigned.length})`}
                   </button>
                 ) : undefined}
                 secondary={<>
                   <button type="button" className="btn btn-ghost" onClick={() => { setAddFor(rel.id); setAddQ(""); }}>Add worker</button>
-                  {machine && assigned.length > 0 && laterFor !== rel.id && (
+                  {machine && assigned.length > 0 && laterFor !== rel.id && sendLaterOpen(day) && (
                     <button type="button" className="btn btn-ghost" data-later={rel.rel_number} onClick={() => setLaterFor(rel.id)}>Send it later…</button>
                   )}
                 </>} />
               {waiting.length > 0 && (
                 <div className="anim-open mt-2 flex flex-wrap items-center gap-2 rounded-sm border border-rulesoft bg-white px-3 py-2 text-[13px]" data-later-waiting={rel.rel_number}>
-                  <span>{late ? "⚠ " : "📅 "}{waiting.length === 1 ? "A text is" : `${waiting.length} texts are`} set to go out {prettyWhen(waiting.map((r) => r.send_at || "").sort()[0])}.{late ? " It hasn't gone yet." : ""}</span>
+                  <span>{late || tooLate ? "⚠ " : "📅 "}{waiting.length === 1 ? "A text is" : `${waiting.length} texts are`} set to go out {prettyWhen(waiting.map((r) => r.send_at || "").sort()[0])}.{tooLate ? ` ${TOO_LATE_WORDS}.` : late ? " It hasn't gone yet." : ""}</span>
                   <span className="ml-auto flex items-center gap-1">
-                    <button type="button" className="btn-link text-inksoft" disabled={sending === rel.id} onClick={() => textCrew(rel)}>Send it now</button>
+                    {!passed && <button type="button" className="btn-link text-inksoft" disabled={sending === rel.id} onClick={() => textCrew(rel)}>Send it now</button>}
                     <button type="button" className="btn-link text-alert" onClick={async () => { const bad = await unqueueRows(waiting.map((r) => r.id)); if (bad) { flash(bad); return; } flash("The text that was set up is called off"); loadDay(day); }}>Call it off</button>
                   </span>
                 </div>
               )}
-              {laterFor === rel.id && <SendLaterPicker dataAttr="data-later-picker" onItsOwn={onItsOwn} onCancel={() => setLaterFor(null)} onPick={(iso) => void setUp(new Date(iso))} />}
+              {laterFor === rel.id && <SendLaterPicker dataAttr="data-later-picker" day={day} onItsOwn={onItsOwn} onCancel={() => setLaterFor(null)} onPick={(iso) => void setUp(new Date(iso))} />}
               </>
               );
             })()}

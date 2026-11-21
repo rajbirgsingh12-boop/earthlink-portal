@@ -13,8 +13,9 @@
 // never cost the worker theirs); what the office reads is finished last.
 import {
   ackText, coworkerText, movedUpNote, nextText, nobodyNote, noNextText, noMoveUpText, notTodayText, askWhichText, hintText, toldOfficeText, shortDay,
-  bareNo, numbersIn, whichMissed, whichNext, LOOK_AHEAD_DAYS, SAME_DOOR_MS, DOOR_HOURS, MOVE_UP_UNTIL, type DayJob, type Next,
+  bareNo, byAddress, numbersIn, whichMissed, whichNext, LOOK_AHEAD_DAYS, SAME_DOOR_MS, DOOR_HOURS, MOVE_UP_UNTIL, type DayJob, type Next,
 } from "./noAccess";
+import { workDaysOf } from "./workDays";
 import { dayMinus, pactKey, relKey } from "./smsIn";
 import { dueBody, dueWork, type DueJob } from "./dueText";
 import { askClaudeSpanish, spanishWorkServer } from "./smartTranslate";
@@ -26,9 +27,9 @@ import type { SfLine } from "./measure";
 
 export interface FlowEmp { id: string; name?: string | null; phone?: string | null; lang?: string | null; active?: boolean | null }
 interface Row { id: string; day: string; employee_id: string; pact_job_id?: string | null; release_id?: string | null; texted?: boolean | null; texted_at?: string | null; description?: string | null; address?: string | null }
-interface PJob extends DueJob { id: string; notes?: string | null; items?: SfLine[] | null }
-// a PACT job's next-job text ends with its own two steps (before photos, after photos)
-const askFor = (j: PJob | undefined, lang?: string | null) => (j ? jobAsk(lang, Array.isArray(j.items) ? j.items : []) : "");
+interface PJob extends DueJob { id: string; notes?: string | null; items?: SfLine[] | null; work_days?: number | null }
+// a PACT job's next-job text ends with its own two steps (before photos, after photos; every day on a job of more days)
+const askFor = (j: PJob | undefined, lang?: string | null) => (j ? jobAsk(lang, Number(j.work_days) || 1) : "");
 interface Rel { id: string; rel_number?: string | null; location?: string | null; address?: string | null; canceled?: boolean; notes?: string | null }
 interface Mark { id: string; pact_job_id?: string | null; release_id?: string | null; created_at?: string | null; status?: string | null; note?: string | null; employee_id?: string | null; how?: string | null }
 
@@ -49,8 +50,9 @@ const jobOfMark = (n: Mark) => n.pact_job_id || n.release_id || "";
 
 export type FlowResult = { handled: false } | { handled: true; reply: string; missed?: DayJob };
 
-// crew rows, a few workers at once, from today to two weeks out — newest
-// columns first, older databases' after
+// crew rows, a few workers at once, up to two weeks out (from further back
+// than today: a PACT job of more days has its crew row on its first day),
+// newest columns first, older databases' after
 async function rowsFor(db: Db, empIds: string[], from: string, to: string): Promise<Row[]> {
   if (!empIds.length) return [];
   const q = (cols: string) => db.get<Row>(`schedule_days?employee_id=in.(${empIds.join(",")})&day=gte.${from}&day=lte.${to}&select=${cols}&order=day&limit=1000`);
@@ -63,6 +65,11 @@ async function rowsFor(db: Db, empIds: string[], from: string, to: string): Prom
 export async function nobodyFlow(db: Db, o: {
   emp: FlowEmp; emps: FlowEmp[]; body: string; from: string; sid: string; now: Date;
   proof?: (dir: string) => Promise<Photo[]>;   // the pictures that came with the text (the door, say), stored in that folder
+  // a plain NO that came with pictures: only a door they haven't been through
+  // today counts (pictures of the job they're working on go on it as usual)
+  photosIn?: boolean;
+  // "NO 2205 Linden": a door only when the number is one of today's (the house, the apartment, the PO)
+  candidate?: boolean;
   say?: (to: string, body: string, who?: string) => Promise<boolean>;   // how the answer goes back (into the thread it came from, say); a plain text to them otherwise
 }): Promise<FlowResult> {
   const { emp, now } = o;
@@ -79,7 +86,10 @@ export async function nobodyFlow(db: Db, o: {
     const pIds = ids(rows.map((r) => r.pact_job_id)).filter((id) => !jobOf.has(id));
     const rIds = ids(rows.map((r) => r.release_id)).filter((id) => !relOf.has(id));
     const [pj, rl] = await Promise.all([
-      pIds.length ? db.get<PJob>(`pact_jobs?id=in.(${pIds.join(",")})&select=id,po_number,job_number,address,development,property_unit,description,start_date,canceled,work_done,notes,items`) : Promise.resolve({ ok: true, rows: [] as PJob[] }),
+      pIds.length
+        ? db.get<PJob>(`pact_jobs?id=in.(${pIds.join(",")})&select=id,po_number,job_number,address,development,property_unit,description,start_date,canceled,work_done,notes,items,work_days`)
+          .then((x) => (x.ok ? x : db.get<PJob>(`pact_jobs?id=in.(${pIds.join(",")})&select=id,po_number,job_number,address,development,property_unit,description,start_date,canceled,work_done,notes,items`)))
+        : Promise.resolve({ ok: true, rows: [] as PJob[] }),
       rIds.length ? db.get<Rel>(`releases?id=in.(${rIds.join(",")})&select=id,rel_number,location,address,canceled,notes`) : Promise.resolve({ ok: true, rows: [] as Rel[] }),
     ]);
     pj.rows.forEach((j) => jobOf.set(j.id, j));
@@ -91,19 +101,20 @@ export async function nobodyFlow(db: Db, o: {
       if (r.pact_job_id) {
         const j = jobOf.get(r.pact_job_id);
         // a canceled or finished job isn't anyone's next job; a crew row left
-        // on another day than its job's is stale
+        // on another day than its job's is stale. A job of more days is on
+        // each of its work days from today on
         if (!j || j.canceled || j.work_done || (j.start_date || "") !== r.day) continue;
-        out.push({ ...pactKey(j), day: r.day, rowIds: [r.id] });
+        for (const d of workDaysOf(j.start_date, j.work_days)) if (d >= today) out.push({ ...pactKey(j), day: d, rowIds: [r.id] });
       } else if (r.release_id) {
         const x = relOf.get(r.release_id);
-        if (!x || x.canceled) continue;
+        if (!x || x.canceled || r.day < today) continue;
         // named by the street its crew text sent: the one typed on the row, else the release's own
         out.push({ ...relKey({ ...x, address: (r.address || "").trim() || x.address }), day: r.day, rowIds: [r.id] });
       }
     }
     return out;
   };
-  const rows = await rowsFor(db, [emp.id], today, lastDay);
+  const rows = await rowsFor(db, [emp.id], dayMinus(today, 31), lastDay);
   await loadJobs(rows);
   const jobs = dayJobs(rows);
   const rowOf = new Map(rows.map((r) => [r.id, r]));
@@ -126,6 +137,16 @@ export async function nobodyFlow(db: Db, o: {
   const lastMine = Math.max(0, ...mine.map(at));
   // the last thing we texted them was "got your photos", within half an hour
   const answerToPhotos = lastPhotos > lastMine && now.getTime() - lastPhotos < 30 * 60_000;
+  // the jobs the portal itself just sent them on to after a door (they can't be there yet)
+  const justSent = new Set(ids(mine.filter((n) => n.status === "note" && jobOfMark(n) && now.getTime() - at(n) < SAME_DOOR_MS).map(jobOfMark)));
+
+  // "NO 2205 Linden": a door only when it names one of today's
+  const quietUnlessDoor = !!o.photosIn || !!o.candidate;
+  if (o.candidate) {
+    const todayJobs = jobs.filter((j) => j.day === today);
+    const nums = numbersIn(o.body);
+    if (!todayJobs.some((j) => j.keys.some((k) => nums.includes(k))) && !byAddress(o.body, todayJobs).length) return { handled: false };
+  }
   // a door the other worker reported in the last twenty minutes, that this
   // worker hasn't had an answer about since
   const sameDoor = new Set(ids(notices.filter((n) => n.employee_id !== emp.id && now.getTime() - at(n) < SAME_DOOR_MS && lastMine < at(n)).map(jobOfMark)));
@@ -142,22 +163,25 @@ export async function nobodyFlow(db: Db, o: {
 
   // ---- not a door: the night, or a plain "no" answering a text about a later day ----
   if (hour < DOOR_HOURS.from || hour >= DOOR_HOURS.to) {
-    await tellOffice(`Texted at ${nyTime(now)} — after hours, so nothing was changed`);
+    if (quietUnlessDoor) return { handled: false };
+    await tellOffice(`Texted at ${nyTime(now)}, after hours, so nothing was changed`);
     return { handled: true, reply: toldOfficeText(lang) };
   }
   if (bare && !numbersIn(o.body).length) {
     const told = rows.filter((r) => r.day > today && r.texted_at && now.getTime() - Date.parse(r.texted_at) < 3 * 3_600_000)
       .sort((a, b) => Date.parse(b.texted_at || "") - Date.parse(a.texted_at || ""))[0];
-    if (told && Date.parse(told.texted_at || "") > Math.max(lastMine, lastPhotos)) {
+    if (told && Date.parse(told.texted_at || "") > Math.max(lastMine, lastPhotos) && !quietUnlessDoor) {
       // it could be about that text, or about a door today: the office hears
       // it either way, and a worker with a door open today is told how to say so
-      await tellOffice(`Texted “${o.body.trim()}” after the text about ${shortDay(told.day)} — nothing was changed`);
+      await tellOffice(`Texted “${o.body.trim()}” after the text about ${shortDay(told.day)}, so nothing was changed`);
       const open = jobs.filter((j) => j.day === today && !flagged.has(j.id) && !visited.has(j.id));
       return { handled: true, reply: open.length ? `${toldOfficeText(lang)} ${hintText(open, lang)}` : toldOfficeText(lang) };
     }
   }
 
-  const m = whichMissed({ body: o.body, today, jobs, flagged, visited, sameDoor, answerToPhotos });
+  const m = whichMissed({ body: o.body, today, jobs, flagged, visited, sameDoor, justSent, answerToPhotos });
+  // with pictures: only a door they haven't sent pictures from today
+  if (quietUnlessDoor && (m.kind !== "missed" || (o.photosIn && visited.has(m.job.id)))) return { handled: false };
   if (m.kind === "skip") {
     // with a number it's a photo fix, which /api/sms-in does; without one,
     // say how a door is reported, in case that's what they meant
@@ -168,8 +192,12 @@ export async function nobodyFlow(db: Db, o: {
     return { handled: true, reply: hintText(open, lang) };
   }
   if (m.kind === "ask") { await remember(); return { handled: true, reply: askWhichText(m.options, lang) }; }
-  if (m.kind === "not_today") { await tellOffice(`Said nobody home at ${m.number} — not a job of theirs today`); return { handled: true, reply: notTodayText(m.number, lang) }; }
-  if (m.kind === "nothing_today") { await tellOffice("No job of theirs today, so nothing was changed"); return { handled: true, reply: toldOfficeText(lang) }; }
+  if (m.kind === "not_today") { await tellOffice(`Said nobody home at ${m.number}, not a job of theirs today`); return { handled: true, reply: notTodayText(m.number, lang) }; }
+  if (m.kind === "nothing_today") {
+    const any = jobs.some((j) => j.day === today) || visited.size > 0;
+    await tellOffice(any ? "Sent photos from every job of theirs today, so nothing was changed" : "No job of theirs today, so nothing was changed");
+    return { handled: true, reply: toldOfficeText(lang) };
+  }
 
   const missed = m.job;
   // ---- claim the door: one notice per job per day. The database refuses a
@@ -194,7 +222,19 @@ export async function nobodyFlow(db: Db, o: {
 
   // ---- their next job ----
   const flaggedOthers = new Set([...flagged].filter((id) => id !== missed.id));
-  const next: Next = whichNext({ today, jobs, missed, flagged: flaggedOthers, visited, lastDay, moveUp: hour < MOVE_UP_UNTIL });
+  // who was at this door with them: a PACT job's whole crew, a release's crew that day
+  const doorRows = (await db.get<Row>(`schedule_days?${missed.kind === "pact" ? `pact_job_id=eq.${missed.id}` : `release_id=eq.${missed.id}&day=eq.${today}`}&select=id,employee_id`)).rows;
+  const atDoor = new Set([emp.id, ...doorRows.map((r) => r.employee_id)]);
+  // a later PACT job moves up only with its whole crew: never when someone on
+  // it wasn't at this door (they'd be moved without being told), and never one
+  // already under way (its first day has passed)
+  const later = ids(jobs.filter((j) => j.kind === "pact" && j.day > today).map((j) => j.id));
+  const stay = new Set<string>(later.filter((id) => (jobOf.get(id)?.start_date || "") < today));
+  if (later.length) {
+    const crew = (await db.get<{ pact_job_id: string; employee_id: string }>(`schedule_days?pact_job_id=in.(${later.join(",")})&select=pact_job_id,employee_id`)).rows;
+    for (const r of crew) if (!atDoor.has(r.employee_id)) stay.add(r.pact_job_id);
+  }
+  const next: Next = whichNext({ today, jobs, missed, flagged: flaggedOthers, visited, lastDay, moveUp: hour < MOVE_UP_UNTIL, stay });
   const nj = next.kind === "none" ? null : next.job;
   const from = next.kind === "move_up" ? next.from : "";
   // the work line in each reader's language — Claude's Spanish once per line,
@@ -205,9 +245,10 @@ export async function nobodyFlow(db: Db, o: {
     if (!spanish.has(raw)) spanish.set(raw, spanishWorkServer(raw, (t) => askClaudeSpanish(t, 5_000)));
     return spanish.get(raw)!;
   };
-  const late = hour >= MOVE_UP_UNTIL;
+  // too late in the day to move one up, and there is one later on: it stays on its day
+  const late = hour >= MOVE_UP_UNTIL && whichNext({ today, jobs, missed, flagged: flaggedOthers, visited, lastDay, moveUp: true, stay }).kind === "move_up";
   let nextMsg = late ? noMoveUpText(lang) : noNextText(lang);
-  let summary = late ? `No other job for ${first(emp)} today (too late in the day to move one up)` : `No other job for ${first(emp)} — told to call the office`;
+  let summary = late ? `No other job for ${first(emp)} today (too late in the day to move one up)` : `No other job for ${first(emp)}, told to call the office`;
   const job = nj?.kind === "pact" ? jobOf.get(nj.id) : undefined;
   const rel = nj?.kind === "rel" ? relOf.get(nj.id) : undefined;
   const moved = next.kind === "move_up" ? { from, to: today } : null;
@@ -231,14 +272,15 @@ export async function nobodyFlow(db: Db, o: {
   }
   if (nj && (next.kind === "today" || movedOk)) {
     const row = rowOf.get(nj.rowIds[0])!;
-    const crew = dueBody({ ...row, day: today }, { emp, job: job ? { ...job, start_date: today } : null, rel, work: await workFor(dueWork(row, job), lang), moved });
+    // (a job moved up starts today; one already under way keeps its own days)
+    const crew = dueBody({ ...row, day: today }, { emp, job: job ? (next.kind === "move_up" ? { ...job, start_date: today } : job) : null, rel, work: await workFor(dueWork(row, job), lang), moved });
     nextMsg = nextText(crew, lang, true, nj.label, askFor(job, lang));
     summary = next.kind === "today"
       ? `Sent ${first(emp)} on to ${nj.label}, their other job today`
       : `Moved ${nj.label} up from ${shortDay(from)} and sent ${first(emp)}`;
   } else if (nj) {
     nextMsg = noNextText(lang);
-    summary = `Couldn't move ${nj.label} up — ${first(emp)} told to call the office`;
+    summary = `Couldn't move ${nj.label} up, ${first(emp)} told to call the office`;
   }
 
   // ---- the worker's answer, now — before anything that could run long ----
@@ -246,7 +288,10 @@ export async function nobodyFlow(db: Db, o: {
   let replied = false;
   if (twilioConfigured() && cleanPhone(o.from)) replied = o.say ? await o.say(cleanPhone(o.from), reply, first(emp)) : (await sendTexts([{ to: cleanPhone(o.from), who: (emp.name || "").trim() || undefined, body: reply }])).sent > 0;
   // they've been told: the row says so (and a text set for later is off)
-  if (nj && (next.kind === "today" || movedOk)) {
+  const again = already && !!nj && justSent.has(nj.id);
+  if (nj && (next.kind === "today" || movedOk) && !again) {
+    // on their record: the job they were just sent to (their next "no" in the next few minutes isn't about it)
+    await db.insert("texted_photos", { employee_id: emp.id, from_phone: o.from, body: "", status: "note", how: "nobody", photos: [], pact_job_id: nj.kind === "pact" ? nj.id : null, release_id: nj.kind === "rel" ? nj.id : null });
     const told = job && next.kind === "move_up"
       ? `pact_job_id=eq.${job.id}&employee_id=eq.${emp.id}&day=eq.${today}`
       : `id=in.(${nj.rowIds.join(",")})`;
@@ -262,12 +307,11 @@ export async function nobodyFlow(db: Db, o: {
   // up is their own next job too, and they haven't texted about it themselves ----
   const sentTo: string[] = [];
   if (nj && next.kind === "move_up" && movedOk && !already) {
-    const doorRows = (await db.get<Row>(`schedule_days?${missed.kind === "pact" ? `pact_job_id=eq.${missed.id}` : `release_id=eq.${missed.id}`}&day=eq.${today}&select=id,employee_id`)).rows;
     const others = ids(doorRows.map((r) => r.employee_id)).filter((id) => id !== emp.id);
     if (others.length) {
       // what's known of them right now (a text of their own in flight counts)
       const theirMarks = (await db.get<Mark>(`texted_photos?how=eq.nobody&employee_id=in.(${others.join(",")})&created_at=gte.${since}&select=employee_id,created_at`)).rows.filter(todays);
-      const theirRows = await rowsFor(db, others, today, lastDay);
+      const theirRows = await rowsFor(db, others, dayMinus(today, 31), lastDay);
       await loadJobs(theirRows);
       const out: { to: string; id: string; body: string; who?: string }[] = [];
       for (const cid of others) {
@@ -295,8 +339,8 @@ export async function nobodyFlow(db: Db, o: {
           sentTo.push(first(e));
           await db.patch(`schedule_days?id=eq.${msg.id}`, { texted: true });
           await db.patch(`schedule_days?id=eq.${msg.id}`, { texted_at: now.toISOString() });
-          // on their record: their next "no" is about the job they were just sent to
-          if (e) await db.insert("texted_photos", { employee_id: e.id, from_phone: msg.to, body: "", status: "note", how: "nobody", photos: [] });
+          // on their record: the job they were just sent to (their next "no" in the next few minutes isn't about it)
+          if (e) await db.insert("texted_photos", { employee_id: e.id, from_phone: msg.to, body: "", status: "note", how: "nobody", photos: [], pact_job_id: nj.kind === "pact" ? nj.id : null, release_id: nj.kind === "rel" ? nj.id : null });
         };
         // the way the worker's own answer went (into the thread, say), or a text to each
         if (o.say) { for (const msg of out) if (await o.say(msg.to, msg.body, msg.who)) await told(msg); }

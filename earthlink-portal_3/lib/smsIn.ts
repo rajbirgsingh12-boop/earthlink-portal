@@ -35,11 +35,14 @@ export const phoneKey = (s?: string | null): string => {
   return d.length >= 11 ? d : "";
 };
 // A text with no pictures that is just a job's number ("220011", "PO 220011",
-// "wrong job, it's PO 220011") — the worker answering "which job?" or fixing
-// one. A longer message that happens to name a PO ("tomorrow I'm at PO
-// 116900, need the key") is talk, and moves nothing that was already placed.
+// "wrong job, it's PO 220011", "220011 thanks"): the worker answering "which
+// job?" or fixing one. The whole text has to be that. A text that names a PO
+// on the way to saying something else ("On my way to PO 116843", "PO 220011
+// done") is talk, and moves nothing that was already placed.
+const FIX_LEAD = String.raw`(?:wrong(?: job| one| po)?|it'?s|it is|its|is|the right one is|right one is|the right po is|correct (?:po|one|job) is|should be|es el|es|era el|el correcto es|trabajo equivocado|equivocado|equivocada)`;
+const FIX_ONLY = new RegExp(String.raw`^(?:${FIX_LEAD}[\s,:.\-]*)*(?:(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:\-]?\s*|#\s*)?\d{1,12}[\s.!]*(?:(?:thanks|thank you|thx|ty|gracias)[\s.!]*)?$`);
 export const justANumber = (body: string): boolean =>
-  refsIn(body).length > 0 && (body || "").replace(/\s+/g, " ").trim().length <= 32;
+  refsIn(body).length > 0 && FIX_ONLY.test((body || "").toLowerCase().replace(/[\u2018\u2019`]/g, "'").replace(/\s+/g, " ").trim());
 
 // ---- the pictures that came with the text ----
 const EXT: Record<string, string> = {
@@ -70,17 +73,17 @@ export function mediaIn(get: (k: string) => string | null): { photos: MediaIn[];
 // "release 12", "rel#12"), when it is long enough to be a PO (5+ digits), or
 // when it is the whole text ("116843", "#12"). "Apt 4B" or "3 photos" never
 // sends pictures to release 3 or 4.
-export interface Ref { n: string; said: boolean }
+export interface Ref { n: string; said: boolean; bare?: boolean }   // bare: the whole text is a number with no PO/release/# in front
 export function refsIn(body: string): Ref[] {
   const text = (body || "").replace(/\s+/g, " ").trim();
   const out: Ref[] = [];
-  const add = (raw: string, said: boolean) => {
+  const add = (raw: string, said: boolean, bare = false) => {
     const n = normPo(raw);
-    if (n && !out.some((r) => r.n === n)) out.push({ n, said });
+    if (n && !out.some((r) => r.n === n)) out.push(bare ? { n, said, bare } : { n, said });
   };
   // the whole text is the number
-  const only = text.match(/^(?:(?:p\.?\s*o\.?|release|rel\.?)\s*)?[#:\s-]*(\d{1,12})[.!\s]*$/i);
-  if (only) { add(only[1], true); return out; }
+  const only = text.match(/^((?:p\.?\s*o\.?|release|rel\.?)\s*)?([#:\s-]*)(\d{1,12})[.!\s]*$/i);
+  if (only) { add(only[3], true, !only[1] && !only[2].includes("#")); return out; }
   // said out loud: "PO 116843", "po#116843", "release 12", "rel. 12"
   const said = /\b(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:\-]?\s*(\d{1,12})\b/gi;
   let m: RegExpExecArray | null;
@@ -133,7 +136,10 @@ export const TOLD_APART_MS = 10 * 60_000;
 //  3. none today: the one job on their last day, if that was in the last three
 //     days — photos sent the evening after, or the next morning.
 // Two jobs that day, or no job at all, and the office decides.
-export function pickJob(body: string, rows: MineRow[], mine: JobKey[], today: string, anyPo: JobKey[] = []): Pick {
+// `photos`: the text came with pictures. Then a small bare number that fits
+// none of their jobs ("12", "3": the apartment, how many pictures) is not a
+// job number, and the pictures go where they would with no number at all.
+export function pickJob(body: string, rows: MineRow[], mine: JobKey[], today: string, anyPo: JobKey[] = [], opts: { photos?: boolean } = {}): Pick {
   const byId = new Map(mine.map((j) => [j.id, j]));
   const refs = refsIn(body);
   if (refs.length) {
@@ -146,7 +152,7 @@ export function pickJob(body: string, rows: MineRow[], mine: JobKey[], today: st
     if (hits.size === 1) return picked([...hits.values()][0], "number");
     if (hits.size > 1) return { kind: "ask", why: "many" };
     // a number was given out loud and fits nothing: never guess past it
-    const told = refs.find((r) => r.said);
+    const told = refs.find((r) => r.said && !(opts.photos && r.bare && r.n.length <= 4));
     if (told) return { kind: "ask", why: "unknown", number: told.n };
   }
   const jobsOn = (day: string) => {
@@ -194,6 +200,7 @@ export function photoName(kind: string, at: Date, first: string, sid: string, i:
 export type Reply =
   | { k: "filed"; n: number; label: string }
   | { k: "held"; n: number }
+  | { k: "which"; n: number; options: string[] }   // held, with the jobs it could be: "116843 (2205 Linden Blvd, Apt 4B)"
   | { k: "moved"; n: number; label: string }
   | { k: "unknown"; number: string }
   | { k: "notphoto" }
@@ -216,6 +223,12 @@ export function replyText(r: Reply, lang0?: string | null): string {
       return es
         ? `Recibimos ${r.n === 1 ? "su foto" : `sus ${photos(r.n, lang)}`}. ¿De qué trabajo ${r.n === 1 ? "es" : "son"}? Responda con el número de PO o de release.`
         : `Got your ${photos(r.n, lang)}. Which job ${r.n === 1 ? "is it" : "are they"} for? Reply with the PO or release number.`;
+    case "which": {
+      const list = r.options.length === 2 ? `${r.options[0]} ${es ? "o" : "or"} ${r.options[1]}` : r.options.join(", ");
+      return es
+        ? `Recibimos ${r.n === 1 ? "su foto" : `sus ${photos(r.n, lang)}`}. ¿De qué trabajo ${r.n === 1 ? "es" : "son"}? Responda con el número: ${list}.`
+        : `Got your ${photos(r.n, lang)}. Which job ${r.n === 1 ? "is it" : "are they"} for? Reply with the number: ${list}.`;
+    }
     case "moved":
       return es
         ? `Listo: ${r.n === 1 ? "su foto" : `sus ${photos(r.n, lang)}`} ahora ${r.n === 1 ? "está" : "están"} ${atJob(r.label, lang)}.`

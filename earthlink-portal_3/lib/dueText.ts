@@ -2,13 +2,14 @@
 // it says. Pure — no database, no Twilio — so the rule that a text never
 // arrives about a day that has already passed can be tested on its own.
 import { crewText } from "./crewText";
+import { lastWorkDay, dayCount } from "./workDays";
 
-export interface DueRow { id: string; day?: string | null; send_at?: string | null; description?: string | null; address?: string | null }
+export interface DueRow { id: string; day?: string | null; send_at?: string | null; description?: string | null; address?: string | null; told_day?: string | null }
 export interface DueEmp { name?: string | null; phone?: string | null; lang?: string | null }
 export interface DueJob {
   po_number?: string | null; job_number?: string | null; address?: string | null; development?: string | null;
   property_unit?: string | null; description?: string | null; start_date?: string | null;
-  canceled?: boolean; work_done?: boolean;
+  canceled?: boolean; work_done?: boolean; work_days?: number | null;
 }
 // the same cut lib/pactCrew's workOf makes, kept here so a server route never
 // has to pull in the browser's half of the app
@@ -29,6 +30,13 @@ const GONE_MS = 36 * 3600_000;                // …nor one for a work day this 
 const nyDay = (d: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 
 export const dueDay = (row: DueRow, job?: DueJob | null): string => ((job?.start_date || row.day || "") as string).trim();
+// the last day the text is about: a PACT job of more days runs to its last work day
+export const dueLastDay = (row: DueRow, job?: DueJob | null): string => (job && dayCount(job.work_days) > 1 ? lastWorkDay(dueDay(row, job), job.work_days) || dueDay(row, job) : dueDay(row, job));
+// told one day, the job on another since: the text says it moved (schedule_days.told_day, RUN_ME section 23)
+export const dueMoved = (row: DueRow, job?: DueJob | null): { from: string; to: string } | null => {
+  const told = (row.told_day || "").trim(), day = dueDay(row, job);
+  return told && day && told !== day ? { from: told, to: day } : null;
+};
 // "" when it should go out; otherwise why it shouldn't, in plain words
 export function dueSkip(row: DueRow, ctx: { emp?: DueEmp | null; job?: DueJob | null; rel?: DueRel | null; phone?: string; now: Date }): string {
   if (!ctx.emp) return "the worker isn't in the crew list any more";
@@ -37,7 +45,7 @@ export function dueSkip(row: DueRow, ctx: { emp?: DueEmp | null; job?: DueJob | 
   if (ctx.job?.work_done) return "the work is already done";
   const at = new Date(row.send_at || 0).getTime();
   if (!at || at < ctx.now.getTime() - LATE_MS) return "it was more than a day late";
-  const day = dueDay(row, ctx.job);
+  const day = dueLastDay(row, ctx.job);
   if (/^\d{4}-\d{2}-\d{2}$/.test(day) && (day < new Date(ctx.now.getTime() - GONE_MS).toISOString().slice(0, 10) || day < nyDay(ctx.now))) return "that work day has passed";
   return "";
 }
@@ -49,6 +57,8 @@ export function dueBody(row: DueRow, ctx: { emp: DueEmp; job?: DueJob | null; re
     first: (emp.name || "").split(" ")[0],
     day: dueDay(row, job),
     moved: ctx.moved || null,
+    days: job ? dayCount(job.work_days) : 1,
+    last: job ? dueLastDay(row, job) : null,
     work: ctx.work,
     lang: emp.lang,
     street: (job ? job.address : row.address || rel?.address) || "",

@@ -1,61 +1,50 @@
 // Server-only: the crew texts out. Into each crew's group thread — the
 // owner, the workers on the job and the company number (lib/groupText) —
-// when the owner is in the threads; one to one (lib/twilio) otherwise, or
-// for any job whose thread can't be made. One message per job per thread,
-// greeting everyone in it; a crew that reads two languages gets both (in
-// one message when it fits Twilio's 1,600, else one each). Each crew row is
-// stamped TEXTED the moment its message goes. A thread that didn't answer
-// (a timeout, a Twilio error) is never followed by the same text one to
-// one — the message may have gone — the rows stay unstamped and the office
-// is told, so nobody gets a text twice.
-import { ensureGroupWebhook, forgetGroup, groupFor, groupLastError, groupProblem, groupsOn, postToGroupStatus, rememberGroupJob } from "./groupText";
+// when the owner is in the threads and the send is for the whole crew; one
+// to one (lib/twilio) otherwise, or for any job whose thread can't be made.
+// One message per job per thread, greeting everyone in it; a crew that reads
+// two languages gets both (in one message when it fits Twilio's 1,600, else
+// one each). Each crew row is stamped TEXTED the moment its message goes. A
+// thread that didn't answer (a timeout, a Twilio error) is never followed by
+// the same text one to one — the message may have gone. The thread's own
+// last messages are read first: what is there counts as sent. What still
+// can't be told comes back as failed with `maybe`, the rows stay unstamped
+// and the office is told to look at the thread, so nobody gets a text twice.
+import { ensureGroupWebhook, forgetGroup, groupFor, groupLastError, groupPostsSince, groupProblem, groupsOn, postToGroupStatus, rememberGroupJob } from "./groupText";
 import { sendTexts, type TextOut, type TextReport } from "./twilio";
 import { cleanPhone } from "./notify";
 import type { Db } from "./photoStore";
+import { groupBodies } from "./groupWords";
+// the words of a thread post live in lib/groupWords, so the browser's preview can build them too
+export { nameList, groupGreeting, groupBodies, groupBody } from "./groupWords";
 
 export interface CrewOut extends TextOut { id?: string }
-export interface CrewReport extends TextReport { grouped: number; groupProblem: string }
+// One that didn't go. `maybe`: it may have reached the crew all the same (a
+// thread post Twilio didn't answer in time, or one that went in part way),
+// so it must never be sent again on its own: app/api/text-due leaves its
+// time off instead of putting it back, and the office is told to look at
+// the crew's thread before sending again. Without `maybe`, Twilio said no
+// before anything went out, and trying again is safe.
+export interface CrewFail { to: string; error: string; id?: string; maybe?: boolean }
+export interface CrewReport extends TextReport { failed: CrewFail[]; grouped: number; groupProblem: string }
 interface Row { id: string; day: string; employee_id: string; pact_job_id?: string | null; release_id?: string | null }
 interface Emp { id: string; name?: string | null; phone?: string | null; active?: boolean | null }
-const TWILIO_MAX = 1600;
 
 const first = (e?: Emp | null) => (e?.name || "").trim().split(/\s+/)[0] || "";
-const isEs = (body: string) => /^hola\b/i.test(body);
-// "Jose", "Jose and Luis", "Jose, Luis and Sam"
-export const nameList = (names: string[], lang: "en" | "es"): string => {
-  const n = [...new Set(names.filter(Boolean))];
-  if (n.length <= 1) return n[0] || "";
-  const and = lang === "es" ? "y" : "and";
-  return `${n.slice(0, -1).join(", ")} ${and} ${n[n.length - 1]}`;
-};
-// the greeting names everyone in the thread: "Hi Jose and Luis, this is
-// Earth Link." — and Spanish speaks to all of them ("les habla", "Tienen", "respondan")
-export function groupGreeting(body: string, names: string[]): string {
-  const es = isEs(body);
-  const list = nameList(names, es ? "es" : "en");
-  if (!list) return body;
-  if (!es) return body.replace(/^Hi\b[^,]*?, this is Earth Link\./, `Hi ${list}, this is Earth Link.`);
-  const many = new Set(names.filter(Boolean)).size > 1;
-  let out = body.replace(/^Hola\b[^,]*?, le habla Earth Link\./, `Hola ${list}, ${many ? "les" : "le"} habla Earth Link.`);
-  if (many) out = out.replace(/\bTiene trabajo\b/, "Tienen trabajo").replace(/\bresponda\b/g, "respondan").replace(/\bResponda\b/g, "Respondan").replace(/\bmande\b/g, "manden").replace(/\bse le avisará\b/g, "se les avisará").replace(/\bse le enviará\b/g, "se les enviará");
-  return out;
-}
-// what a crew that may read two languages gets: English first, Spanish under
-// it, in one message when that fits — otherwise one message each
-export function groupBodies(bodies: string[], names: string[]): string[] {
-  const en = bodies.find((b) => !isEs(b)), es = bodies.find(isEs);
-  const parts = [en, es].filter((b): b is string => !!b).map((b) => groupGreeting(b, names));
-  const joined = parts.join("\n\n");
-  return parts.length > 1 && joined.length > TWILIO_MAX - 100 ? parts : parts.length ? [joined] : [];
-}
-export const groupBody = (bodies: string[], names: string[]): string => groupBodies(bodies, names).join("\n\n");
+// the same words, whatever spacing Twilio hands back
+const same = (a: string, b: string) => a.replace(/\s+/g, " ").trim() === b.replace(/\s+/g, " ").trim();
+// the thread is read back only while there is time for it: the routes that
+// send have a minute in all, and a Twilio that is timing out would
+// otherwise spend it on reads
+const CHECK_WITHIN_MS = 35_000;
 
 interface Batch { row: Row; msgs: CrewOut[] }
-interface Outcome { sent: number; grouped: boolean; failed: TextReport["failed"]; loose: CrewOut[]; problem: string }
+interface Outcome { sent: number; grouped: boolean; failed: CrewFail[]; loose: CrewOut[]; problem: string }
 
 export async function sendCrew(db: Db | null, messages: CrewOut[], onSent: (m: CrewOut) => Promise<void>, origin: string): Promise<CrewReport> {
   const plain = async (ms: CrewOut[]): Promise<TextReport> => (ms.length ? sendTexts(ms, onSent) : { sent: 0, failed: [] });
   if (!groupsOn() || !db) return { ...(await plain(messages)), grouped: 0, groupProblem: groupProblem() };
+  const began = Date.now();
   // which job each message is for, and everyone scheduled on that job that day
   const ids = messages.map((m) => m.id).filter((id): id is string => !!id);
   const rows = ids.length ? (await db.get<Row>(`schedule_days?id=in.(${ids.join(",")})&select=id,day,employee_id,pact_job_id,release_id`)).rows : [];
@@ -81,34 +70,70 @@ export async function sendCrew(db: Db | null, messages: CrewOut[], onSent: (m: C
     const none: Outcome = { sent: 0, grouped: false, failed: [], loose: [], problem: "" };
     const where = row.pact_job_id ? `pact_job_id=eq.${row.pact_job_id}` : `release_id=eq.${row.release_id}`;
     const crewRows = (await db.get<{ employee_id: string }>(`schedule_days?${where}&day=eq.${row.day}&select=employee_id&limit=50`)).rows;
-    const crewIds = [...new Set([...crewRows.map((r) => r.employee_id), ...msgs.map((m) => rowOf.get(m.id!)!.employee_id)])];
+    const workerOf = (m: CrewOut) => rowOf.get(m.id!)!.employee_id;
+    const crewIds = [...new Set([...crewRows.map((r) => r.employee_id), ...msgs.map(workerOf)])];
     // the people in the thread: on the crew list, still with us, with a phone
     const crew = crewIds.map((id) => empOf.get(id)).filter((e): e is Emp => !!e && e.active !== false && !!cleanPhone(e.phone || ""));
     // a worker whose message is here but who can't be in the thread (off the
     // crew list, no usable number) is never marked texted by the thread: their
     // text goes one to one and is stamped only when Twilio takes it
-    const inThread = msgs.filter((m) => crew.some((e) => e.id === rowOf.get(m.id!)!.employee_id));
+    const inThread = msgs.filter((m) => crew.some((e) => e.id === workerOf(m)));
     const dropped = msgs.filter((m) => !inThread.includes(m));
     if (!inThread.length) return { ...none, loose: msgs };
+    // A post reaches everyone in the thread. So it goes there only when this
+    // send is for every one of them; a send for part of the crew (a worker
+    // added later, a Resend to one, a crew where only some were set up for
+    // later) goes one to one, each worker in their own language: nobody
+    // outside this send gets it, and nobody already told gets it again in
+    // somebody else's language. Compared by worker, not by count, so one
+    // worker with two messages here can't stand in for another.
+    if (crew.some((e) => !inThread.some((m) => workerOf(m) === e.id))) return { ...none, loose: msgs };
     const phones = [...new Set(crew.map((e) => cleanPhone(e.phone || "")))];
     let made = await groupFor(phones);
     if ("error" in made) return { ...none, loose: msgs, problem: made.error };
     const bodies = groupBodies(inThread.map((m) => m.body), crew.map(first));
-    const postAll = async (sid: string) => {
-      for (const b of bodies) { const r = await postToGroupStatus(sid, b); if (!r.ok) return r; }
-      return { ok: true, status: 201 };
+    // the parts in order: how many are in when one isn't, and Twilio's answer to that one
+    const postAll = async (sid: string): Promise<{ landed: number; status: number }> => {
+      for (let i = 0; i < bodies.length; i++) { const r = await postToGroupStatus(sid, bodies[i]); if (!r.ok) return { landed: i, status: r.status }; }
+      return { landed: bodies.length, status: 201 };
     };
-    let r = await postAll(made.group.sid);
-    if (!r.ok && r.status === 404) {
+    const started = Date.now();
+    let p = await postAll(made.group.sid);
+    if (p.landed === 0 && p.status === 404) {
       // a thread remembered here but gone on Twilio's side: made again, once
       forgetGroup(made.group.key);
       made = await groupFor(phones);
       if ("error" in made) return { ...none, loose: msgs, problem: made.error };
-      r = await postAll(made.group.sid);
+      p = await postAll(made.group.sid);
     }
-    if (!r.ok) {
-      const why = `the thread didn't take the text (${groupLastError() || `Twilio ${r.status || "didn't answer"}`}). Not sent again another way, so nobody gets it twice; try again in a minute`;
-      return { ...none, failed: inThread.map((m) => ({ to: m.to, id: m.id, error: why })), loose: dropped, problem: why };
+    // Twilio didn't answer in time (0) or had trouble of its own (5xx), or
+    // one part went in and the next didn't: the post may be in the thread
+    // all the same. The thread's own last messages say what is there. Every
+    // part there: it went. Some there: only the missing ones go in after
+    // them. None there, or the thread can't be read: it may still land, so
+    // nothing is posted again and it comes back as maybe.
+    let unsure = p.landed < bodies.length && (p.landed > 0 || p.status === 0 || p.status >= 500);
+    if (unsure && Date.now() - began < CHECK_WITHIN_MS) {
+      await new Promise((res) => setTimeout(res, 1_000)); // a post Twilio was still taking is in by now
+      const seen = await groupPostsSince(made.group.sid, started - 60_000);
+      if (seen) {
+        const missing = bodies.map((_, i) => i).filter((i) => i >= p.landed && !seen.some((s) => same(s, bodies[i])));
+        const someIn = p.landed > 0 || missing.length < bodies.length - p.landed;
+        if (!missing.length) unsure = false;
+        else if (someIn) {
+          let all = true;
+          for (const i of missing) { if (!(await postToGroupStatus(made.group.sid, bodies[i])).ok) { all = false; break; } }
+          if (all) unsure = false;
+        }
+      }
+      if (!unsure) p = { landed: bodies.length, status: 201 };
+    }
+    if (p.landed < bodies.length) {
+      const words = groupLastError() || `Twilio ${p.status || "didn't answer"}`;
+      const why = unsure
+        ? `Twilio didn't say whether the crew's thread took the text (${words}), so it may have gone: check the crew's thread before sending again`
+        : `the crew's thread didn't take the text (${words}). Nothing went out; try again in a minute`;
+      return { ...none, failed: inThread.map((m) => ({ to: m.to, id: m.id, error: why, ...(unsure ? { maybe: true } : {}) })), loose: dropped, problem: why };
     }
     const job = row.pact_job_id ? { kind: "pact" as const, id: row.pact_job_id } : row.release_id ? { kind: "rel" as const, id: row.release_id } : undefined;
     await rememberGroupJob(made.group.sid, made.group.members, job);

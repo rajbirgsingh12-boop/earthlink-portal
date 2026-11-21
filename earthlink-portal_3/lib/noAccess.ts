@@ -61,6 +61,10 @@ export const bareNo = (body: string): boolean => {
   const t = norm(body);
   return !!t && !SAID.test(t) && BARE.test(withoutNumbers(t));
 };
+// "NO 2205 Linden", "no 4B": a no with a number and a few words, which is a
+// door only when the number is the house or the apartment of one of today's
+// jobs (lib/nobodyFlow checks; "no 5 gallons left" is not one)
+export const noAt = (body: string): boolean => /^no+ #?\d[\w-]*( [a-z0-9#-]+){0,4}$/.test(norm(body)) && !NOT_IT.test(norm(body));
 // every number in the text, stripped like a PO ("NO 0116843" → "116843")
 export const numbersIn = (body: string): string[] => [...new Set(((body || "").match(/\d{1,12}/g) || []).map((n) => normPo(n)).filter(Boolean))];
 
@@ -102,25 +106,42 @@ export const SAME_DOOR_MS = 20 * 60_000;
 // next day's job is moved up to today only until 2 PM, while there's a day left to work
 export const DOOR_HOURS = { from: 6, to: 19 };
 export const MOVE_UP_UNTIL = 14;
+// the door's own numbers: the house ("41-10 12th St" is 41 and 10) and the apartment ("4B")
+const houseOf = (j: DayJob): string[] => ((j.street || "").trim().split(/\s+/)[0] || "").split("-").filter((x) => /^\d+[a-z]?$/i.test(x)).map((x) => normPo(x.replace(/[a-z]$/i, ""))).filter(Boolean);
+const aptOf = (j: DayJob): string => norm(j.apt || "").replace(/^(apt|apartment|unit)\s*/, "").replace(/\s+/g, "");
+// today's jobs the text names by the house number or the apartment (the way the replies name them)
+export function byAddress(body: string, today: DayJob[]): DayJob[] {
+  const nums = numbersIn(body);
+  const words = norm(body).split(" ");
+  const byHouse = today.filter((j) => houseOf(j).some((h) => nums.includes(h)));
+  const byApt = today.filter((j) => { const a = aptOf(j); return !!a && words.includes(a); });
+  if (byHouse.length > 1 && byApt.length) { const both = byHouse.filter((j) => byApt.includes(j)); if (both.length) return both; }
+  return byHouse.length ? byHouse : byApt;
+}
 export function whichMissed(ctx: {
   body: string; today: string; jobs: DayJob[];            // this worker's jobs, today and after
   flagged: Set<string>; visited: Set<string>;               // job ids flagged / photographed today
   sameDoor?: Set<string>;                                   // …flagged in the last twenty minutes by the other worker at that door, not yet answered by this one
+  justSent?: Set<string>;                                   // …the jobs the portal just sent them on to after a door (they can't be there yet)
   answerToPhotos: boolean;                                  // the last thing we texted them was "got your photos" (half an hour at most)
 }): Missed {
   const today = dedupe(ctx.jobs.filter((j) => j.day === ctx.today)).sort(byLabel);
-  const nums = numbersIn(ctx.body);
-  // "No" / "No, 116900" right after "Got it — 3 photos on PO 116843 … wrong
+  const addr = byAddress(ctx.body, today);
+  // a house number or an apartment is never a job number
+  const doorNums = new Set(today.flatMap((j) => [...houseOf(j), aptOf(j)]).filter(Boolean));
+  const nums = numbersIn(ctx.body).filter((n) => !doorNums.has(n) || today.some((j) => j.keys.includes(n)));
+  // "No" / "No, 116900" right after "Got 3 photos at 2205 Linden Blvd … wrong
   // job? reply with the right PO": that's about the photos, not a door
-  // …unless the number is one of today's doors they haven't been through —
+  // …unless the number is one of today's doors they haven't been through:
   // "NO 116900" is how the portal teaches a door to be reported
   if (bareNo(ctx.body) && ctx.answerToPhotos
-    && !today.some((j) => !ctx.visited.has(j.id) && !ctx.flagged.has(j.id) && j.keys.some((k) => nums.includes(k)))) return { kind: "skip" };
+    && !today.some((j) => !ctx.visited.has(j.id) && !ctx.flagged.has(j.id) && (j.keys.some((k) => nums.includes(k)) || addr.includes(j)))) return { kind: "skip" };
+  const hit = nums.length ? today.filter((j) => j.keys.some((k) => nums.includes(k))) : [];
+  const named = hit.length ? hit : addr;
+  if (named.length === 1) return { kind: "missed", job: named[0], already: ctx.flagged.has(named[0].id) };
+  if (named.length > 1) return { kind: "ask", options: named };
   if (nums.length) {
-    const hit = today.filter((j) => j.keys.some((k) => nums.includes(k)));
-    if (hit.length === 1) return { kind: "missed", job: hit[0], already: ctx.flagged.has(hit[0].id) };
-    if (hit.length > 1) return { kind: "ask", options: hit };
-    // "nobody home apt 4" is not a job number; "NO 116900" is — and it isn't today's
+    // "nobody home apt 4" is not a job number; "NO 116900" is, and it isn't today's
     const big = nums.find((n) => n.length >= 4);
     if (big) return { kind: "not_today", number: big };
   }
@@ -130,7 +151,7 @@ export function whichMissed(ctx: {
   // sent them on to, which they can't have reached yet
   const same = today.filter((j) => ctx.sameDoor?.has(j.id));
   if (same.length) return { kind: "missed", job: same[same.length - 1], already: true };
-  const open = today.filter((j) => !ctx.flagged.has(j.id) && !ctx.visited.has(j.id));
+  const open = today.filter((j) => !ctx.flagged.has(j.id) && !ctx.visited.has(j.id) && !ctx.justSent?.has(j.id));
   if (open.length === 1) return { kind: "missed", job: open[0], already: false };
   if (open.length > 1) return { kind: "ask", options: open };
   const flaggedToday = today.filter((j) => ctx.flagged.has(j.id));
@@ -146,7 +167,8 @@ export const LOOK_AHEAD_DAYS = 14;
 // Their next job: another of today's still open, in the calendar's order;
 // else the first job of their next working day (in the next two weeks),
 // which moves up to today.
-export function whichNext(ctx: { today: string; jobs: DayJob[]; missed: DayJob; flagged: Set<string>; visited: Set<string>; lastDay: string; moveUp?: boolean }): Next {
+// `stay`: later jobs that can't be moved up (others on their crew who aren't at this door)
+export function whichNext(ctx: { today: string; jobs: DayJob[]; missed: DayJob; flagged: Set<string>; visited: Set<string>; lastDay: string; moveUp?: boolean; stay?: Set<string> }): Next {
   const all = dedupe(ctx.jobs);
   const todayOpen = all.filter((j) => j.day === ctx.today && j.id !== ctx.missed.id && !ctx.flagged.has(j.id) && !ctx.visited.has(j.id)).sort(byLabel);
   if (todayOpen.length) return { kind: "today", job: todayOpen[0] };
@@ -155,7 +177,7 @@ export function whichNext(ctx: { today: string; jobs: DayJob[]; missed: DayJob; 
   // several days), not one they were at or that was reported empty today
   const onToday = new Set(all.filter((j) => j.day === ctx.today).map((j) => j.id));
   const later = all.filter((j) => j.day > ctx.today && j.day <= ctx.lastDay && j.id !== ctx.missed.id
-    && !onToday.has(j.id) && !ctx.flagged.has(j.id) && !ctx.visited.has(j.id));
+    && !onToday.has(j.id) && !ctx.flagged.has(j.id) && !ctx.visited.has(j.id) && !ctx.stay?.has(j.id));
   if (!later.length) return { kind: "none" };
   const first = later.map((j) => j.day).sort()[0];
   const job = later.filter((j) => j.day === first).sort(byLabel)[0];
@@ -227,7 +249,7 @@ export function notTodayText(number: string, lang0?: string | null): string {
     : `${number} isn't on your schedule today. The office will see your message.`;
 }
 export function toldOfficeText(lang0?: string | null): string {
-  return langOf(lang0) === "es" ? "Gracias — la oficina verá su mensaje." : "Thanks — the office will see your message.";
+  return langOf(lang0) === "es" ? "Gracias, la oficina verá su mensaje." : "Thanks, the office will see your message.";
 }
 
 // the line on the job's own notes, and on the job that moved up
@@ -235,5 +257,5 @@ export const shortDay = (iso: string) => {
   const d = longDay(iso);
   return d ? d.replace(/^(\w{3})\w*, (\w{3})\w* (\d+)$/, "$1 $2 $3") : iso;
 };
-export const nobodyNote = (day: string, who: string, time: string) => `⚠ Nobody home ${shortDay(day)} — ${who || "the crew"} texted${time ? ` at ${time}` : ""}`;
-export const movedUpNote = (from: string, to: string, missedLabel: string) => `📅 Moved up to ${shortDay(to)} from ${shortDay(from)} — nobody home at ${missedLabel}`;
+export const nobodyNote = (day: string, who: string, time: string) => `⚠ Nobody home ${shortDay(day)} · ${who || "the crew"} texted${time ? ` at ${time}` : ""}`;
+export const movedUpNote = (from: string, to: string, missedLabel: string) => `📅 Moved up to ${shortDay(to)} from ${shortDay(from)} · nobody home at ${missedLabel}`;

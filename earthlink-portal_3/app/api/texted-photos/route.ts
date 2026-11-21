@@ -6,8 +6,9 @@
 import { NextResponse } from "next/server";
 import { pactKey, relKey } from "@/lib/smsIn";
 import { dropBatch, fileBatch, serviceDb, type Batch } from "@/lib/photoStore";
-import { countKinds, photoKindFor, stageOf, type PhotoKind } from "@/lib/jobFlow";
-import type { SfLine } from "@/lib/measure";
+import { photoKindFor, type PhotoKind } from "@/lib/jobFlow";
+import { clearDoneIfNoAfter, closeQuestion, markDone, nyDay, onLastDay, stageFor, threadJob, type Emp, type ThreadJob } from "@/lib/jobThread";
+import { jobName } from "@/lib/crewText";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -49,25 +50,37 @@ export async function POST(req: Request) {
   if (body.action !== "file") return NextResponse.json({ error: "Bad request" }, { status: 400 });
   if (b.status !== "held" && b.status !== "filed") return NextResponse.json({ error: "Those photos were thrown away" }, { status: 409 });
   let target;
-  // onto a PACT job, the pile is where the job's thread is (lib/jobFlow): its
-  // first pictures are before pictures, whatever they were called while they waited
+  // onto a PACT job, the pile is where the job's day is (lib/jobThread): the
+  // day's first pictures are before pictures, whatever they were called while
+  // they waited; a worker's own first pictures count as theirs, as when they
+  // answer with the number; finished work held for its job stays the finished work
   let kind: PhotoKind | undefined;
+  let thread: ThreadJob | null = null;
+  const now = new Date();
+  const today = nyDay(now);
   if (body.pact_job_id && uuid.test(body.pact_job_id)) {
-    type J = { id: string; po_number?: string; job_number?: string; items?: SfLine[] | null; attachments?: { name?: string }[] | null };
-    let got = await db.get<J>(`pact_jobs?id=eq.${body.pact_job_id}&select=id,po_number,job_number,items,attachments`);
-    if (!got.ok) got = await db.get<J>(`pact_jobs?id=eq.${body.pact_job_id}&select=id,po_number,job_number`);
-    const j = got.rows[0];
-    if (j) {
-      target = pactKey(j);
-      const stage = stageOf(countKinds((j.attachments || []).map((a) => a?.name || "")));
-      kind = photoKindFor(b.body || "", stage, null);
+    thread = await threadJob(db, body.pact_job_id);
+    if (thread) {
+      target = pactKey(thread);
+      kind = b.status === "held" && b.how === "after" ? "after" : photoKindFor(b.body || "", await stageFor(db, thread, b.employee_id, now, today), null);
     }
   } else if (body.release_id && uuid.test(body.release_id)) {
     const r = (await db.get<{ id: string; rel_number?: string }>(`releases?id=eq.${body.release_id}&select=id,rel_number`)).rows[0];
     if (r) target = relKey(r);
   }
   if (!target) return NextResponse.json({ error: "That job isn't in the portal" }, { status: 404 });
+  const was = b.status === "filed" && b.pact_job_id && b.pact_job_id !== (target.kind === "pact" ? target.id : "") ? b.pact_job_id : "";
   const n = await fileBatch(db, b, target, "office", kind);
   if (!n) return NextResponse.json({ error: "Couldn't move the photos, try again" }, { status: 500 });
-  return NextResponse.json({ ok: true, n, label: target.label });
+  // the job they left: marked done by these, it isn't any more
+  if (was) await clearDoneIfNoAfter(db, was, jobName(target, "en"), now, today);
+  // after pictures on the job's last day: the job is work done, as when the worker texts them
+  let marked = false;
+  if (thread && kind === "after" && b.employee_id) {
+    await closeQuestion(db, thread.id);
+    const emp = (await db.get<Emp>(`employees?id=eq.${b.employee_id}&select=id,name,phone,lang,active`)).rows[0];
+    if (emp && !onLastDay(thread, today).before) marked = await markDone(db, thread, emp, { from: b.from_phone || "", now, finish: today });
+  }
+  return NextResponse.json({ ok: true, n, label: target.label, marked });
+
 }

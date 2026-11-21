@@ -15,12 +15,12 @@
 //   • The portal itself calls it while someone has it open, with their own
 //     sign-in. That is the catch-up when the cron isn't set up yet.
 import { NextResponse } from "next/server";
-import { sendCrew } from "@/lib/crewSend";
+import { sendCrew, type CrewFail } from "@/lib/crewSend";
 import { publicOrigin } from "@/lib/groupText";
 import { fitText, langOf, withJobAsk, withPhotoInvite } from "@/lib/crewText";
 import { jobAsk } from "@/lib/jobFlow";
-import type { SfLine } from "@/lib/measure";
-import { dueBody, dueSkip, dueWork } from "@/lib/dueText";
+import { dueBody, dueDay, dueMoved, dueSkip, dueWork } from "@/lib/dueText";
+import { morningRun } from "@/lib/morning";
 import { spanishWorkServer } from "@/lib/smartTranslate";
 import { twilioConfigured } from "@/lib/twilio";
 import { photosBackOn, serviceDb } from "@/lib/photoStore";
@@ -34,14 +34,14 @@ const cleanPhone = (s: string): string => {
   if (d.length === 11 && d.startsWith("1")) return `+${d}`;
   return d.length > 11 && d.length <= 15 && (s || "").trim().startsWith("+") ? `+${d}` : ""; // as lib/notify's
 };
-interface Row { id: string; day: string; employee_id: string; description?: string | null; address?: string | null; texted?: boolean; send_at?: string | null; release_id?: string | null; pact_job_id?: string | null }
+interface Row { id: string; day: string; employee_id: string; description?: string | null; address?: string | null; texted?: boolean; send_at?: string | null; release_id?: string | null; pact_job_id?: string | null; told_day?: string | null }
 interface Emp { id: string; name?: string | null; phone?: string | null; lang?: string | null; active?: boolean | null }
-interface Job { id: string; po_number?: string | null; job_number?: string | null; address?: string | null; development?: string | null; property_unit?: string | null; description?: string | null; start_date?: string | null; canceled?: boolean; work_done?: boolean; items?: unknown }
+interface Job { id: string; po_number?: string | null; job_number?: string | null; address?: string | null; development?: string | null; property_unit?: string | null; description?: string | null; start_date?: string | null; canceled?: boolean; work_done?: boolean; items?: unknown; work_days?: number | null }
 interface Rel { id: string; rel_number?: string | null; location?: string | null; address?: string | null; canceled?: boolean }
 
 // who is asking: Vercel's cron (and then the service key does the reading), or
 // a signed-in admin/office person with the portal open (their own sign-in does)
-async function authorize(req: Request): Promise<{ key: string; token: string } | { error: string; status: number }> {
+async function authorize(req: Request): Promise<{ key: string; token: string; cron: boolean } | { error: string; status: number }> {
   const supaUrl = env("NEXT_PUBLIC_SUPABASE_URL");
   const anon = env("NEXT_PUBLIC_SUPABASE_ANON_KEY");
   if (!supaUrl || !anon) return { error: "The portal's database isn't set up", status: 500 };
@@ -50,7 +50,7 @@ async function authorize(req: Request): Promise<{ key: string; token: string } |
   if (secret && bearer && bearer === secret) {
     const service = env("SUPABASE_SERVICE_ROLE_KEY");
     if (!service) return { error: "Add SUPABASE_SERVICE_ROLE_KEY in Vercel so scheduled texts can go out on their own", status: 500 };
-    return { key: service, token: service };
+    return { key: service, token: service, cron: true };
   }
   if (!bearer) return { error: "Not signed in", status: 401 };
   const uRes = await fetch(`${supaUrl}/auth/v1/user`, { headers: { apikey: anon, Authorization: `Bearer ${bearer}` }, cache: "no-store" });
@@ -60,9 +60,17 @@ async function authorize(req: Request): Promise<{ key: string; token: string } |
   const pRes = await fetch(`${supaUrl}/rest/v1/profiles?id=eq.${user.id}&select=role`, { headers: { apikey: anon, Authorization: `Bearer ${bearer}` }, cache: "no-store" });
   const role = (pRes.ok ? ((await pRes.json()) as { role?: string }[]) : [])[0]?.role || "";
   if (role !== "admin" && role !== "office") return { error: "Not allowed", status: 403 };
-  return { key: anon, token: bearer };
+  return { key: anon, token: bearer, cron: false };
 }
 
+// noon in New York on that day, as a moment (the timer sends a same-morning text early, never an afternoon one)
+const nyNoon = (iso: string): Date => {
+  for (const off of [4, 5]) {
+    const at = new Date(`${iso}T${String(12 + off).padStart(2, "0")}:00:00Z`);
+    if (new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hourCycle: "h23" }).format(at).replace(/\D/g, "") === "12") return at;
+  }
+  return new Date(`${iso}T17:00:00Z`);
+};
 // Vercel's cron calls GET (it never POSTs), so that is where the sweep runs
 // for it. Without the cron's secret, GET is just the health answer the
 // Settings page reads.
@@ -99,24 +107,41 @@ async function sweep(req: Request) {
   // Take the rows before sending: the stamp is cleared only on rows that
   // still had one, and the answer says which those were. The cron and a phone
   // with the portal open can sweep at the same moment; only one of them ends
-  // up holding a row, so nobody is texted twice. A row whose send then fails
-  // shows as not told — visible, and better than a double text.
+  // up holding a row, so nobody is texted twice. The row is taken as TEXTED
+  // too, so Send it now (/api/text, which takes rows the same way) can't send
+  // it at the same moment. A row whose send then fails shows as not told:
+  // visible, and better than a double text.
   const claim = async (ids: string[]): Promise<Set<string>> => {
     if (!ids.length) return new Set();
     const r = await fetch(`${supaUrl}/rest/v1/schedule_days?id=in.(${ids.join(",")})&send_at=not.is.null&texted=is.false`, {
-      method: "PATCH", headers: { ...H, Prefer: "return=representation" }, body: JSON.stringify({ send_at: null }),
+      method: "PATCH", headers: { ...H, Prefer: "return=representation" }, body: JSON.stringify({ send_at: null, texted: true }),
     }).catch(() => null);
     if (!r || !r.ok) return new Set();
     return new Set(((await r.json().catch(() => [])) as { id: string }[]).map((x) => x.id));
   };
 
   const now = new Date();
-  const due = await get<Row>(`schedule_days?send_at=lte.${encodeURIComponent(now.toISOString())}&texted=is.false&select=id,day,employee_id,description,address,texted,send_at,release_id,pact_job_id&order=send_at&limit=200`);
-  if (!due) return NextResponse.json({ error: "Couldn't read the schedule, nothing was sent (RUN_ME.sql section 19 gives the schedule its send_at column)" }, { status: 500 });
-  if (due.length === 0) return NextResponse.json({ sent: 0, missed: 0, failed: 0, due: 0 });
+  // the morning run over PACT jobs (lib/morning): day 2 of 3, and "Finished?"
+  // the morning after a job went quiet. Its own key: the crew's answers are the server's to keep
+  const sdb = serviceDb();
+  const morning = sdb ? await morningRun(sdb, now, await photosBackOn()).catch(() => ({ reminded: 0, asked: 0 })) : { reminded: 0, asked: 0 };
+  // The timer runs once a day, about 6 to 7 AM New York time (7 to 8 in
+  // summer). A text set for later this same morning about today's job goes
+  // out with it, or it would never go out on its own: by the next run its day
+  // has passed. Any other text still ahead is left as it is.
+  const nyToday = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  const upTo = who.cron ? nyNoon(nyToday) : now;
+  const COLS = "id,day,employee_id,description,address,texted,send_at,release_id,pact_job_id";
+  const dueQ = (cols: string) => get<Row>(`schedule_days?send_at=lte.${encodeURIComponent(upTo.toISOString())}&texted=is.false&select=${cols}&order=send_at&limit=200`);
+  // told_day is RUN_ME section 23's: without it a moved job's text reads as a new one
+  const due0 = (await dueQ(`${COLS},told_day`)) ?? (await dueQ(COLS));
+  if (!due0) return NextResponse.json({ error: "Couldn't read the schedule, nothing was sent (RUN_ME.sql section 19 gives the schedule its send_at column)" }, { status: 500 });
+  let due = due0;
+  if (due.length === 0) return NextResponse.json({ sent: 0, missed: 0, failed: 0, due: 0, ...morning });
   if (!twilioConfigured()) {
     return NextResponse.json({ sent: 0, missed: 0, failed: 0, due: due.length, note: "The company texting number isn't set up, so a text can't go out on its own" });
   }
+  const early = (r: Row) => Date.parse(r.send_at || "") > now.getTime();
 
   const ids = (xs: (string | null | undefined)[]) => [...new Set(xs.filter(Boolean) as string[])];
   const empQ = `employees?id=in.(${ids(due.map((r) => r.employee_id)).join(",")})&select=id,name,phone,active`;
@@ -124,7 +149,8 @@ async function sweep(req: Request) {
     // before RUN_ME section 18 there is no language column — then everyone reads English
     get<Emp>(`${empQ},lang`).then((e) => e ?? get<Emp>(empQ)),
     ids(due.map((r) => r.pact_job_id)).length
-      ? get<Job>(`pact_jobs?id=in.(${ids(due.map((r) => r.pact_job_id)).join(",")})&select=id,po_number,job_number,address,development,property_unit,description,start_date,canceled,work_done,items`)
+      ? get<Job>(`pact_jobs?id=in.(${ids(due.map((r) => r.pact_job_id)).join(",")})&select=id,po_number,job_number,address,development,property_unit,description,start_date,canceled,work_done,items,work_days`)
+        .then((j) => j ?? get<Job>(`pact_jobs?id=in.(${ids(due.map((r) => r.pact_job_id)).join(",")})&select=id,po_number,job_number,address,development,property_unit,description,start_date,canceled,work_done,items`))
       : Promise.resolve([] as Job[]),
     ids(due.map((r) => r.release_id)).length
       ? get<Rel>(`releases?id=in.(${ids(due.map((r) => r.release_id)).join(",")})&select=id,rel_number,location,address,canceled`)
@@ -138,6 +164,9 @@ async function sweep(req: Request) {
   const empOf = new Map(emps.map((e) => [e.id, e]));
   const jobOf = new Map(jobs.map((j) => [j.id, j]));
   const relOf = new Map(rels.map((r) => [r.id, r]));
+  // a text still ahead goes now only when it is this morning's, about today's work
+  due = due.filter((r) => !early(r) || dueDay(r, r.pact_job_id ? jobOf.get(r.pact_job_id) : null) === nyToday);
+  if (due.length === 0) return NextResponse.json({ sent: 0, missed: 0, failed: 0, due: 0, ...morning });
 
   const missed: string[] = [];
   const invite = await photosBackOn();
@@ -155,28 +184,41 @@ async function sweep(req: Request) {
     if (dueSkip(row, { emp, job, rel, phone, now })) { missed.push(row.id); return null; }
     const raw = dueWork(row, job);
     const work = langOf(emp!.lang) === "es" && raw ? await spanishWorkServer(raw) : raw;
-    const body = dueBody(row, { emp: emp!, job, rel, work });
+    const body = dueBody(row, { emp: emp!, job, rel, work, moved: dueMoved(row, job) });
     // a PACT job's text asks for the whole thread; a release's just for photos
-    const asked = !invite ? body : job ? withJobAsk(body, jobAsk(emp!.lang, Array.isArray(job.items) ? (job.items as SfLine[]) : [])) : withPhotoInvite(body);
-    // Twilio's 1,600 holds whatever the row's work line ran to (the work gives, never the ask)
-    return { to: phone, body: fitText(asked, 1600), id: row.id, sendAt: row.send_at || null };
+    const asked = !invite ? body : job ? withJobAsk(body, jobAsk(emp!.lang, Number(job.work_days) || 1)) : withPhotoInvite(body);
+    // Twilio's 1,600 holds whatever the row's work line ran to (the work gives,
+    // never the ask); the owner's copy names the worker, as Send it now's does
+    return { to: phone, body: fitText(asked, 1600), id: row.id, sendAt: row.send_at || null, who: (emp!.name || "").trim() || undefined };
   }));
   const out = built.filter((m): m is NonNullable<typeof m> => !!m);
   await clear(missed);
-  if (out.length === 0) return NextResponse.json({ sent: 0, missed: missed.length, failed: 0, due: due.length });
+  if (out.length === 0) return NextResponse.json({ sent: 0, missed: missed.length, failed: 0, due: due.length, ...morning });
   const held = await claim(out.map((m) => m.id));
   const mine = out.filter((m) => held.has(m.id));
-  if (mine.length === 0) return NextResponse.json({ sent: 0, missed: missed.length, failed: 0, due: due.length });
+  if (mine.length === 0) return NextResponse.json({ sent: 0, missed: missed.length, failed: 0, due: due.length, ...morning });
 
-  const { sent, failed } = await sendCrew(serviceDb(), mine, async (m) => {
-    await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ texted: true }) }).catch(() => {});
-    await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ texted_at: new Date().toISOString() }) }).catch(() => {});
-  }, publicOrigin(req));
-  // one Twilio said no to gets its time back, so the next sweep tries again
-  // (until it is a day late — then it is dropped and the crew shows as not told)
-  for (const f of failed) {
-    const m = (f.id ? mine.find((x) => x.id === f.id) : undefined) || mine.find((x) => x.to === f.to);
-    if (m?.sendAt) await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}&texted=is.false`, { method: "PATCH", headers: H, body: JSON.stringify({ send_at: m.sendAt }) }).catch(() => {});
+  const took = new Set<string>();
+  let sent = 0;
+  let failed: CrewFail[] = [];
+  try {
+    ({ sent, failed } = await sendCrew(serviceDb(), mine, async (m) => {
+      if (m.id) took.add(m.id);
+      await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ texted: true }) }).catch(() => {});
+      await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ texted_at: new Date().toISOString() }) }).catch(() => {});
+    }, publicOrigin(req)));
+  } finally {
+    // taken but not sent: not TEXTED after all. One Twilio said no to gets its
+    // time back, so the next sweep tries again (until it is a day late: then
+    // it is dropped and the crew shows as not told); one that may have reached
+    // the crew's thread never does, so nobody gets it twice
+    for (const m of mine.filter((x) => !took.has(x.id))) {
+      const f = failed.find((x) => x.id === m.id) || failed.find((x) => x.to === m.to);
+      await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, { method: "PATCH", headers: H, body: JSON.stringify(f && !f.maybe && m.sendAt ? { texted: false, send_at: m.sendAt } : { texted: false }) }).catch(() => {});
+      // the day they were last told stays the one they were told (the taking marked it; RUN_ME section 23)
+      const was = due.find((r) => r.id === m.id)?.told_day;
+      if (was !== undefined) await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ told_day: was || "" }) }).catch(() => {});
+    }
   }
-  return NextResponse.json({ sent, missed: missed.length, failed: failed.length, due: due.length, ...(failed.length ? { errors: failed.slice(0, 5) } : {}) });
+  return NextResponse.json({ sent, missed: missed.length, failed: failed.length, due: due.length, ...morning, ...(failed.length ? { errors: failed.slice(0, 5) } : {}) });
 }

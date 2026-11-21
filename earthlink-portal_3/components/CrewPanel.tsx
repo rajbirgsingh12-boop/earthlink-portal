@@ -3,11 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import { sb } from "@/lib/supabase";
 import { cleanPhone, prettyPhone, textRows, stampRows, textMachine } from "@/lib/notify";
 import { prettyDate } from "@/lib/docs";
-import { crewMessageFor, crewPreview, normText, rowNeedsText, saveWorkerLang, siteOf, workOf, type CrewJob, type CrewRow, type Worker } from "@/lib/pactCrew";
+import { crewMessageFor, crewPreview, daysOfJob, normText, rowNeedsText, saveWorkerLang, siteOf, workOf, type CrewJob, type CrewRow, type Worker } from "@/lib/pactCrew";
 import { spanishKnown, spanishWork } from "@/lib/spanish";
 import { langOf, LANG_LABEL, withJobAsk, type Lang } from "@/lib/crewText";
-import { jobAsk } from "@/lib/jobFlow";
-import { goesOnItsOwn, isQueued, isLate, prettyWhen, queueRows, unqueueRows } from "@/lib/sendLater";
+import { daysAsk, jobAsk } from "@/lib/jobFlow";
+import { dayPassed, goesOnItsOwn, isQueued, isLate, prettyWhen, queueRows, queuedTooLate, sendLaterOpen, TOO_LATE_WORDS, unqueueRows } from "@/lib/sendLater";
+import { threadNote, threadPreview } from "@/lib/groupWords";
 import LangToggle from "@/components/LangToggle";
 import Stamp from "@/components/Stamp";
 import Disclosure from "@/components/Disclosure";
@@ -38,7 +39,8 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   const [phoneBuf, setPhoneBuf] = useState<Record<string, string>>({});
   const [machine, setMachine] = useState(true); // company number set up? (else a group text opens on this phone)
   const [photosIn, setPhotosIn] = useState(false); // photos texted back go on the job: the text asks for them
-  useEffect(() => { textMachine().then((m) => { setMachine(m.configured); setPhotosIn(m.photosIn); }); }, []);
+  const [group, setGroup] = useState(false); // crew texts go into one thread with the owner (TEXT_COPY_TO and a local number)
+  useEffect(() => { textMachine().then((m) => { setMachine(m.configured); setPhotosIn(m.photosIn); setGroup(!!m.group); }); }, []);
   // the ask exactly as this job's text will carry it (before photos, then after
   // photos; the plain form stands in until the server answers)
   const [askFor, setAskFor] = useState<{ en: string; es: string } | null>(null);
@@ -48,6 +50,13 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   }, [machine, photosIn, job.id]);
   const addingNow = useRef<Set<string>>(new Set()); // guards a double-tap on the same name
   const day = (job.start_date || "").trim();
+  // a job of more days: its work days, Monday to Saturday (lib/workDays), and every day's two steps
+  const days = daysOfJob(job);
+  const lastDay = days[days.length - 1] || day;
+  const span = days.length > 1 ? `${prettyDate(day)} to ${prettyDate(lastDay)} (${days.length} days)` : day ? prettyDate(day) : "";
+  const askOf = (lang: Lang) => (days.length > 1 ? daysAsk(lang) : askFor ? askFor[lang] : jobAsk(lang, true));
+  // the job's days are behind us: nobody is texted about them
+  const passed = !!lastDay && dayPassed(lastDay);
   // the work the crew is told: the rows' saved wording, else the PO's own
   const savedWork = rows.find((r) => (r.description || "").trim())?.description || "";
   const [work, setWork] = useState(savedWork || workOf(job));
@@ -85,16 +94,18 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
     await onChange();
   };
   const onJob = new Set(rows.map((r) => r.employee_id));
-  const need = rows.filter((r) => rowNeedsText(r, job));
+  const need = passed ? [] : rows.filter((r) => rowNeedsText(r, job));
+  const untold = rows.filter((r) => rowNeedsText(r, job));
   const waiting = rows.filter((r) => isQueued(r));
   const nextWhen = waiting.map((r) => r.send_at || "").sort()[0] || "";
   const late = waiting.length > 0 && isLate(waiting[0]);
+  const tooLate = waiting.some((r) => queuedTooLate(r, day));
   // set the whole crew's texts up for a time: the ones still to tell
   const setLater0 = async (t: Date) => {
     const ids = (need.length ? need : rows).map((r) => r.id);
     if (ids.length === 0) { flash("Nobody on the job yet"); return; }
     if (!day) { flash("Give the job a day first: the crew is texted the day"); return; }
-    const bad = await queueRows(ids, t);
+    const bad = await queueRows(ids, t, day);
     if (bad) { flash(bad); return; }
     setLaterOpen(false);
     flash(`${ids.length === 1 ? "The text goes" : `${ids.length} texts go`} out ${prettyWhen(t.toISOString())}`);
@@ -153,8 +164,13 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
       const targets = await Promise.all((only ? [only] : need).map(async (r) => {
         const e = emps.find((x) => x.id === r.employee_id);
         const first = (e?.name || "").split(" ")[0];
-        const moved = r.texted && r.day !== day ? { from: r.day, to: day } : undefined;
-        return { rowId: r.id, to: e?.phone || "", body: await crewMessageFor(job, first, work.trim(), moved, e?.lang), first, lang: e?.lang };
+        // told one day, the job on another now: the text says it moved (the
+        // day they were told is kept on the row, RUN_ME section 23)
+        const told = (r.told_day || "").trim();
+        const moved = told && told !== day ? { from: told, to: day } : r.texted && r.day !== day ? { from: r.day, to: day } : undefined;
+        const body = await crewMessageFor(job, first, work.trim(), moved, e?.lang);
+        // a job of more days asks for both piles every day (the server adds the one-day ask to the rest)
+        return { rowId: r.id, to: e?.phone || "", body: photosIn && days.length > 1 ? withJobAsk(body, daysAsk(e?.lang)) : body, first, lang: e?.lang };
       }));
       if (targets.some((t) => !cleanPhone(t.to))) { flash("Someone here has no number. Add it in the box beside their name"); return; }
       // a worker told a different day carries a stale TEXTED mark until RUN_ME's
@@ -174,15 +190,20 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   };
   // the preview, as the first worker on the job gets it (the thread's ask, before
   // photos then after photos, goes on the end once photos texted back land on the job)
-  const preview = () => {
-    const t = crewPreview(job, (emps.find((e) => rows[0] && e.id === rows[0].employee_id)?.name || "Name").split(" ")[0], work.trim(), undefined, shownLang);
-    return machine && photosIn ? withJobAsk(t, askFor ? askFor[shownLang === "es" ? "es" : "en"] : jobAsk(shownLang, true)) : t;
-  };
+  const withAsk = (lang: Lang, t: string) => (machine && photosIn ? withJobAsk(t, askOf(lang)) : t);
+  const preview = () => withAsk(shownLang, crewPreview(job, (emps.find((e) => rows[0] && e.id === rows[0].employee_id)?.name || "Name").split(" ")[0], work.trim(), undefined, shownLang));
+  // …or, when the crew's texts go into one thread with the owner, that one message
+  const empOf = (id: string) => emps.find((e) => e.id === id);
+  const thread = group ? threadPreview(
+    rows.map((r) => empOf(r.employee_id)).filter((e): e is Worker => !!e && e.active !== false && !!cleanPhone(e.phone || "")).map((e) => ({ id: e.id, first: e.name.split(" ")[0] })),
+    (need.length ? need : rows).map((r) => ({ id: r.employee_id, lang: langOf(empOf(r.employee_id)?.lang) })),
+    (lang) => withAsk(lang, crewPreview(job, "Name", work.trim(), undefined, lang)),
+  ) : null;
 
   return (
     <div className="rounded-sm border border-rulesoft bg-paper p-3">
       <div className="mb-1.5 flex items-center justify-between gap-2">
-        <div className="section-label">Who's going? {day ? `· ${prettyDate(day)}` : "· no day yet"}</div>
+        <div className="section-label">Who's going? {span ? `· ${span}` : "· no day yet"}</div>
         {onClose && <button type="button" className="btn-icon btn-icon-quiet" aria-label="Close" onClick={onClose}>✕</button>}
       </div>
       {!day && <div className="notice-alert mb-2">No day yet. Put the job on a day first; the crew is texted the day.</div>}
@@ -192,12 +213,12 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
       <div className="mb-2">
         <div className="flex items-center justify-between gap-2">
           <Disclosure label="What they get" open={previewOpen} onToggle={() => setPreviewOpen(!previewOpen)} className="min-w-0 flex-1">{null}</Disclosure>
-          <LangToggle value={shownLang} onChange={setPreviewLang} full name="Preview language" />
+          {!thread && <LangToggle value={shownLang} onChange={setPreviewLang} full name="Preview language" />}
         </div>
         {previewOpen && (
           <div className="anim-open rounded-sm border border-rulesoft bg-white px-3 py-2 whitespace-pre-line text-[12px] text-inksoft [overflow-wrap:anywhere]" data-preview-lang={shownLang}>
-            {preview()}
-            <span className="mt-1 block text-[11px]">Each worker gets it in the language beside their name.</span>
+            {thread ? thread.parts.join("\n\n") : preview()}
+            <span className="mt-1 block text-[11px]">{thread ? threadNote(thread) : "Each worker gets it in the language beside their name."}</span>
           </div>
         )}
       </div>
@@ -213,13 +234,15 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
             <b className="text-[13px]">{name}</b>
             {e && <LangToggle value={langOf(e.lang)} onChange={(l) => setLang(e, l)} disabled={!canEdit} name={`Language for ${name}`} />}
             {r.texted && !needs && <Stamp label="TEXTED ✓" tone="ok" />}
-            {needs && isQueued(r) && <Stamp label={`${isLate(r) ? "STILL WAITING · " : "GOES OUT "}${prettyWhen(r.send_at)}`} tone={isLate(r) ? "alert" : "work"} />}
+            {needs && isQueued(r) && (queuedTooLate(r, day)
+              ? <Stamp label={`TOO LATE · ${prettyWhen(r.send_at)}`} tone="alert" />
+              : <Stamp label={`${isLate(r) ? "STILL WAITING · " : "GOES OUT "}${prettyWhen(r.send_at)}`} tone={isLate(r) ? "alert" : "work"} />)}
             {r.texted && needs && !isQueued(r) && <Stamp label="NEEDS THE NEW DAY" tone="alert" />}
             {!r.texted && !isQueued(r) && <Stamp label="NOT TEXTED" tone="mute" />}
             {canEdit && (
               <span className="ml-auto flex items-center gap-1">
-                {needs && hasPhone && <button type="button" className="btn-link text-inksoft" disabled={sending} onClick={() => send(r)}>Send</button>}
-                {!needs && hasPhone && <button type="button" className="btn-link text-inksoft" disabled={sending} onClick={() => send(r)}>Resend</button>}
+                {needs && hasPhone && !passed && <button type="button" className="btn-link text-inksoft" disabled={sending} onClick={() => send(r)}>Send</button>}
+                {!needs && hasPhone && !passed && <button type="button" className="btn-link text-inksoft" disabled={sending} onClick={() => send(r)}>Resend</button>}
                 <RowActions items={[
                   { label: "Clear TEXTED mark", hidden: !r.texted, confirm: `Clear the TEXTED mark for ${first}? Do this if the message never really went out.`, onSelect: () => void clearTexted(r) },
                   { label: "Take off this job", destructive: true, confirm: r.texted ? `${first} was already texted about this job. Take them off anyway? (You'll want to tell them.)` : undefined, onSelect: () => void remove(r) },
@@ -255,22 +278,23 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
               <button type="button" className={`btn btn-primary${sending ? " btn-busy" : ""}`} aria-busy={sending || undefined} disabled={sending || !day} onClick={() => send()}>
                 {need.length === 1 ? "📱 Text worker" : `📱 Text crew (${need.length})`}
               </button>
-            ) : rows.length > 0 ? <Stamp label="CREW UP TO DATE ✓" tone="ok" /> : null}
-            {machine && need.length > 0 && !later && (
+            ) : passed && untold.length > 0 ? <span className="text-[13px] text-inksoft">This job's days have passed. Move the job to a day ahead to text the crew.</span>
+              : rows.length > 0 ? <Stamp label="CREW UP TO DATE ✓" tone="ok" /> : null}
+            {machine && need.length > 0 && !later && sendLaterOpen(day) && (
               <button type="button" className="btn btn-ghost" disabled={sending || !day} onClick={() => setLaterOpen(true)} data-crew-later>Send it later…</button>
             )}
           </div>
           <div className="mt-1 text-[12px] text-inksoft">{machine ? "From the company number" : "Opens a group text on this phone"} · each person once</div>
           {waiting.length > 0 && (
             <div className="anim-open mt-2 flex flex-wrap items-center gap-2 rounded-sm border border-rulesoft bg-white px-3 py-2 text-[13px]" data-crew-waiting>
-              <span>{late ? "⚠ " : "📅 "}{waiting.length === 1 ? "A text is" : `${waiting.length} texts are`} set to go out {prettyWhen(nextWhen)}.{late ? " It hasn't gone yet." : ""}</span>
+              <span>{late || tooLate ? "⚠ " : "📅 "}{waiting.length === 1 ? "A text is" : `${waiting.length} texts are`} set to go out {prettyWhen(nextWhen)}.{late ? " It hasn't gone yet." : ""}{tooLate ? ` ${TOO_LATE_WORDS}.` : ""}</span>
               <span className="ml-auto flex items-center gap-1">
-                <button type="button" className="btn-link text-inksoft" disabled={sending} onClick={() => send()}>Send it now</button>
+                {!passed && <button type="button" className="btn-link text-inksoft" disabled={sending} onClick={() => send()}>Send it now</button>}
                 <button type="button" className="btn-link text-alert" onClick={dropLater}>Call it off</button>
               </span>
             </div>
           )}
-          {later && <SendLaterPicker dataAttr="data-crew-picker" onItsOwn={onItsOwn} onCancel={() => setLaterOpen(false)} onPick={(iso) => void setLater0(new Date(iso))} />}
+          {later && <SendLaterPicker dataAttr="data-crew-picker" day={day} onItsOwn={onItsOwn} onCancel={() => setLaterOpen(false)} onPick={(iso) => void setLater0(new Date(iso))} />}
         </>
       )}
     </div>

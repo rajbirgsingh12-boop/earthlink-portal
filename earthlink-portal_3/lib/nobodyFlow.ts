@@ -21,7 +21,7 @@ import { dueBody, dueWork, type DueJob } from "./dueText";
 import { askClaudeSpanish, spanishWorkServer } from "./smartTranslate";
 import { sendTexts, twilioConfigured, type TextOut } from "./twilio";
 import { jobName, langOf } from "./crewText";
-import { folderOf, type Db, type Photo } from "./photoStore";
+import { pileDir, type Db, type Photo } from "./photoStore";
 import { jobAsk } from "./jobFlow";
 import type { SfLine } from "./measure";
 
@@ -306,7 +306,7 @@ export async function nobodyFlow(db: Db, o: {
   }
 
   // ---- the pictures that came with it (the door) go on the missed job ----
-  const proof = o.proof ? await o.proof(folderOf(missed)) : [];
+  const proof = o.proof ? await o.proof(pileDir(missed, "noaccess")) : [];
   if (proof.length) await db.attach(missed, proof, []);
 
   // ---- the other worker at the same door: told only when the job just moved

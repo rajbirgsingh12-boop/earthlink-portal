@@ -13,6 +13,8 @@ import PrintShell from "@/components/PrintShell";
 import { RowActions } from "@/components/ActionMenu";
 import PageHeader from "@/components/PageHeader";
 import CardToolbar from "@/components/CardToolbar";
+import MediaFolders from "@/components/MediaFolders";
+import { isMediaName, pileOf } from "@/lib/media";
 import Modal from "@/components/Modal";
 import Disclosure from "@/components/Disclosure";
 import MeasurePanel from "@/components/MeasurePanel";
@@ -75,9 +77,7 @@ export default function Pact() {
   const [draft, setDraft] = useState({ ...BLANK });
   const [openId, setOpenId] = useState<string | null>(null);
   const [attachJob, setAttachJob] = useState<Job | null>(null);
-  const [lightbox, setLightbox] = useState<{ name: string; path: string } | null>(null); // a photo opened big from the Documents dialog
   const [measureJob, setMeasureJob] = useState<Job | null>(null); // "Sq ft from photos" is open for this job
-  const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
   const [invJob, setInvJob] = useState<Job | null>(null);
   // which jobs show their details panel — per job, so opening one job's
   // details never flips another's, and closing a job doesn't forget it
@@ -1173,12 +1173,13 @@ export default function Pact() {
   };
 
   // ---------- attachments & photos ----------
-  const attachFiles = async (j: Job, files: File[]): Promise<{ name: string; path: string }[]> => {
+  // `folder`: a pile's own folder on the job ("before/", "after/"), for the 📷 Before and After buttons
+  const attachFiles = async (j: Job, files: File[], folder = ""): Promise<{ name: string; path: string }[]> => {
     if (files.length === 0) return [];
     setBusy(true);
     const added: { name: string; path: string }[] = [];
     for (const file of files) {
-      const path = `pact/${j.id}/${file.name}`;
+      const path = `pact/${j.id}/${folder}${file.name}`;
       const { error } = await sb().storage.from("docs").upload(path, file, { upsert: true });
       if (error) { setBusy(false); flash(/bucket/i.test(error.message) ? "Storage isn't set up yet (Settings → System check)" : upgradeHint(error.message, "Couldn't upload")); return []; }
       added.push({ name: file.name, path });
@@ -1247,11 +1248,12 @@ export default function Pact() {
   const addPhotos = async (j: Job, files: File[], kind: "before" | "after") => {
     const stamp = new Date().toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "");
     setBusy(true, `photo:${j.id}:${kind}`);
-    const shrunk = await Promise.all(files.map((f) => shrinkImage(f)));
+    // (a video goes up as it is; pictures are shrunk like camera shots)
+    const shrunk = await Promise.all(files.map((f) => (/^video\//i.test(f.type) ? Promise.resolve(f) : shrinkImage(f))));
     await attachFiles(j, shrunk.map((f, i) => {
-      const ext = (f.name.match(/\.\w+$/) || [".jpg"])[0];
+      const ext = (f.name.match(/\.\w+$/) || [/^video\//i.test(f.type) ? ".mp4" : ".jpg"])[0];
       return new File([f], `${kind}_${stamp}${files.length > 1 ? `_${i + 1}` : ""}${ext}`, { type: f.type });
-    }));
+    }), `${kind}/`);
   };
   const openAttachment = async (path: string) => {
     const { data, error } = await sb().storage.from("docs").createSignedUrl(path, 3600);
@@ -1267,18 +1269,8 @@ export default function Pact() {
     await sb().from("pact_jobs").update({ attachments: list }).eq("id", j.id);
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, attachments: list } : x)));
     setAttachJob((prev) => (prev && prev.id === j.id ? { ...prev, attachments: list } : prev));
-    setLightbox((prev) => (prev && prev.path === path ? null : prev));
     return true;
   };
-  useEffect(() => {
-    const imgs = (attachJob?.attachments || []).filter((a) => isImg(a.name));
-    if (imgs.length === 0) { setPhotoUrls({}); return; }
-    sb().storage.from("docs").createSignedUrls(imgs.map((a) => a.path), 3600).then(({ data }) => {
-      const m: Record<string, string> = {};
-      (data || []).forEach((d) => { if (d.signedUrl && d.path) m[d.path] = d.signedUrl; });
-      setPhotoUrls(m);
-    });
-  }, [attachJob]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------- a whole folder of proposals in, all their invoices out ----------
   const folderRef = useRef<HTMLInputElement>(null);
@@ -1645,22 +1637,6 @@ export default function Pact() {
   const testPosHere = jobs.some(isTestJob);
   const emailLeft = emailJobsToClean().length;
   // a row's thumbnail in the Documents dialog: a tap opens it big, the ✕ deletes it
-  const thumb = (j: Job, a: { name: string; path: string }) => (
-    <div key={a.path} className="relative">
-      <button type="button" className="block w-full transition-opacity active:opacity-80" onClick={() => setLightbox(a)} aria-label={`Open ${a.name}`}>
-        {photoUrls[a.path]
-          // eslint-disable-next-line @next/next/no-img-element
-          ? <img src={photoUrls[a.path]} alt={a.name} className="h-24 w-full rounded-sm border border-rulesoft object-cover" onLoad={(e) => e.currentTarget.classList.add("anim-fade")} />
-          : <span className="skeleton block h-24 w-full" />}
-      </button>
-      {canEdit && (
-        <button type="button" className="btn-icon btn-icon-quiet absolute -right-1 -top-1 text-paper hover:bg-transparent active:bg-transparent active:text-paper" aria-label="Delete photo" onClick={() => removeAttachment(j, a.path, a.name)}>
-          <span className="rounded-sm bg-ink/70 px-1.5 text-xs">✕</span>
-        </button>
-      )}
-    </div>
-  );
-
   return (
     <div>
       <PageHeader title="PACT Billing" sub="POs, proposals, invoices"
@@ -1821,8 +1797,8 @@ export default function Pact() {
               </div>
             </div>
             {openId === j.id && !j.canceled && (() => {
-              const beforeN = (j.attachments || []).filter((a) => isImg(a.name) && a.name.toLowerCase().startsWith("before")).length;
-              const afterN = (j.attachments || []).filter((a) => isImg(a.name) && a.name.toLowerCase().startsWith("after")).length;
+              const beforeN = (j.attachments || []).filter((a) => isMediaName(a.name) && pileOf(a) === "before").length;
+              const afterN = (j.attachments || []).filter((a) => isMediaName(a.name) && pileOf(a) === "after").length;
               const photoN = (j.attachments || []).filter((a) => isImg(a.name)).length;
               const canReread = canPrice && (j.attachments || []).some((a) => /\.pdf$/i.test(a.name) && !isMade(a));
               return (
@@ -2030,10 +2006,7 @@ export default function Pact() {
 
       {/* ---------- documents & photos ---------- */}
       {attachJob && (() => {
-        const photoN = (attachJob.attachments || []).filter((a) => isImg(a.name)).length;
-        // images that came in through "Upload files" have no before/after
-        // prefix — they still need to be viewable (and deletable) here
-        const loose = (attachJob.attachments || []).filter((a) => isImg(a.name) && !/^(before|after)/i.test(a.name));
+        const photoN = (attachJob.attachments || []).filter((a) => isMediaName(a.name)).length;
         return (
         <Modal title={`Documents · PO ${attachJob.po_number || attachJob.job_number || ""}`} onClose={() => setAttachJob(null)}
           primary={canEdit ? <button type="button" className={`btn btn-primary${spin("upload")}`} onClick={() => fileRef.current?.click()} {...busyOn("upload")} title="Pictures, a photos zip or a document, several at once">Upload files</button> : undefined}
@@ -2044,24 +2017,11 @@ export default function Pact() {
           menu={photoN > 0 ? [
             { label: "Photos (PDF)", glyph: "⬇", disabled: busy, title: "Before and after photos on one PDF", onSelect: () => makePhotoPdf(attachJob) },
           ] : undefined}>
-            {(["before", "after"] as const).map((kind) => {
-              const photos = (attachJob.attachments || []).filter((a) => isImg(a.name) && a.name.toLowerCase().startsWith(kind));
-              return (
-                <div key={kind} className="mb-3">
-                  <div className="section-label mb-1">{kind} ({photos.length})</div>
-                  {photos.length > 0
-                    ? <div className="grid grid-cols-3 gap-1.5">{photos.map((a) => thumb(attachJob, a))}</div>
-                    : <div className="empty py-3">No {kind} photos yet.</div>}
-                </div>
-              );
-            })}
-            {loose.length > 0 && (
-              <div className="mb-3">
-                <div className="section-label mb-1">other photos ({loose.length})</div>
-                <div className="grid grid-cols-3 gap-1.5">{loose.map((a) => thumb(attachJob, a))}</div>
-              </div>
-            )}
-            {(attachJob.attachments || []).filter((a) => !isImg(a.name)).map((a) => (
+            <MediaFolders items={attachJob.attachments || []} canEdit={canEdit} flash={flash}
+              zipName={`PO ${attachJob.po_number || attachJob.job_number || ""}`.trim()}
+              onDelete={(a) => removeAttachment(attachJob, a.path, a.name)} />
+            {photoN === 0 && <div className="empty mb-3 py-3">No photos or videos yet. The crew&apos;s land in the Before and After folders by themselves.</div>}
+            {(attachJob.attachments || []).filter((a) => !isMediaName(a.name)).map((a) => (
               <div key={a.path} className="mb-1.5 flex items-center gap-1">
                 <button type="button" className="row-btn rounded-sm border border-rulesoft p-2.5 text-sm hover:border-work active:border-work" onClick={() => openAttachment(a.path)}>📄 {a.name}</button>
                 {canEdit && <button type="button" className="btn-icon btn-icon-quiet text-alert" aria-label="Delete file" onClick={() => removeAttachment(attachJob, a.path, a.name)}>✕</button>}
@@ -2070,21 +2030,10 @@ export default function Pact() {
         </Modal>
         );
       })()}
-      {/* a photo, big: over the Documents dialog, closed with ✕, Escape or a tap outside */}
-      {attachJob && lightbox && (
-        <Modal wide title={/^before/i.test(lightbox.name) ? "Before photo" : /^after/i.test(lightbox.name) ? "After photo" : "Photo"} onClose={() => setLightbox(null)}
-          secondary={<button type="button" className="btn btn-ghost" onClick={() => openAttachment(lightbox.path)}>Open in a new tab</button>}>
-          {photoUrls[lightbox.path]
-            // eslint-disable-next-line @next/next/no-img-element
-            ? <img src={photoUrls[lightbox.path]} alt={lightbox.name} className="anim-fade mx-auto max-h-[70vh] w-auto max-w-full rounded-sm object-contain" />
-            : <div className="skeleton mx-auto h-64 w-full" />}
-          <div className="mt-2 truncate text-center text-[12px] text-inksoft">{lightbox.name}</div>
-        </Modal>
-      )}
       <input ref={fileRef} type="file" multiple className="hidden" onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length && attachJob) uploadFiles(attachJob, fs); e.target.value = ""; }} />
       {/* no capture= here on purpose: the phone offers the camera AND the photo
           library, so pictures someone else took (or downloaded) can go up too */}
-      <input ref={photoRef} type="file" accept="image/*" multiple className="hidden"
+      <input ref={photoRef} type="file" accept="image/*,video/*" multiple className="hidden"
         onChange={(e) => { const fs = Array.from(e.target.files || []); const t = photoTarget; const j = t ? jobs.find((x) => x.id === t.id) : null; if (fs.length && t && j) addPhotos(j, fs, t.kind); e.target.value = ""; }} />
 
       <Toast msg={msg} progress={progress} action={action} />

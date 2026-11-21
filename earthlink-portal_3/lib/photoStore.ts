@@ -3,6 +3,7 @@
 // signed in (Twilio is calling), and for the office's "put them on this job".
 // Every caller checks who is asking before it gets here.
 import type { JobKey } from "./smsIn";
+import { pileFolder, pileOf } from "./media";
 import { twilioConfigured } from "./twilio";
 
 const env = (k: string) => process.env[k] || "";
@@ -80,8 +81,10 @@ export function serviceDb() {
 }
 export type Db = NonNullable<ReturnType<typeof serviceDb>>;
 
-// where a job's pictures live: PACT jobs under pact/<job>/, releases under <release>/
+// where a job's pictures live: PACT jobs under pact/<job>/, releases under
+// <release>/, each pile in its own folder: before/, after/, noaccess/ (lib/media)
 export const folderOf = (t: { kind: "pact" | "rel"; id: string }) => (t.kind === "pact" ? `pact/${t.id}/` : `${t.id}/`);
+export const pileDir = (t: { kind: "pact" | "rel"; id: string }, pile: "before" | "after" | "noaccess") => pileFolder(folderOf(t), pile);
 export const inboxOf = (batchId: string) => `inbox/${batchId}/`;
 
 // A batch onto a job: the pictures move into that job's folder and onto its
@@ -94,11 +97,12 @@ export const inboxOf = (batchId: string) => `inbox/${batchId}/`;
 export async function fileBatch(db: Db, b: Batch, t: Target, how = "office", kind?: "before" | "after" | "noaccess"): Promise<number> {
   const photos = Array.isArray(b.photos) ? b.photos.filter((p) => p && p.name && p.path) : [];
   if (!photos.length) return 0;
-  const dir = folderOf(t);
+  // each one into its pile's folder on the job: the pile given, else the one its name says
+  const dirOf = (name: string) => { const pile = kind || pileOf({ name }); return pile === "other" ? folderOf(t) : pileDir(t, pile); };
   const was = b.status === "filed" ? (b.pact_job_id ? { kind: "pact" as const, id: b.pact_job_id } : b.release_id ? { kind: "rel" as const, id: b.release_id } : null) : null;
   const same = !!was && was.kind === t.kind && was.id === t.id;
   const named = (n: string) => (kind ? n.replace(/^(before|after|noaccess)_/i, `${kind}_`) : n);
-  const want = photos.map((p) => ({ from: p.path, name: named(p.name), to: dir + named(p.name) }));
+  const want = photos.map((p) => ({ from: p.path, name: named(p.name), to: dirOf(named(p.name)) + named(p.name) }));
   const moving = want.filter((w) => w.from !== w.to);
   if (!(same && moving.length === 0)) {
     if (!(await db.attach(t, want.map((w) => ({ name: w.name, path: w.to })), []))) return 0;

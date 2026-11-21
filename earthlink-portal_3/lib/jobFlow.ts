@@ -1,22 +1,26 @@
-// A PACT job, start to finish, by text — one thread the worker follows from
+// A PACT job, start to finish, by text: one thread the worker follows from
 // the company number, and everything they send lands on the job:
 //
-//   the crew text   → "When you get there, reply with BEFORE photos. When you
-//                      finish, reply with AFTER photos."
-//   before photos   → on the job as before photos; "When you finish, reply
-//                      with AFTER photos."
-//   after photos    → on the job as after photos; "Thanks, all set."
+//   the crew text   → "When you get there, reply with photos: they go in
+//                      BEFORE. When you finish, send the photos with the word AFTER."
+//   photos          → BEFORE, always, unless the worker says AFTER
+//   AFTER + photos  → on the job as after photos; "Thanks, all set."
+//
+// The worker says AFTER one of three ways: the word with the photos
+// ("after", "done", "despues", "terminado"), the word texted just before the
+// photos (the next photos go in AFTER), or the word texted just after them
+// (the photos they just sent move to AFTER). Nothing else ever makes a
+// photo an after photo: no clock, no count, no guess. Videos go the same way.
 //
 // The crew is never asked for square feet: the office measures. A number a
 // worker texts on their own ("plaster 120 sf") still goes onto the job's
 // lines, as it always has. Every reply names the job by its address
 // (lib/crewText jobName), the caller passes that name in as `label`.
 //
-// Where the job is in that thread is read off the job itself — the photos it
-// has — never kept anywhere else, so a photo the office took counts the same
-// as a texted one. Pure: no database, no Twilio. The route (/api/sms-in) does
-// the reading and writing; this decides and writes the words.
-import { atJob, jobName, langOf, longDay, ofJob, theJob } from "./crewText";
+// Pure: no database, no Twilio. The route (/api/sms-in) does the reading and
+// writing; this decides and writes the words.
+import { AFTER_HOW, atJob, jobName, langOf, longDay, ofJob, theJob } from "./crewText";
+import { asCount, isMediaName, mediaWords, type MediaCount } from "./media";
 import { isSfLine, roundSf, type SfLine } from "./measure";
 import { normUnit } from "./priceBook";
 
@@ -26,38 +30,37 @@ export interface StageInput { beforeN: number; afterN: number }
 // no before photos yet: the job hasn't started; then the after photos; then nothing more
 export const stageOf = (s: StageInput): Stage => (s.beforeN === 0 ? "before" : s.afterN === 0 ? "after" : "done");
 
-// the photo's own name says which it is; a job's documents sort on the prefix
-export const isImageName = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n || "");
+// the photo's (or video's) own name says which it is; a job's documents sort on the prefix
+export { isImageName } from "./media";
 export const kindOfName = (n: string): PhotoKind | null => (/^before/i.test(n || "") ? "before" : /^after/i.test(n || "") ? "after" : null);
 export const countKinds = (names: string[]): { beforeN: number; afterN: number } => ({
-  beforeN: names.filter((n) => isImageName(n) && kindOfName(n) === "before").length,
-  afterN: names.filter((n) => isImageName(n) && kindOfName(n) === "after").length,
+  beforeN: names.filter((n) => isMediaName(n) && kindOfName(n) === "before").length,
+  afterN: names.filter((n) => isMediaName(n) && kindOfName(n) === "after").length,
 });
 
 // lower-case, accents off, one space — "¡ANTES!" reads as "antes"
 const norm = (s: string) => (s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ").trim();
 
-// Which pile a texted picture goes on. The worker's own word wins: "done",
-// "finished", "terminado" are the finished work (even "all done, way better
-// than before"); "before", "antes", "llegamos" are the arrival; "after",
-// "despues". Words that say it ISN'T finished ("not done yet", "no
-// terminado") never make it the finished work: those pictures are the day's
-// progress, on the pile the day is at. Without a word: the first pictures of
-// the day are the before pictures, a picture sent minutes after a before
-// batch (one send, split by the phone) stays with it, and once the day has
-// its before pictures, pictures are after pictures.
+// Which pile a texted picture (or video) goes on. BEFORE, unless the worker
+// says AFTER:
+//   • the word with them: "after", "despues", "done", "finished",
+//     "terminado", "listo" (but "not done yet", "no terminado" never is);
+//     two pile words, the first said wins ("all done, way better than
+//     before" is AFTER; "Before. Will send after when done" is BEFORE, and
+//     what they'll do later says nothing about these);
+//   • AFTER texted just before them (`afterAsked`: the next photos go in AFTER);
+//   • the rest of a send whose first piece was AFTER (`burst`: one send, split by the phone).
+// Nothing else: no clock, no count of photos, no guess.
 const BEFORE_WORDS = /\b(before|antes|previo|al llegar)\b/;
-// arriving, starting: the arrival only when no pile word says otherwise ("we started at 8 and finished" is the finished work)
+// arriving, starting: these are the arrival (and so is everything else)
 const ARRIVE_WORDS = /\b(llegamos|llegue|llegando|arrived|arriving|starting|started|empezando|empezamos|comenzando|comenzamos)\b/;
 const AFTER_WORDS = /\b(after|despues|final)\b/;
 const DONE_WORDS = /\b(done|finished|finish|complete|completed|terminado|terminada|terminados|terminamos|termine|termino|listo|lista|listos|acabado|acabamos|acabe|all set)\b/;
-// Two pile words in one caption: the one said first wins ("all done, way
-// better than before" is the finished work; "Before. Will send after when
-// done" is the arrival)
 // what they'll do later ("when we finish I'll send the after photos", "cuando
 // terminemos le mando las de despues") says nothing about these pictures
 const LATER = /\b(when|once|cuando|will|i'?ll|we'?ll|going to|gonna|voy a|vamos a|le mando|les mando|te mando|mandare|mandamos|luego)\b[^.,;!?]*/g;
-export function photoKindFor(body: string, stage: Stage, burstKind?: PhotoKind | null): PhotoKind {
+// the caption's own say: "after", "before", or nothing
+export function captionKind(body: string): PhotoKind | null {
   const neg = notDone(body);
   const t = (neg ? norm(straight(body)).replace(NOT_DONE_G, " ") : norm(straight(body))).replace(LATER, " ");
   const at = (re: RegExp) => { const m = re.exec(t); return m ? m.index : Infinity; };
@@ -65,9 +68,26 @@ export function photoKindFor(body: string, stage: Stage, burstKind?: PhotoKind |
   const after = Math.min(neg ? Infinity : at(DONE_WORDS), at(AFTER_WORDS));
   if (before < after) return "before";
   if (after < Infinity) return "after";
-  if (ARRIVE_WORDS.test(t)) return "before";
-  if (burstKind) return burstKind;
-  return stage === "before" ? "before" : "after";
+  return null;
+}
+export function photoKindFor(body: string, o: { burst?: PhotoKind | null; afterAsked?: boolean } = {}): PhotoKind {
+  const said = captionKind(body);
+  if (said) return said;
+  if (o.afterAsked) return "after";
+  if (o.burst) return o.burst;
+  return "before";
+}
+// a text with no pictures that says the next ones (or the ones just sent) are
+// AFTER photos: "AFTER", "after photos", "here are the after", "fotos de
+// despues", "las de despues". A sentence about something else ("after lunch
+// I'll be there") is not it
+const AFTER_FILLER = new Set(["the", "these", "those", "here", "are", "is", "heres", "here's", "next", "now", "ok", "okay", "estas", "esas", "son", "aqui", "aca", "estan", "van", "ahi", "las", "los", "la", "el", "de", "del", "fotos", "foto", "photos", "photo", "pics", "pic", "pictures", "picture", "videos", "video", "coming", "incoming", "ahora", "of", "y", "and", "go", "goes", "mis", "my", "our", "nuestras", "sending", "send", "mando", "mandando"]);
+export function afterSaid(body: string): boolean {
+  const raw = (body || "").trim();
+  if (!raw || raw.includes("?") || notDone(raw) || raw.length > 40) return false;
+  const words = norm(straight(raw)).replace(/[^a-z' ]/g, " ").split(" ").filter(Boolean);
+  const left = words.filter((w) => !AFTER_FILLER.has(w));
+  return left.length === 1 && (left[0] === "after" || left[0] === "despues");
 }
 // a caption that says something got done and something is starting ("kitchen
 // done, starting the bathroom"): finished work maybe, the job maybe not. Its
@@ -97,7 +117,7 @@ const nyDayOf = (ms: number) => new Intl.DateTimeFormat("en-CA", { timeZone: "Am
 export const namesFrom = (names: string[], day: string): string[] => names.filter((n) => { const at = photoAt(n); return !!at && nyDayOf(at) >= day; });
 // the first before picture of those: when the day's crew got there
 export const firstBeforeAt = (names: string[]): number =>
-  Math.min(Infinity, ...names.filter((n) => isImageName(n) && kindOfName(n) === "before").map(photoAt).filter(Boolean));
+  Math.min(Infinity, ...names.filter((n) => isMediaName(n) && kindOfName(n) === "before").map(photoAt).filter(Boolean));
 // ---- the lines a worker can measure ----
 export type LineUnit = "SF" | "LF" | "ROOM";
 export interface MeasureLine { index: number; key: string; name: string; unit: LineUnit; qty: number; has: boolean; words: string[] }
@@ -388,8 +408,10 @@ const example = (lines: MeasureLine[]): string => {
 };
 const list = (lines: MeasureLine[]) => lines.map((l) => l.name).join(", ");
 // "3 BEFORE photos" / "3 fotos de ANTES"
-const kindN = (n: number, kind: PhotoKind, lang: "en" | "es") =>
-  lang === "es" ? `${n} foto${n === 1 ? "" : "s"} de ${kind === "before" ? "ANTES" : "DESPUES"}` : `${n} ${kind === "before" ? "BEFORE" : "AFTER"} photo${n === 1 ? "" : "s"}`;
+// (and "1 BEFORE video", "2 BEFORE photos and 1 video": `n` can carry how many are videos)
+export type Count = number | MediaCount;
+const kindN = (n: Count, kind: PhotoKind, lang: "en" | "es") =>
+  mediaWords(n, lang, lang === "es" ? (kind === "before" ? "ANTES" : "DESPUES") : kind === "before" ? "BEFORE" : "AFTER");
 
 // the line at the foot of the crew text: the two steps, in one breath. The
 // same for every job (the crew is never asked for square feet). The second
@@ -398,20 +420,36 @@ const kindN = (n: number, kind: PhotoKind, lang: "en" | "es") =>
 // get the one-day ask.)
 export function jobAsk(lang0: string | null | undefined, days?: unknown): string {
   if (typeof days === "number" && days > 1) return daysAsk(lang0);
-  if (langOf(lang0) === "es") return "Al llegar, responda con fotos de ANTES. Al terminar, responda con fotos de DESPUES.";
-  return "When you get there, reply with BEFORE photos. When you finish, reply with AFTER photos.";
+  if (langOf(lang0) === "es") return `Al llegar, responda con fotos: van a ANTES. ${AFTER_HOW.es}`;
+  return `When you get there, reply with photos: they go in BEFORE. ${AFTER_HOW.en}`;
 }
-export const JOB_ASK_MARK = { en: "reply with BEFORE photos", es: "responda con fotos de ANTES" };
+export { AFTER_HOW };
+export const JOB_ASK_MARK = { en: "with the word AFTER", es: "con la palabra DESPUES" };
 // just what landed: "Got 2 AFTER photos at 2205 Linden Blvd, Apt 4B (PO 116843)."
-export function gotPhotosText(n: number, kind: PhotoKind, label: string, lang0?: string | null): string {
+export function gotPhotosText(n: Count, kind: PhotoKind, label: string, lang0?: string | null): string {
   const lang = langOf(lang0);
   return lang === "es" ? `Recibido: ${kindN(n, kind, lang)} ${atJob(label, lang)}.` : `Got ${kindN(n, kind, lang)} ${atJob(label, lang)}.`;
 }
 // the before pictures are on the job: what comes next
-export function gotBeforeText(n: number, label: string, lang0?: string | null): string {
+export function gotBeforeText(n: Count, label: string, lang0?: string | null): string {
   const lang = langOf(lang0);
-  if (lang === "es") return `Recibido: ${kindN(n, "before", lang)} ${atJob(label, lang)}. Al terminar, responda con fotos de DESPUES.`;
-  return `Got ${kindN(n, "before", lang)} ${atJob(label, lang)}. When you finish, reply with AFTER photos.`;
+  if (lang === "es") return `Recibido: ${kindN(n, "before", lang)} ${atJob(label, lang)}. ${AFTER_HOW.es}`;
+  return `Got ${kindN(n, "before", lang)} ${atJob(label, lang)}. ${AFTER_HOW.en}`;
+}
+// AFTER texted with no photos: the next ones go in AFTER
+export function afterNextText(label: string, lang0?: string | null): string {
+  return langOf(lang0) === "es"
+    ? `Entendido: las fotos que mande ahora van a DESPUES ${atJob(label, "es")}.`
+    : `OK: the photos you send now go in AFTER ${atJob(label, "en")}.`;
+}
+// AFTER (or DONE) texted right after photos: those photos are the after photos
+export function flippedText(n0: Count, label: string, lang0?: string | null, marked = false): string {
+  const lang = langOf(lang0);
+  const n = asCount(n0);
+  const tail = marked ? ` ${MARKED_DONE[lang]}` : "";
+  if (lang === "es") return `Entendido: lo que acaba de mandar ${atJob(label, lang)} ya está en DESPUES (${mediaWords(n, "es")}). ¡Gracias!${tail}`;
+  const what = n.n === 1 ? (n.v ? "the video" : "the photo") : `the ${mediaWords(n, "en")}`;
+  return `Got it: ${what} you just sent ${atJob(label, lang)} ${n.n === 1 ? "is" : "are"} in AFTER now. Thanks!${tail}`;
 }
 // a number a worker texted on their own is on the job's lines, and so on the proposal and the invoice
 export function gotMeasureText(changes: Change[], label: string, lang0?: string | null): string {
@@ -461,15 +499,15 @@ export function askMeasureText(p: Extract<Parsed, { kind: "ask" }>, label: strin
 }
 // pictures and a number the worker texted on their own, in one text: both landed
 // `lost`: pictures in the text that didn't come through — then nothing is "all set"
-export function gotBothText(kind: PhotoKind, n: number, label: string, changes: Change[], lang0?: string | null, marked = false, lost = 0): string {
+export function gotBothText(kind: PhotoKind, n: Count, label: string, changes: Change[], lang0?: string | null, marked = false, lost = 0): string {
   const lang = langOf(lang0);
   const got = changes.map((c) => `${c.name} ${c.qty} ${c.unit === "ROOM" && c.qty === 1 ? (lang === "es" ? "cuarto" : "room") : unitWord(c.unit, lang)}`).join(", ");
   const tail = marked ? ` ${MARKED_DONE[lang]}` : "";
   const thanks = lost ? "" : lang === "es" ? " ¡Gracias, todo listo!" : " Thanks, all set!";
   if (lang === "es") {
-    return `Recibido: ${kindN(n, kind, lang)} ${atJob(label, lang)}. Anotado: ${got}. Ya está en la propuesta y la factura.${kind === "before" ? " Al terminar, responda con fotos de DESPUES." : thanks}${tail}`;
+    return `Recibido: ${kindN(n, kind, lang)} ${atJob(label, lang)}. Anotado: ${got}. Ya está en la propuesta y la factura.${kind === "before" ? ` ${AFTER_HOW.es}` : thanks}${tail}`;
   }
-  return `Got ${kindN(n, kind, lang)} ${atJob(label, lang)}. Got it: ${got}. It's on the proposal and the invoice.${kind === "before" ? " When you finish, reply with AFTER photos." : thanks}${tail}`;
+  return `Got ${kindN(n, kind, lang)} ${atJob(label, lang)}. Got it: ${got}. It's on the proposal and the invoice.${kind === "before" ? ` ${AFTER_HOW.en}` : thanks}${tail}`;
 }
 // a measurement with no one PACT job to put it on
 export function askWhichJobText(lang0?: string | null): string {
@@ -492,7 +530,7 @@ export function releaseMeasureText(label: string, lang0?: string | null): string
 // the after pictures are on the job: the thread is done — and the job is
 // marked work done, which the worker is told, with the way to take it back
 export const MARKED_DONE = { en: "Marked work done. If it isn't finished, reply NOT DONE.", es: "Marcado como terminado. Si no está terminado, responda NO TERMINADO." };
-export function gotAfterText(n: number, label: string, lang0?: string | null, marked = false, lost = 0): string {
+export function gotAfterText(n: Count, label: string, lang0?: string | null, marked = false, lost = 0): string {
   const lang = langOf(lang0);
   const tail = marked ? ` ${MARKED_DONE[lang]}` : "";
   const thanks = lost ? "" : lang === "es" ? " ¡Gracias, todo listo!" : " Thanks, all set!";
@@ -505,6 +543,10 @@ const NOT_DONE_SRC = String.raw`\b(not done|not finished|not complete|not comple
 const NOT_DONE_G = new RegExp(NOT_DONE_SRC, "g");
 const straight = (s: string) => (s || "").replace(/[\u2018\u2019`\u00b4]/g, "'");
 export const notDone = (body: string): boolean => new RegExp(NOT_DONE_SRC).test(norm(straight(body)));
+// with photos, only the plain ways of saying it: "todavía no", "not yet" and
+// "still working" ride on arrival photos ("llegamos, todavía no empezamos")
+const NOT_DONE_STRONG = new RegExp(NOT_DONE_SRC.replace("not yet|still working|still going|", "").replace("|todavia no|aun no", ""));
+export const notDoneStrong = (body: string): boolean => NOT_DONE_STRONG.test(norm(straight(body)));
 // "done", "terminé", "all done" with no pictures: the job (or the day) is
 // finished. A short text that says only that; a question ("done?") or a
 // sentence about something else ("done with the kitchen, starting the
@@ -531,8 +573,8 @@ export const yesWord = (body: string): boolean => /^(yes|yeah|yep|yup|si|sii|lis
 export const noWord = (body: string): boolean => /^(no+|nope|nah|not yet|todavia no|aun no)$/.test(norm(body).replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim());
 export function backInProgressText(label: string, lang0?: string | null): string {
   return langOf(lang0) === "es"
-    ? `OK, ${theJob(label, "es")} sigue en proceso. Responda con fotos de DESPUES al terminar.`
-    : `OK, ${label} is back in progress. Reply with AFTER photos when it's finished.`;
+    ? `OK, ${theJob(label, "es")} sigue en proceso. ${AFTER_HOW.es}`
+    : `OK, ${label} is back in progress. ${AFTER_HOW.en}`;
 }
 export function nothingToUndoText(lang0?: string | null): string {
   return langOf(lang0) === "es" ? "Ningún trabajo suyo está marcado como terminado ahora." : "No job of yours is marked done right now.";
@@ -554,33 +596,33 @@ const dayOf = (n: number, of: number, lang: "en" | "es") => (lang === "es" ? `d�
 // the crew's ask on a job of more than one day: the same two steps, every day
 export function daysAsk(lang0: string | null | undefined): string {
   return langOf(lang0) === "es"
-    ? "Cada día: al llegar, responda con fotos de ANTES. Al irse, responda con fotos de DESPUES."
-    : "Every day: when you get there, reply with BEFORE photos. When you leave, reply with AFTER photos.";
+    ? "Cada día: al llegar, responda con fotos (van a ANTES). Al irse, mande las fotos con la palabra DESPUES."
+    : "Every day: when you get there, reply with photos (they go in BEFORE). When you leave, send the photos with the word AFTER.";
 }
 // the after pictures of a day that isn't the job's last: not finished, it goes on
-export function gotAfterDayText(n: number, label: string, o: { day: number; of: number; next: string; today: string }, lang0?: string | null, lost = 0): string {
+export function gotAfterDayText(n: Count, label: string, o: { day: number; of: number; next: string; today: string }, lang0?: string | null, lost = 0): string {
   const lang = langOf(lang0);
   const next = whenDay(o.next, o.today, lang);
   if (lang === "es") {
-    return `Recibido: ${kindN(n, "after", lang)} ${atJob(label, lang)}${o.day ? `, ${dayOf(o.day, o.of, lang)}` : ""}.${lost ? "" : " ¡Gracias!"} Sigue ${next}: al llegar, responda con fotos de ANTES. ¿Ya terminó todo el trabajo? Responda TODO TERMINADO.`;
+    return `Recibido: ${kindN(n, "after", lang)} ${atJob(label, lang)}${o.day ? `, ${dayOf(o.day, o.of, lang)}` : ""}.${lost ? "" : " ¡Gracias!"} Sigue ${next}: al llegar, responda con fotos (van a ANTES). ¿Ya terminó todo el trabajo? Responda TODO TERMINADO.`;
   }
-  return `Got ${kindN(n, "after", lang)} ${atJob(label, lang)}${o.day ? `, ${dayOf(o.day, o.of, lang)}` : ""}.${lost ? "" : " Thanks!"} It continues ${next}: when you get there, reply with BEFORE photos. Is the whole job finished? Reply ALL DONE.`;
+  return `Got ${kindN(n, "after", lang)} ${atJob(label, lang)}${o.day ? `, ${dayOf(o.day, o.of, lang)}` : ""}.${lost ? "" : " Thanks!"} It continues ${next}: when you get there, reply with photos (they go in BEFORE). Is the whole job finished? Reply ALL DONE.`;
 }
 // NOT DONE on the job's last day (or after it): one more work day, the same crew
 export function continuesText(label: string, o: { next: string; today: string; day: number }, lang0?: string | null): string {
   const lang = langOf(lang0);
   const next = whenDay(o.next, o.today, lang);
   return lang === "es"
-    ? `Entendido, ${theJob(label, "es")} no está terminado, así que sigue ${next}${o.day ? ` (${dayOf(o.day, 0, lang)})` : ""}, con el mismo equipo. Al llegar, responda con fotos de ANTES. Al terminar, responda con fotos de DESPUES.`
-    : `OK, ${label} isn't finished, so it continues ${next}${o.day ? ` (${dayOf(o.day, 0, lang)})` : ""} with the same crew. When you get there, reply with BEFORE photos. When you finish, reply with AFTER photos.`;
+    ? `Entendido, ${theJob(label, "es")} no está terminado, así que sigue ${next}${o.day ? ` (${dayOf(o.day, 0, lang)})` : ""}, con el mismo equipo. Al llegar, responda con fotos (van a ANTES). ${AFTER_HOW.es}`
+    : `OK, ${label} isn't finished, so it continues ${next}${o.day ? ` (${dayOf(o.day, 0, lang)})` : ""} with the same crew. When you get there, reply with photos (they go in BEFORE). ${AFTER_HOW.en}`;
 }
 // …and the rest of the crew hears it from the portal
 export function crewContinuesText(first: string, label: string, o: { next: string; today: string; day: number; who: string }, lang0?: string | null): string {
   const lang = langOf(lang0);
   const next = whenDay(o.next, o.today, lang);
   return lang === "es"
-    ? `Hola${first ? ` ${first}` : ""}, le habla Earth Link. ${o.who ? `${o.who} avisó que ` : ""}${theJob(label, "es")} no está terminado, así que sigue ${next}${o.day ? ` (${dayOf(o.day, 0, lang)})` : ""}, con el mismo equipo. Al llegar, responda con fotos de ANTES. Al terminar, responda con fotos de DESPUES.`
-    : `Hi${first ? ` ${first}` : ""}, this is Earth Link. ${o.who ? `${o.who} let us know ` : ""}${label} isn't finished, so it continues ${next}${o.day ? ` (${dayOf(o.day, 0, lang)})` : ""} with the same crew. When you get there, reply with BEFORE photos. When you finish, reply with AFTER photos.`;
+    ? `Hola${first ? ` ${first}` : ""}, le habla Earth Link. ${o.who ? `${o.who} avisó que ` : ""}${theJob(label, "es")} no está terminado, así que sigue ${next}${o.day ? ` (${dayOf(o.day, 0, lang)})` : ""}, con el mismo equipo. Al llegar, responda con fotos (van a ANTES). ${AFTER_HOW.es}`
+    : `Hi${first ? ` ${first}` : ""}, this is Earth Link. ${o.who ? `${o.who} let us know ` : ""}${label} isn't finished, so it continues ${next}${o.day ? ` (${dayOf(o.day, 0, lang)})` : ""} with the same crew. When you get there, reply with photos (they go in BEFORE). ${AFTER_HOW.en}`;
 }
 // NOT DONE before the job's last day: nothing to add, it was going on anyway
 export function stillOnText(label: string, o: { next: string; today: string; day: number; of: number }, lang0?: string | null): string {
@@ -606,8 +648,8 @@ export function invoicedNotDoneText(label: string, lang0?: string | null): strin
 export function dayReminderText(first: string, label: string, o: { day: number; of: number }, lang0?: string | null): string {
   const lang = langOf(lang0);
   return lang === "es"
-    ? `Hola${first ? ` ${first}` : ""}, le habla Earth Link. ${o.day ? `Hoy es el ${dayOf(o.day, o.of, lang)} ${atJob(label, lang)}.` : `Hoy sigue el trabajo ${atJob(label, lang)}.`} Al llegar, responda con fotos de ANTES. Al irse, responda con fotos de DESPUES.`
-    : `Hi${first ? ` ${first}` : ""}, this is Earth Link. ${o.day ? `Today is ${dayOf(o.day, o.of, lang)} ${atJob(label, lang)}.` : `The job ${atJob(label, lang)} goes on today.`} When you get there, reply with BEFORE photos. When you leave, reply with AFTER photos.`;
+    ? `Hola${first ? ` ${first}` : ""}, le habla Earth Link. ${o.day ? `Hoy es el ${dayOf(o.day, o.of, lang)} ${atJob(label, lang)}.` : `Hoy sigue el trabajo ${atJob(label, lang)}.`} Al llegar, responda con fotos (van a ANTES). Al irse, mande las fotos con la palabra DESPUES.`
+    : `Hi${first ? ` ${first}` : ""}, this is Earth Link. ${o.day ? `Today is ${dayOf(o.day, o.of, lang)} ${atJob(label, lang)}.` : `The job ${atJob(label, lang)} goes on today.`} When you get there, reply with photos (they go in BEFORE). When you leave, send the photos with the word AFTER.`;
 }
 // the morning after a job's last day with no AFTER photos: was it finished?
 export function finishedQuestionText(first: string, label: string, day: string, today: string, lang0?: string | null): string {
@@ -624,8 +666,8 @@ export function finishedQuestionText(first: string, label: string, day: string, 
 export function doneMarkedText(label: string, needPhotos: boolean, lang0?: string | null): string {
   const lang = langOf(lang0);
   return lang === "es"
-    ? `¡Gracias! ${theJob(label, "es", true)} quedó marcado como terminado.${needPhotos ? " Por favor responda con fotos de DESPUES del trabajo terminado." : ""}`
-    : `Thanks! ${label} is marked work done.${needPhotos ? " Please reply with AFTER photos of the finished work." : ""}`;
+    ? `¡Gracias! ${theJob(label, "es", true)} quedó marcado como terminado.${needPhotos ? " Mande ahora las fotos del trabajo terminado: van a DESPUES." : ""}`
+    : `Thanks! ${label} is marked work done.${needPhotos ? " Send the photos of the finished work now: they go in AFTER." : ""}`;
 }
 export function alreadyDoneText(label: string, lang0?: string | null): string {
   return langOf(lang0) === "es" ? `${theJob(label, "es", true)} ya está marcado como terminado. ¡Gracias!` : `${label} is already marked work done. Thanks!`;
@@ -633,8 +675,8 @@ export function alreadyDoneText(label: string, lang0?: string | null): string {
 // DONE with no after pictures yet, nobody asked: the pictures finish it
 export function sendAfterText(label: string, lang0?: string | null): string {
   return langOf(lang0) === "es"
-    ? `Mande las fotos de DESPUES ${ofJob(label, "es")} y queda marcado como terminado.`
-    : `Send the AFTER photos ${atJob(label, "en")} and it gets marked work done.`;
+    ? `Mande ahora las fotos del trabajo terminado ${ofJob(label, "es")}: van a DESPUES y queda marcado como terminado.`
+    : `Send the photos of the finished work ${atJob(label, "en")} now: they go in AFTER, and it gets marked work done.`;
 }
 // "done" on a day that isn't the job's last: for today, or the whole job?
 export function dayDoneText(label: string, o: { next: string; today: string; day: number; of: number }, lang0?: string | null): string {
@@ -649,8 +691,8 @@ export function endedEarlyText(label: string, dropped: string[], lang0?: string 
   const lang = langOf(lang0);
   const days = dropped.map((d) => longDay(d, lang).split(",")[0]).join(lang === "es" ? " y " : " and ");
   return lang === "es"
-    ? `¡Gracias! ${theJob(label, "es", true)} quedó marcado como terminado${days ? `, así que no hay trabajo ahí el ${days}` : ""}.${needPhotos ? " Por favor responda con fotos de DESPUES del trabajo terminado." : ""}`
-    : `Thanks! ${label} is marked work done${days ? `, so there's no work there on ${days}` : ""}.${needPhotos ? " Please reply with AFTER photos of the finished work." : ""}`;
+    ? `¡Gracias! ${theJob(label, "es", true)} quedó marcado como terminado${days ? `, así que no hay trabajo ahí el ${days}` : ""}.${needPhotos ? " Mande ahora las fotos del trabajo terminado: van a DESPUES." : ""}`
+    : `Thanks! ${label} is marked work done${days ? `, so there's no work there on ${days}` : ""}.${needPhotos ? " Send the photos of the finished work now: they go in AFTER." : ""}`;
 }
 export function crewEndedText(first: string, label: string, dropped: string[], lang0?: string | null): string {
   const lang = langOf(lang0);

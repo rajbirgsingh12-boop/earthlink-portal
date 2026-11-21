@@ -1,4 +1,6 @@
 "use client";
+import MediaFolders from "@/components/MediaFolders";
+import { isMediaName } from "@/lib/media";
 import { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { matches } from "@/lib/search";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the SOS export
@@ -209,7 +211,6 @@ export default function Releases() {
   const [attachRel, setAttachRel] = useState<Release | null>(null);
   const attachInputRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
-  const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
   const isImg = (n: string) => /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(n);
   const [sosEdit, setSosEdit] = useState<{ fileBase: string; data: SosData } | null>(null);
   const [sosReady, setSosReady] = useState<Set<string>>(new Set());
@@ -744,24 +745,15 @@ export default function Releases() {
   // timestamped job photos straight from the phone camera — shrunk before upload;
   // second-resolution stamp so retakes moments apart never overwrite each other
   const addPhotos = async (r: Release, files: File[]) => {
-    const shrunk = await Promise.all(files.map((f) => shrinkImage(f)));
+    // (a video goes up as it is; pictures are shrunk like camera shots)
+    const shrunk = await Promise.all(files.map((f) => (/^video\//i.test(f.type) ? Promise.resolve(f) : shrinkImage(f))));
     const stamp = new Date().toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "");
     await attachFileList(r, shrunk.map((f, i) => {
-      const ext = (f.name.match(/\.\w+$/) || [".jpg"])[0];
+      const ext = (f.name.match(/\.\w+$/) || [/^video\//i.test(f.type) ? ".mp4" : ".jpg"])[0];
       return new File([f], `photo_${stamp}${files.length > 1 ? `_${i + 1}` : ""}${ext}`, { type: f.type });
     }));
   };
 
-  // thumbnails for the photos in the open panel
-  useEffect(() => {
-    const imgs = (attachRel?.attachments || []).filter((a) => isImg(a.name));
-    if (imgs.length === 0) { setPhotoUrls({}); return; }
-    sb().storage.from("docs").createSignedUrls(imgs.map((a) => a.path), 3600).then(({ data }) => {
-      const m: Record<string, string> = {};
-      (data || []).forEach((d) => { if (d.signedUrl && d.path) m[d.path] = d.signedUrl; });
-      setPhotoUrls(m);
-    });
-  }, [attachRel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------- import ----------
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2494,22 +2486,11 @@ export default function Releases() {
           primary={!readOnly ? <button type="button" className="btn btn-primary" onClick={() => photoInputRef.current?.click()} disabled={busy}>📷 Take photo</button> : undefined}
           secondary={!readOnly ? <button type="button" className="btn btn-ghost" onClick={() => attachInputRef.current?.click()} disabled={busy}>Upload file</button> : undefined}>
           {(attachRel.attachments || []).length === 0 && <div className="empty mb-3">Nothing attached yet. Release PDFs and walk sheets added from + Add release land here by themselves, and so do job photos.</div>}
-          {(attachRel.attachments || []).filter((a) => isImg(a.name)).length > 0 && (
-            <div className="mb-3 grid grid-cols-3 gap-1.5">
-              {(attachRel.attachments || []).filter((a) => isImg(a.name)).map((a) => (
-                <div key={a.path} className="relative">
-                  <button type="button" className="block w-full active:opacity-80" onClick={() => openAttachment(a.path)} aria-label={`Open ${a.name}`}>
-                    {photoUrls[a.path]
-                      // eslint-disable-next-line @next/next/no-img-element
-                      ? <img src={photoUrls[a.path]} alt={a.name} className="anim-fade h-24 w-full rounded-sm border border-rulesoft object-cover" />
-                      : <div className="skeleton h-24 w-full" />}
-                  </button>
-                  {!readOnly && <button type="button" className="btn-icon absolute right-1 top-1 border-0 bg-ink/70 text-paper shadow-none" aria-label="Delete photo" onClick={() => removeAttachment(attachRel, a)}>✕</button>}
-                </div>
-              ))}
-            </div>
-          )}
-          {(attachRel.attachments || []).filter((a) => !isImg(a.name)).map((a) => (
+          {/* the crew's texted photos and videos land in Before and After by themselves; the office's own, in Other photos */}
+          <MediaFolders items={attachRel.attachments || []} canEdit={!readOnly} flash={flash}
+            zipName={`Release ${attachRel.rel_number || ""}`.trim()}
+            onDelete={async (a) => { const x = (attachRel.attachments || []).find((y) => y.path === a.path); if (x) await removeAttachment(attachRel, x); }} />
+          {(attachRel.attachments || []).filter((a) => !isMediaName(a.name)).map((a) => (
             <div key={a.path} className="mb-1.5 flex items-center gap-1">
               <button type="button" className="row-btn flex-1 rounded-sm border border-rulesoft p-2.5 text-sm hover:border-work active:border-work" onClick={() => openAttachment(a.path)}>
                 📄 {a.name}
@@ -2521,7 +2502,7 @@ export default function Releases() {
       )}
       <input ref={attachInputRef} type="file" className="hidden"
         onChange={(e) => { const f = e.target.files?.[0]; if (f && attachRel) attachFile(attachRel, f); e.target.value = ""; }} />
-      <input ref={photoInputRef} type="file" accept="image/*" capture="environment" multiple className="hidden"
+      <input ref={photoInputRef} type="file" accept="image/*,video/*" capture="environment" multiple className="hidden"
         onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length && attachRel) addPhotos(attachRel, fs); e.target.value = ""; }} />
 
       {invPreview && org && (

@@ -7,6 +7,7 @@
 // get into, and where the portal sent them next — until the office gives the
 // job a new day (then it clears by itself) or taps ✓ Got it. Admin and office
 // only — no money here.
+import { countOf, isVideoName, mediaWords, pileOf } from "@/lib/media";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { sb } from "@/lib/supabase";
@@ -26,6 +27,12 @@ interface Spot { kind: "pact" | "rel"; id: string; label: string; sub: string }
 const LATELY_DAYS = 3;
 const when = (iso: string) => new Date(iso).toLocaleString("en-US", { weekday: "short", hour: "numeric", minute: "2-digit" });
 const photosN = (n: number) => `${n} photo${n === 1 ? "" : "s"}`;
+// "3 photos", "2 photos and 1 video", "BEFORE" / "AFTER" when the batch is on one pile
+const mediaOf = (b: { photos?: { name: string }[] | null }) => mediaWords(countOf((b.photos || []).map((p) => p.name)), "en");
+const pileWord = (b: { photos?: { name: string }[] | null; status?: string }) => {
+  const kinds = new Set((b.photos || []).map((p) => pileOf({ name: p.name })));
+  return b.status === "filed" && kinds.size === 1 ? ({ before: " BEFORE", after: " AFTER", noaccess: " door", other: "" } as const)[[...kinds][0]] : "";
+};
 const pactSpot = (j: { id: string; po_number?: string | null; job_number?: string | null; address?: string | null; development?: string | null }): Spot =>
   ({ kind: "pact", id: j.id, label: `PO ${(j.po_number || j.job_number || "").trim().replace(/^(p\.?\s*o\.?\s*#?|#)\s*/i, "")}`, sub: (j.address || j.development || "").trim() });
 const relSpot = (r: { id: string; rel_number?: string | null; location?: string | null }): Spot =>
@@ -137,10 +144,12 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
     <div className="mt-1.5 flex flex-wrap gap-1.5">
       {(b.photos || []).slice(0, 8).map((p) => (
         <button key={p.path} type="button" className="block h-16 w-16 overflow-hidden rounded-sm border border-rulesoft transition-opacity active:opacity-80" onClick={() => open(p.path)} aria-label={`Open ${p.name}`}>
-          {thumbs[p.path]
-            // eslint-disable-next-line @next/next/no-img-element
-            ? <img src={thumbs[p.path]} alt={p.name} className="h-full w-full object-cover" />
-            : <span className="skeleton block h-full w-full" />}
+          {isVideoName(p.name)
+            ? <span className="grid h-full w-full place-items-center bg-ink text-[18px] text-paper">▶</span>
+            : thumbs[p.path]
+              // eslint-disable-next-line @next/next/no-img-element
+              ? <img src={thumbs[p.path]} alt={p.name} className="h-full w-full object-cover" />
+              : <span className="skeleton block h-full w-full" />}
         </button>
       ))}
       {(b.photos || []).length > 8 && <span className="grid h-16 place-items-center px-1 text-[12px] text-inksoft">+{(b.photos || []).length - 8}</span>}
@@ -230,7 +239,7 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
       })}
       {held.map((b) => (
         <div key={b.id} className="anim-row border-t border-rulesoft py-2.5" data-held={b.id}>
-          <div className="text-[14px]"><b>{who(b)}</b> texted {photosN((b.photos || []).length)} · {when(b.created_at)}</div>
+          <div className="text-[14px]"><b>{who(b)}</b> texted {mediaOf(b)} · {when(b.created_at)}</div>
           {(b.body || "").trim() && <div className="text-[12px] text-inksoft [overflow-wrap:anywhere]">“{(b.body || "").trim()}”</div>}
           {strip(b)}
           {picking === b.id
@@ -238,7 +247,7 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
             : (
               <div className="mt-2 flex flex-wrap gap-2">
                 <button type="button" className="btn btn-primary btn-sm" onClick={() => setPicking(b.id)} disabled={busy} data-pick-job>Put them on a job…</button>
-                <button type="button" className={`btn btn-ghost btn-sm${spin(`${b.id}:throw`)}`} onClick={() => { if (window.confirm(`Throw away ${photosN((b.photos || []).length)} from ${who(b)}?`)) act(b, { action: "throw" }); }} {...busyOn(`${b.id}:throw`)} data-throw>Throw away</button>
+                <button type="button" className={`btn btn-ghost btn-sm${spin(`${b.id}:throw`)}`} onClick={() => { if (window.confirm(`Throw away ${mediaOf(b)} from ${who(b)}?`)) act(b, { action: "throw" }); }} {...busyOn(`${b.id}:throw`)} data-throw>Throw away</button>
               </div>
             )}
         </div>
@@ -250,7 +259,7 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
             return (
               <div key={b.id} className="border-t border-rulesoft py-2" data-filed={b.id}>
                 <div className="flex flex-wrap items-center gap-x-2 text-[13px]">
-                  <span><b>{who(b)}</b> · {photosN((b.photos || []).length)} → <b>{at ? at.label : "a job"}</b> · {when(b.created_at)}</span>
+                  <span><b>{who(b)}</b> · {mediaOf(b)}{pileWord(b)} → <b>{at ? at.label : "a job"}</b> · {when(b.created_at)}</span>
                   {picking !== b.id && <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPicking(b.id)} disabled={busy} data-move>Wrong job?</button>}
                 </div>
                 {picking === b.id && (

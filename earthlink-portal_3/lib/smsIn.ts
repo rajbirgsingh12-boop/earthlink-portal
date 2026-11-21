@@ -5,7 +5,8 @@
 // every case can be tried on its own. Server-only (it signs with node:crypto).
 import { createHmac, timingSafeEqual } from "crypto";
 import { normPo } from "./po";
-import { atJob, langOf, streetOf, type Lang } from "./crewText";
+import { AFTER_HOW, atJob, langOf, streetOf, type Lang } from "./crewText";
+import { extOfType, mediaWords } from "./media";
 
 export type Params = [string, string][];
 
@@ -44,17 +45,14 @@ const FIX_ONLY = new RegExp(String.raw`^(?:${FIX_LEAD}[\s,:.\-]*)*(?:(?:p\.?\s*o
 export const justANumber = (body: string): boolean =>
   refsIn(body).length > 0 && FIX_ONLY.test((body || "").toLowerCase().replace(/[\u2018\u2019`]/g, "'").replace(/\s+/g, " ").trim());
 
-// ---- the pictures that came with the text ----
-const EXT: Record<string, string> = {
-  "image/jpeg": "jpg", "image/jpg": "jpg", "image/pjpeg": "jpg", "image/png": "png", "image/gif": "gif",
-  "image/webp": "webp", "image/heic": "heic", "image/heif": "heif",
-};
+// ---- the pictures (and videos) that came with the text ----
 export const MAX_MEDIA = 10;
 export interface MediaIn { url: string; type: string; ext: string }
 // Twilio lists them as MediaUrl0…, MediaContentType0…; a phone sends ten at
-// most. Pictures only — a video or a contact card is counted, not kept.
-// the file ending for a picture's type, or "" for anything that isn't a picture
-export const imageExt = (type: string): string => EXT[(type || "").trim().toLowerCase().split(";")[0]] || "";
+// most. Pictures and videos are kept; anything else (a contact card, a voice
+// note) is counted, not kept.
+// the file ending for a picture's or a video's type, or "" for anything else
+export const imageExt = (type: string): string => extOfType(type);
 export function mediaIn(get: (k: string) => string | null): { photos: MediaIn[]; other: number } {
   const n = Math.min(MAX_MEDIA, Math.max(0, parseInt(get("NumMedia") || "0", 10) || 0));
   const photos: MediaIn[] = [];
@@ -62,7 +60,8 @@ export function mediaIn(get: (k: string) => string | null): { photos: MediaIn[];
   for (let i = 0; i < n; i++) {
     const url = (get(`MediaUrl${i}`) || "").trim();
     const type = (get(`MediaContentType${i}`) || "").trim().toLowerCase().split(";")[0];
-    if (url && EXT[type]) photos.push({ url, type, ext: EXT[type] });
+    const ext = extOfType(type);
+    if (url && ext) photos.push({ url, type, ext });
     else if (url) other += 1;
   }
   return { photos, other };
@@ -183,10 +182,6 @@ export function pickJob(body: string, rows: MineRow[], mine: JobKey[], today: st
   return { kind: "ask", why: "none" };
 }
 
-// "before" / "antes" in the text puts them with the before pictures; anything
-// else is the work done
-export const photoKind = (body: string): "before" | "after" => (/\b(before|antes)\b/i.test(body || "") ? "before" : "after");
-
 // after_2026-09-22_183012_jose_x7k2_1.jpg — the kind first (so the job's
 // Documents sort them into Before / After), the time, who sent it, and a bit
 // of Twilio's message id so two texts in the same second never collide
@@ -200,62 +195,70 @@ export function photoName(kind: string, at: Date, first: string, sid: string, i:
 // ---- what to say back ----
 // `label` here is the job's whole name, address first (lib/crewText jobName)
 export type Reply =
-  | { k: "filed"; n: number; label: string }
-  | { k: "held"; n: number }
-  | { k: "which"; n: number; options: string[] }   // held, with the jobs it could be: "116843 (2205 Linden Blvd, Apt 4B)"
-  | { k: "moved"; n: number; label: string }
+  | { k: "filed"; n: number; v?: number; label: string; kind?: "before" | "after" }   // v: how many of the n are videos
+  | { k: "held"; n: number; v?: number }
+  | { k: "which"; n: number; v?: number; options: string[] }   // held, with the jobs it could be: "116843 (2205 Linden Blvd, Apt 4B)"
+  | { k: "moved"; n: number; v?: number; label: string }
   | { k: "unknown"; number: string }
   | { k: "notphoto" }
   | { k: "failed" }
   | { k: "resend" }
   | { k: "stranger"; n: number }
   | { k: "connected" }
-  | { k: "inall"; n: number; label: string; kind?: "before" | "after" | null }   // the phone split one send: the whole count, once it has settled
-  | { k: "lost"; n: number };                                                   // pictures in the text that didn't come through
-const photos = (n: number, lang: Lang) => (lang === "es" ? (n === 1 ? "1 foto" : `${n} fotos`) : (n === 1 ? "1 photo" : `${n} photos`));
+  | { k: "inall"; n: number; v?: number; label: string; kind?: "before" | "after" | null }   // the phone split one send: the whole count, once it has settled
+  | { k: "lost"; n: number };                                                                // pictures in the text that didn't come through
+// "3 photos", "1 video", "2 photos and 1 video"
+const photos = (n: number, lang: Lang, v = 0) => mediaWords({ n, v }, lang);
+const one = (n: number, v = 0) => n === 1 && v <= 1;
 export function replyText(r: Reply, lang0?: string | null): string {
   const lang = langOf(lang0);
   const es = lang === "es";
   switch (r.k) {
-    case "filed":
+    case "filed": {
+      // a release's pictures: on their pile, BEFORE unless they said AFTER
+      const pile = r.kind === "after" ? (es ? "DESPUES" : "AFTER") : r.kind === "before" ? (es ? "ANTES" : "BEFORE") : "";
+      const got = pile ? mediaWords({ n: r.n, v: r.v || 0 }, lang, pile) : photos(r.n, lang, r.v);
+      const next = r.kind === "before" ? ` ${AFTER_HOW[lang]}` : es ? " ¡Gracias!" : " Thanks!";
       return es
-        ? `Recibido: ${photos(r.n, lang)} ${r.n === 1 ? "quedó" : "quedaron"} ${atJob(r.label, lang)}. ¡Gracias! Si es otro trabajo, responda con el número de PO correcto.`
-        : `Got it: ${photos(r.n, lang)} ${atJob(r.label, lang)}. Thanks! If that's the wrong job, reply with the right PO number.`;
+        ? `Recibido: ${got} ${atJob(r.label, lang)}.${next} Si es otro trabajo, responda con el número correcto.`
+        : `Got ${got} ${atJob(r.label, lang)}.${next} If that's the wrong job, reply with the right number.`;
+    }
     case "held":
       return es
-        ? `Recibimos ${r.n === 1 ? "su foto" : `sus ${photos(r.n, lang)}`}. ¿De qué trabajo ${r.n === 1 ? "es" : "son"}? Responda con el número de PO o de release.`
-        : `Got your ${photos(r.n, lang)}. Which job ${r.n === 1 ? "is it" : "are they"} for? Reply with the PO or release number.`;
+        ? `Recibimos ${one(r.n, r.v) ? (r.v ? "su video" : "su foto") : `sus ${photos(r.n, lang, r.v)}`}. ¿De qué trabajo ${one(r.n, r.v) ? "es" : "son"}? Responda con el número de PO o de release.`
+        : `Got your ${photos(r.n, lang, r.v)}. Which job ${r.n === 1 ? "is it" : "are they"} for? Reply with the PO or release number.`;
     case "which": {
       const list = r.options.length === 2 ? `${r.options[0]} ${es ? "o" : "or"} ${r.options[1]}` : r.options.join(", ");
       return es
-        ? `Recibimos ${r.n === 1 ? "su foto" : `sus ${photos(r.n, lang)}`}. ¿De qué trabajo ${r.n === 1 ? "es" : "son"}? Responda con el número: ${list}.`
-        : `Got your ${photos(r.n, lang)}. Which job ${r.n === 1 ? "is it" : "are they"} for? Reply with the number: ${list}.`;
+        ? `Recibimos ${one(r.n, r.v) ? (r.v ? "su video" : "su foto") : `sus ${photos(r.n, lang, r.v)}`}. ¿De qué trabajo ${one(r.n, r.v) ? "es" : "son"}? Responda con el número: ${list}.`
+        : `Got your ${photos(r.n, lang, r.v)}. Which job ${r.n === 1 ? "is it" : "are they"} for? Reply with the number: ${list}.`;
     }
     case "moved":
       return es
-        ? `Listo: ${r.n === 1 ? "su foto" : `sus ${photos(r.n, lang)}`} ahora ${r.n === 1 ? "está" : "están"} ${atJob(r.label, lang)}.`
-        : `Done: your ${photos(r.n, lang)} ${r.n === 1 ? "is" : "are"} ${atJob(r.label, lang)} now.`;
+        ? `Listo: ${one(r.n, r.v) ? (r.v ? "su video" : "su foto") : `sus ${photos(r.n, lang, r.v)}`} ahora ${r.n === 1 ? "está" : "están"} ${atJob(r.label, lang)}.`
+        : `Done: your ${photos(r.n, lang, r.v)} ${r.n === 1 ? "is" : "are"} ${atJob(r.label, lang)} now.`;
     case "unknown":
       return es
         ? `No encontramos el número ${r.number} en sus trabajos. La oficina pondrá sus fotos en el trabajo correcto.`
         : `Couldn't find ${r.number} on your jobs. The office will put your photos on the right job.`;
     case "notphoto":
-      return es ? "Solo se guardan fotos en el trabajo; eso no era una foto." : "Only photos go on the job; that wasn't a photo.";
+      return es ? "Solo se guardan fotos y videos en el trabajo; eso no era ninguno de los dos." : "Only photos and videos go on the job; that wasn't either.";
     case "resend":
       return es ? "No supimos de qué trabajo son sus fotos. Por favor envíelas otra vez con el número de PO en el mensaje." : "We couldn't tell which job your photos are for. Please send them again with the PO number in the text.";
     case "failed":
       return es ? "Sus fotos no llegaron bien. Por favor envíelas otra vez." : "Your photos didn't come through. Please send them again.";
     case "inall": {
-      const pile = r.kind === "before" ? (es ? " de ANTES" : " BEFORE") : r.kind === "after" ? (es ? " de DESPUES" : " AFTER") : "";
-      return es ? `En total, ${r.n} fotos${pile} ${atJob(r.label, lang)}.` : `${r.n}${pile} photos ${atJob(r.label, lang)} in all.`;
+      const pile = r.kind === "before" ? (es ? "ANTES" : "BEFORE") : r.kind === "after" ? (es ? "DESPUES" : "AFTER") : "";
+      const all = mediaWords({ n: r.n, v: r.v || 0 }, lang, pile);
+      return es ? `En total, ${all} ${atJob(r.label, lang)}.` : `${all} ${atJob(r.label, lang)} in all.`;
     }
     case "lost":
       return es
-        ? `${r.n === 1 ? "1 foto no llegó" : `${r.n} fotos no llegaron`}; por favor ${r.n === 1 ? "mándela" : "mándelas"} otra vez.`
-        : `${photos(r.n, lang)} didn't come through; please send ${r.n === 1 ? "it" : "them"} again.`;
+        ? `${r.n === 1 ? "1 foto o video no llegó" : `${r.n} fotos o videos no llegaron`}; por favor ${r.n === 1 ? "mándelo" : "mándelos"} otra vez.`
+        : `${r.n === 1 ? "1 photo or video" : `${r.n} photos or videos`} didn't come through; please send ${r.n === 1 ? "it" : "them"} again.`;
     case "connected":
       // the very first text the number ever gets, from a phone on the crew
-      // list — the owner trying it. Silence would look like it didn't work.
+      // list (the owner trying it). Silence would look like it didn't work.
       return es
         ? "Earth Link: este número está conectado. Responda a un mensaje del equipo con fotos del trabajo, o NO si no hay nadie en casa."
         : "Earth Link: this number is connected. Reply to a crew text with photos of the work, or NO when nobody is home.";

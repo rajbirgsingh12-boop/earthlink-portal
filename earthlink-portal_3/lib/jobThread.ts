@@ -7,8 +7,7 @@
 // (/api/texted-photos) and the morning run (lib/morning.ts).
 import type { Db, Photo } from "./photoStore";
 import {
-  countKinds, doneNoteLine, endedNoteLine, firstBeforeAt, kindOfName, namesFrom, photoAt, stageOf, undoneNoteLine, unmarkedNoteLine,
-  type Stage,
+  countKinds, doneNoteLine, endedNoteLine, firstBeforeAt, namesFrom, photoAt, undoneNoteLine, unmarkedNoteLine,
 } from "./jobFlow";
 import { continueDay, currentWorkDay, daysThrough, MAX_WORK_DAYS, nextWorkDay, workDaysOf } from "./workDays";
 import { langOf } from "./crewText";
@@ -71,26 +70,6 @@ export function dayPile(j: ThreadJob, today: string) {
   const cur = currentWorkDay(j.start_date, j.work_days, today);
   const names = namesFrom(namesOf(j), cur);
   return { cur, ...countKinds(names), firstBefore: firstBeforeAt(names) };
-}
-// Where the job is for this worker, today. The day's first pictures are the
-// before pictures. Once the day has them, a worker's own first pictures are
-// before pictures too when they come within two hours of the day's first
-// (two workers at one door each start with theirs; a helper sending the
-// finished work at 3 PM is not arriving), and more pictures from a worker
-// within an hour of their own before pictures are still before pictures
-// (the other room, ten minutes later); after that, after pictures.
-const HELPER_MS = 2 * 3_600_000;
-const SAME_START_MS = 60 * 60_000;
-export async function stageFor(db: Db, j: ThreadJob, empId: string | null | undefined, now: Date, today: string): Promise<Stage> {
-  const pile = dayPile(j, today);
-  const s = stageOf(pile);
-  if (s !== "after" || !empId) return s;
-  const since = encodeURIComponent(new Date(now.getTime() - 10 * 86_400_000).toISOString());
-  const mine = (await db.get<{ photos?: Photo[] | null; created_at?: string | null }>(`texted_photos?employee_id=eq.${empId}&pact_job_id=eq.${j.id}&status=eq.filed&created_at=gte.${since}&select=photos,created_at&order=created_at.desc&limit=50`)).rows
-    .filter((r) => r.created_at && nyDay(new Date(r.created_at)) >= pile.cur && (r.photos || []).some((p) => kindOfName(p?.name || "") === "before"));
-  if (!mine.length) return Number.isFinite(pile.firstBefore) && now.getTime() - pile.firstBefore <= HELPER_MS ? "before" : "after";
-  const last = Math.max(...mine.map((r) => Date.parse(r.created_at || "") || 0));
-  return now.getTime() - last <= SAME_START_MS ? "before" : "after";
 }
 // the job's days before today with no picture at all (a NOT DONE days late
 // counts the days in between): then "day 3 of 4" would mean nothing to the crew

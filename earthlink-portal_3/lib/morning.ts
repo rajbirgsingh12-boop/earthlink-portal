@@ -4,7 +4,8 @@
 // first, so the timer and a phone sweeping the same morning never both text):
 //   • a job of more days, on its day 2 and on: each worker told about it gets
 //     "Today is day 2 of 3 at 2205 Linden Blvd, Apt 4B (PO 116843). When you
-//     get there, reply with BEFORE photos. When you leave, reply with AFTER photos."
+//     get there, reply with photos (they go in BEFORE). When you leave, send
+//     the photos with the word AFTER."
 //   • the morning after a job's last day, when that day has no AFTER photos
 //     and the job isn't marked done: each worker on it is asked "Did you
 //     finish it yesterday? Reply DONE if it's finished, or NOT DONE if it

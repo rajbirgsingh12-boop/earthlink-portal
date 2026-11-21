@@ -131,10 +131,19 @@ export const ofJob = (name: string, lang: Lang): string => (lang === "es" ? (isR
 // The line at the end of a text from the company number, once photos sent
 // back to it go on the job (/api/sms-in) — added by the server, which is the
 // only one that sends from that number. Language by the text's own greeting.
-export const PHOTO_INVITE = { en: "Reply to this text with photos of the work.", es: "Responda a este mensaje con fotos del trabajo." };
+// how a worker says the photos are the finished work: every text that asks for photos ends with it
+export const AFTER_HOW = { en: "When you finish, send the photos with the word AFTER.", es: "Al terminar, mande las fotos con la palabra DESPUES." };
+// (photos are BEFORE unless the worker says AFTER: the same words as AFTER_HOW)
+export const PHOTO_INVITE = {
+  en: "Reply to this text with photos of the work: they go in BEFORE. When you finish, send the photos with the word AFTER.",
+  es: "Responda a este mensaje con fotos del trabajo: van a ANTES. Al terminar, mande las fotos con la palabra DESPUES.",
+};
+// the invite as texts already out carried it (a text being re-sent is never asked twice)
+const OLD_INVITE = { en: "Reply to this text with photos of the work.", es: "Responda a este mensaje con fotos del trabajo." };
 // a PACT job's text carries the whole thread instead (lib/jobFlow's jobAsk:
 // before photos, then after photos), never both
-const hasAsk = (b: string) => b.includes(PHOTO_INVITE.en) || b.includes(PHOTO_INVITE.es) || /reply with BEFORE photos|responda con fotos de ANTES/.test(b);
+const hasAsk = (b: string) => b.includes(PHOTO_INVITE.en) || b.includes(PHOTO_INVITE.es) || b.includes(OLD_INVITE.en) || b.includes(OLD_INVITE.es)
+  || /with the word AFTER|con la palabra DESPUES|reply with BEFORE photos|responda con fotos de ANTES/.test(b);
 // Twilio takes 1,600 characters. A text over a limit gives up words from its
 // LONGEST paragraph (the work line), cut at a word with "…" — the greeting,
 // the map link and the ask at the end all stay whole. (A paragraph that is

@@ -7,7 +7,7 @@ import { NextResponse } from "next/server";
 import { pactKey, relKey } from "@/lib/smsIn";
 import { dropBatch, fileBatch, serviceDb, type Batch } from "@/lib/photoStore";
 import { kindOfName, mixedCaption, notDone, photoKindFor, type PhotoKind } from "@/lib/jobFlow";
-import { clearDoneIfNoAfter, closeQuestion, markDone, nyDay, onLastDay, stageFor, threadJob, type Emp, type ThreadJob } from "@/lib/jobThread";
+import { clearDoneIfNoAfter, closeQuestion, markDone, nyDay, onLastDay, threadJob, type Emp, type ThreadJob } from "@/lib/jobThread";
 import { jobName } from "@/lib/crewText";
 
 export const runtime = "nodejs";
@@ -50,10 +50,8 @@ export async function POST(req: Request) {
   if (body.action !== "file") return NextResponse.json({ error: "Bad request" }, { status: 400 });
   if (b.status !== "held" && b.status !== "filed") return NextResponse.json({ error: "Those photos were thrown away" }, { status: 409 });
   let target;
-  // onto a PACT job, the pile is where the job's day is (lib/jobThread): the
-  // day's first pictures are before pictures, whatever they were called while
-  // they waited; a worker's own first pictures count as theirs, as when they
-  // answer with the number; finished work held for its job stays the finished work
+  // onto a PACT job: a batch already on a job keeps its pile; one waiting is
+  // BEFORE unless the worker said AFTER (lib/jobFlow photoKindFor)
   let kind: PhotoKind | undefined;
   let thread: ThreadJob | null = null;
   const now = new Date();
@@ -64,7 +62,8 @@ export async function POST(req: Request) {
       target = pactKey(thread);
       // a batch already on a job (Wrong job?) keeps its own pile: it was sorted when it came in
       const own = b.status === "filed" ? kindOfName((b.photos || [])[0]?.name || "") : null;
-      kind = own || (b.status === "held" && b.how === "after" ? "after" : photoKindFor(b.body || "", await stageFor(db, thread, b.employee_id, now, today), null));
+      // one waiting goes where its words (or an AFTER texted with it) put it: BEFORE unless they said AFTER
+      kind = own || (b.how === "after" ? "after" : photoKindFor(b.body || ""));
     }
   } else if (body.release_id && uuid.test(body.release_id)) {
     const r = (await db.get<{ id: string; rel_number?: string }>(`releases?id=eq.${body.release_id}&select=id,rel_number`)).rows[0];

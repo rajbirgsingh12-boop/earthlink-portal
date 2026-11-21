@@ -26,6 +26,7 @@ import { NextResponse } from "next/server";
 import { waitUntil } from "@vercel/functions";
 import { addressesOf, copyTo, fetchMediaFrom, messageMediaBase, sendCopy, sendTexts } from "@/lib/twilio";
 import { mediaIn, twiml, validTwilio, type Params } from "@/lib/smsIn";
+import { mediaWords } from "@/lib/media";
 import { photosBackReady, serviceDb } from "@/lib/photoStore";
 import { handleInbound, type Seen } from "@/lib/inbound";
 
@@ -75,7 +76,7 @@ export async function POST(req: Request) {
   // the owner's copy (lib/twilio copyTo): the text in and the answer, in two short texts
   const copy = copyTo();
   if (copy && seen.from && cleanPhone(seen.from) !== copy) {
-    const what = `${seen.body.trim()}${seen.photos ? `${seen.body.trim() ? " " : ""}(${seen.photos} photo${seen.photos === 1 ? "" : "s"})` : ""}${seen.other ? ` (${seen.other} file${seen.other === 1 ? "" : "s"})` : ""}`.trim();
+    const what = `${seen.body.trim()}${seen.photos ? `${seen.body.trim() ? " " : ""}(${mediaWords({ n: seen.photos, v: seen.videos || 0 }, "en")})` : ""}${seen.other ? ` (${seen.other} file${seen.other === 1 ? "" : "s"})` : ""}`.trim();
     const who = seen.who || seen.from;
     waitUntil((async () => {
       if (what) await sendCopy(`From ${who}: ${what}`);

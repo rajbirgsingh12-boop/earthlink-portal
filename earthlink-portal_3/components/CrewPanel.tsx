@@ -59,7 +59,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   const passed = !!lastDay && dayPassed(lastDay);
   // the day a text set for later is about: the job's first day still ahead or
   // under way (a helper added on day 2 of 3 is texted for day 2's morning)
-  const sendDay = days.find((d) => !dayPassed(d)) || day;
+  const sendDay = days.find((d) => sendLaterOpen(d)) || days.find((d) => !dayPassed(d)) || day;
   // the work the crew is told: the rows' saved wording, else the PO's own
   const savedWork = rows.find((r) => (r.description || "").trim())?.description || "";
   const [work, setWork] = useState(savedWork || workOf(job));

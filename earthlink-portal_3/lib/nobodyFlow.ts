@@ -128,7 +128,8 @@ export async function nobodyFlow(db: Db, o: {
   const todays = (n: Mark) => !!n.created_at && nyDay(new Date(n.created_at)) === today;
   const at = (n: Mark) => Date.parse(n.created_at || "") || 0;
   const marks = marksGot.rows.filter(todays);
-  const notices = marks.filter((n) => n.status === "nobody" || n.status === "seen" || n.status === "moved");
+  // ("opened": someone on the crew got in after all; still reported today, so no second ⚠ on it)
+  const notices = marks.filter((n) => n.status === "nobody" || n.status === "seen" || n.status === "moved" || n.status === "opened");
   const mine = marks.filter((n) => n.employee_id === emp.id);           // every "nobody" answer this worker has had today
   const flagged = new Set(ids(notices.map(jobOfMark)));
   const myPhotos = photosGot.rows.filter((b) => todays(b) && b.how !== "noaccess");
@@ -138,7 +139,8 @@ export async function nobodyFlow(db: Db, o: {
   // the last thing we texted them was "got your photos", within half an hour
   const answerToPhotos = lastPhotos > lastMine && now.getTime() - lastPhotos < 30 * 60_000;
   // the jobs the portal itself just sent them on to after a door (they can't be there yet)
-  const justSent = new Set(ids(mine.filter((n) => n.status === "note" && jobOfMark(n) && now.getTime() - at(n) < SAME_DOOR_MS).map(jobOfMark)));
+  // (five minutes: later than that they can be at it, and a "no" is about it)
+  const justSent = new Set(ids(mine.filter((n) => n.status === "note" && jobOfMark(n) && now.getTime() - at(n) < 5 * 60_000).map(jobOfMark)));
 
   // "NO 2205 Linden": a door only when it names one of today's
   const quietUnlessDoor = !!o.photosIn || !!o.candidate;
@@ -180,9 +182,13 @@ export async function nobodyFlow(db: Db, o: {
   }
 
   const m = whichMissed({ body: o.body, today, jobs, flagged, visited, sameDoor, justSent, answerToPhotos });
+  // a NO with a picture minutes after being sent on to a door in the same
+  // building: the picture is of that door
+  let m2 = m;
+  if (o.photosIn && m.kind === "ask" && m.options.length === 1 && justSent.has(m.options[0].id)) m2 = { kind: "missed", job: m.options[0], already: false };
   // with pictures: only a door they haven't sent pictures from today
-  if (quietUnlessDoor && (m.kind !== "missed" || (o.photosIn && visited.has(m.job.id)))) return { handled: false };
-  if (m.kind === "skip") {
+  if (quietUnlessDoor && (m2.kind !== "missed" || (o.photosIn && visited.has(m2.job.id)))) return { handled: false };
+  if (m2.kind === "skip") {
     // with a number it's a photo fix, which /api/sms-in does; without one,
     // say how a door is reported, in case that's what they meant
     if (numbersIn(o.body).length) return { handled: false };
@@ -191,19 +197,19 @@ export async function nobodyFlow(db: Db, o: {
     await remember();
     return { handled: true, reply: hintText(open, lang) };
   }
-  if (m.kind === "ask") { await remember(); return { handled: true, reply: askWhichText(m.options, lang) }; }
-  if (m.kind === "not_today") { await tellOffice(`Said nobody home at ${m.number}, not a job of theirs today`); return { handled: true, reply: notTodayText(m.number, lang) }; }
-  if (m.kind === "nothing_today") {
+  if (m2.kind === "ask") { await remember(); return { handled: true, reply: askWhichText(m2.options, lang) }; }
+  if (m2.kind === "not_today") { await tellOffice(`Said nobody home at ${m2.number}, not a job of theirs today`); return { handled: true, reply: notTodayText(m2.number, lang) }; }
+  if (m2.kind === "nothing_today") {
     const any = jobs.some((j) => j.day === today) || visited.size > 0;
     await tellOffice(any ? "Sent photos from every job of theirs today, so nothing was changed" : "No job of theirs today, so nothing was changed");
     return { handled: true, reply: toldOfficeText(lang) };
   }
 
-  const missed = m.job;
+  const missed = m2.job;
   // ---- claim the door: one notice per job per day. The database refuses a
   // second one (RUN_ME section 21), so the other worker at the same door,
   // texting in the same second, takes the "already reported" road ----
-  let already = m.already;
+  let already = m2.already;
   let noticeId = "";
   if (!already) {
     const notice = {

@@ -6,7 +6,7 @@
 import { NextResponse } from "next/server";
 import { pactKey, relKey } from "@/lib/smsIn";
 import { dropBatch, fileBatch, serviceDb, type Batch } from "@/lib/photoStore";
-import { photoKindFor, type PhotoKind } from "@/lib/jobFlow";
+import { kindOfName, mixedCaption, notDone, photoKindFor, type PhotoKind } from "@/lib/jobFlow";
 import { clearDoneIfNoAfter, closeQuestion, markDone, nyDay, onLastDay, stageFor, threadJob, type Emp, type ThreadJob } from "@/lib/jobThread";
 import { jobName } from "@/lib/crewText";
 
@@ -62,7 +62,9 @@ export async function POST(req: Request) {
     thread = await threadJob(db, body.pact_job_id);
     if (thread) {
       target = pactKey(thread);
-      kind = b.status === "held" && b.how === "after" ? "after" : photoKindFor(b.body || "", await stageFor(db, thread, b.employee_id, now, today), null);
+      // a batch already on a job (Wrong job?) keeps its own pile: it was sorted when it came in
+      const own = b.status === "filed" ? kindOfName((b.photos || [])[0]?.name || "") : null;
+      kind = own || (b.status === "held" && b.how === "after" ? "after" : photoKindFor(b.body || "", await stageFor(db, thread, b.employee_id, now, today), null));
     }
   } else if (body.release_id && uuid.test(body.release_id)) {
     const r = (await db.get<{ id: string; rel_number?: string }>(`releases?id=eq.${body.release_id}&select=id,rel_number`)).rows[0];
@@ -76,7 +78,8 @@ export async function POST(req: Request) {
   if (was) await clearDoneIfNoAfter(db, was, jobName(target, "en"), now, today, (b.photos || []).some((p) => /^after/i.test(p?.name || "")));
   // after pictures on the job's last day: the job is work done, as when the worker texts them
   let marked = false;
-  if (thread && kind === "after" && b.employee_id) {
+  // ("not done yet" or "kitchen done, starting the bath" with them: not marked; the office sees the words)
+  if (thread && kind === "after" && b.employee_id && !notDone(b.body || "") && !mixedCaption(b.body || "")) {
     await closeQuestion(db, thread.id);
     const emp = (await db.get<Emp>(`employees?id=eq.${b.employee_id}&select=id,name,phone,lang,active`)).rows[0];
     if (emp && !onLastDay(thread, today).before) marked = await markDone(db, thread, emp, { from: b.from_phone || "", now, finish: today });

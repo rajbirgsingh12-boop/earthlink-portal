@@ -53,14 +53,20 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true, crew,
   // how many days the job runs: the crew sends BEFORE and AFTER photos every
   // day, and it's marked work done on its last (a worker's NOT DONE adds one)
   const n = dayCount(job.work_days);
+  // asked once, a moment after the last tap (two taps of + are one change),
+  // by a timer that outlives the card: one day fewer can take the card off
+  // the day on screen. The page's onDays texts the job as it is by then
+  const askLater = useRef<ReturnType<typeof setTimeout> | null>(null);
   const setDays = (to: number) => once(async () => {
     const next = Math.max(1, Math.min(MAX_WORK_DAYS, to));
     if (next === n) return;
     const ok = await onSave({ work_days: next });
     if (ok === false || !crew?.told || !crew.names.length || !onDays) return;
-    // asked at once: one day fewer can take the card off the day on screen, and a prompt on it with it
+    if (askLater.current) clearTimeout(askLater.current);
+    const names = crew.names.join(", ");
     const end = job.start_date ? lastWorkDay(job.start_date, next) : "";
-    if (window.confirm(`${job.start_date ? `Now ${prettyDate(job.start_date)}${next > 1 ? ` to ${prettyDate(end)}` : ""}. ` : ""}Text ${crew.names.join(", ")} the new days?`)) await onDays();
+    const span = job.start_date ? `Now ${prettyDate(job.start_date)}${next > 1 ? ` to ${prettyDate(end)}` : ""}. ` : "";
+    askLater.current = setTimeout(() => { askLater.current = null; if (window.confirm(`${span}Text ${names} the new days?`)) void onDays(); }, 1500);
   });
   const last = job.start_date ? lastWorkDay(job.start_date, n) : "";
   const trips = noAccessCount(job.notes);

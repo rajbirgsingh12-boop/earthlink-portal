@@ -12,7 +12,7 @@
 //     DONE marks it done; NOT DONE runs it one more work day (lib/inbound).
 import type { Db } from "./photoStore";
 import { dayReminderText, finishedQuestionText } from "./jobFlow";
-import { billed, cleanPhone, dayPile, firstName, keyOf, nyDay, nyHour, putRow, shortDay, type Emp, type ThreadJob } from "./jobThread";
+import { billed, cleanPhone, dayPile, firstName, keyOf, nyDay, nyHour, putRow, shortDay, unworkedDays, type Emp, type ThreadJob } from "./jobThread";
 import { jobName } from "./crewText";
 import { dayMinus } from "./smsIn";
 import { isSunday, workDaysOf } from "./workDays";
@@ -54,17 +54,22 @@ export async function morningRun(db: Db, now: Date, photosBack: boolean): Promis
     if (!claim.ok || !claim.rows.length) continue;
     const key = keyOf(t.job);
     // the crew who were told about the job, each once, with a phone
-    const rows = (await db.get<{ employee_id: string; texted?: boolean | null }>(`schedule_days?pact_job_id=eq.${t.job.id}&select=employee_id,texted`)).rows;
-    const crew: { e: Emp; to: string }[] = [];
-    for (const r of rows) {
+    type CrewRow = { employee_id: string; texted?: boolean | null; texted_at?: string | null };
+    let got = await db.get<CrewRow>(`schedule_days?pact_job_id=eq.${t.job.id}&select=employee_id,texted,texted_at`);
+    if (!got.ok) got = await db.get<CrewRow>(`schedule_days?pact_job_id=eq.${t.job.id}&select=employee_id,texted`);
+    const crew: { e: Emp; to: string; toldToday: boolean }[] = [];
+    for (const r of got.rows) {
       if (!r.texted || crew.some((c) => c.e.id === r.employee_id)) continue;
       const e = emps.rows.find((x) => x.id === r.employee_id);
       const to = cleanPhone(e?.phone);
-      if (e && e.active !== false && to) crew.push({ e, to });
+      if (e && e.active !== false && to) crew.push({ e, to, toldToday: !!r.texted_at && nyDay(new Date(r.texted_at)) === today });
     }
-    if (t.remind && crew.length) {
-      const day = t.days.indexOf(today) + 1;
-      const out: TextOut[] = crew.map(({ e, to }) => ({ to, who: (e.name || "").trim() || undefined, body: dayReminderText(firstName(e), jobName(key, e.lang), { day, of: t.days.length }, e.lang) }));
+    // (a worker whose crew text went out this morning, a helper set up for day 2, has just been told)
+    const remindCrew = crew.filter((c) => !c.toldToday);
+    if (t.remind && remindCrew.length) {
+      // (no number when a day before today was never worked: it would be wrong)
+      const day = unworkedDays(t.job, today).length ? 0 : t.days.indexOf(today) + 1;
+      const out: TextOut[] = remindCrew.map(({ e, to }) => ({ to, who: (e.name || "").trim() || undefined, body: dayReminderText(firstName(e), jobName(key, e.lang), { day, of: t.days.length }, e.lang) }));
       reminded += (await sendTexts(out)).sent;
     }
     // (a job nobody was texted about isn't run by text: nothing to ask)
@@ -73,9 +78,14 @@ export async function morningRun(db: Db, now: Date, photosBack: boolean): Promis
       // (one somebody got into after all is "opened", and is asked about)
       const door = (await db.get<{ id: string }>(`texted_photos?pact_job_id=eq.${t.job.id}&how=eq.nobody&status=in.(nobody,seen,moved)&day=eq.${t.ask}&select=id&limit=1`)).rows.length > 0;
       if (door) continue;
-      // asked already, on an earlier morning: once per job and day
-      if ((await db.get<{ id: string }>(`texted_photos?pact_job_id=eq.${t.job.id}&how=eq.finished&day=eq.${t.ask}&select=id&limit=1`)).rows.length) continue;
-      const out: TextOut[] = crew.map(({ e, to }) => ({ to, who: (e.name || "").trim() || undefined, body: finishedQuestionText(firstName(e), jobName(key, e.lang), t.ask, today, e.lang) }));
+      // asked already, on an earlier morning: once per job and day; a worker
+      // whose question didn't go out then is asked now, while it's still open
+      const card = (await db.get<{ id: string; status?: string | null }>(`texted_photos?pact_job_id=eq.${t.job.id}&how=eq.finished&day=eq.${t.ask}&select=id,status&limit=1`)).rows[0];
+      if (card && card.status !== "reply") continue;
+      const askedBefore = card ? new Set((await db.get<{ employee_id?: string | null }>(`texted_photos?pact_job_id=eq.${t.job.id}&how=eq.asked&day=eq.${t.ask}&select=employee_id`)).rows.map((r) => r.employee_id || "")) : new Set<string>();
+      const toAsk = crew.filter((c) => !askedBefore.has(c.e.id));
+      if (!toAsk.length) continue;
+      const out: TextOut[] = toAsk.map(({ e, to }) => ({ to, who: (e.name || "").trim() || undefined, body: finishedQuestionText(firstName(e), jobName(key, e.lang), t.ask, today, e.lang) }));
       const told: string[] = [];
       await sendTexts(out, async (m) => {
         const c = crew.find((x) => x.to === m.to);
@@ -87,7 +97,7 @@ export async function morningRun(db: Db, now: Date, photosBack: boolean): Promis
       });
       // the question for the office's card, naming the ones Twilio took (none
       // took it: no card, and the next morning tries again inside the look-back)
-      if (!told.length) continue;
+      if (!told.length || card) continue;
       const note = `No AFTER photos ${shortDay(t.ask)} and it isn't marked done: asked ${told.filter(Boolean).join(" and ") || "the crew"} if it was finished`;
       const st = await db.insertStatus("texted_photos", { pact_job_id: t.job.id, from_phone: "", body: "", photos: [], status: "reply", how: "finished", day: t.ask, note });
       if (st === 400) await putRow(db, { pact_job_id: t.job.id, from_phone: "", body: "", photos: [], status: "reply", how: "finished", note });

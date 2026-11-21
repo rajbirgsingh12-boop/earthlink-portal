@@ -7,7 +7,7 @@
 // (/api/texted-photos) and the morning run (lib/morning.ts).
 import type { Db, Photo } from "./photoStore";
 import {
-  countKinds, doneNoteLine, endedNoteLine, firstBeforeAt, kindOfName, namesFrom, stageOf, undoneNoteLine, unmarkedNoteLine,
+  countKinds, doneNoteLine, endedNoteLine, firstBeforeAt, kindOfName, namesFrom, photoAt, stageOf, undoneNoteLine, unmarkedNoteLine,
   type Stage,
 } from "./jobFlow";
 import { continueDay, currentWorkDay, daysThrough, MAX_WORK_DAYS, nextWorkDay, workDaysOf } from "./workDays";
@@ -92,13 +92,21 @@ export async function stageFor(db: Db, j: ThreadJob, empId: string | null | unde
   const last = Math.max(...mine.map((r) => Date.parse(r.created_at || "") || 0));
   return now.getTime() - last <= SAME_START_MS ? "before" : "after";
 }
-// the job's last work day, and whether today is before it (a job of more days, not on its last)
-export function onLastDay(j: ThreadJob, today: string): { last: string; before: boolean; day: number; of: number; next: string } {
+// the job's days before today with no picture at all (a NOT DONE days late
+// counts the days in between): then "day 3 of 4" would mean nothing to the crew
+export const unworkedDays = (j: ThreadJob, today: string): string[] => {
+  const seen = new Set(namesOf(j).map(photoAt).filter(Boolean).map((ms) => nyDay(new Date(ms))));
+  return daysOfJob(j).filter((d) => d < today && !seen.has(d));
+};
+// the job's last work day, and whether today is before it (a job of more
+// days, not on its last). `day` is 0 when its days can't be counted for the crew
+export function onLastDay(j: ThreadJob, today: string): { last: string; before: boolean; day: number; of: number; next: string; nextN: number } {
   const days = daysOfJob(j);
   const last = days[days.length - 1] || today;
   const cur = currentWorkDay(j.start_date, j.work_days, today);
-  const day = days.indexOf(cur) + 1;
-  return { last, before: today < last && days.length > 1, day: day || 1, of: days.length || 1, next: days.find((d) => d > today) || "" };
+  const counted = !unworkedDays(j, today).length;
+  const next = days.find((d) => d > today) || "";
+  return { last, before: today < last && days.length > 1, day: counted ? days.indexOf(cur) + 1 || 1 : 0, of: days.length || 1, next, nextN: counted && next ? days.indexOf(next) + 1 : 0 };
 }
 
 // ---- the work-done mark ----
@@ -136,7 +144,7 @@ export async function clearDoneIfNoAfter(db: Db, jobId: string, toLabel: string,
   if (dayPile(job, today).afterN > 0) return;
   // only a mark the texted AFTER photos put on, never one the office set by
   // hand or a worker's DONE (the answer to the morning's question) put on
-  const marks = (await db.get<{ note?: string | null }>(`texted_photos?pact_job_id=eq.${jobId}&how=eq.done&select=note&order=created_at.desc&limit=1`)).rows;
+  const marks = (await db.get<{ note?: string | null }>(`texted_photos?pact_job_id=eq.${jobId}&how=eq.done&status=in.(done,seen)&select=note&order=created_at.desc&limit=1`)).rows;
   if (!marks.length || /texted DONE/.test(marks[0].note || "")) return;
   const notes = withNote(job.notes, unmarkedNoteLine(nyWhen(now), toLabel));
   if (!(await db.patch(`pact_jobs?id=eq.${jobId}`, { work_done: false, finish_date: "", notes })) && !(await db.patch(`pact_jobs?id=eq.${jobId}`, { work_done: false, notes }))) return;
@@ -175,17 +183,20 @@ export type Continued =
   | { kind: "still"; next: string; day: number; of: number }   // it was going on anyway (before its last day)
   | { kind: "added"; next: string; day: number; told: string[] } // one more work day, the crew told
   | { kind: "open" };                                    // not finished, and no day could be added: the office sets it
-export async function continueJob(db: Db, job: ThreadJob, o: { emp: Emp; emps: Emp[]; now: Date; today: string; tell: boolean; words: (e: Emp, next: string, day: number) => string }): Promise<Continued> {
+// `answered`: the morning's question was already answered by someone else on the crew
+export async function continueJob(db: Db, job: ThreadJob, o: { emp: Emp; emps: Emp[]; now: Date; today: string; tell: boolean; answered?: boolean; words: (e: Emp, next: string, day: number) => string }): Promise<Continued> {
   if (billed(job)) return { kind: "billed" };
   const who = firstName(o.emp);
   const days = daysOfJob(job);
   const last = days[days.length - 1] || "";
   const wasDone = !!job.work_done;
-  // a co-worker's NOT DONE a moment ago already ran it on to today: the same day, not one more
-  if (last && last === o.today) {
+  // a co-worker's NOT DONE (to the same question, or a moment ago) already ran
+  // it on to today: the same day, not one more. Once today's AFTER photos are
+  // in, or it's marked done again, a NOT DONE is about today and adds tomorrow
+  if (last && last === o.today && !wasDone && dayPile(job, o.today).afterN === 0) {
     const since = encodeURIComponent(new Date(o.now.getTime() - 3 * 3_600_000).toISOString());
-    const recent = (await db.get<{ id: string }>(`texted_photos?pact_job_id=eq.${job.id}&how=eq.notdone&created_at=gte.${since}&select=id&limit=1`)).rows.length > 0;
-    if (recent) return { kind: "still", next: last, day: days.length, of: days.length };
+    const recent = o.answered || (await db.get<{ id: string }>(`texted_photos?pact_job_id=eq.${job.id}&how=eq.notdone&created_at=gte.${since}&select=id&limit=1`)).rows.length > 0;
+    if (recent) return { kind: "still", next: last, day: unworkedDays(job, o.today).length ? 0 : days.length, of: days.length };
   }
   // still inside its days (NOT DONE on day 1 of 3): it was going on anyway
   if (last && o.today < last) {
@@ -194,7 +205,7 @@ export async function continueJob(db: Db, job: ThreadJob, o: { emp: Emp; emps: E
       const notes = withNote(job.notes, undoneNoteLine(who, nyWhen(o.now)));
       if (await db.patch(`pact_jobs?id=eq.${job.id}`, { work_done: false, finish_date: "", notes }) || await db.patch(`pact_jobs?id=eq.${job.id}`, { work_done: false, notes })) await cardsOff(db, job.id);
     }
-    return { kind: "still", next, day: days.indexOf(next) + 1, of: days.length };
+    return { kind: "still", next, day: unworkedDays(job, o.today).length ? 0 : days.indexOf(next) + 1, of: days.length };
   }
   const next = last ? continueDay(last, o.today) : "";
   const n = next ? daysThrough(job.start_date || next, next) : 0;
@@ -214,7 +225,7 @@ export async function continueJob(db: Db, job: ThreadJob, o: { emp: Emp; emps: E
   job.work_days = n;
   // a day number only when the days run on without a gap (a NOT DONE days
   // late counts the days nobody worked: "day 4" would mean nothing to the crew)
-  const day = next === nextWorkDay(last) ? n : 0;
+  const day = next === nextWorkDay(last) && !unworkedDays(job, o.today).length ? n : 0;
   const told = o.tell ? await textCrew(db, job.id, o.emps, [o.emp.id], (e) => o.words(e, next, day)) : [];
   return { kind: "added", next, day, told };
 }
@@ -235,10 +246,11 @@ export async function endEarly(db: Db, job: ThreadJob, o: { emp: Emp; emps: Emp[
 
 // ---- the morning's "Finished?" question, still waiting for this worker ----
 // (lib/morning.ts writes one marker row per worker asked, how 'asked')
-export async function openQuestion(db: Db, empId: string, now: Date): Promise<{ jobId: string; day: string; at: number } | null> {
+// `closed`: also one already answered by someone else on the crew (open: false)
+export async function openQuestion(db: Db, empId: string, now: Date, closed = false): Promise<{ jobId: string; day: string; at: number; open: boolean } | null> {
   const since = encodeURIComponent(new Date(now.getTime() - 3 * 86_400_000).toISOString());
-  const r = (await db.get<{ pact_job_id?: string | null; day?: string | null; created_at?: string | null }>(`texted_photos?employee_id=eq.${empId}&how=eq.asked&status=eq.note&created_at=gte.${since}&select=pact_job_id,day,created_at&order=created_at.desc&limit=1`)).rows[0];
-  return r?.pact_job_id ? { jobId: r.pact_job_id, day: r.day || "", at: Date.parse(r.created_at || "") || 0 } : null;
+  const r = (await db.get<{ pact_job_id?: string | null; day?: string | null; created_at?: string | null; status?: string | null }>(`texted_photos?employee_id=eq.${empId}&how=eq.asked&status=${closed ? "in.(note,seen)" : "eq.note"}&created_at=gte.${since}&select=pact_job_id,day,created_at,status&order=created_at.desc&limit=1`)).rows[0];
+  return r?.pact_job_id ? { jobId: r.pact_job_id, day: r.day || "", at: Date.parse(r.created_at || "") || 0, open: r.status === "note" } : null;
 }
 // answered (by anyone on the crew, or by the job's pictures): the question and its markers close
 export async function closeQuestion(db: Db, jobId: string): Promise<void> {

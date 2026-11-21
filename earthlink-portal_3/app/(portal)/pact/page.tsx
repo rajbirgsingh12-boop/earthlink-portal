@@ -525,12 +525,12 @@ export default function Pact() {
   // proposal, a partner's PO comes as a PDF; and a file named as a proposal
   // or an invoice
   const pricedPaper = (a: { path?: string; name?: string }) =>
-    isMade(a) ? !/^PO .+ photos\.pdf$/.test(a.name || "") : /\.(docx?|rtf|odt)$/i.test(a.name || "") || /^(proposal|invoice)\b/i.test(a.name || "");
+    isMade(a) ? !/^PO .+ photos\.pdf$/.test(a.name || "") : /\.(docx?|rtf|odt)$/i.test(a.name || "") || /(^|[^a-z])(proposals?|invoices?)([^a-z]|$)/i.test(a.name || "");
   const seesPaper = (a: { path?: string; name?: string }) => canPrice || !pricedPaper(a);
 
   // ---------- the job's photos as one PDF to send ----------
   const makePhotoPdf = async (j: Job) => {
-    const imgs = (j.attachments || []).filter((a) => isImg(a.name));
+    const imgs = (j.attachments || []).filter((a) => isImg(a.name) && seesPaper(a));
     if (imgs.length === 0) { flash("No photos on this job yet"); return; }
     setBusy(true, `photopdf:${j.id}`);
     try {
@@ -1202,7 +1202,8 @@ export default function Pact() {
     let why = "";
     for (const file of files) {
       const path = `pact/${j.id}/${folder}${file.name}`;
-      const { error } = await sb().storage.from("docs").upload(path, file, { upsert: true });
+      // (over the storage's 50 MB a file: said before a long upload, not after it)
+      const { error } = file.size > 50 * 1024 * 1024 ? { error: { message: "too large" } } : await sb().storage.from("docs").upload(path, file, { upsert: true });
       if (error) {
         missed.push(file.name);
         const w = upFail(file, error.message);
@@ -1221,8 +1222,12 @@ export default function Pact() {
       || jobs.find((x) => x.id === j.id)?.attachments || [];
     const list = [...existing.filter((a) => !added.some((b) => b.path === a.path)), ...added];
     const { error: e2 } = await sb().from("pact_jobs").update({ attachments: list }).eq("id", j.id);
-    if (e2) flash(upgradeHint(e2.message, "Couldn't save the file list"));
-    else {
+    if (e2) {
+      // the list didn't take them: the new files come off storage again (a file already on the list was only replaced)
+      const fresh = added.filter((a) => !existing.some((e) => e.path === a.path)).map((a) => a.path);
+      if (fresh.length) await sb().storage.from("docs").remove(fresh);
+      flash(`${upgradeHint(e2.message, "Couldn't save the file list")}${missedMsg ? ` ${missedMsg}` : ""}`);
+    } else {
       setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, attachments: list } : x)));
       setAttachJob((prev) => (prev && prev.id === j.id ? { ...prev, attachments: list } : prev));
       setMeasureJob((prev) => (prev && prev.id === j.id ? { ...prev, attachments: list } : prev));
@@ -1288,10 +1293,12 @@ export default function Pact() {
       return new File([f], `${kind}_${stamp}${files.length > 1 ? `_${i + 1}` : ""}${ext}`, { type: f.type });
     }), `${kind}/`);
   };
+  // (the window opens on the tap itself: a phone blocks one opened after a wait)
   const openAttachment = async (path: string) => {
+    const w = window.open("", "_blank");
     const { data, error } = await sb().storage.from("docs").createSignedUrl(path, 3600);
-    if (error || !data) { flash("Couldn't open that file"); return; }
-    window.open(data.signedUrl, "_blank");
+    if (error || !data) { w?.close(); flash("Couldn't open that file"); return; }
+    if (w) w.location.href = data.signedUrl; else window.location.href = data.signedUrl;
   };
   // deleting a photo or a file always asks first: there is no undo on the shelf
   const removeAttachment = async (j: Job, path: string, name = path): Promise<boolean> => {
@@ -1838,7 +1845,7 @@ export default function Pact() {
             {openId === j.id && !j.canceled && (() => {
               const beforeN = (j.attachments || []).filter((a) => isMediaName(a.name) && pileOf(a) === "before").length;
               const afterN = (j.attachments || []).filter((a) => isMediaName(a.name) && pileOf(a) === "after").length;
-              const photoN = (j.attachments || []).filter((a) => isImg(a.name)).length;
+              const photoN = (j.attachments || []).filter((a) => isImg(a.name) && seesPaper(a)).length;
               const canReread = canPrice && (j.attachments || []).some((a) => /\.pdf$/i.test(a.name) && !isMade(a));
               return (
               <div className="anim-open mt-3 border-t border-rulesoft pt-3">
@@ -2048,9 +2055,11 @@ export default function Pact() {
         // the job as it is now: a live refresh (or the server moving a crew
         // file from before/ to after/) shows here at once, as in the measure panel
         const aj = jobs.find((x) => x.id === attachJob.id) || attachJob;
-        const mediaN = (aj.attachments || []).filter((a) => isMediaName(a.name)).length;
+        // (what this login may see: Admin 2 never a priced paper, a picture of one included)
+        const seen = (aj.attachments || []).filter(seesPaper);
+        const mediaN = seen.filter((a) => isMediaName(a.name)).length;
         // the PDF is of pictures: a job with only videos has nothing to put in it
-        const photoN = (aj.attachments || []).filter((a) => isImg(a.name)).length;
+        const photoN = seen.filter((a) => isImg(a.name)).length;
         return (
         <Modal title={`Documents · PO ${aj.po_number || aj.job_number || ""}`} onClose={() => setAttachJob(null)}
           primary={canEdit ? <button type="button" className={`btn btn-primary${spin("upload")}`} onClick={() => fileRef.current?.click()} {...busyOn("upload")} title="Pictures, a photos zip or a document, several at once">Upload files</button> : undefined}
@@ -2061,11 +2070,11 @@ export default function Pact() {
           menu={photoN > 0 ? [
             { label: "Photos (PDF)", glyph: "⬇", disabled: busy, title: "Before and after photos on one PDF", onSelect: () => makePhotoPdf(aj) },
           ] : undefined}>
-            <MediaFolders items={aj.attachments || []} canEdit={canEdit} flash={flash}
+            <MediaFolders items={seen} canEdit={canEdit} flash={flash}
               zipName={`PO ${aj.po_number || aj.job_number || ""}`.trim()}
               onDelete={(a) => removeAttachment(aj, a.path, a.name)} />
             {mediaN === 0 && <div className="empty mb-3 py-3">No photos or videos yet. The crew&apos;s land in the Before and After folders by themselves.</div>}
-            {(aj.attachments || []).filter((a) => !isMediaName(a.name) && seesPaper(a)).map((a) => (
+            {seen.filter((a) => !isMediaName(a.name)).map((a) => (
               <div key={a.path} className="mb-1.5 flex items-center gap-1">
                 <button type="button" className="row-btn rounded-sm border border-rulesoft p-2.5 text-sm hover:border-work active:border-work" onClick={() => openAttachment(a.path)}>📄 {a.name}</button>
                 {canEdit && <button type="button" className="btn-icon btn-icon-quiet text-alert" aria-label="Delete file" onClick={() => removeAttachment(aj, a.path, a.name)}>✕</button>}

@@ -5,7 +5,7 @@
 // folder downloads as a zip, and so does the whole job, one folder per pile.
 // The pile is read off where the file sits (pact/<job>/before/…) or the front
 // of its name (before_…): lib/media pileOf. PACT jobs and NYCHA releases both use it.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { sb } from "@/lib/supabase";
 import { askFileName } from "@/lib/format";
 import { countOf, isMediaName, isVideoName, mediaWords, pileOf, PILE_LABEL, type Pile } from "@/lib/media";
@@ -33,19 +33,26 @@ export default function MediaFolders({ items, canEdit, onDelete, zipName, flash 
   const [big, setBig] = useState<MediaItem | null>(null);
   const [cantPlay, setCantPlay] = useState(""); // the video link this browser couldn't play (a fresh link tries again)
   const [zipping, setZipping] = useState<string>("");
-  // a fresh link for each picture and video, an hour long
+  // a link for each picture and video, an hour long. A file still here keeps
+  // its link when the list changes (a crew photo lands, a send moves to After):
+  // a video playing doesn't restart, a picture isn't fetched again
   const key = media.map((a) => a.path).join("|");
+  const urlsNow = useRef(urls);
+  urlsNow.current = urls;
   useEffect(() => {
     if (!media.length) { setUrls({}); return; }
     let stale = false;
-    sb().storage.from("docs").createSignedUrls(media.map((a) => a.path), 3600).then(({ data }) => {
+    const keep = (from: Record<string, string>) => { const out: Record<string, string> = {}; for (const a of media) if (from[a.path]) out[a.path] = from[a.path]; return out; };
+    const need = media.map((a) => a.path).filter((p) => !urlsNow.current[p]);
+    if (!need.length) { setUrls(keep(urlsNow.current)); return; }
+    sb().storage.from("docs").createSignedUrls(need, 3600).then(({ data }) => {
       if (stale) return;
-      const m: Record<string, string> = {};
-      (data || []).forEach((d) => { if (d.signedUrl && d.path) m[d.path] = d.signedUrl; });
-      setUrls(m);
+      setUrls((prev) => { const out = keep(prev); (data || []).forEach((d) => { if (d.signedUrl && d.path) out[d.path] = d.signedUrl; }); return out; });
     });
     return () => { stale = true; };
   }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  // the one open big went away (deleted, or moved to the other folder): the viewer closes
+  useEffect(() => { if (big && !media.some((a) => a.path === big.path)) setBig(null); }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!media.length) return null;
   const toggle = (p: Pile) => setOpen((prev) => { const n = new Set(prev); if (n.has(p)) n.delete(p); else n.add(p); return n; });
@@ -59,8 +66,10 @@ export default function MediaFolders({ items, canEdit, onDelete, zipName, flash 
   };
   // the files, fetched one at a time and zipped on this phone as they come,
   // one folder per pile (videos and jpegs don't shrink: stored as they are).
-  // Each file's bytes are held once, as a piece of the zip: a few big videos
-  // in one copy, never two or three, so the phone's tab doesn't run out
+  // Each file, once zipped, is handed to the browser as a piece of the zip
+  // (a Blob, which it can keep out of the page's memory) and let go, so a job
+  // of big videos never sits in the phone's memory all at once. Each link is
+  // signed just before its fetch: a long download never outlives its links
   const download = async (which: Pile | "all") => {
     if (zipping) return;
     const list = which === "all" ? ORDER.flatMap((p) => (piles.get(p) || []).map((a) => ({ a, p }))) : (piles.get(which) || []).map((a) => ({ a, p: which }));
@@ -70,14 +79,15 @@ export default function MediaFolders({ items, canEdit, onDelete, zipName, flash 
     if (!fname) return;
     setZipping(which);
     try {
-      const { data } = await sb().storage.from("docs").createSignedUrls(list.map((x) => x.a.path), 600);
       const { Zip, ZipPassThrough } = await import("fflate");
       const chunks: Uint8Array[] = [];
+      const parts: Blob[] = [];
       const zip = new Zip((err, chunk) => { if (err) throw err; chunks.push(chunk); });
+      const flush = () => { if (chunks.length) parts.push(new Blob(chunks.splice(0))); };
       const names = new Set<string>();
       let missed = 0;
       for (const { a, p } of list) {
-        const url = (data || []).find((d) => d.path === a.path)?.signedUrl;
+        const url = (await sb().storage.from("docs").createSignedUrl(a.path, 600).catch(() => null))?.data?.signedUrl;
         const res = url ? await fetch(url).catch(() => null) : null;
         // (a video cut off halfway by a bad signal is missed, like one never reached)
         const bytes = res && res.ok ? await res.arrayBuffer().catch(() => null) : null;
@@ -88,10 +98,12 @@ export default function MediaFolders({ items, canEdit, onDelete, zipName, flash 
         const entry = new ZipPassThrough(name);
         zip.add(entry);
         entry.push(new Uint8Array(bytes), true);
+        flush();
       }
       if (!names.size) { flash("Couldn't reach the photos. Check your signal and try again."); return; }
       zip.end();
-      const href = URL.createObjectURL(new Blob(chunks, { type: "application/zip" }));
+      flush();
+      const href = URL.createObjectURL(new Blob(parts, { type: "application/zip" }));
       const link = document.createElement("a");
       link.href = href; link.download = fname; link.click();
       setTimeout(() => URL.revokeObjectURL(href), 60_000);

@@ -679,16 +679,18 @@ export default function Releases() {
   };
 
   // ---------- attachments ----------
-  const uploadAttachment = async (r: Release, file: File): Promise<{ name: string; path: string } | null> => {
+  // one file up: where it went, or why it didn't (said once the whole pick is done)
+  const uploadAttachment = async (r: Release, file: File): Promise<{ name: string; path: string } | { why: string }> => {
     const path = `${r.id}/${file.name}`;
+    // the storage takes 50 MB a file: a longer video is too big (said before a long upload, not after it)
+    const tooBig = (/^video\//i.test(file.type) || isVideoName(file.name)) ? "That video is too big to upload (over 50 MB). Send a shorter one." : "That file is too big to upload (over 50 MB).";
+    if (file.size > 50 * 1024 * 1024) return { why: tooBig };
     const { error } = await sb().storage.from("docs").upload(path, file, { upsert: true });
     if (error) {
-      // the storage takes 50 MB a file: a longer video is too big, not a bad signal
-      const big = /exceed|too large|413|payload/i.test(error.message) || file.size > 50 * 1024 * 1024;
-      failed(error, /bucket/i.test(error.message) ? "File storage isn't set up yet (Settings → System check)."
-        : big ? (/^video\//i.test(file.type) || isVideoName(file.name) ? "That video is too big to upload (over 50 MB). Send a shorter one." : "That file is too big to upload (over 50 MB).")
-        : `Couldn't upload ${file.name}. Check your signal and try again.`);
-      return null;
+      console.error(error.message);
+      return { why: /bucket/i.test(error.message) ? "File storage isn't set up yet (Settings → System check)."
+        : /exceed|too large|413|payload/i.test(error.message) ? tooBig
+        : `Couldn't upload ${file.name}. Check your signal and try again.` };
     }
     return { name: file.name, path };
   };
@@ -699,10 +701,17 @@ export default function Releases() {
     if (files.length === 0) return;
     setBusy(true);
     const added: { name: string; path: string }[] = [];
+    const missed: string[] = [];
+    let why = "";
     for (const file of files) {
       const up = await uploadAttachment(r, file);
-      if (up) added.push(up);
+      if ("why" in up) { missed.push(file.name); if (!why || /too big/.test(up.why)) why = up.why; continue; } // (too big says so over a bad signal)
+      added.push(up);
     }
+    // one file: why it didn't go up; several: which ones, then why
+    const missedMsg = !missed.length ? "" : files.length === 1 ? why
+      : `${missed.slice(0, 3).join(", ")}${missed.length > 3 ? ` and ${missed.length - 3} more` : ""} didn't go up. ${why}`;
+    if (!added.length && missedMsg) flash(missedMsg);
     if (added.length > 0) {
       const { data: cur } = await sb().from("releases").select("attachments").eq("id", r.id).single();
       const existing = ((cur as { attachments?: { name: string; path: string }[] } | null)?.attachments)
@@ -710,23 +719,29 @@ export default function Releases() {
       const list = [...existing.filter((a) => !added.some((b) => b.path === a.path)), ...added];
       forget(CACHE.rows(r.contract_id || active)); // a write half done is never what the next open paints
       const { error } = await sb().from("releases").update({ attachments: list }).eq("id", r.id);
-      if (error) failed(error, "Couldn't attach the files. Check your signal and try again.");
-      else {
+      if (error) {
+        // the list didn't take them: the new files come off storage again (one already on the list was only replaced)
+        const fresh = added.filter((a) => !existing.some((e) => e.path === a.path)).map((a) => a.path);
+        if (fresh.length) await sb().storage.from("docs").remove(fresh);
+        failed(error, `Couldn't attach the files. Check your signal and try again.${missedMsg ? ` ${missedMsg}` : ""}`);
+      } else {
         setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, attachments: list } : x)));
         setAttachRel((prev) => (prev && prev.id === r.id ? { ...prev, attachments: list } : prev));
         keepRows(r.contract_id || active, (x) => (x.id === r.id ? { ...x, attachments: list } : x));
-        // (one that didn't go up keeps its own message on screen: too big, or the signal)
-        if (added.length === files.length) flash(added.length === 1 ? `Attached ${added[0].name}` : `Attached ${added.length} files`);
+        // (one that didn't go up is said: too big, or the signal)
+        flash(missedMsg || (added.length === 1 ? `Attached ${added[0].name}` : `Attached ${added.length} files`));
       }
     }
     setBusy(false);
   };
   const attachFile = (r: Release, file: File) => attachFileList(r, [file]);
 
+  // (the window opens on the tap itself: a phone blocks one opened after a wait)
   const openAttachment = async (path: string) => {
+    const w = window.open("", "_blank");
     const { data, error } = await sb().storage.from("docs").createSignedUrl(path, 3600);
-    if (error || !data) { failed(error, "Couldn't open that file. Check your signal and try again."); return; }
-    window.open(data.signedUrl, "_blank");
+    if (error || !data) { w?.close(); failed(error, "Couldn't open that file. Check your signal and try again."); return; }
+    if (w) w.location.href = data.signedUrl; else window.location.href = data.signedUrl;
   };
 
   // deleting a photo or a file always asks first: there is no undo on storage

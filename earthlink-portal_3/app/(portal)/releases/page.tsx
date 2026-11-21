@@ -8,6 +8,7 @@ import { matches } from "@/lib/search";
 let XLSX!: typeof import("xlsx-js-style");
 const ensureXLSX = async () => { XLSX = XLSX || (await import("xlsx-js-style")); };
 import { sb } from "@/lib/supabase";
+import { goneFromTexted } from "@/lib/textedGone";
 import { useProfile } from "@/lib/profile";
 import { cached, forget, onCacheUser, remember } from "@/lib/cache";
 import { fmt, parseNum, askFileName } from "@/lib/format";
@@ -756,6 +757,7 @@ export default function Releases() {
     const { error } = await sb().from("releases").update({ attachments: list }).eq("id", r.id);
     if (error) { failed(error, `Couldn't delete ${a.name}. Check your signal and try again.`); return; }
     await sb().storage.from("docs").remove([path]);
+    goneFromTexted({ release_id: r.id }, [path]);
     setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, attachments: list } : x)));
     setAttachRel((prev) => (prev && prev.id === r.id ? { ...prev, attachments: list } : prev));
     keepRows(r.contract_id || active, (x) => (x.id === r.id ? { ...x, attachments: list } : x));

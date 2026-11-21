@@ -104,7 +104,8 @@ export async function POST(req: Request) {
   if (ids.length) {
     // told_day (RUN_ME section 23): the day each was last told, put back if a send is let go
     const rq = `schedule_days?id=in.(${ids.join(",")})&select=id,day,pact_job_id,release_id`;
-    ((await read<DayRow>(`${rq},told_day`)) ?? (await read<DayRow>(rq)) ?? []).forEach((r) => rowOf.set(r.id, r));
+    // (texted_at: when they were first told today, kept by a resend below)
+    ((await read<DayRow>(`${rq},told_day,texted_at`)) ?? (await read<DayRow>(`${rq},told_day`)) ?? (await read<DayRow>(rq)) ?? []).forEach((r) => rowOf.set(r.id, r));
     const jobIds = [...new Set([...rowOf.values()].map((r) => r.pact_job_id).filter((j): j is string => !!j))];
     if (jobIds.length) {
       // work_days (a job that runs several days) is newer than the rest: a
@@ -199,8 +200,14 @@ export async function POST(req: Request) {
       await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, {
         method: "PATCH", headers: supaHeaders, body: JSON.stringify({ texted: true }),
       }).catch(() => {});
-      // when it went (RUN_ME section 21) — its own write, so a database without the column still gets the TEXTED mark
-      await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, {
+      // when it went (RUN_ME section 21) — its own write, so a database without
+      // the column still gets the TEXTED mark. A resend of a text they had
+      // today keeps the first time: it isn't a new job (the inbox reads the
+      // job texted last as the one their next pictures are of); a text about
+      // a job that moved since they were told is new
+      const r = rowOf.get(m.id);
+      const resent = !!r?.texted_at && nyDay(new Date(r.texted_at)) === today && (!r.told_day || r.told_day === r.day);
+      if (!resent) await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, {
         method: "PATCH", headers: supaHeaders, body: JSON.stringify({ texted_at: new Date().toISOString() }),
       }).catch(() => {});
     }, publicOrigin(req));
@@ -218,7 +225,7 @@ export async function POST(req: Request) {
   }
 }
 
-interface DayRow { id: string; day?: string | null; pact_job_id?: string | null; release_id?: string | null; told_day?: string | null }
+interface DayRow { id: string; day?: string | null; pact_job_id?: string | null; release_id?: string | null; told_day?: string | null; texted_at?: string | null }
 interface DayJob { id: string; items?: unknown; start_date?: string | null; work_days?: number | null }
 // the last day of a job that runs `days` work days from `start`, Monday to
 // Saturday (a Sunday is skipped, never counted). The same rule as

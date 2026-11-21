@@ -4,6 +4,7 @@ import { matches } from "@/lib/search";
 import Link from "next/link";
 // pdf-lib is heavy — loaded only when a package PDF is actually built
 import { sb } from "@/lib/supabase";
+import { goneFromTexted } from "@/lib/textedGone";
 import { useProfile } from "@/lib/profile";
 import { cached, remember, onCacheUser } from "@/lib/cache";
 import { fmt, parseNum, askFileName } from "@/lib/format";
@@ -1312,6 +1313,7 @@ export default function Pact() {
     const { error } = await sb().from("pact_jobs").update({ attachments: list }).eq("id", j.id);
     if (error) { flash(upgradeHint(error.message, `Couldn't delete the ${what}`)); return false; }
     await sb().storage.from("docs").remove([path]);
+    goneFromTexted({ pact_job_id: j.id }, [path]);
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, attachments: list } : x)));
     setAttachJob((prev) => (prev && prev.id === j.id ? { ...prev, attachments: list } : prev));
     return true;

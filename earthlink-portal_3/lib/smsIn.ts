@@ -40,10 +40,14 @@ export const phoneKey = (s?: string | null): string => {
 // job?" or fixing one. The whole text has to be that. A text that names a PO
 // on the way to saying something else ("On my way to PO 116843", "PO 220011
 // done") is talk, and moves nothing that was already placed.
-const FIX_LEAD = String.raw`(?:wrong(?: job| one| po)?|it'?s|it is|its|is|the right one is|right one is|the right po is|correct (?:po|one|job) is|should be|es el|es|era el|el correcto es|trabajo equivocado|equivocado|equivocada)`;
+const FIX_LEAD = String.raw`(?:wrong(?: job| one| po)?|it'?s|it is|its|is|that'?s|that is|the right one is|right one is|the right po is|correct (?:po|one|job) is|should be|job|number|es el|es|era el|el correcto es|el|el numero|numero|trabajo|trabajo equivocado|equivocado|equivocada)`;
 const FIX_ONLY = new RegExp(String.raw`^(?:${FIX_LEAD}[\s,:.\-]*)*(?:(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:\-]?\s*|#\s*)?\d{1,12}[\s.!]*(?:(?:thanks|thank you|thx|ty|gracias)[\s.!]*)?$`);
+// the job's place in brackets after its number, the way the portal's own
+// question lists it ("116843 (2205 Linden Blvd, Apt 4B)", "12 (392 Blake
+// Avenue)"): an answer copied from it is the number
+export const noPlace = (body: string): string => (body || "").replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim();
 export const justANumber = (body: string): boolean =>
-  refsIn(body).length > 0 && FIX_ONLY.test((body || "").toLowerCase().replace(/[\u2018\u2019`]/g, "'").replace(/\s+/g, " ").trim());
+  refsIn(noPlace(body)).length > 0 && FIX_ONLY.test(noPlace(body).toLowerCase().replace(/[\u2018\u2019`]/g, "'").trim());
 
 // ---- the pictures (and videos) that came with the text ----
 export const MAX_MEDIA = 10;

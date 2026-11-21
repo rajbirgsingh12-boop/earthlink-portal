@@ -33,8 +33,24 @@ export async function POST(req: Request) {
   if (!(await officeUser(req))) return NextResponse.json({ error: "Not allowed" }, { status: 403 });
   const db = serviceDb();
   if (!db) return NextResponse.json({ error: "Add SUPABASE_SERVICE_ROLE_KEY in Vercel so texted photos can be moved" }, { status: 501 });
-  let body: { id?: string; action?: string; pact_job_id?: string; release_id?: string };
+  let body: { id?: string; action?: string; pact_job_id?: string; release_id?: string; paths?: unknown };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Bad request" }, { status: 400 }); }
+  // a crew picture the office deleted from a job's Documents: off the texted
+  // batch that brought it too, so its card counts what's there (a batch with
+  // nothing left goes off the list)
+  if (body.action === "gone") {
+    const jobId = body.pact_job_id || body.release_id || "";
+    const paths = (Array.isArray(body.paths) ? body.paths : []).filter((x): x is string => typeof x === "string" && !!x && x.length < 500).slice(0, 50);
+    if (!uuid.test(jobId) || !paths.length) return NextResponse.json({ error: "Bad request" }, { status: 400 });
+    const col = body.pact_job_id ? "pact_job_id" : "release_id";
+    const rows = (await db.get<Batch>(`texted_photos?${col}=eq.${jobId}&status=eq.filed&select=id,photos&limit=200`)).rows;
+    for (const r of rows) {
+      const had = r.photos || [];
+      const left = had.filter((x) => !paths.includes(x?.path || ""));
+      if (left.length !== had.length) await db.patch(`texted_photos?id=eq.${r.id}&status=eq.filed`, left.length ? { photos: left } : { photos: left, status: "gone" });
+    }
+    return NextResponse.json({ ok: true });
+  }
   if (!body.id || !uuid.test(body.id)) return NextResponse.json({ error: "Bad request" }, { status: 400 });
   const b = (await db.get<Batch>(`texted_photos?id=eq.${body.id}&select=*`)).rows[0];
   if (!b) return NextResponse.json({ error: "Those photos aren't there any more" }, { status: 404 });
@@ -69,10 +85,11 @@ export async function POST(req: Request) {
   if (!target) return NextResponse.json({ error: "That job isn't in the portal" }, { status: 404 });
   // a batch already on a job (Wrong job?) keeps its own pile: it was sorted when it came in
   const own = b.status === "filed" ? kindOfName((b.photos || [])[0]?.name || "") : null;
-  // one waiting goes where its words (or an AFTER texted with it) put it: BEFORE unless they said AFTER
-  kind = door ? "noaccess" : own || (b.how === "after" ? "after" : photoKindFor(b.body || ""));
+  // one waiting goes where its words (or an AFTER or DONE texted with it) put it: BEFORE unless they said AFTER
+  kind = door ? "noaccess" : own || (b.how === "after" || b.how === "afterall" ? "after" : photoKindFor(b.body || ""));
   const was = b.status === "filed" && b.pact_job_id && b.pact_job_id !== (target.kind === "pact" ? target.id : "") ? b.pact_job_id : "";
-  const n = await fileBatch(db, b, target, "office", kind);
+  // (a door's picture keeps its mark wherever it goes: the crew's next texts know it for one)
+  const n = await fileBatch(db, b, target, door ? "noaccess" : "office", kind);
   if (!n) return NextResponse.json({ error: "Couldn't move the photos, try again" }, { status: 500 });
   // the job they left: marked done by these, it isn't any more
   if (was) await clearDoneIfNoAfter(db, was, jobName(target, "en"), now, today, (b.photos || []).some((p) => /^after/i.test(p?.name || "")));

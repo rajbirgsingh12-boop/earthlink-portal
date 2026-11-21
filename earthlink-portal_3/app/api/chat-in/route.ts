@@ -6,7 +6,7 @@
 // portal's own messages and the owner's are heard but not acted on.
 // Every request is checked against TWILIO_AUTH_TOKEN, like /api/sms-in.
 import { NextResponse } from "next/server";
-import { addressesOf, copyTo, fetchMediaFrom, groupMediaBase } from "@/lib/twilio";
+import { addressesOf, copyTo, fetchMediaFrom, groupMediaBase, sendTexts } from "@/lib/twilio";
 import { imageExt, phoneKey, validTwilio, type MediaIn, type Params } from "@/lib/smsIn";
 import { serviceDb } from "@/lib/photoStore";
 import { handleInbound, type Seen } from "@/lib/inbound";
@@ -64,7 +64,15 @@ export async function POST(req: Request) {
     sid: (form.get("MessageSid") || "").trim(),
     photos: photos.slice(0, 10), other,
     fetchMedia: fetchMediaFrom(groupMediaBase()),
-    deliver: async (_to, body, who) => postToGroup(thread, forWho(body, who)),   // a later text goes into the thread, not to one phone
+    // a later text: the one who posted gets it in the thread; a co-worker who
+    // reads this thread has it there already (the answer just posted names
+    // the next job for both), so it isn't posted twice; anyone else is texted one to one
+    deliver: async (to, body, who) => {
+      const k = phoneKey(to);
+      if (!k || k === phoneKey(author)) return postToGroup(thread, forWho(body, who));
+      if (workers.some((m) => phoneKey(m) === k)) return true;
+      return (await sendTexts([{ to, body, who }])).sent > 0;
+    },
     jobHint: info.job,
   }, seen);
   if (reply) await postToGroup(thread, forWho(reply));

@@ -71,6 +71,7 @@ export async function nobodyFlow(db: Db, o: {
   // "NO 2205 Linden": a door only when the number is one of today's (the house, the apartment, the PO)
   candidate?: boolean;
   say?: (to: string, body: string, who?: string) => Promise<boolean>;   // how the answer goes back (into the thread it came from, say); a plain text to them otherwise
+  hint?: string;   // the job the crew's thread it came in on is about: with two open today, that one
 }): Promise<FlowResult> {
   const { emp, now } = o;
   const today = nyDay(now);
@@ -156,7 +157,11 @@ export async function nobodyFlow(db: Db, o: {
   // every answer leaves a row with Twilio's message id, so a message Twilio
   // delivers twice is only acted on once (/api/sms-in checks it first) — and
   // the next "no" knows what was last said to this worker
-  const remember = () => db.insert("texted_photos", { employee_id: emp.id, from_phone: o.from, body: o.body, status: "note", how: "nobody", photos: [], msg_sid: o.sid || null });
+  // (`note`: what the answer asked, so a picture that follows knows: "Asked which job has nobody home")
+  const remember = async (note = "") => {
+    const row = { employee_id: emp.id, from_phone: o.from, body: o.body, status: "note", how: "nobody", photos: [], msg_sid: o.sid || null };
+    return (note && (await db.insert("texted_photos", { ...row, note }))) || db.insert("texted_photos", row);
+  };
   // a word for the office when there's nothing to move: kept on the Schedule tabs
   const tellOffice = async (note: string) => {
     const row = { employee_id: emp.id, from_phone: o.from, body: o.body, status: "reply", how: "nobody", photos: [], msg_sid: o.sid || null };
@@ -182,7 +187,7 @@ export async function nobodyFlow(db: Db, o: {
     }
   }
 
-  const m = whichMissed({ body: o.body, today, jobs, flagged, visited, sameDoor, justSent, answerToPhotos });
+  const m = whichMissed({ body: o.body, today, jobs, flagged, visited, sameDoor, justSent, answerToPhotos, hint: o.hint });
   // a NO with a picture minutes after being sent on to a door in the same
   // building: the picture is of that door
   let m2 = m;
@@ -197,10 +202,10 @@ export async function nobodyFlow(db: Db, o: {
     if (numbersIn(o.body).length) return { handled: false };
     const open = jobs.filter((j) => j.day === today && !flagged.has(j.id) && !visited.has(j.id));
     if (!open.length) return { handled: false };
-    await remember();
+    await remember("Told how to report a door");
     return { handled: true, reply: hintText(open, lang) };
   }
-  if (m2.kind === "ask") { await remember(); return { handled: true, reply: askWhichText(m2.options, lang) }; }
+  if (m2.kind === "ask") { await remember("Asked which job has nobody home"); return { handled: true, reply: askWhichText(m2.options, lang) }; }
   if (m2.kind === "not_today") { await tellOffice(`Said nobody home at ${m2.number}, not a job of theirs today`); return { handled: true, reply: notTodayText(m2.number, lang) }; }
   if (m2.kind === "nothing_today") {
     const any = jobs.some((j) => j.day === today) || visited.size > 0;

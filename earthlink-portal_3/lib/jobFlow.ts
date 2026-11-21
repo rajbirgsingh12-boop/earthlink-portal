@@ -54,6 +54,8 @@ const norm = (s: string) => (s || "").toLowerCase().normalize("NFD").replace(/[�
 const BEFORE_WORDS = /\b(before|antes|previo|al llegar)\b/;
 // arriving, starting: these are the arrival (and so is everything else)
 const ARRIVE_WORDS = /\b(llegamos|llegue|llegando|arrived|arriving|starting|started|empezando|empezamos|comenzando|comenzamos)\b/;
+// …said with the pictures, the arrival is the BEFORE pile's ("just got here", "ya llegamos")
+const ARRIVED = /\b(llegamos|llegue|llegando|arrived|arriving|just got here|got here|we're here|we are here|i'm here|i am here|im here|estamos aqui|starting|started|start|empezando|empezamos|empezar|comenzando|comenzamos|comenzar)\b/;
 // …and getting ready to start: then "listo" means ready, not finished
 const STARTING = /\b(llegamos|llegue|llegando|arrived|arriving|starting|started|start|empezando|empezamos|empezar|comenzando|comenzamos|comenzar|ready to|set up|setting up)\b/;
 const AFTER_WORDS = /\b(after|despues|final)\b/;
@@ -62,22 +64,31 @@ const DONE_WORDS = /\b(done|finished|finish|complete|completed|terminado|termina
 // empezar", "all set up", "ya llegamos, listos")
 const READY_WORDS = /\b(listo|lista|listos|listas|all set)\b/;
 // a word about the work that isn't finished yet: "almost done", "about to
-// finish", "half done", "first coat done", "casi terminamos", "por terminar"
-const NOT_YET_DONE = /\b(?:(?:almost|nearly|about to|half|halfway|mostly|partly|partially|first coat|1st coat|one coat|first part|casi|medio|primera mano|primera capa|una mano)\s+(?:\w+\s+)?(?:done|finished|finish|complete|completed|terminado|terminada|terminar|terminamos|termine|termino|acabado|acabamos|acabar|listo|lista|listos)|por terminar|por acabar|falta poco)\b/g;
-// "after" and "después" as a time ("back after lunch", "después del
-// almuerzo seguimos"): when, not which pile
-const AFTER_TIME = /\b(?:after|despues)\s+(?:the\s+|a\s+|an\s+|de(?:l)?\s+(?:la\s+|las\s+|los\s+|el\s+)?)?(?:lunch|break|breakfast|dinner|noon|tomorrow|tonight|that|this|an hour|a while|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}:\d{2}|\d{1,2}(?!\s*(?:coats?|capas?|manos?|layers?|rooms?|cuartos?|walls?|paredes|[\d:]))|almuerzo|comer|comida|desayuno|cena|mediodia|manana|la tarde|un rato|eso|esto|una hora)\b/g;
-// what they'll do later ("when we finish I'll send the after photos", "cuando
-// terminemos le mando las de despues") says nothing about these pictures
-const LATER = /\b(when|once|cuando|will|i'?ll|we'?ll|going to|gonna|voy a|vamos a|le mando|les mando|te mando|mandare|mandamos|luego)\b[^.,;!?]*/g;
+// finish", "half done", "first coat done", "casi terminamos", "ya mero
+// terminamos", "por terminar"
+const NOT_YET_DONE = /\b(?:(?:almost|nearly|about to|about|close to|half|halfway|mostly|partly|partially|first coat|1st coat|one coat|first part|casi|ya mero|ya merito|medio|primera mano|primera capa|una mano)\s+(?:\w+\s+)?(?:done|finished|finish|complete|completed|terminado|terminada|terminar|terminamos|termine|termino|acabado|acabamos|acabar|listo|lista|listos)|por terminar|por acabar|falta poco)\b/g;
+// "after" and "después" as a time ("back after lunch", "after we eat",
+// "después del almuerzo seguimos"): when, not which pile. The rest of that
+// part of the sentence goes with it ("después de comer terminamos" is later)
+const AFTER_TIME = /\b(?:after|despues)\s+(?:the\s+|a\s+|an\s+|de(?:l)?\s+(?:la\s+|las\s+|los\s+|el\s+)?)?(?:lunch|break|breakfast|dinner|noon|tomorrow|tonight|that|this|an hour|a while|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}:\d{2}|\d{1,2}(?!\s*(?:coats?|capas?|manos?|layers?|rooms?|cuartos?|walls?|paredes|[\d:]))|almuerzo|comer|comida|desayuno|cena|mediodia|manana|la tarde|un rato|eso|esto|una hora|we|i|they|you|he|she|que)\b[^.,;!?]*/g;
+// what they'll do later ("when we finish I'll send the after photos", "should
+// be done by 3", "cuando terminemos le mando las de despues") says nothing
+// about these pictures
+const LATER = /\b(when|once|cuando|will|i'?ll|we'?ll|going to|gonna|should|hope|hopefully|voy a|vamos a|le mando|les mando|te mando|mandare|mandamos|luego|deberia|deberiamos|espero|esperamos)\b[^.,;!?]*/g;
+// …and a finish still to come: "done in 30 min", "finished by 4", "listo en una hora"
+const DONE_SOON = /\b(?:done|finished|finish|complete|terminado|terminada|terminamos|terminar|listo|lista|acabamos|acabar)\s+(?:in|en|by|around|at|a las|para las|como en|como a las)\s+(?:\d|an?\s+(?:hour|few|couple|min)|half an hour|un[ao]?\s+(?:hora|rato|minutos?)|media hora)[^.,;!?]*/g;
+// the words a pile or a finished job is read from, without the ones that
+// aren't about these pictures or a finish ("almost done", "done by 3", "when
+// we finish", "after lunch", "listos para empezar", "all set up")
+const unfinishedOff = (t: string): string => t
+  .replace(LATER, " ").replace(NOT_YET_DONE, " ").replace(DONE_SOON, " ").replace(AFTER_TIME, " ")
+  .replace(/\b(listo|lista|listos|listas)\s+(para|pa)\b/g, " ").replace(/\ball set up\b/g, " ").replace(/\s+/g, " ").trim();
 // the caption's own say: "after", "before", or nothing
 export function captionKind(body: string): PhotoKind | null {
   const neg = notDone(body);
-  const t = (neg ? norm(straight(body)).replace(NOT_DONE_G, " ") : norm(straight(body)))
-    .replace(LATER, " ").replace(NOT_YET_DONE, " ").replace(AFTER_TIME, " ")
-    .replace(/\b(listo|lista|listos|listas)\s+(para|pa)\b/g, " ").replace(/\ball set up\b/g, " ");
+  const t = unfinishedOff(neg ? norm(straight(body)).replace(NOT_DONE_G, " ") : norm(straight(body)));
   const at = (re: RegExp) => { const m = re.exec(t); return m ? m.index : Infinity; };
-  const before = at(BEFORE_WORDS);
+  const before = Math.min(at(BEFORE_WORDS), at(ARRIVED));
   // ("listo" with the arrival is "ready", not "finished")
   const ready = STARTING.test(t) ? Infinity : at(READY_WORDS);
   const after = Math.min(neg ? Infinity : Math.min(at(DONE_WORDS), ready), at(AFTER_WORDS));
@@ -497,7 +508,7 @@ export function heldAfterText(n0: Count, options: string[], lang0?: string | nul
   const one = n.n === 1;
   const list = options.length === 2 ? `${options[0]} ${lang === "es" ? "o" : "or"} ${options[1]}` : options.join(", ");
   if (lang === "es") {
-    return `Entendido: ${one ? (n.v ? "ese video va" : "esa foto va") : `esas ${mediaWords(n, "es")} van`} a DESPUES. ¿De qué trabajo ${one ? "es" : "son"}? Responda con el número${list ? `: ${list}` : " de PO o de release"}.`;
+    return `Entendido: ${one ? (n.v ? "ese video va" : "esa foto va") : `${n.v === n.n ? "esos" : "esas"} ${mediaWords(n, "es")} van`} a DESPUES. ¿De qué trabajo ${one ? "es" : "son"}? Responda con el número${list ? `: ${list}` : " de PO o de release"}.`;
   }
   const what = one ? (n.v ? "the video" : "the photo") : `the ${mediaWords(n, "en")}`;
   return `Got it: ${what} you just sent ${one ? "goes" : "go"} in AFTER. Which job ${one ? "is it" : "are they"} for? Reply with the ${list ? `number: ${list}` : "PO or release number"}.`;
@@ -516,7 +527,8 @@ export function gotBeforeAskText(n: Count, label: string, lang0?: string | null)
 export function doorGotText(n0: Count, lang0?: string | null): string {
   const n = asCount(n0);
   if (langOf(lang0) === "es") {
-    const what = n.n === 1 ? (n.v ? "el video" : "la foto") : n.v === n.n ? `los ${mediaWords(n, "es")}` : `las ${mediaWords(n, "es")}`;
+    // (photos and videos together: no article, "1 foto y 1 video")
+    const what = n.n === 1 ? (n.v ? "el video" : "la foto") : n.v === n.n ? `los ${mediaWords(n, "es")}` : n.v ? mediaWords(n, "es") : `las ${mediaWords(n, "es")}`;
     return `Recibimos ${what} de la puerta.`;
   }
   return `Got the ${n.n === 1 ? (n.v ? "video" : "photo") : mediaWords(n, "en")} of the door.`;
@@ -609,13 +621,14 @@ export function gotAfterText(n: Count, label: string, lang0?: string | null, mar
 }
 // "not done", "no terminado": the job isn't finished (the work-done mark
 // comes off, and it runs one more work day)
-const NOT_DONE_SRC = String.raw`\b(not yet (?:done|finished|complete|completed)|not done|not finished|not complete|not completed|not yet|still working|still going|need(?:s)? (?:another|one more) day|(?:come|coming) back tomorrow|back tomorrow|(?:haven'?t|have not|hasn'?t|has not) (?:finished|done|completed|been finished)|(?:isn'?t|is not|wasn'?t|was not|aren'?t|are not|ain'?t) (?:done|finished|complete|completed|ready)|(?:didn'?t|did not|couldn'?t|could not) (?:finish|complete|get (?:it )?done)|no terminado|no terminada|no termine|no termino|no terminamos|no terminaron|no lo (?:termine|terminamos|acabe|acabamos)|no acabamos|no acabe|no (?:he|hemos|ha|han) (?:terminado|acabado)|no esta (?:terminado|terminada|listo|lista|acabado)|todavia no|aun no|volvemos manana|regresamos manana|seguimos manana|manana seguimos)\b`;
+const NOT_DONE_SRC = String.raw`\b(not yet (?:done|finished|complete|completed)|not done|not finished|not complete|not completed|not quite|not yet|still working|still going|need(?:s)? (?:another|one more) day|(?:come|coming) back tomorrow|back tomorrow|(?:haven'?t|have not|hasn'?t|has not) (?:finished|done|completed|been finished)|(?:isn'?t|is not|wasn'?t|was not|aren'?t|are not|ain'?t) (?:done|finished|complete|completed|ready)|(?:didn'?t|did not|couldn'?t|could not) (?:finish|complete|get (?:it )?done)|no terminado|no terminada|no termine|no termino|no terminamos|no terminaron|no lo (?:termine|terminamos|acabe|acabamos)|no acabamos|no acabe|no (?:he|hemos|ha|han) (?:terminado|acabado)|no esta (?:terminado|terminada|listo|lista|acabado)|todavia no|aun no|volvemos manana|regresamos manana|seguimos manana|manana seguimos)\b`;
 const NOT_DONE_G = new RegExp(NOT_DONE_SRC, "g");
 const straight = (s: string) => (s || "").replace(/[\u2018\u2019`\u00b4]/g, "'");
 export const notDone = (body: string): boolean => new RegExp(NOT_DONE_SRC).test(norm(straight(body)));
 // with photos, only the plain ways of saying it: "todavía no", "not yet" and
-// "still working" ride on arrival photos ("llegamos, todavía no empezamos")
-const NOT_DONE_STRONG = new RegExp(NOT_DONE_SRC.replace("not yet|still working|still going|", "").replace("|todavia no|aun no", ""));
+// "still working" ride on arrival photos ("llegamos, todavía no empezamos"),
+// and "not quite done" is a progress word, not one more day
+const NOT_DONE_STRONG = new RegExp(NOT_DONE_SRC.replace("not quite|not yet|still working|still going|", "").replace("|todavia no|aun no", ""));
 export const notDoneStrong = (body: string): boolean => NOT_DONE_STRONG.test(norm(straight(body)));
 // "done", "terminé", "all done" with no pictures: the job (or the day) is
 // finished. A short text that says only that; a question ("done?") or a
@@ -624,23 +637,37 @@ export const notDoneStrong = (body: string): boolean => NOT_DONE_STRONG.test(nor
 // text, never a finished job: those count only as the answer to "Finished?"
 const DONE_SAID = /\b(done|finished|complete|completed|terminado|terminada|terminamos|termine|termino|acabamos|acabe|acabado)\b/;
 const ALL_DONE = /\b(all done|all finished|whole job|job (?:is )?(?:done|finished|complete)|todo terminado|todo listo|terminamos todo|ya terminamos todo|trabajo terminado|terminamos el trabajo)\b/;
+// …the ones about the job itself: never the day's ("all done for today" is
+// the day's, "the whole job is done today" is the job's)
+const ALL_DONE_JOB = /\b(whole job|job (?:is )?(?:done|finished|complete)|trabajo terminado|terminamos el trabajo|todo el trabajo)\b/;
 const FOR_TODAY = /\b(for today|for the day|today|por hoy|de hoy|hoy)\b/;
+const TOMORROW = /\b(tomorrow|manana)\b/;
 export type DoneSaid = "all" | "day" | "done" | null;
-// "all done", "todo terminado" with the photos: the whole job is finished (on a day before its last, it ends early)
+// "all done", "todo terminado" with the photos: the whole job is finished (on
+// a day before its last, it ends early). "Almost all done", "casi todo
+// terminado", "all done for today", "todo listo para mañana" and "todo listo
+// para empezar" are not
 export const allDoneSaid = (body: string): boolean => {
-  const t = norm(straight(body)).replace(/[^a-z0-9' ]/g, " ").replace(/\s+/g, " ");
-  return !notDone(body) && ALL_DONE.test(t) && !/\b(not|no|never|nunca|isn'?t|aren'?t|wasn'?t)\s+(?:\w+\s+)?(all|whole|todo|job|trabajo)\b/.test(t);
+  if (notDone(body)) return false;
+  const t = unfinishedOff(norm(straight(body))).replace(/[^a-z0-9' ]/g, " ").replace(/\s+/g, " ").trim();
+  if (!ALL_DONE.test(t) || /\b(not|no|never|nunca|isn'?t|aren'?t|wasn'?t)\s+(?:\w+\s+)?(all|whole|todo|job|trabajo)\b/.test(t)) return false;
+  return ALL_DONE_JOB.test(t) || !(FOR_TODAY.test(t) || TOMORROW.test(t));
 };
 export function doneSaid(body: string): DoneSaid {
   const raw = (body || "").trim();
-  const t = norm(raw).replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
-  if (!t || raw.includes("?") || notDone(raw) || t.length > 40) return null;
+  const t0 = norm(raw).replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  if (!t0 || raw.includes("?") || notDone(raw) || t0.length > 40) return null;
   // any no / not / yet in a text this short and it isn't a plain "done": "no, we didn't finish it",
   // "haven't finished", "no lo acabamos". Those go to the office as words, never mark a job done
-  if (/\b(no|not|never|nunca|nada|todavia|aun|yet|falta|faltan)\b|n t\b/.test(t)) return null;
-  if (/\b(starting|empezando|now|ahora|next|tomorrow|manana|with the|con el|con la)\b/.test(t) && !ALL_DONE.test(t)) return null;
-  if (ALL_DONE.test(t)) return "all";
-  if (!DONE_SAID.test(t)) return null;
+  if (/\b(no|not|never|nunca|nada|todavia|aun|yet|falta|faltan)\b|n t\b/.test(t0)) return null;
+  // "almost done", "done by 3", "will be done soon", "listo para empezar": not a finish
+  const t = unfinishedOff(norm(straight(raw))).replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  if (!t) return null;
+  const all = ALL_DONE.test(t);
+  if (/\b(starting|empezando|empezar|comenzando|comenzar|start|now|ahora|next|with the|con el|con la)\b/.test(t) && !all) return null;
+  // ("all done for today", "todo listo para mañana": the day's)
+  if (all) return ALL_DONE_JOB.test(t) || !(FOR_TODAY.test(t) || TOMORROW.test(t)) ? "all" : "day";
+  if (!DONE_SAID.test(t) || TOMORROW.test(t)) return null;
   return FOR_TODAY.test(t) ? "day" : "done";
 }
 // the answer to the morning's "Finished?" (only then): yes / no

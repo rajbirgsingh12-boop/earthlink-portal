@@ -11,6 +11,9 @@ import { jobName, langOf, longDay, PHOTO_INVITE, theJob, type Lang } from "./cre
 // lower case, no accents, no punctuation: "¡No abrió!" → "no abrio"
 const norm = (s: string) => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
   .replace(/[’‘`´]/g, "'").replace(/[^a-z0-9' ]+/g, " ").replace(/\s+/g, " ").trim();
+// the place in brackets the portal's own question puts after a number ("NO
+// 116843 (2205 Linden Blvd, Apt 4B)"): an answer copied from it is the number
+const unplaced = (s: string) => (s || "").replace(/\([^)]*\)/g, " ");
 
 // Said in so many words, English or Spanish — about the door or the tenant,
 // never just any "no": "Home Depot not open", "no está el material", "hoy no
@@ -50,7 +53,7 @@ const NOT_IT = /\b(no problem|no prob|no worries|no worry|no hay problema|no te 
 const withoutNumbers = (t: string) => t.replace(/\b(po|p o|release|rel|#)\b/g, " ").replace(/\d+/g, " ").replace(/\s+/g, " ").trim();
 // the text says nobody let them in (or the tenant can't do it today)
 export function nobodyHome(body: string): boolean {
-  const t = norm(body);
+  const t = norm(unplaced(body));
   if (!t) return false;
   if (SAID.test(t)) return true;
   return !NOT_IT.test(t) && BARE.test(withoutNumbers(t));
@@ -58,15 +61,15 @@ export function nobodyHome(body: string): boolean {
 // …and it's just "no" (with or without a number): that can also be an answer
 // to the text before it, so it counts only when it can't be anything else
 export const bareNo = (body: string): boolean => {
-  const t = norm(body);
+  const t = norm(unplaced(body));
   return !!t && !SAID.test(t) && BARE.test(withoutNumbers(t));
 };
 // "NO 2205 Linden", "no 4B": a no with a number and a few words, which is a
 // door only when the number is the house or the apartment of one of today's
 // jobs (lib/nobodyFlow checks; "no 5 gallons left" is not one)
-export const noAt = (body: string): boolean => /^no+ #?\d[\w-]*( [a-z0-9#-]+){0,4}$/.test(norm(body)) && !NOT_IT.test(norm(body));
+export const noAt = (body: string): boolean => /^no+ #?\d[\w-]*( [a-z0-9#-]+){0,4}$/.test(norm(unplaced(body))) && !NOT_IT.test(norm(unplaced(body)));
 // every number in the text, stripped like a PO ("NO 0116843" → "116843")
-export const numbersIn = (body: string): string[] => [...new Set(((body || "").match(/\d{1,12}/g) || []).map((n) => normPo(n)).filter(Boolean))];
+export const numbersIn = (body: string): string[] => [...new Set((unplaced(body).match(/\d{1,12}/g) || []).map((n) => normPo(n)).filter(Boolean))];
 
 // ---- which job, which next ----
 export interface DayJob {
@@ -124,6 +127,7 @@ export function whichMissed(ctx: {
   sameDoor?: Set<string>;                                   // …flagged in the last twenty minutes by the other worker at that door, not yet answered by this one
   justSent?: Set<string>;                                   // …the jobs the portal just sent them on to after a door (they can't be there yet)
   answerToPhotos: boolean;                                  // the last thing we texted them was "got your photos" (half an hour at most)
+  hint?: string;                                            // the job the crew's thread the text came in on is about
 }): Missed {
   const today = dedupe(ctx.jobs.filter((j) => j.day === ctx.today)).sort(byLabel);
   const addr = byAddress(ctx.body, today);
@@ -146,6 +150,9 @@ export function whichMissed(ctx: {
     if (big) return { kind: "not_today", number: big };
   }
   if (today.length === 0) return { kind: "nothing_today" };
+  // posted in the crew's thread about one of today's jobs, still open: that one
+  const hinted = ctx.hint ? today.find((j) => j.id === ctx.hint && !ctx.flagged.has(j.id) && !ctx.visited.has(j.id) && !ctx.justSent?.has(j.id)) : undefined;
+  if (hinted && !today.some((j) => ctx.sameDoor?.has(j.id))) return { kind: "missed", job: hinted, already: false };
   // a door the other worker reported in the last twenty minutes, that they
   // were at too: this "no" is about it — not about the job the portal just
   // sent them on to, which they can't have reached yet

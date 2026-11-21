@@ -17,8 +17,9 @@ export const longDay = (iso?: string | null, lang: Lang = "en") =>
   iso && /^\d{4}-\d{2}-\d{2}$/.test(iso) && !Number.isNaN(new Date(iso + "T00:00:00").getTime()) ? new Date(iso + "T00:00:00").toLocaleDateString(lang === "es" ? "es" : "en-US", { weekday: "long", month: "long", day: "numeric" }) : "";
 const flat = (s?: string | null) => (s || "").replace(/\s+/g, " ").trim();
 // a dash typed into an address or a building ("41–10 Vernon Blvd", "Van Dyke
-// Houses – Bldg 3") reads in a text as a hyphen, or a comma when spaced
-const undash = (s?: string | null) => flat(s).replace(/\s*[\u2014\u2013]\s+|\s+[\u2014\u2013]\s*|\u2014/g, ", ").replace(/\u2013/g, "-");
+// Houses – Bldg 3") reads in a text as a hyphen, or a comma when spaced. One
+// between two numbers ("41—10", the way a phone's punctuation types it) is a hyphen
+const undash = (s?: string | null) => flat(s).replace(/(\d)[\u2014\u2013](?=\d)/g, "$1-").replace(/\s*[\u2014\u2013]\s+|\s+[\u2014\u2013]\s*|\u2014/g, ", ").replace(/\u2013/g, "-");
 const sameText = (a: string, b: string) => flat(a).toLowerCase() === flat(b).toLowerCase();
 
 export type CrewTextInput = {
@@ -50,10 +51,10 @@ export function crewText(t: CrewTextInput): string {
   const street = undash(t.street).replace(/[.\s]+$/, "");
   const building = undash(t.building).replace(/[.\s]+$/, "");
   // "Apt 4B", "Apartment 4B", "Unit 4B", "#4B" — the label is put on here, once
-  const apt = flat(t.apt).replace(/^(apt\.?|apartment|unit|#)\s*/i, "");
+  const apt = undash(t.apt).replace(/^(apt\.?|apartment|unit|#)\s*/i, "");
   // the work's own last stop is kept ("Paint everything!" / a cut line's "…"); a period is added only where there is none.
   // A dash typed into a PO ("Bedroom – plaster") reads as a comma in a text
-  const work = flat(t.work).replace(/\s*[\u2014\u2013]\s+|\s+[\u2014\u2013]\s*|\u2014/g, ", ").replace(/\u2013/g, "-").replace(/[.\s]+$/, "");
+  const work = undash(t.work).replace(/[.\s]+$/, "");
   const stop = /[!?…]$/.test(work) ? "" : ".";
   // a "move" to the same day is not a move — the old day is not repeated
   const moved = t.moved && t.moved.from && t.moved.from === t.moved.to ? { to: t.moved.to } : t.moved;
@@ -146,7 +147,7 @@ const OLD_INVITE = { en: "Reply to this text with photos of the work.", es: "Res
 // a PACT job's text carries the whole thread instead (lib/jobFlow's jobAsk:
 // before photos, then after photos), never both
 const hasAsk = (b: string) => b.includes(PHOTO_INVITE.en) || b.includes(PHOTO_INVITE.es) || b.includes(OLD_INVITE.en) || b.includes(OLD_INVITE.es)
-  || /with the word AFTER|con la palabra DESPUES|reply with BEFORE photos|responda con fotos de ANTES/.test(b);
+  || /with the word AFTER|con la palabra DESPUES/.test(b) || b.split("\n\n").some(isOldAsk);
 // Twilio takes 1,600 characters. A text over a limit gives up words from its
 // LONGEST paragraph (the work line), cut at a word with "…" — the greeting,
 // the map link and the ask at the end all stay whole. (A paragraph that is
@@ -168,13 +169,16 @@ export function fitText(body: string, max: number): string {
   }
   return b;
 }
-// the ask as texts before the word AFTER said it ("reply with BEFORE photos …
-// reply with AFTER photos"): a paragraph of its own, which the new ask replaces
-const OLD_ASK = /reply with BEFORE photos|responda con fotos de ANTES/;
+// the ask as texts before the word AFTER said it ("When you get there, reply
+// with BEFORE photos … reply with AFTER photos"): a paragraph of its own,
+// starting that way, which the new ask replaces (a work line that quotes
+// those words is the work, and stays)
+const OLD_ASK = /^(?:(?:Every day: when you get there|When you get there), reply with BEFORE photos|(?:Cada día: al llegar|Al llegar), responda con fotos de ANTES)/;
 const NEW_ASK = /with the word AFTER|con la palabra DESPUES/;
+function isOldAsk(p: string): boolean { return OLD_ASK.test(p.trim()) && !NEW_ASK.test(p); }
 const swapOldAsk = (b: string, ask: string): string | null => {
   const paras = b.split("\n\n");
-  const i = paras.findIndex((p) => OLD_ASK.test(p) && !NEW_ASK.test(p));
+  const i = paras.findIndex(isOldAsk);
   if (i < 0) return null;
   paras[i] = ask;
   return paras.join("\n\n");

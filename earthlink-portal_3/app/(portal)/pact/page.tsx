@@ -14,7 +14,7 @@ import { RowActions } from "@/components/ActionMenu";
 import PageHeader from "@/components/PageHeader";
 import CardToolbar from "@/components/CardToolbar";
 import MediaFolders from "@/components/MediaFolders";
-import { isMediaName, pileOf } from "@/lib/media";
+import { isImageName, isMediaName, isVideoName, pileOf } from "@/lib/media";
 import Modal from "@/components/Modal";
 import Disclosure from "@/components/Disclosure";
 import MeasurePanel from "@/components/MeasurePanel";
@@ -518,6 +518,10 @@ export default function Pact() {
 
   // a paper the portal made, filed on the job — never merged back into a package, never re-read as the PO
   const isMade = (a: { path?: string; name?: string }) => /\/made\//.test(a.path || "");
+  // of those, Admin 2 sees only the photos PDF ("PO 116843 photos.pdf", the
+  // name lib/photoPdf photoPdfName gives it): the invoice and the proposal
+  // letters carry prices
+  const seesPaper = (a: { path?: string; name?: string }) => canPrice || !isMade(a) || /^PO .+ photos\.pdf$/.test(a.name || "");
 
   // ---------- the job's photos as one PDF to send ----------
   const makePhotoPdf = async (j: Job) => {
@@ -1173,17 +1177,39 @@ export default function Pact() {
   };
 
   // ---------- attachments & photos ----------
-  // `folder`: a pile's own folder on the job ("before/", "after/"), for the 📷 Before and After buttons
+  // why a file didn't go up, in plain words. The storage takes 50 MB a file:
+  // a longer video is too big, not a bad signal
+  const upFail = (f: File, m: string) => {
+    if (/bucket/i.test(m)) return "Storage isn't set up yet (Settings → System check)";
+    if (/exceed|too large|413|payload/i.test(m) || f.size > 50 * 1024 * 1024) {
+      console.warn(m);
+      return /^video\//i.test(f.type) || isVideoName(f.name) ? "That video is too big to upload (over 50 MB). Send a shorter one." : "That file is too big to upload (over 50 MB).";
+    }
+    return upgradeHint(m, "Couldn't upload");
+  };
+  // `folder`: a pile's own folder on the job ("before/", "after/"), for the 📷 Before and After buttons.
+  // A file that won't go up is named and the rest carry on: what did go up is on the job
   const attachFiles = async (j: Job, files: File[], folder = ""): Promise<{ name: string; path: string }[]> => {
     if (files.length === 0) return [];
     setBusy(true);
     const added: { name: string; path: string }[] = [];
+    const missed: string[] = [];
+    let why = "";
     for (const file of files) {
       const path = `pact/${j.id}/${folder}${file.name}`;
       const { error } = await sb().storage.from("docs").upload(path, file, { upsert: true });
-      if (error) { setBusy(false); flash(/bucket/i.test(error.message) ? "Storage isn't set up yet (Settings → System check)" : upgradeHint(error.message, "Couldn't upload")); return []; }
+      if (error) {
+        missed.push(file.name);
+        const w = upFail(file, error.message);
+        if (!why || /too big/.test(w)) why = w; // a file too big says so over a bad signal
+        continue;
+      }
       added.push({ name: file.name, path });
     }
+    // one file: why it didn't go up; several: which ones, then why
+    const missedMsg = !missed.length ? "" : files.length === 1 ? why
+      : `${missed.slice(0, 3).join(", ")}${missed.length > 3 ? ` and ${missed.length - 3} more` : ""} didn't go up. ${why}`;
+    if (added.length === 0) { setBusy(false); flash(missedMsg); return []; }
     // merge against the freshest row so multi-photo batches and other devices never lose files
     const { data: cur } = await sb().from("pact_jobs").select("attachments").eq("id", j.id).single();
     const existing = (cur as { attachments?: { name: string; path: string }[] } | null)?.attachments
@@ -1195,6 +1221,7 @@ export default function Pact() {
       setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, attachments: list } : x)));
       setAttachJob((prev) => (prev && prev.id === j.id ? { ...prev, attachments: list } : prev));
       setMeasureJob((prev) => (prev && prev.id === j.id ? { ...prev, attachments: list } : prev));
+      if (missedMsg) flash(missedMsg);
     }
     setBusy(false);
     return e2 ? [] : added;
@@ -1241,8 +1268,9 @@ export default function Pact() {
         out.push(isImg(f.name) ? await shrinkImage(f) : f);
       }
       if (out.length === 0) { flash("Nothing to attach in that: no pictures or documents found"); return; }
-      await attachFiles(j, out);
-      if (zipped) flash(`${zipped} picture${zipped === 1 ? "" : "s"} unpacked from the zip and attached`);
+      const got = await attachFiles(j, out);
+      // (one that didn't go up keeps its own message on screen)
+      if (zipped && got.length === out.length) flash(`${zipped} picture${zipped === 1 ? "" : "s"} unpacked from the zip and attached`);
     } finally { setBusy(false); }
   };
   const addPhotos = async (j: Job, files: File[], kind: "before" | "after") => {
@@ -1262,11 +1290,16 @@ export default function Pact() {
   };
   // deleting a photo or a file always asks first: there is no undo on the shelf
   const removeAttachment = async (j: Job, path: string, name = path): Promise<boolean> => {
-    if (!window.confirm(isImg(name) ? "Delete this photo? It comes off the job for good." : "Delete this file? It comes off the job for good.")) return false;
+    // (read the way the folders label their tiles: lib/media)
+    const what = isImageName(name) ? "photo" : isVideoName(name) ? "video" : "file";
+    if (!window.confirm(`Delete this ${what}? It comes off the job for good.`)) return false;
+    // fresh list: another phone may have attached files since this render;
+    // and the row updates first, so a failed write never orphans the entry
+    const { data: cur } = await sb().from("pact_jobs").select("attachments").eq("id", j.id).single();
+    const list = (((cur as { attachments?: { name: string; path: string }[] } | null)?.attachments) || (jobs.find((x) => x.id === j.id) || j).attachments || []).filter((a) => a.path !== path);
+    const { error } = await sb().from("pact_jobs").update({ attachments: list }).eq("id", j.id);
+    if (error) { flash(upgradeHint(error.message, `Couldn't delete the ${what}`)); return false; }
     await sb().storage.from("docs").remove([path]);
-    const cur = jobs.find((x) => x.id === j.id) || j;
-    const list = (cur.attachments || []).filter((a) => a.path !== path);
-    await sb().from("pact_jobs").update({ attachments: list }).eq("id", j.id);
     setJobs((prev) => prev.map((x) => (x.id === j.id ? { ...x, attachments: list } : x)));
     setAttachJob((prev) => (prev && prev.id === j.id ? { ...prev, attachments: list } : prev));
     return true;
@@ -1536,7 +1569,7 @@ export default function Pact() {
       }
       // --- photos: before then after, one per page ---
       for (const kind of ["before", "after"] as const) {
-        const photos = atts.filter((x) => isImg(x.name) && x.name.toLowerCase().startsWith(kind));
+        const photos = atts.filter((x) => isImg(x.name) && pileOf(x) === kind);
         for (const a of photos) {
           try {
             const { data } = await sb().storage.from("docs").createSignedUrl(a.path, 600);
@@ -1786,7 +1819,8 @@ export default function Pact() {
               </button>
               <div className="flex shrink-0 items-center gap-2">
                 {canPrice && <span className="font-mono text-sm font-semibold tabular-nums">{fmt(Number(j.amount) || invTotal(j))}</span>}
-                {(j.attachments || []).length > 0 && <button type="button" className="btn-icon btn-icon-quiet chip w-auto min-w-[44px] px-1.5" aria-label="Documents and photos" onClick={() => setAttachJob(j)}>📎 {(j.attachments || []).length}</button>}
+                {/* (the count is what the Documents list shows this role: Admin 2's leaves out the priced papers) */}
+                {(j.attachments || []).some(seesPaper) && <button type="button" className="btn-icon btn-icon-quiet chip w-auto min-w-[44px] px-1.5" aria-label="Documents and photos" onClick={() => setAttachJob(j)}>📎 {(j.attachments || []).filter(seesPaper).length}</button>}
                 <RowActions items={[
                   { label: "Documents", glyph: "📎", onSelect: () => setAttachJob(j) },
                   { label: "Open on Schedule", glyph: "📅", href: `/pact/schedule?job=${j.id}` },
@@ -2006,25 +2040,30 @@ export default function Pact() {
 
       {/* ---------- documents & photos ---------- */}
       {attachJob && (() => {
-        const photoN = (attachJob.attachments || []).filter((a) => isMediaName(a.name)).length;
+        // the job as it is now: a live refresh (or the server moving a crew
+        // file from before/ to after/) shows here at once, as in the measure panel
+        const aj = jobs.find((x) => x.id === attachJob.id) || attachJob;
+        const mediaN = (aj.attachments || []).filter((a) => isMediaName(a.name)).length;
+        // the PDF is of pictures: a job with only videos has nothing to put in it
+        const photoN = (aj.attachments || []).filter((a) => isImg(a.name)).length;
         return (
-        <Modal title={`Documents · PO ${attachJob.po_number || attachJob.job_number || ""}`} onClose={() => setAttachJob(null)}
+        <Modal title={`Documents · PO ${aj.po_number || aj.job_number || ""}`} onClose={() => setAttachJob(null)}
           primary={canEdit ? <button type="button" className={`btn btn-primary${spin("upload")}`} onClick={() => fileRef.current?.click()} {...busyOn("upload")} title="Pictures, a photos zip or a document, several at once">Upload files</button> : undefined}
           secondary={canEdit ? <>
-            <button type="button" className={`btn btn-ghost${spin(`photo:${attachJob.id}:before`)}`} onClick={() => snapPhotos(attachJob, "before")} {...busyOn(`photo:${attachJob.id}:before`)}>📷 Before</button>
-            <button type="button" className={`btn btn-ghost${spin(`photo:${attachJob.id}:after`)}`} onClick={() => snapPhotos(attachJob, "after")} {...busyOn(`photo:${attachJob.id}:after`)}>📷 After</button>
+            <button type="button" className={`btn btn-ghost${spin(`photo:${aj.id}:before`)}`} onClick={() => snapPhotos(aj, "before")} {...busyOn(`photo:${aj.id}:before`)}>📷 Before</button>
+            <button type="button" className={`btn btn-ghost${spin(`photo:${aj.id}:after`)}`} onClick={() => snapPhotos(aj, "after")} {...busyOn(`photo:${aj.id}:after`)}>📷 After</button>
           </> : undefined}
           menu={photoN > 0 ? [
-            { label: "Photos (PDF)", glyph: "⬇", disabled: busy, title: "Before and after photos on one PDF", onSelect: () => makePhotoPdf(attachJob) },
+            { label: "Photos (PDF)", glyph: "⬇", disabled: busy, title: "Before and after photos on one PDF", onSelect: () => makePhotoPdf(aj) },
           ] : undefined}>
-            <MediaFolders items={attachJob.attachments || []} canEdit={canEdit} flash={flash}
-              zipName={`PO ${attachJob.po_number || attachJob.job_number || ""}`.trim()}
-              onDelete={(a) => removeAttachment(attachJob, a.path, a.name)} />
-            {photoN === 0 && <div className="empty mb-3 py-3">No photos or videos yet. The crew&apos;s land in the Before and After folders by themselves.</div>}
-            {(attachJob.attachments || []).filter((a) => !isMediaName(a.name)).map((a) => (
+            <MediaFolders items={aj.attachments || []} canEdit={canEdit} flash={flash}
+              zipName={`PO ${aj.po_number || aj.job_number || ""}`.trim()}
+              onDelete={(a) => removeAttachment(aj, a.path, a.name)} />
+            {mediaN === 0 && <div className="empty mb-3 py-3">No photos or videos yet. The crew&apos;s land in the Before and After folders by themselves.</div>}
+            {(aj.attachments || []).filter((a) => !isMediaName(a.name) && seesPaper(a)).map((a) => (
               <div key={a.path} className="mb-1.5 flex items-center gap-1">
                 <button type="button" className="row-btn rounded-sm border border-rulesoft p-2.5 text-sm hover:border-work active:border-work" onClick={() => openAttachment(a.path)}>📄 {a.name}</button>
-                {canEdit && <button type="button" className="btn-icon btn-icon-quiet text-alert" aria-label="Delete file" onClick={() => removeAttachment(attachJob, a.path, a.name)}>✕</button>}
+                {canEdit && <button type="button" className="btn-icon btn-icon-quiet text-alert" aria-label="Delete file" onClick={() => removeAttachment(aj, a.path, a.name)}>✕</button>}
               </div>
             ))}
         </Modal>

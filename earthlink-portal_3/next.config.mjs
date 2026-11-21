@@ -16,6 +16,8 @@ const csp = [
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self'",
   `img-src 'self' data: blob: ${supaHosts}`,
+  // the crew's videos play from Supabase's signed links
+  `media-src 'self' blob: ${supaHosts}`,
   `connect-src 'self' ${supaHosts} ${supaWs}`,
   "frame-src https://www.google.com https://maps.google.com",
   "worker-src 'self' blob:",

@@ -8,8 +8,8 @@
 // (a release's at <release>/before/… the same way). Older ones sit loose in
 // the job's folder; their name's front says the pile all the same.
 
-export const IMAGE_EXT = /\.(jpe?g|png|webp|heic|heif|gif)$/i;
-export const VIDEO_EXT = /\.(mp4|mov|m4v|3gp|3g2|webm|mpe?g|avi)$/i;
+export const IMAGE_EXT = /\.(jpe?g|png|webp|heic|heif|gif|bmp|tiff?)$/i;
+export const VIDEO_EXT = /\.(mp4|mov|m4v|3gp|3g2|webm|mpe?g|avi|mkv|ogv)$/i;
 export const isImageName = (n: string): boolean => IMAGE_EXT.test(n || "");
 export const isVideoName = (n: string): boolean => VIDEO_EXT.test(n || "");
 export const isMediaName = (n: string): boolean => isImageName(n) || isVideoName(n);
@@ -20,8 +20,15 @@ const TYPE_EXT: Record<string, string> = {
   "image/webp": "webp", "image/heic": "heic", "image/heif": "heif",
   "video/mp4": "mp4", "video/quicktime": "mov", "video/x-m4v": "m4v", "video/3gpp": "3gp", "video/3gpp2": "3g2",
   "video/webm": "webm", "video/mpeg": "mpeg", "video/mpeg4": "mp4", "video/h264": "mp4", "video/x-msvideo": "avi",
+  "image/bmp": "bmp", "image/tiff": "tif", "video/x-matroska": "mkv", "video/ogg": "ogv",
+  // the older phone formats Twilio passes on (a 3GP file, as the phone made it)
+  "video/avi": "avi", "video/msvideo": "avi", "video/3gpp-tt": "3gp", "video/h261": "3gp", "video/h263": "3gp", "video/h263-1998": "3gp", "video/h263-2000": "3gp",
 };
-export const extOfType = (type: string): string => TYPE_EXT[(type || "").trim().toLowerCase().split(";")[0]] || "";
+// (any other video a phone sends is still a video: kept, as an .mp4)
+export const extOfType = (type: string): string => {
+  const t = (type || "").trim().toLowerCase().split(";")[0];
+  return TYPE_EXT[t] || (/^video\/[\w.+-]+$/.test(t) ? "mp4" : "");
+};
 export const isVideoType = (type: string): boolean => /^video\//i.test((type || "").trim());
 // the type a file is served with, from its ending (an upload from the office carries its own)
 export const typeOfName = (n: string): string => {
@@ -36,7 +43,8 @@ export const pileOf = (a: { name?: string | null; path?: string | null }): Pile 
   const parts = (a.path || "").split("/");
   const folder = (parts.length > 1 ? parts[parts.length - 2] : "").toLowerCase();
   if (folder === "before" || folder === "after" || folder === "noaccess") return folder;
-  const m = (a.name || "").toLowerCase().match(/^(before|after|noaccess)_/);
+  // ("before_…" as the inbox names them, "Before 1.jpg" or "after-kitchen.jpg" as the office does; never "afternoon.jpg")
+  const m = (a.name || "").toLowerCase().match(/^(before|after|noaccess)(?![a-z])/);
   return m ? (m[1] as Pile) : "other";
 };
 export const PILE_LABEL: Record<Pile, string> = { before: "Before", after: "After", noaccess: "Nobody home", other: "Other photos" };

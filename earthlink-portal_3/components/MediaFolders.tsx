@@ -31,6 +31,7 @@ export default function MediaFolders({ items, canEdit, onDelete, zipName, flash 
   const [open, setOpen] = useState<Set<Pile>>(new Set());
   const [urls, setUrls] = useState<Record<string, string>>({});
   const [big, setBig] = useState<MediaItem | null>(null);
+  const [cantPlay, setCantPlay] = useState(""); // the video link this browser couldn't play (a fresh link tries again)
   const [zipping, setZipping] = useState<string>("");
   // a fresh link for each picture and video, an hour long
   const key = media.map((a) => a.path).join("|");
@@ -48,7 +49,18 @@ export default function MediaFolders({ items, canEdit, onDelete, zipName, flash 
 
   if (!media.length) return null;
   const toggle = (p: Pile) => setOpen((prev) => { const n = new Set(prev); if (n.has(p)) n.delete(p); else n.add(p); return n; });
-  // the files, fetched and zipped on this phone, one folder per pile (videos and jpegs don't shrink: stored as they are)
+  // a fresh link at the tap (the one signed when the folder opened runs out
+  // after an hour); the window opens on the tap itself, so a phone doesn't block it
+  const openNew = async (a: MediaItem) => {
+    const w = window.open("", "_blank");
+    const url = (await sb().storage.from("docs").createSignedUrl(a.path, 3600)).data?.signedUrl;
+    if (url && w) w.location.href = url;
+    else { w?.close(); flash(`Couldn't open that ${isVideoName(a.name) ? "video" : "photo"}`); }
+  };
+  // the files, fetched one at a time and zipped on this phone as they come,
+  // one folder per pile (videos and jpegs don't shrink: stored as they are).
+  // Each file's bytes are held once, as a piece of the zip: a few big videos
+  // in one copy, never two or three, so the phone's tab doesn't run out
   const download = async (which: Pile | "all") => {
     if (zipping) return;
     const list = which === "all" ? ORDER.flatMap((p) => (piles.get(p) || []).map((a) => ({ a, p }))) : (piles.get(which) || []).map((a) => ({ a, p: which }));
@@ -59,22 +71,27 @@ export default function MediaFolders({ items, canEdit, onDelete, zipName, flash 
     setZipping(which);
     try {
       const { data } = await sb().storage.from("docs").createSignedUrls(list.map((x) => x.a.path), 600);
-      const files: Record<string, [Uint8Array, { level: 0 }]> = {};
+      const { Zip, ZipPassThrough } = await import("fflate");
+      const chunks: Uint8Array[] = [];
+      const zip = new Zip((err, chunk) => { if (err) throw err; chunks.push(chunk); });
+      const names = new Set<string>();
       let missed = 0;
       for (const { a, p } of list) {
         const url = (data || []).find((d) => d.path === a.path)?.signedUrl;
         const res = url ? await fetch(url).catch(() => null) : null;
-        if (!res || !res.ok) { missed += 1; continue; }
+        // (a video cut off halfway by a bad signal is missed, like one never reached)
+        const bytes = res && res.ok ? await res.arrayBuffer().catch(() => null) : null;
+        if (!bytes) { missed += 1; continue; }
         let name = `${which === "all" ? `${PILE_LABEL[p]}/` : ""}${a.name}`;
-        for (let n = 2; files[name]; n++) name = name.replace(/(\.\w+)?$/, ` (${n})$1`);
-        files[name] = [new Uint8Array(await res.arrayBuffer()), { level: 0 }];
+        for (let n = 2; names.has(name); n++) name = name.replace(/(\.\w+)?$/, ` (${n})$1`);
+        names.add(name);
+        const entry = new ZipPassThrough(name);
+        zip.add(entry);
+        entry.push(new Uint8Array(bytes), true);
       }
-      if (!Object.keys(files).length) { flash("Couldn't reach the photos. Check your signal and try again."); return; }
-      const { zipSync } = await import("fflate");
-      const zipped = zipSync(files);
-      const ab = new ArrayBuffer(zipped.byteLength);
-      new Uint8Array(ab).set(zipped);
-      const href = URL.createObjectURL(new Blob([ab], { type: "application/zip" }));
+      if (!names.size) { flash("Couldn't reach the photos. Check your signal and try again."); return; }
+      zip.end();
+      const href = URL.createObjectURL(new Blob(chunks, { type: "application/zip" }));
       const link = document.createElement("a");
       link.href = href; link.download = fname; link.click();
       setTimeout(() => URL.revokeObjectURL(href), 60_000);
@@ -121,7 +138,7 @@ export default function MediaFolders({ items, canEdit, onDelete, zipName, flash 
                 <span className="text-[12px] text-inksoft">{list.length ? mediaWords(c, "en") : "empty"}</span>
               </button>
               {list.length > 0 && (
-                <button type="button" className={`btn btn-ghost btn-sm mr-1${zipping === p ? " btn-busy" : ""}`} aria-busy={zipping === p || undefined} disabled={!!zipping} onClick={() => download(p)} aria-label={`Download the ${PILE_LABEL[p]} folder`}>⬇</button>
+                <button type="button" className={`btn btn-ghost btn-sm mr-1 min-w-[44px]${zipping === p ? " btn-busy" : ""}`} aria-busy={zipping === p || undefined} disabled={!!zipping} onClick={() => download(p)} aria-label={`Download the ${PILE_LABEL[p]} folder`}>⬇</button>
               )}
             </div>
             {isOpen && list.length > 0 && <div className="anim-open grid grid-cols-3 gap-1.5 border-t border-rulesoft p-2">{list.map(tile)}</div>}
@@ -130,10 +147,13 @@ export default function MediaFolders({ items, canEdit, onDelete, zipName, flash 
       })}
       {big && (
         <Modal wide title={`${PILE_LABEL[pileOf(big)].replace(/ photos$/, "")} ${isVideoName(big.name) ? "video" : "photo"}`} onClose={() => setBig(null)}
-          secondary={urls[big.path] ? <a className="btn btn-ghost" href={urls[big.path]} target="_blank" rel="noreferrer">Open in a new tab</a> : undefined}>
+          secondary={<button type="button" className="btn btn-ghost" onClick={() => openNew(big)} data-open-new>Open in a new tab</button>}>
           {urls[big.path]
             ? isVideoName(big.name)
-              ? <video src={urls[big.path]} controls playsInline preload="metadata" className="mx-auto max-h-[70vh] w-full rounded-sm bg-ink" />
+              // a video this browser can't play (a .3gp from an Android phone on a desktop) says so
+              ? cantPlay === urls[big.path]
+                ? <div className="grid min-h-[10rem] place-items-center rounded-sm bg-ink p-4 text-center text-[14px] text-paper" data-cant-play>This video can&apos;t play here. Open it in a new tab to save it.</div>
+                : <video src={urls[big.path]} controls playsInline preload="metadata" onError={() => setCantPlay(urls[big.path])} className="mx-auto max-h-[70vh] w-full rounded-sm bg-ink" />
               // eslint-disable-next-line @next/next/no-img-element
               : <img src={urls[big.path]} alt={big.name} className="anim-fade mx-auto max-h-[70vh] w-auto max-w-full rounded-sm object-contain" />
             : <div className="skeleton mx-auto h-64 w-full" />}

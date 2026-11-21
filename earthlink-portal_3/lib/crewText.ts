@@ -16,6 +16,9 @@ export const LANG_LABEL: Record<Lang, string> = { en: "English", es: "Español" 
 export const longDay = (iso?: string | null, lang: Lang = "en") =>
   iso && /^\d{4}-\d{2}-\d{2}$/.test(iso) && !Number.isNaN(new Date(iso + "T00:00:00").getTime()) ? new Date(iso + "T00:00:00").toLocaleDateString(lang === "es" ? "es" : "en-US", { weekday: "long", month: "long", day: "numeric" }) : "";
 const flat = (s?: string | null) => (s || "").replace(/\s+/g, " ").trim();
+// a dash typed into an address or a building ("41–10 Vernon Blvd", "Van Dyke
+// Houses – Bldg 3") reads in a text as a hyphen, or a comma when spaced
+const undash = (s?: string | null) => flat(s).replace(/\s*[\u2014\u2013]\s+|\s+[\u2014\u2013]\s*|\u2014/g, ", ").replace(/\u2013/g, "-");
 const sameText = (a: string, b: string) => flat(a).toLowerCase() === flat(b).toLowerCase();
 
 export type CrewTextInput = {
@@ -44,8 +47,8 @@ export function crewText(t: CrewTextInput): string {
   const lang = langOf(t.lang);
   const first = flat(t.first);
   // a trailing period on a street or building would land mid-sentence
-  const street = flat(t.street).replace(/[.\s]+$/, "");
-  const building = flat(t.building).replace(/[.\s]+$/, "");
+  const street = undash(t.street).replace(/[.\s]+$/, "");
+  const building = undash(t.building).replace(/[.\s]+$/, "");
   // "Apt 4B", "Apartment 4B", "Unit 4B", "#4B" — the label is put on here, once
   const apt = flat(t.apt).replace(/^(apt\.?|apartment|unit|#)\s*/i, "");
   // the work's own last stop is kept ("Paint everything!" / a cut line's "…"); a period is added only where there is none.
@@ -104,17 +107,17 @@ export function crewText(t: CrewTextInput): string {
 // address up to its first comma; a job with no address goes by its building.
 export const jobName = (j: { label: string; street?: string | null; apt?: string | null }, lang0?: string | null): string => {
   const lang = langOf(lang0);
-  const street = flat(j.street).replace(/[.,\s]+$/, "");
-  const apt = flat(j.apt).replace(/^(apt\.?|apartment|unit|#)\s*/i, "");
+  const street = undash(j.street).replace(/[.,\s]+$/, "");
+  const apt = undash(j.apt).replace(/^(apt\.?|apartment|unit|#)\s*/i, "");
   // an address that already says the apartment ("2205 Linden Blvd Apt 4B", "… #4B") doesn't get it
   // twice; the same number as a house or street number ("41-10 12th St", apartment 10) is not it
   const aptSaid = !!apt && new RegExp(`(^|[^a-z0-9])(apt\\.?|apartment|unit|#)\\s*#?\\s*${apt.replace(/[^a-z0-9]/gi, (c) => `\\${c}`)}($|[^a-z0-9])`, "i").test(street);
   const where = street ? [street, apt && !aptSaid && `${lang === "es" ? "Apto" : "Apt"} ${apt}`].filter(Boolean).join(", ") : "";
-  const label = flat(j.label);
+  const label = undash(j.label);
   return where && label ? `${where} (${label})` : where || label;
 };
 // the street part of an address: "2205 Linden Blvd, Brooklyn, NY 11207" is "2205 Linden Blvd"
-export const streetOf = (address?: string | null): string => flat(address).split(",")[0].replace(/[.\s]+$/, "");
+export const streetOf = (address?: string | null): string => undash(address).split(",")[0].replace(/[.\s]+$/, "");
 // a job name in a sentence. "PO 9098" and "release 12" are numbers ("on PO
 // 9098", "en el PO 9098"); an address is a place ("at 2205 Linden Blvd",
 // "en 2205 Linden Blvd")
@@ -165,15 +168,38 @@ export function fitText(body: string, max: number): string {
   }
   return b;
 }
+// the ask as texts before the word AFTER said it ("reply with BEFORE photos …
+// reply with AFTER photos"): a paragraph of its own, which the new ask replaces
+const OLD_ASK = /reply with BEFORE photos|responda con fotos de ANTES/;
+const NEW_ASK = /with the word AFTER|con la palabra DESPUES/;
+const swapOldAsk = (b: string, ask: string): string | null => {
+  const paras = b.split("\n\n");
+  const i = paras.findIndex((p) => OLD_ASK.test(p) && !NEW_ASK.test(p));
+  if (i < 0) return null;
+  paras[i] = ask;
+  return paras.join("\n\n");
+};
 export function withPhotoInvite(body: string): string {
   const b = (body || "").trimEnd();
-  if (!b || hasAsk(b)) return b;
+  if (!b) return b;
+  const es = /^hola\b/i.test(b.trimStart());
+  // the old invite ("Reply to this text with photos of the work.") gets the rest of the ask
+  if (!b.includes(PHOTO_INVITE.en) && !b.includes(PHOTO_INVITE.es)) {
+    if (b.includes(OLD_INVITE.en)) return b.replace(OLD_INVITE.en, PHOTO_INVITE.en);
+    if (b.includes(OLD_INVITE.es)) return b.replace(OLD_INVITE.es, PHOTO_INVITE.es);
+    const swapped = swapOldAsk(b, es ? PHOTO_INVITE.es : PHOTO_INVITE.en);
+    if (swapped) return swapped;
+  }
+  if (hasAsk(b)) return b;
   return `${b}\n\n${/^hola\b/i.test(b.trimStart()) ? PHOTO_INVITE.es : PHOTO_INVITE.en}`;
 }
 // the same, with the PACT thread's ask (the words come from lib/jobFlow, so
 // this file stays free of it: the browser's preview and the server both call this)
 export function withJobAsk(body: string, ask: string): string {
   const b = (body || "").trimEnd();
-  if (!b || !ask || hasAsk(b)) return b;
+  if (!b || !ask) return b;
+  const swapped = swapOldAsk(b, ask);
+  if (swapped) return swapped;
+  if (hasAsk(b)) return b;
   return `${b}\n\n${ask}`;
 }

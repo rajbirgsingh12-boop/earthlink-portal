@@ -26,12 +26,15 @@ export interface Batch {
 interface Spot { kind: "pact" | "rel"; id: string; label: string; sub: string }
 const LATELY_DAYS = 3;
 const when = (iso: string) => new Date(iso).toLocaleString("en-US", { weekday: "short", hour: "numeric", minute: "2-digit" });
-const photosN = (n: number) => `${n} photo${n === 1 ? "" : "s"}`;
-// "3 photos", "2 photos and 1 video", "BEFORE" / "AFTER" when the batch is on one pile
+// "3 photos", "2 photos and 1 video"
 const mediaOf = (b: { photos?: { name: string }[] | null }) => mediaWords(countOf((b.photos || []).map((p) => p.name)), "en");
-const pileWord = (b: { photos?: { name: string }[] | null; status?: string }) => {
+// a placed batch on one pile says which: "2 BEFORE photos and 1 video",
+// "1 photo (nobody home)" for a closed door; else the plain count
+const filedWords = (b: { photos?: { name: string }[] | null; status?: string }) => {
   const kinds = new Set((b.photos || []).map((p) => pileOf({ name: p.name })));
-  return b.status === "filed" && kinds.size === 1 ? ({ before: " BEFORE", after: " AFTER", noaccess: " door", other: "" } as const)[[...kinds][0]] : "";
+  const pile = b.status === "filed" && kinds.size === 1 ? [...kinds][0] : "other";
+  if (pile === "before" || pile === "after") return mediaWords(countOf((b.photos || []).map((p) => p.name)), "en", pile === "before" ? "BEFORE" : "AFTER");
+  return `${mediaOf(b)}${pile === "noaccess" ? " (nobody home)" : ""}`;
 };
 const pactSpot = (j: { id: string; po_number?: string | null; job_number?: string | null; address?: string | null; development?: string | null }): Spot =>
   ({ kind: "pact", id: j.id, label: `PO ${(j.po_number || j.job_number || "").trim().replace(/^(p\.?\s*o\.?\s*#?|#)\s*/i, "")}`, sub: (j.address || j.development || "").trim() });
@@ -115,7 +118,7 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
       const res = await fetch("/api/texted-photos", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ id: b.id, ...body }) });
       const j = (await res.json().catch(() => ({}))) as { error?: string; n?: number; label?: string };
       if (!res.ok) { flash(j.error || "Couldn't do that. Try again."); return; }
-      flash(body.action === "throw" ? "Photos thrown away ✓" : body.action === "seen" ? "Cleared from the list ✓" : `${photosN(j.n || 0)} on ${j.label} ✓`);
+      flash(body.action === "throw" ? "Photos thrown away ✓" : body.action === "seen" ? "Cleared from the list ✓" : `${mediaOf(b)} on ${j.label} ✓`);
       setPicking(null);
       await load();
     } finally { setBusy(false); setDoing(""); }
@@ -259,7 +262,7 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
             return (
               <div key={b.id} className="border-t border-rulesoft py-2" data-filed={b.id}>
                 <div className="flex flex-wrap items-center gap-x-2 text-[13px]">
-                  <span><b>{who(b)}</b> · {mediaOf(b)}{pileWord(b)} → <b>{at ? at.label : "a job"}</b> · {when(b.created_at)}</span>
+                  <span><b>{who(b)}</b> · {filedWords(b)} → <b>{at ? at.label : "a job"}</b> · {when(b.created_at)}</span>
                   {picking !== b.id && <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPicking(b.id)} disabled={busy} data-move>Wrong job?</button>}
                 </div>
                 {picking === b.id && (

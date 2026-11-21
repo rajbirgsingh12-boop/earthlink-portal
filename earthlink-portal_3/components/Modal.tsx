@@ -8,6 +8,10 @@ import type { ActionItem } from "./ActionMenu";
 // those go through PrintShell, which has its own chrome.
 // the dialogs open right now, bottom to top
 const OPEN: symbol[] = [];
+// how many dialogs hold the page still, and the page's own overflow from
+// before the first of them opened: only the last one to close puts it back
+let held = 0;
+let pageOverflow = "";
 
 export default function Modal({ title, onClose, footer, children, wide = false, dismissOnBackdrop = true, dirty = false, primary, secondary, menu }: {
   title: string;
@@ -31,16 +35,21 @@ export default function Modal({ title, onClose, footer, children, wide = false, 
     if (dirty && !window.confirm("Close without saving?")) return;
     onClose();
   }, [dirty, onClose]);
+  // the latest close, for the Escape key: the page hands a new onClose on
+  // every render, and the key's place in OPEN must not move with it
+  const closeRef = useRef(tryClose);
+  closeRef.current = tryClose;
   useEffect(() => {
     // an Escape a menu inside has already used (defaultPrevented) is not ours,
     // and with one dialog over another (a photo over the Documents list) only
-    // the one on top answers it
+    // the one on top answers it. Registered once per dialog, so OPEN keeps the
+    // order the dialogs opened in
     const me = Symbol("modal");
     OPEN.push(me);
-    const key = (e: KeyboardEvent) => { if (e.key === "Escape" && !e.defaultPrevented && OPEN[OPEN.length - 1] === me) { e.preventDefault(); tryClose(); } };
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape" && !e.defaultPrevented && OPEN[OPEN.length - 1] === me) { e.preventDefault(); closeRef.current(); } };
     document.addEventListener("keydown", key);
     return () => { document.removeEventListener("keydown", key); const at = OPEN.indexOf(me); if (at >= 0) OPEN.splice(at, 1); };
-  }, [tryClose]);
+  }, []);
   useEffect(() => {
     // focus moves in (an autoFocus field if the page gave one, else the first
     // field, else the panel) and goes back where it was on close; the page
@@ -50,10 +59,14 @@ export default function Modal({ title, onClose, footer, children, wide = false, 
         || panel.current?.querySelector<HTMLElement>("input:not([type=hidden]), select, textarea, button:not([aria-label='Close'])");
       (first || panel.current)?.focus({ preventScroll: true });
     }
-    const prevOverflow = document.body.style.overflow;
+    // (two dialogs can close in one go, the photo with the Documents list
+    // under it: the count, not each one's own copy, says when the page scrolls)
+    if (held === 0) pageOverflow = document.body.style.overflow;
+    held += 1;
     document.body.style.overflow = "hidden";
     return () => {
-      document.body.style.overflow = prevOverflow;
+      held = Math.max(0, held - 1);
+      if (held === 0) document.body.style.overflow = pageOverflow;
       before?.focus?.({ preventScroll: true });
     };
   }, []);

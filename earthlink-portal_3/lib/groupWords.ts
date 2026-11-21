@@ -3,6 +3,8 @@
 // when the crew reads both. Pure, with no server code in it, so the
 // browser's "What they get" preview (components/CrewPanel) and the server's
 // send (lib/crewSend) build the same message the same way.
+import { fitText } from "./crewText";
+
 export type ThreadLang = "en" | "es";
 const TWILIO_MAX = 1600;
 
@@ -16,12 +18,13 @@ export const nameList = (names: string[], lang: ThreadLang): string => {
 };
 // the greeting names everyone in the thread: "Hi Jose and Luis, this is
 // Earth Link." And Spanish speaks to all of them ("les habla", "Tienen", "respondan")
-export function groupGreeting(body: string, names: string[]): string {
+// `all`: "Hi all" / "Hola a todos", when the names would make it too long for one text
+export function groupGreeting(body: string, names: string[], all = false): string {
   const es = isEs(body);
-  const list = nameList(names, es ? "es" : "en");
+  const list = all ? (es ? "a todos" : "all") : nameList(names, es ? "es" : "en");
   if (!list) return body;
   if (!es) return body.replace(/^Hi\b[^,]*?, this is Earth Link\./, `Hi ${list}, this is Earth Link.`);
-  const many = new Set(names.filter(Boolean)).size > 1;
+  const many = all || new Set(names.filter(Boolean)).size > 1;
   let out = body.replace(/^Hola\b[^,]*?, le habla Earth Link\./, `Hola ${list}, ${many ? "les" : "le"} habla Earth Link.`);
   if (many) out = out.replace(/\bTiene trabajo\b/, "Tienen trabajo").replace(/\bresponda\b/g, "respondan").replace(/\bResponda\b/g, "Respondan").replace(/\bmande\b/g, "manden").replace(/\bse le avisará\b/g, "se les avisará").replace(/\bse le enviará\b/g, "se les enviará");
   return out;
@@ -30,7 +33,9 @@ export function groupGreeting(body: string, names: string[]): string {
 // it, in one message when that fits; otherwise one message each
 export function groupBodies(bodies: string[], names: string[]): string[] {
   const en = bodies.find((b) => !isEs(b)), es = bodies.find(isEs);
-  const parts = [en, es].filter((b): b is string => !!b).map((b) => groupGreeting(b, names));
+  // (each part one text: a greeting too long for it says "Hi all", and a part still over is cut in its work line)
+  const greet = (b: string) => { const g = groupGreeting(b, names); return g.length <= TWILIO_MAX ? g : fitText(groupGreeting(b, names, true), TWILIO_MAX); };
+  const parts = [en, es].filter((b): b is string => !!b).map(greet);
   const joined = parts.join("\n\n");
   return parts.length > 1 && joined.length > TWILIO_MAX - 100 ? parts : parts.length ? [joined] : [];
 }

@@ -32,7 +32,7 @@ export const stageOf = (s: StageInput): Stage => (s.beforeN === 0 ? "before" : s
 
 // the photo's (or video's) own name says which it is; a job's documents sort on the prefix
 export { isImageName } from "./media";
-export const kindOfName = (n: string): PhotoKind | null => (/^before/i.test(n || "") ? "before" : /^after/i.test(n || "") ? "after" : null);
+export const kindOfName = (n: string): PhotoKind | null => (/^before(?![a-z])/i.test(n || "") ? "before" : /^after(?![a-z])/i.test(n || "") ? "after" : null);
 export const countKinds = (names: string[]): { beforeN: number; afterN: number } => ({
   beforeN: names.filter((n) => isMediaName(n) && kindOfName(n) === "before").length,
   afterN: names.filter((n) => isMediaName(n) && kindOfName(n) === "after").length,
@@ -54,18 +54,33 @@ const norm = (s: string) => (s || "").toLowerCase().normalize("NFD").replace(/[�
 const BEFORE_WORDS = /\b(before|antes|previo|al llegar)\b/;
 // arriving, starting: these are the arrival (and so is everything else)
 const ARRIVE_WORDS = /\b(llegamos|llegue|llegando|arrived|arriving|starting|started|empezando|empezamos|comenzando|comenzamos)\b/;
+// …and getting ready to start: then "listo" means ready, not finished
+const STARTING = /\b(llegamos|llegue|llegando|arrived|arriving|starting|started|start|empezando|empezamos|empezar|comenzando|comenzamos|comenzar|ready to|set up|setting up)\b/;
 const AFTER_WORDS = /\b(after|despues|final)\b/;
-const DONE_WORDS = /\b(done|finished|finish|complete|completed|terminado|terminada|terminados|terminamos|termine|termino|listo|lista|listos|acabado|acabamos|acabe|all set)\b/;
+const DONE_WORDS = /\b(done|finished|finish|complete|completed|terminado|terminada|terminados|terminamos|termine|termino|acabado|acabamos|acabe)\b/;
+// "listo", "all set": finished, unless they're ready to start ("listos para
+// empezar", "all set up", "ya llegamos, listos")
+const READY_WORDS = /\b(listo|lista|listos|listas|all set)\b/;
+// a word about the work that isn't finished yet: "almost done", "about to
+// finish", "half done", "first coat done", "casi terminamos", "por terminar"
+const NOT_YET_DONE = /\b(?:(?:almost|nearly|about to|half|halfway|mostly|partly|partially|first coat|1st coat|one coat|first part|casi|medio|primera mano|primera capa|una mano)\s+(?:\w+\s+)?(?:done|finished|finish|complete|completed|terminado|terminada|terminar|terminamos|termine|termino|acabado|acabamos|acabar|listo|lista|listos)|por terminar|por acabar|falta poco)\b/g;
+// "after" and "después" as a time ("back after lunch", "después del
+// almuerzo seguimos"): when, not which pile
+const AFTER_TIME = /\b(?:after|despues)\s+(?:the\s+|a\s+|an\s+|de(?:l)?\s+(?:la\s+|las\s+|los\s+|el\s+)?)?(?:lunch|break|breakfast|dinner|noon|tomorrow|tonight|that|this|an hour|a while|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}:\d{2}|\d{1,2}(?!\s*(?:coats?|capas?|manos?|layers?|rooms?|cuartos?|walls?|paredes|[\d:]))|almuerzo|comer|comida|desayuno|cena|mediodia|manana|la tarde|un rato|eso|esto|una hora)\b/g;
 // what they'll do later ("when we finish I'll send the after photos", "cuando
 // terminemos le mando las de despues") says nothing about these pictures
 const LATER = /\b(when|once|cuando|will|i'?ll|we'?ll|going to|gonna|voy a|vamos a|le mando|les mando|te mando|mandare|mandamos|luego)\b[^.,;!?]*/g;
 // the caption's own say: "after", "before", or nothing
 export function captionKind(body: string): PhotoKind | null {
   const neg = notDone(body);
-  const t = (neg ? norm(straight(body)).replace(NOT_DONE_G, " ") : norm(straight(body))).replace(LATER, " ");
+  const t = (neg ? norm(straight(body)).replace(NOT_DONE_G, " ") : norm(straight(body)))
+    .replace(LATER, " ").replace(NOT_YET_DONE, " ").replace(AFTER_TIME, " ")
+    .replace(/\b(listo|lista|listos|listas)\s+(para|pa)\b/g, " ").replace(/\ball set up\b/g, " ");
   const at = (re: RegExp) => { const m = re.exec(t); return m ? m.index : Infinity; };
   const before = at(BEFORE_WORDS);
-  const after = Math.min(neg ? Infinity : at(DONE_WORDS), at(AFTER_WORDS));
+  // ("listo" with the arrival is "ready", not "finished")
+  const ready = STARTING.test(t) ? Infinity : at(READY_WORDS);
+  const after = Math.min(neg ? Infinity : Math.min(at(DONE_WORDS), ready), at(AFTER_WORDS));
   if (before < after) return "before";
   if (after < Infinity) return "after";
   return null;
@@ -81,11 +96,17 @@ export function photoKindFor(body: string, o: { burst?: PhotoKind | null; afterA
 // AFTER photos: "AFTER", "after photos", "here are the after", "fotos de
 // despues", "las de despues". A sentence about something else ("after lunch
 // I'll be there") is not it
-const AFTER_FILLER = new Set(["the", "these", "those", "here", "are", "is", "heres", "here's", "next", "now", "ok", "okay", "estas", "esas", "son", "aqui", "aca", "estan", "van", "ahi", "las", "los", "la", "el", "de", "del", "fotos", "foto", "photos", "photo", "pics", "pic", "pictures", "picture", "videos", "video", "coming", "incoming", "ahora", "of", "y", "and", "go", "goes", "mis", "my", "our", "nuestras", "sending", "send", "mando", "mandando"]);
+const AFTER_FILLER = new Set(["the", "these", "those", "here", "are", "is", "heres", "here's", "next", "now", "ok", "okay", "estas", "esas", "son", "aqui", "aca", "estan", "van", "ahi", "las", "los", "la", "el", "de", "del", "fotos", "foto", "photos", "photo", "pics", "pic", "pix", "pictures", "picture", "videos", "video", "vids", "vid", "clips", "clip", "imagenes", "imagen", "coming", "incoming", "ahora", "of", "y", "and", "go", "goes", "mis", "my", "our", "nuestras", "sending", "send", "mando", "mandando", "for", "para"]);
+// a job's number said with it ("AFTER 116843", "after PO 116843", "116843
+// after", "despues release 12"): the word is about that job. Any other number
+// ("after 3", "después de las 3") is a time, and the text isn't the word
+const JOB_REF = /\b(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:-]?\s*\d{1,12}\b|#\s*\d{1,12}\b|\b\d{5,12}\b/gi;
 export function afterSaid(body: string): boolean {
   const raw = (body || "").trim();
   if (!raw || raw.includes("?") || notDone(raw) || raw.length > 40) return false;
-  const words = norm(straight(raw)).replace(/[^a-z' ]/g, " ").split(" ").filter(Boolean);
+  const rest = straight(raw).replace(JOB_REF, " ");
+  if (/\d/.test(rest)) return false;
+  const words = norm(rest).replace(/[^a-z' ]/g, " ").split(" ").filter(Boolean);
   const left = words.filter((w) => !AFTER_FILLER.has(w));
   return left.length === 1 && (left[0] === "after" || left[0] === "despues");
 }
@@ -95,7 +116,7 @@ export function afterSaid(body: string): boolean {
 export const mixedCaption = (body: string): boolean => {
   if (notDone(body)) return false;
   const t = norm(body);
-  return DONE_WORDS.test(t) && (ARRIVE_WORDS.test(t) || /\b(now|next|ahora|sigue|siguiente|then)\b/.test(t));
+  return (DONE_WORDS.test(t) || READY_WORDS.test(t)) && (ARRIVE_WORDS.test(t) || /\b(now|next|ahora|sigue|siguiente|then)\b/.test(t));
 };
 // …and the question it gets
 export function finishedAskText(lang0?: string | null): string {
@@ -199,11 +220,14 @@ const NOT_A_MEASURE: RegExp[] = [
   /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, /\(?\b\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/g,
   new RegExp(String.raw`\b(?:apt|apartment|unit|apto|apartamento|depto|departamento|room|rm|floor|fl|piso|suite|ste|bldg|building|edificio|house|casa|no|num|number|numero|job|trabajo)\.?\s*#?\s*\d{1,6}[a-z]?\b${NOT_TAIL}`, "g"),
   new RegExp(String.raw`#\s*\d{1,6}[a-z]?\b${NOT_TAIL}`, "g"),
-  new RegExp(String.raw`\b\d{1,3}\s*(?:pics?|pictures?|photos?|fotos?|imagenes?|imgs?|coats?|capas?|manos?|hours?|hrs?|horas?|days?|dias?|min|mins|minutes?|minutos?|bags?|bolsas?|buckets?|cubetas?|cans?|latas?|boxes?|cajas?|guys?|people|men|hombres|personas?|workers?|trabajadores?|doors?|puertas?|windows?|ventanas?|closets?|floors?|pisos?|apts?|apartments?|apartamentos?|units?|outlets?|switches?|lights?|luces?|sheets?|hojas?|boards?|tablas?|tiles?|losas?|pieces?|piezas?|pcs?|each|ea|c\/u|times|veces|trips?|viajes?|holes?|hoyos?|agujeros?|spots?|patches?|parches?)\b${NOT_TAIL}`, "g"),
+  // "2 more buckets", "3 extra gallons": supplies, never a measurement
+  /\b\d{1,3}\s*(?:more|extra|other|mas|otr[oa]s?)\b(?:\s+(?!(?:sf|sq|sqft|square|lf|linear|pies)\b)[a-z]+){0,3}/g,
+  new RegExp(String.raw`\b\d{1,3}\s*(?:pics?|pictures?|photos?|fotos?|imagenes?|imgs?|coats?|capas?|manos?|hours?|hrs?|horas?|days?|dias?|min|mins|minutes?|minutos?|bags?|bolsas?|buckets?|cubetas?|cans?|latas?|boxes?|cajas?|gallons?|gal|galones?|galon|quarts?|rolls?|rollos?|tubes?|tubos?|pails?|tubs?|jugs?|bottles?|botellas?|brushes?|brochas?|rollers?|rodillos?|guys?|people|men|hombres|personas?|workers?|trabajadores?|doors?|puertas?|windows?|ventanas?|closets?|floors?|pisos?|apts?|apartments?|apartamentos?|units?|outlets?|switches?|lights?|luces?|sheets?|hojas?|boards?|tablas?|tiles?|losas?|pieces?|piezas?|pcs?|each|ea|c\/u|times|veces|trips?|viajes?|holes?|hoyos?|agujeros?|spots?|patches?|parches?)\b${NOT_TAIL}`, "g"),
 ];
 // "sq. ft." keeps its dots so a sentence break ". " is just that
 const unDot = (t: string) => t.replace(/\bsq\.\s*ft\.?/g, "sqft").replace(/\blin\.\s*ft\.?/g, "linft").replace(/\bft\./g, "ft");
 const SPLIT = /\s*(?:,|;|\n|\+|\.\s+|\band\b|\by\b|\bplus\b|\balso\b|\bmas\b|\btambien\b)\s*/;
+const SUPPLY = /\b(need|needs|needed|bring|buy|order|grab|pick up|get me|send me|send more|necesito|necesitamos|necesita|necesitan|traer|traiga|traigan|trae|comprar|compra|compren|falta|faltan|hace falta|mandar|mande|manden)\b/;
 const MAX_TEXTED_SQFT = 5000;   // no apartment wall is bigger — lib/measure's cap, for texted numbers too
 interface Clause { nums: { qty: number; explicit: boolean; rooms?: boolean }[]; words: string[]; text: string }
 // the text, cleaned and cut into clauses, each with the numbers that could
@@ -286,6 +310,9 @@ export function parseMeasures(body: string, lines: MeasureLine[], expecting: boo
   };
   const bare: Clause[] = [];
   for (const c of clauses) {
+    // "need 2 buckets of plaster", "bring 3 for the paint": what to bring, not
+    // what was done; a number with its unit ("we need 120 sf of plaster") still counts
+    if (SUPPLY.test(c.text)) c.nums = c.nums.filter((n) => n.explicit);
     if (!c.nums.length) continue;   // talk around the numbers ("thanks", "2 pics")
     if (c.words.length === 0) { bare.push(c); continue; }
     const found = lineFor(c.words, lines);
@@ -443,13 +470,56 @@ export function afterNextText(label: string, lang0?: string | null): string {
     : `OK: the photos you send now go in AFTER ${atJob(label, "en")}.`;
 }
 // AFTER (or DONE) texted right after photos: those photos are the after photos
-export function flippedText(n0: Count, label: string, lang0?: string | null, marked = false): string {
+// `thanks`: off when more follows; `hint`: the photos sat on a job the portal
+// only guessed (two jobs that day), so the worker hears how to move them;
+// `who`: a co-worker sent them (in the crew's thread)
+export const WRONG_JOB = { en: "If that's the wrong job, reply with the right number.", es: "Si es otro trabajo, responda con el número correcto." };
+export function flippedText(n0: Count, label: string, lang0?: string | null, marked = false, o: { thanks?: boolean; hint?: boolean; who?: string } = {}): string {
   const lang = langOf(lang0);
   const n = asCount(n0);
-  const tail = marked ? ` ${MARKED_DONE[lang]}` : "";
-  if (lang === "es") return `Entendido: lo que acaba de mandar ${atJob(label, lang)} ya está en DESPUES (${mediaWords(n, "es")}). ¡Gracias!${tail}`;
+  const tail = `${marked ? ` ${MARKED_DONE[lang]}` : ""}${o.hint ? ` ${WRONG_JOB[lang]}` : ""}`;
+  const thanks = o.thanks === false ? "" : lang === "es" ? " ¡Gracias!" : " Thanks!";
+  if (lang === "es") return `Entendido: lo que ${o.who ? `${o.who} acaba` : "acaba"} de mandar ${atJob(label, lang)} ya está en DESPUES (${mediaWords(n, "es")}).${thanks}${tail}`;
   const what = n.n === 1 ? (n.v ? "the video" : "the photo") : `the ${mediaWords(n, "en")}`;
-  return `Got it: ${what} you just sent ${atJob(label, lang)} ${n.n === 1 ? "is" : "are"} in AFTER now. Thanks!${tail}`;
+  return `Got it: ${what} ${o.who || "you"} just sent ${atJob(label, lang)} ${n.n === 1 ? "is" : "are"} in AFTER now.${thanks}${tail}`;
+}
+// AFTER texted again after photos already in AFTER: nothing to move
+export function alreadyAfterText(n0: Count, label: string, lang0?: string | null): string {
+  const n = asCount(n0);
+  if (langOf(lang0) === "es") return `Entendido: lo que acaba de mandar ${atJob(label, "es")} está en DESPUES (${mediaWords(n, "es")}).`;
+  const what = n.n === 1 ? (n.v ? "the video" : "the photo") : `the ${mediaWords(n, "en")}`;
+  return `Got it: ${what} you just sent ${atJob(label, "en")} ${n.n === 1 ? "is" : "are"} in AFTER.`;
+}
+// AFTER right after photos still waiting for their job's number: they're the after photos, wherever they go
+export function heldAfterText(n0: Count, options: string[], lang0?: string | null): string {
+  const lang = langOf(lang0);
+  const n = asCount(n0);
+  const one = n.n === 1;
+  const list = options.length === 2 ? `${options[0]} ${lang === "es" ? "o" : "or"} ${options[1]}` : options.join(", ");
+  if (lang === "es") {
+    return `Entendido: ${one ? (n.v ? "ese video va" : "esa foto va") : `esas ${mediaWords(n, "es")} van`} a DESPUES. ¿De qué trabajo ${one ? "es" : "son"}? Responda con el número${list ? `: ${list}` : " de PO o de release"}.`;
+  }
+  const what = one ? (n.v ? "the video" : "the photo") : `the ${mediaWords(n, "en")}`;
+  return `Got it: ${what} you just sent ${one ? "goes" : "go"} in AFTER. Which job ${one ? "is it" : "are they"} for? Reply with the ${list ? `number: ${list}` : "PO or release number"}.`;
+}
+// photos that came a moment after DONE, before any photo of the day (the
+// phone sent DONE ahead of the pictures, "done sending" maybe): they stay
+// BEFORE, and the worker says if they're the finished work
+export function gotBeforeAskText(n: Count, label: string, lang0?: string | null): string {
+  const lang = langOf(lang0);
+  const one = asCount(n).n === 1;
+  return lang === "es"
+    ? `Recibido: ${kindN(n, "before", lang)} ${atJob(label, lang)}. Si ${one ? "es" : "son"} del trabajo terminado, responda DESPUES.`
+    : `Got ${kindN(n, "before", lang)} ${atJob(label, lang)}. If ${one ? "it's" : "they're"} the finished work, reply AFTER.`;
+}
+// pictures of the door, after their "no": "Got the photo of the door.", "Got the 2 photos and 1 video of the door."
+export function doorGotText(n0: Count, lang0?: string | null): string {
+  const n = asCount(n0);
+  if (langOf(lang0) === "es") {
+    const what = n.n === 1 ? (n.v ? "el video" : "la foto") : n.v === n.n ? `los ${mediaWords(n, "es")}` : `las ${mediaWords(n, "es")}`;
+    return `Recibimos ${what} de la puerta.`;
+  }
+  return `Got the ${n.n === 1 ? (n.v ? "video" : "photo") : mediaWords(n, "en")} of the door.`;
 }
 // a number a worker texted on their own is on the job's lines, and so on the proposal and the invoice
 export function gotMeasureText(changes: Change[], label: string, lang0?: string | null): string {
@@ -539,7 +609,7 @@ export function gotAfterText(n: Count, label: string, lang0?: string | null, mar
 }
 // "not done", "no terminado": the job isn't finished (the work-done mark
 // comes off, and it runs one more work day)
-const NOT_DONE_SRC = String.raw`\b(not done|not finished|not complete|not completed|not yet|still working|still going|need(?:s)? (?:another|one more) day|(?:come|coming) back tomorrow|back tomorrow|(?:haven'?t|have not|hasn'?t|has not) (?:finished|done|completed|been finished)|(?:isn'?t|is not|wasn'?t|was not|aren'?t|are not|ain'?t) (?:done|finished|complete|completed|ready)|(?:didn'?t|did not|couldn'?t|could not) (?:finish|complete|get (?:it )?done)|no terminado|no terminada|no termine|no termino|no terminamos|no terminaron|no lo (?:termine|terminamos|acabe|acabamos)|no acabamos|no acabe|no (?:he|hemos|ha|han) (?:terminado|acabado)|no esta (?:terminado|terminada|listo|lista|acabado)|todavia no|aun no|volvemos manana|regresamos manana|seguimos manana|manana seguimos)\b`;
+const NOT_DONE_SRC = String.raw`\b(not yet (?:done|finished|complete|completed)|not done|not finished|not complete|not completed|not yet|still working|still going|need(?:s)? (?:another|one more) day|(?:come|coming) back tomorrow|back tomorrow|(?:haven'?t|have not|hasn'?t|has not) (?:finished|done|completed|been finished)|(?:isn'?t|is not|wasn'?t|was not|aren'?t|are not|ain'?t) (?:done|finished|complete|completed|ready)|(?:didn'?t|did not|couldn'?t|could not) (?:finish|complete|get (?:it )?done)|no terminado|no terminada|no termine|no termino|no terminamos|no terminaron|no lo (?:termine|terminamos|acabe|acabamos)|no acabamos|no acabe|no (?:he|hemos|ha|han) (?:terminado|acabado)|no esta (?:terminado|terminada|listo|lista|acabado)|todavia no|aun no|volvemos manana|regresamos manana|seguimos manana|manana seguimos)\b`;
 const NOT_DONE_G = new RegExp(NOT_DONE_SRC, "g");
 const straight = (s: string) => (s || "").replace(/[\u2018\u2019`\u00b4]/g, "'");
 export const notDone = (body: string): boolean => new RegExp(NOT_DONE_SRC).test(norm(straight(body)));
@@ -556,6 +626,11 @@ const DONE_SAID = /\b(done|finished|complete|completed|terminado|terminada|termi
 const ALL_DONE = /\b(all done|all finished|whole job|job (?:is )?(?:done|finished|complete)|todo terminado|todo listo|terminamos todo|ya terminamos todo|trabajo terminado|terminamos el trabajo)\b/;
 const FOR_TODAY = /\b(for today|for the day|today|por hoy|de hoy|hoy)\b/;
 export type DoneSaid = "all" | "day" | "done" | null;
+// "all done", "todo terminado" with the photos: the whole job is finished (on a day before its last, it ends early)
+export const allDoneSaid = (body: string): boolean => {
+  const t = norm(straight(body)).replace(/[^a-z0-9' ]/g, " ").replace(/\s+/g, " ");
+  return !notDone(body) && ALL_DONE.test(t) && !/\b(not|no|never|nunca|isn'?t|aren'?t|wasn'?t)\s+(?:\w+\s+)?(all|whole|todo|job|trabajo)\b/.test(t);
+};
 export function doneSaid(body: string): DoneSaid {
   const raw = (body || "").trim();
   const t = norm(raw).replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
@@ -679,12 +754,13 @@ export function sendAfterText(label: string, lang0?: string | null): string {
     : `Send the photos of the finished work ${atJob(label, "en")} now: they go in AFTER, and it gets marked work done.`;
 }
 // "done" on a day that isn't the job's last: for today, or the whole job?
-export function dayDoneText(label: string, o: { next: string; today: string; day: number; of: number }, lang0?: string | null): string {
+// `needPhotos`: no AFTER photos of the day yet: the next ones go in AFTER
+export function dayDoneText(label: string, o: { next: string; today: string; day: number; of: number }, lang0?: string | null, needPhotos = false): string {
   const lang = langOf(lang0);
   const next = whenDay(o.next, o.today, lang);
   return lang === "es"
-    ? `Entendido por hoy. ${theJob(label, "es", true)} sigue ${next}${o.day ? ` (${dayOf(o.day, o.of, lang)})` : ""}. Si todo el trabajo está terminado, responda TODO TERMINADO.`
-    : `Got it for today. ${label} continues ${next}${o.day ? ` (${dayOf(o.day, o.of, lang)})` : ""}. If the whole job is finished, reply ALL DONE.`;
+    ? `Entendido por hoy.${needPhotos ? " Mande ahora las fotos del trabajo de hoy: van a DESPUES." : ""} ${theJob(label, "es", true)} sigue ${next}${o.day ? ` (${dayOf(o.day, o.of, lang)})` : ""}. Si todo el trabajo está terminado, responda TODO TERMINADO.`
+    : `Got it for today.${needPhotos ? " Send the photos of today's work now: they go in AFTER." : ""} ${label} continues ${next}${o.day ? ` (${dayOf(o.day, o.of, lang)})` : ""}. If the whole job is finished, reply ALL DONE.`;
 }
 // ALL DONE before the job's last day: finished early, the days left come off
 export function endedEarlyText(label: string, dropped: string[], lang0?: string | null, needPhotos = false): string {

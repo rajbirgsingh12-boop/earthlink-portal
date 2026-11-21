@@ -8,6 +8,7 @@ import { pactKey, relKey } from "@/lib/smsIn";
 import { dropBatch, fileBatch, serviceDb, type Batch } from "@/lib/photoStore";
 import { kindOfName, mixedCaption, notDone, photoKindFor, type PhotoKind } from "@/lib/jobFlow";
 import { clearDoneIfNoAfter, closeQuestion, markDone, nyDay, onLastDay, threadJob, type Emp, type ThreadJob } from "@/lib/jobThread";
+import { currentWorkDay } from "@/lib/workDays";
 import { jobName } from "@/lib/crewText";
 
 export const runtime = "nodejs";
@@ -51,25 +52,25 @@ export async function POST(req: Request) {
   if (b.status !== "held" && b.status !== "filed") return NextResponse.json({ error: "Those photos were thrown away" }, { status: 409 });
   let target;
   // onto a PACT job: a batch already on a job keeps its pile; one waiting is
-  // BEFORE unless the worker said AFTER (lib/jobFlow photoKindFor)
-  let kind: PhotoKind | undefined;
+  // BEFORE unless the worker said AFTER (lib/jobFlow photoKindFor); a door's
+  // picture ("nobody home") stays the door's, in Nobody home
+  let kind: PhotoKind | "noaccess" | undefined;
+  const door = b.how === "noaccess" || (b.photos || []).some((p) => /^noaccess/i.test(p?.name || ""));
   let thread: ThreadJob | null = null;
   const now = new Date();
   const today = nyDay(now);
   if (body.pact_job_id && uuid.test(body.pact_job_id)) {
     thread = await threadJob(db, body.pact_job_id);
-    if (thread) {
-      target = pactKey(thread);
-      // a batch already on a job (Wrong job?) keeps its own pile: it was sorted when it came in
-      const own = b.status === "filed" ? kindOfName((b.photos || [])[0]?.name || "") : null;
-      // one waiting goes where its words (or an AFTER texted with it) put it: BEFORE unless they said AFTER
-      kind = own || (b.how === "after" ? "after" : photoKindFor(b.body || ""));
-    }
+    if (thread) target = pactKey(thread);
   } else if (body.release_id && uuid.test(body.release_id)) {
     const r = (await db.get<{ id: string; rel_number?: string }>(`releases?id=eq.${body.release_id}&select=id,rel_number`)).rows[0];
     if (r) target = relKey(r);
   }
   if (!target) return NextResponse.json({ error: "That job isn't in the portal" }, { status: 404 });
+  // a batch already on a job (Wrong job?) keeps its own pile: it was sorted when it came in
+  const own = b.status === "filed" ? kindOfName((b.photos || [])[0]?.name || "") : null;
+  // one waiting goes where its words (or an AFTER texted with it) put it: BEFORE unless they said AFTER
+  kind = door ? "noaccess" : own || (b.how === "after" ? "after" : photoKindFor(b.body || ""));
   const was = b.status === "filed" && b.pact_job_id && b.pact_job_id !== (target.kind === "pact" ? target.id : "") ? b.pact_job_id : "";
   const n = await fileBatch(db, b, target, "office", kind);
   if (!n) return NextResponse.json({ error: "Couldn't move the photos, try again" }, { status: 500 });
@@ -81,7 +82,10 @@ export async function POST(req: Request) {
   if (thread && kind === "after" && b.employee_id && !notDone(b.body || "") && !mixedCaption(b.body || "")) {
     await closeQuestion(db, thread.id);
     const emp = (await db.get<Emp>(`employees?id=eq.${b.employee_id}&select=id,name,phone,lang,active`)).rows[0];
-    if (emp && !onLastDay(thread, today).before) marked = await markDone(db, thread, emp, { from: b.from_phone || "", now, finish: today });
+    // the day they were texted, not the day the office moved them: that day's job, finished on its work day
+    const sent = b.created_at ? nyDay(new Date(b.created_at)) : today;
+    const day = sent < today ? sent : today;
+    if (emp && !onLastDay(thread, day).before) marked = await markDone(db, thread, emp, { from: b.from_phone || "", now, finish: currentWorkDay(thread.start_date, thread.work_days, day) });
   }
   return NextResponse.json({ ok: true, n, label: target.label, marked });
 

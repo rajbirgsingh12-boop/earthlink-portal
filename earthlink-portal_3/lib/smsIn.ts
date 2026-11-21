@@ -199,11 +199,11 @@ export type Reply =
   | { k: "held"; n: number; v?: number }
   | { k: "which"; n: number; v?: number; options: string[] }   // held, with the jobs it could be: "116843 (2205 Linden Blvd, Apt 4B)"
   | { k: "moved"; n: number; v?: number; label: string }
-  | { k: "unknown"; number: string }
+  | { k: "unknown"; number: string; n?: number; v?: number }   // n, v: the pictures that came with it (none: "your photos")
   | { k: "notphoto" }
   | { k: "failed" }
   | { k: "resend" }
-  | { k: "stranger"; n: number }
+  | { k: "stranger"; n: number; v?: number }
   | { k: "connected" }
   | { k: "inall"; n: number; v?: number; label: string; kind?: "before" | "after" | null }   // the phone split one send: the whole count, once it has settled
   | { k: "lost"; n: number };                                                                // pictures in the text that didn't come through
@@ -237,10 +237,14 @@ export function replyText(r: Reply, lang0?: string | null): string {
       return es
         ? `Listo: ${one(r.n, r.v) ? (r.v ? "su video" : "su foto") : `sus ${photos(r.n, lang, r.v)}`} ahora ${r.n === 1 ? "está" : "están"} ${atJob(r.label, lang)}.`
         : `Done: your ${photos(r.n, lang, r.v)} ${r.n === 1 ? "is" : "are"} ${atJob(r.label, lang)} now.`;
-    case "unknown":
+    case "unknown": {
+      // "your photos", "your video", "your 2 photos and 1 video"
+      const n = r.n || 0, v = r.v || 0;
+      const yours = !n ? (es ? "sus fotos" : "your photos") : one(n, v) ? (es ? (v ? "su video" : "su foto") : v ? "your video" : "your photo") : es ? `sus ${photos(n, lang, v)}` : `your ${photos(n, lang, v)}`;
       return es
-        ? `No encontramos el número ${r.number} en sus trabajos. La oficina pondrá sus fotos en el trabajo correcto.`
-        : `Couldn't find ${r.number} on your jobs. The office will put your photos on the right job.`;
+        ? `No encontramos el número ${r.number} en sus trabajos. La oficina pondrá ${yours} en el trabajo correcto.`
+        : `Couldn't find ${r.number} on your jobs. The office will put ${yours} on the right job.`;
+    }
     case "notphoto":
       return es ? "Solo se guardan fotos y videos en el trabajo; eso no era ninguno de los dos." : "Only photos and videos go on the job; that wasn't either.";
     case "resend":
@@ -262,11 +266,16 @@ export function replyText(r: Reply, lang0?: string | null): string {
       return es
         ? "Earth Link: este número está conectado. Responda a un mensaje del equipo con fotos del trabajo, o NO si no hay nadie en casa."
         : "Earth Link: this number is connected. Reply to a crew text with photos of the work, or NO when nobody is home.";
-    case "stranger":
+    case "stranger": {
       // nobody knows this phone's language yet: both
-      return r.n > 0
-        ? "Earth Link: got your photos. This phone isn't on the crew list yet, so the office will put them on the job. / Recibimos sus fotos. Este teléfono aún no está en la lista del equipo; la oficina las pondrá en el trabajo."
-        : "Earth Link: this number takes job photos from the crew. This phone isn't on the crew list; ask the office to add it. / Este número recibe fotos de trabajo del equipo. Este teléfono no está en la lista; pida a la oficina que lo agregue.";
+      if (!(r.n > 0)) return "Earth Link: this number takes job photos from the crew. This phone isn't on the crew list; ask the office to add it. / Este número recibe fotos de trabajo del equipo. Este teléfono no está en la lista; pida a la oficina que lo agregue.";
+      const v = r.v || 0, single = one(r.n, v);
+      const en = single ? (v ? "your video" : "your photo") : `your ${photos(r.n, "en", v)}`;
+      const es1 = single ? (v ? "su video" : "su foto") : `sus ${photos(r.n, "es", v)}`;
+      // (la foto: la; el video: lo; las fotos: las; videos, or photos with videos: los)
+      const it = single ? (v ? "lo" : "la") : v ? "los" : "las";
+      return `Earth Link: got ${en}. This phone isn't on the crew list yet, so the office will put ${single ? "it" : "them"} on the job. / Recibimos ${es1}. Este teléfono aún no está en la lista del equipo; la oficina ${it} pondrá en el trabajo.`;
+    }
   }
 }
 

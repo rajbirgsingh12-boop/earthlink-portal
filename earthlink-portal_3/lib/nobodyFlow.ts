@@ -165,7 +165,8 @@ export async function nobodyFlow(db: Db, o: {
 
   // ---- not a door: the night, or a plain "no" answering a text about a later day ----
   if (hour < DOOR_HOURS.from || hour >= DOOR_HOURS.to) {
-    if (quietUnlessDoor) return { handled: false };
+    // (a NO with a picture, after hours: the picture waits for the office, as a door's)
+    if (quietUnlessDoor && !o.photosIn) return { handled: false };
     await tellOffice(`Texted at ${nyTime(now)}, after hours, so nothing was changed`);
     return { handled: true, reply: toldOfficeText(lang) };
   }
@@ -186,8 +187,10 @@ export async function nobodyFlow(db: Db, o: {
   // building: the picture is of that door
   let m2 = m;
   if (o.photosIn && m.kind === "ask" && m.options.length === 1 && justSent.has(m.options[0].id)) m2 = { kind: "missed", job: m.options[0], already: false };
-  // with pictures: only a door they haven't sent pictures from today
-  if (quietUnlessDoor && (m2.kind !== "missed" || (o.photosIn && visited.has(m2.job.id)))) return { handled: false };
+  // with pictures: only a door they haven't sent pictures from today (two
+  // such doors: which one? The picture waits for the answer, as a door's)
+  const doorAsk = !!o.photosIn && m2.kind === "ask";
+  if (quietUnlessDoor && !doorAsk && (m2.kind !== "missed" || (o.photosIn && visited.has(m2.job.id)))) return { handled: false };
   if (m2.kind === "skip") {
     // with a number it's a photo fix, which /api/sms-in does; without one,
     // say how a door is reported, in case that's what they meant

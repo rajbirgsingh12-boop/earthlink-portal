@@ -1,6 +1,6 @@
 "use client";
 import MediaFolders from "@/components/MediaFolders";
-import { isMediaName } from "@/lib/media";
+import { isMediaName, isVideoName } from "@/lib/media";
 import { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { matches } from "@/lib/search";
 // styled fork of SheetJS — same API, plus cell borders/fonts for the SOS export
@@ -683,7 +683,11 @@ export default function Releases() {
     const path = `${r.id}/${file.name}`;
     const { error } = await sb().storage.from("docs").upload(path, file, { upsert: true });
     if (error) {
-      failed(error, /bucket/i.test(error.message) ? "File storage isn't set up yet (Settings → System check)." : `Couldn't upload ${file.name}. Check your signal and try again.`);
+      // the storage takes 50 MB a file: a longer video is too big, not a bad signal
+      const big = /exceed|too large|413|payload/i.test(error.message) || file.size > 50 * 1024 * 1024;
+      failed(error, /bucket/i.test(error.message) ? "File storage isn't set up yet (Settings → System check)."
+        : big ? (/^video\//i.test(file.type) || isVideoName(file.name) ? "That video is too big to upload (over 50 MB). Send a shorter one." : "That file is too big to upload (over 50 MB).")
+        : `Couldn't upload ${file.name}. Check your signal and try again.`);
       return null;
     }
     return { name: file.name, path };
@@ -711,7 +715,8 @@ export default function Releases() {
         setRows((prev) => prev.map((x) => (x.id === r.id ? { ...x, attachments: list } : x)));
         setAttachRel((prev) => (prev && prev.id === r.id ? { ...prev, attachments: list } : prev));
         keepRows(r.contract_id || active, (x) => (x.id === r.id ? { ...x, attachments: list } : x));
-        flash(added.length === 1 ? `Attached ${added[0].name}` : `Attached ${added.length} files`);
+        // (one that didn't go up keeps its own message on screen: too big, or the signal)
+        if (added.length === files.length) flash(added.length === 1 ? `Attached ${added[0].name}` : `Attached ${added.length} files`);
       }
     }
     setBusy(false);
@@ -2481,25 +2486,30 @@ export default function Releases() {
 
 
       {/* ---------- attachments panel ---------- */}
-      {attachRel && (
-        <Modal title={`Documents · Release ${attachRel.rel_number}`} onClose={() => setAttachRel(null)}
+      {attachRel && (() => {
+        // the release as it is now: a live refresh (or the server moving a crew
+        // file from before/ to after/) shows here at once
+        const ar = rows.find((x) => x.id === attachRel.id) || attachRel;
+        return (
+        <Modal title={`Documents · Release ${ar.rel_number}`} onClose={() => setAttachRel(null)}
           primary={!readOnly ? <button type="button" className="btn btn-primary" onClick={() => photoInputRef.current?.click()} disabled={busy}>📷 Take photo</button> : undefined}
           secondary={!readOnly ? <button type="button" className="btn btn-ghost" onClick={() => attachInputRef.current?.click()} disabled={busy}>Upload file</button> : undefined}>
-          {(attachRel.attachments || []).length === 0 && <div className="empty mb-3">Nothing attached yet. Release PDFs and walk sheets added from + Add release land here by themselves, and so do job photos.</div>}
+          {(ar.attachments || []).length === 0 && <div className="empty mb-3">Nothing attached yet. Release PDFs and walk sheets added from + Add release land here by themselves, and so do job photos.</div>}
           {/* the crew's texted photos and videos land in Before and After by themselves; the office's own, in Other photos */}
-          <MediaFolders items={attachRel.attachments || []} canEdit={!readOnly} flash={flash}
-            zipName={`Release ${attachRel.rel_number || ""}`.trim()}
-            onDelete={async (a) => { const x = (attachRel.attachments || []).find((y) => y.path === a.path); if (x) await removeAttachment(attachRel, x); }} />
-          {(attachRel.attachments || []).filter((a) => !isMediaName(a.name)).map((a) => (
+          <MediaFolders items={ar.attachments || []} canEdit={!readOnly} flash={flash}
+            zipName={`Release ${ar.rel_number || ""}`.trim()}
+            onDelete={async (a) => { const x = (ar.attachments || []).find((y) => y.path === a.path); if (x) await removeAttachment(ar, x); }} />
+          {(ar.attachments || []).filter((a) => !isMediaName(a.name)).map((a) => (
             <div key={a.path} className="mb-1.5 flex items-center gap-1">
               <button type="button" className="row-btn flex-1 rounded-sm border border-rulesoft p-2.5 text-sm hover:border-work active:border-work" onClick={() => openAttachment(a.path)}>
                 📄 {a.name}
               </button>
-              {!readOnly && <button type="button" className="btn-icon border-0 shadow-none text-alert" aria-label="Delete file" onClick={() => removeAttachment(attachRel, a)}>✕</button>}
+              {!readOnly && <button type="button" className="btn-icon border-0 shadow-none text-alert" aria-label="Delete file" onClick={() => removeAttachment(ar, a)}>✕</button>}
             </div>
           ))}
         </Modal>
-      )}
+        );
+      })()}
       <input ref={attachInputRef} type="file" className="hidden"
         onChange={(e) => { const f = e.target.files?.[0]; if (f && attachRel) attachFile(attachRel, f); e.target.value = ""; }} />
       <input ref={photoInputRef} type="file" accept="image/*,video/*" capture="environment" multiple className="hidden"

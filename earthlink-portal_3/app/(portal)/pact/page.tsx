@@ -520,8 +520,13 @@ export default function Pact() {
   const isMade = (a: { path?: string; name?: string }) => /\/made\//.test(a.path || "");
   // of those, Admin 2 sees only the photos PDF ("PO 116843 photos.pdf", the
   // name lib/photoPdf photoPdfName gives it): the invoice and the proposal
-  // letters carry prices
-  const seesPaper = (a: { path?: string; name?: string }) => canPrice || !isMade(a) || /^PO .+ photos\.pdf$/.test(a.name || "");
+  // letters carry prices. So do the ones uploaded by hand: a Word letter
+  // (Upload PO or proposal, a folder of proposals) is always our own
+  // proposal, a partner's PO comes as a PDF; and a file named as a proposal
+  // or an invoice
+  const pricedPaper = (a: { path?: string; name?: string }) =>
+    isMade(a) ? !/^PO .+ photos\.pdf$/.test(a.name || "") : /\.(docx?|rtf|odt)$/i.test(a.name || "") || /^(proposal|invoice)\b/i.test(a.name || "");
+  const seesPaper = (a: { path?: string; name?: string }) => canPrice || !pricedPaper(a);
 
   // ---------- the job's photos as one PDF to send ----------
   const makePhotoPdf = async (j: Job) => {

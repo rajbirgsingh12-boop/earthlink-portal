@@ -17,7 +17,7 @@ import JobDates, { lastNote } from "@/components/JobDates";
 import Calendar, { type CalEvent, type CalView } from "@/components/Calendar";
 import CrewPanel from "@/components/CrewPanel";
 import TextedPhotos from "@/components/TextedPhotos";
-import { CAL_JOB_COLS, CAL_JOB_COLS_OLD, CREW_JOB_COLS, WORKER_COLS, WORKER_COLS_OLD, crewLine, crewMessageFor, crewState, daysOfJob, offCalendar, siteOf, type CrewRow, type Worker } from "@/lib/pactCrew";
+import { CAL_JOB_COLS, CAL_JOB_COLS_OLD, CREW_JOB_COLS, WORKER_COLS, WORKER_COLS_OLD, crewLine, crewMessageFor, crewState, daysOfJob, notMarkedDone, offCalendar, siteOf, type CrewRow, type Worker } from "@/lib/pactCrew";
 import { addWorkDays } from "@/lib/workDays";
 import { textRows, stampRows } from "@/lib/notify";
 import { intakePoFile, addJobByHand } from "@/lib/pactIntake";
@@ -457,7 +457,7 @@ export default function PactCalendar() {
     const where = [(j.address || j.development || "").split(",")[0], j.property_unit && `Apt ${j.property_unit}`].filter(Boolean).join(" · ");
     const days = daysOfJob(j);
     // its days are behind us and it isn't marked done: the crew is asked the next morning, the office sees it here
-    const unfinished = !j.work_done && crew.length > 0 && days.length > 0 && days[days.length - 1] < today;
+    const unfinished = crew.length > 0 && notMarkedDone(j, today);
     return days.map((day, i) => ({
       id: `pact:${j.id}`, day, kind: "pact" as const, done: j.work_done,
       title: `${poOf(j) ? `PO ${poOf(j)}` : where || j.partner || "Job"}${days.length > 1 ? ` · day ${i + 1}/${days.length}` : ""}`,
@@ -472,7 +472,7 @@ export default function PactCalendar() {
     const crew = crewOf(j);
     const days = daysOfJob(j);
     const dayN = iso ? days.indexOf(iso) + 1 : 0;
-    const unfinished = !j.work_done && crew.length > 0 && days.length > 0 && days[days.length - 1] < today;
+    const unfinished = crew.length > 0 && notMarkedDone(j, today);
     const state = crewState(crew, j);
     const names = crew.map((r) => firstName(r.employee_id)).filter(Boolean);
     const site = siteOf(j);

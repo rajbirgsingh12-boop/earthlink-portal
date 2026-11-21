@@ -31,10 +31,19 @@ export const CREW_JOB_COLS = "id,po_number,job_number,partner,address,developmen
 export const CAL_JOB_COLS = `${CREW_JOB_COLS},priced,work_days`;
 export const CAL_JOB_COLS_OLD = `${CREW_JOB_COLS},priced`;
 // A priced job is off the calendar once its work is marked done. One whose
-// day has passed but isn't done stays on its days: an unfinished job going
-// quiet off the calendar is the one thing the office must never miss.
-export const offCalendar = (j: { priced?: boolean | null; work_done?: boolean | null; start_date?: string | null }, _today: string): boolean =>
-  !!j.priced && !!j.work_done;
+// days have passed but isn't done stays on them for two weeks (flagged ⚠ NOT
+// MARKED DONE): an unfinished job going quiet off the calendar is the one
+// thing the office must never miss. After that it's the Billing tab's.
+export const STALE_DAYS = 14;
+const daysBack = (iso: string, n: number) => { const d = new Date(`${iso}T12:00:00Z`); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); };
+export const lastDayOf = (j: { start_date?: string | null; work_days?: number | null }): string => lastWorkDay(j.start_date, j.work_days);
+export const offCalendar = (j: { priced?: boolean | null; work_done?: boolean | null; start_date?: string | null; work_days?: number | null }, today: string): boolean =>
+  !!j.priced && (!!j.work_done || (!!lastDayOf(j) && lastDayOf(j) < daysBack(today, STALE_DAYS)));
+// its days are behind us (in the last two weeks) and it isn't marked done
+export const notMarkedDone = (j: { work_done?: boolean | null; start_date?: string | null; work_days?: number | null }, today: string): boolean => {
+  const last = lastDayOf(j);
+  return !j.work_done && !!last && last < today && last >= daysBack(today, STALE_DAYS);
+};
 // the job's work days, and which one a day is ("Day 2 of 3")
 export const daysOfJob = (j: CrewJob): string[] => workDaysOf(j.start_date, j.work_days);
 

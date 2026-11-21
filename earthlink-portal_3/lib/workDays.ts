@@ -45,11 +45,12 @@ export const workDaysOf = (start: string | null | undefined, n?: unknown): strin
 };
 export const lastWorkDay = (start: string | null | undefined, n?: unknown): string => workDaysOf(start, n).pop() || "";
 // how many work days from the start through `last` (the count that makes `last` the job's last day)
+// (a Sunday `last` counts the work days up to it: ALL DONE on a Sunday keeps Friday and Saturday)
 export const daysThrough = (start: string, last: string): number => {
   if (!DAY.test(start) || !DAY.test(last) || last < start) return 1;
-  let n = 1;
-  for (let d = start; d < last && n < MAX_WORK_DAYS; d = nextWorkDay(d)) n++;
-  return n;
+  let n = 0;
+  for (let d = start; d <= last && n < MAX_WORK_DAYS; d = nextWorkDay(d)) n++;
+  return Math.max(1, n);
 };
 // which day of the job a date is: 1-based, 0 when it isn't one of its days
 export const dayNumber = (start: string | null | undefined, n: unknown, day: string): number => workDaysOf(start, n).indexOf(day) + 1;

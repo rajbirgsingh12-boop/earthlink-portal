@@ -15,7 +15,7 @@ import { dayReminderText, finishedQuestionText } from "./jobFlow";
 import { billed, cleanPhone, dayPile, firstName, keyOf, nyDay, nyHour, putRow, shortDay, type Emp, type ThreadJob } from "./jobThread";
 import { jobName } from "./crewText";
 import { dayMinus } from "./smsIn";
-import { workDaysOf } from "./workDays";
+import { isSunday, workDaysOf } from "./workDays";
 import { sendTexts, twilioConfigured, type TextOut } from "./twilio";
 
 // the morning's hours: reminders until noon, the question until evening
@@ -40,7 +40,8 @@ export async function morningRun(db: Db, now: Date, photosBack: boolean): Promis
     if (!days.length) continue;
     const last = days[days.length - 1];
     const remind = hour < REMIND_UNTIL && days.includes(today) && today !== days[0];
-    const ask = last < today && last >= dayMinus(today, ASK_BACK_DAYS) && !billed(job) && dayPile(job, today).afterN === 0 ? last : "";
+    // (never on a Sunday: Monday asks, still inside the look-back)
+    const ask = !isSunday(today) && last < today && last >= dayMinus(today, ASK_BACK_DAYS) && !billed(job) && dayPile(job, today).afterN === 0 ? last : "";
     if (remind || ask) todo.push({ job, days, remind, ask });
   }
   if (!todo.length) return none;
@@ -69,21 +70,27 @@ export async function morningRun(db: Db, now: Date, photosBack: boolean): Promis
     // (a job nobody was texted about isn't run by text: nothing to ask)
     if (t.ask && crew.length) {
       // a door nobody opened on that day is the office's already: not asked about
+      // (one somebody got into after all is "opened", and is asked about)
       const door = (await db.get<{ id: string }>(`texted_photos?pact_job_id=eq.${t.job.id}&how=eq.nobody&status=in.(nobody,seen,moved)&day=eq.${t.ask}&select=id&limit=1`)).rows.length > 0;
       if (door) continue;
-      const names = crew.map((c) => firstName(c.e)).filter(Boolean);
-      // the question for the office's card, once per job and day (the database refuses a second)
-      const note = `No AFTER photos ${shortDay(t.ask)} and it isn't marked done: asked ${names.join(" and ") || "the crew"} if it was finished`;
-      const st = await db.insertStatus("texted_photos", { pact_job_id: t.job.id, from_phone: "", body: "", photos: [], status: "reply", how: "finished", day: t.ask, note });
-      if (st === 409) continue;
-      if (st < 200 || st >= 300) { await putRow(db, { pact_job_id: t.job.id, from_phone: "", body: "", photos: [], status: "reply", how: "finished", note }); }
+      // asked already, on an earlier morning: once per job and day
+      if ((await db.get<{ id: string }>(`texted_photos?pact_job_id=eq.${t.job.id}&how=eq.finished&day=eq.${t.ask}&select=id&limit=1`)).rows.length) continue;
       const out: TextOut[] = crew.map(({ e, to }) => ({ to, who: (e.name || "").trim() || undefined, body: finishedQuestionText(firstName(e), jobName(key, e.lang), t.ask, today, e.lang) }));
+      const told: string[] = [];
       await sendTexts(out, async (m) => {
         const c = crew.find((x) => x.to === m.to);
+        if (!c) return;
+        told.push(firstName(c.e));
         // on each worker's record: their plain "yes" / "no" is the answer to this
-        if (c) await putRow(db, { employee_id: c.e.id, from_phone: m.to, body: "", photos: [], status: "note", how: "asked", pact_job_id: t.job.id, day: t.ask });
+        await putRow(db, { employee_id: c.e.id, from_phone: m.to, body: "", photos: [], status: "note", how: "asked", pact_job_id: t.job.id, day: t.ask });
         asked += 1;
       });
+      // the question for the office's card, naming the ones Twilio took (none
+      // took it: no card, and the next morning tries again inside the look-back)
+      if (!told.length) continue;
+      const note = `No AFTER photos ${shortDay(t.ask)} and it isn't marked done: asked ${told.filter(Boolean).join(" and ") || "the crew"} if it was finished`;
+      const st = await db.insertStatus("texted_photos", { pact_job_id: t.job.id, from_phone: "", body: "", photos: [], status: "reply", how: "finished", day: t.ask, note });
+      if (st === 400) await putRow(db, { pact_job_id: t.job.id, from_phone: "", body: "", photos: [], status: "reply", how: "finished", note });
     }
   }
   return { reminded, asked };

@@ -73,7 +73,7 @@ export async function POST(req: Request) {
   const n = await fileBatch(db, b, target, "office", kind);
   if (!n) return NextResponse.json({ error: "Couldn't move the photos, try again" }, { status: 500 });
   // the job they left: marked done by these, it isn't any more
-  if (was) await clearDoneIfNoAfter(db, was, jobName(target, "en"), now, today);
+  if (was) await clearDoneIfNoAfter(db, was, jobName(target, "en"), now, today, (b.photos || []).some((p) => /^after/i.test(p?.name || "")));
   // after pictures on the job's last day: the job is work done, as when the worker texts them
   let marked = false;
   if (thread && kind === "after" && b.employee_id) {

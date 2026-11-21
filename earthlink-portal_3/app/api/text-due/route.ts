@@ -21,6 +21,7 @@ import { fitText, langOf, withJobAsk, withPhotoInvite } from "@/lib/crewText";
 import { jobAsk } from "@/lib/jobFlow";
 import { dueBody, dueDay, dueMoved, dueSkip, dueWork } from "@/lib/dueText";
 import { morningRun } from "@/lib/morning";
+import { workDaysOf } from "@/lib/workDays";
 import { spanishWorkServer } from "@/lib/smartTranslate";
 import { twilioConfigured } from "@/lib/twilio";
 import { photosBackOn, serviceDb } from "@/lib/photoStore";
@@ -123,8 +124,9 @@ async function sweep(req: Request) {
   const now = new Date();
   // the morning run over PACT jobs (lib/morning): day 2 of 3, and "Finished?"
   // the morning after a job went quiet. Its own key: the crew's answers are the server's to keep
+  // It runs after the texts that were set up are out (they're the ones a timeout must not cut short)
   const sdb = serviceDb();
-  const morning = sdb ? await morningRun(sdb, now, await photosBackOn()).catch(() => ({ reminded: 0, asked: 0 })) : { reminded: 0, asked: 0 };
+  const runMorning = async () => (sdb ? await morningRun(sdb, now, await photosBackOn()).catch(() => ({ reminded: 0, asked: 0 })) : { reminded: 0, asked: 0 });
   // The timer runs once a day, about 6 to 7 AM New York time (7 to 8 in
   // summer). A text set for later this same morning about today's job goes
   // out with it, or it would never go out on its own: by the next run its day
@@ -135,11 +137,11 @@ async function sweep(req: Request) {
   const dueQ = (cols: string) => get<Row>(`schedule_days?send_at=lte.${encodeURIComponent(upTo.toISOString())}&texted=is.false&select=${cols}&order=send_at&limit=200`);
   // told_day is RUN_ME section 23's: without it a moved job's text reads as a new one
   const due0 = (await dueQ(`${COLS},told_day`)) ?? (await dueQ(COLS));
-  if (!due0) return NextResponse.json({ error: "Couldn't read the schedule, nothing was sent (RUN_ME.sql section 19 gives the schedule its send_at column)" }, { status: 500 });
+  if (!due0) return NextResponse.json({ error: "Couldn't read the schedule, nothing was sent (RUN_ME.sql section 19 gives the schedule its send_at column)", ...(await runMorning()) }, { status: 500 });
   let due = due0;
-  if (due.length === 0) return NextResponse.json({ sent: 0, missed: 0, failed: 0, due: 0, ...morning });
+  if (due.length === 0) return NextResponse.json({ sent: 0, missed: 0, failed: 0, due: 0, ...(await runMorning()) });
   if (!twilioConfigured()) {
-    return NextResponse.json({ sent: 0, missed: 0, failed: 0, due: due.length, note: "The company texting number isn't set up, so a text can't go out on its own" });
+    return NextResponse.json({ sent: 0, missed: 0, failed: 0, due: due.length, note: "The company texting number isn't set up, so a text can't go out on its own" }); // (and the morning run has nothing to send with)
   }
   const early = (r: Row) => Date.parse(r.send_at || "") > now.getTime();
 
@@ -159,14 +161,15 @@ async function sweep(req: Request) {
   // a lookup that failed leaves every text waiting for the next sweep — it
   // must not turn the whole queue into "the worker isn't in the crew list"
   if (!emps || !jobs || !rels) {
-    return NextResponse.json({ error: `Couldn't read the ${!emps ? "crew list" : !jobs ? "PACT jobs" : "releases"}. Nothing was sent; the texts are still set up` }, { status: 500 });
+    return NextResponse.json({ error: `Couldn't read the ${!emps ? "crew list" : !jobs ? "PACT jobs" : "releases"}. Nothing was sent; the texts are still set up`, ...(await runMorning()) }, { status: 500 });
   }
   const empOf = new Map(emps.map((e) => [e.id, e]));
   const jobOf = new Map(jobs.map((j) => [j.id, j]));
   const relOf = new Map(rels.map((r) => [r.id, r]));
   // a text still ahead goes now only when it is this morning's, about today's work
-  due = due.filter((r) => !early(r) || dueDay(r, r.pact_job_id ? jobOf.get(r.pact_job_id) : null) === nyToday);
-  if (due.length === 0) return NextResponse.json({ sent: 0, missed: 0, failed: 0, due: 0, ...morning });
+  const workingToday = (r: Row) => { const j = r.pact_job_id ? jobOf.get(r.pact_job_id) : null; return dueDay(r, j) === nyToday || (!!j && workDaysOf(j.start_date, j.work_days).includes(nyToday)); };
+  due = due.filter((r) => !early(r) || workingToday(r));
+  if (due.length === 0) return NextResponse.json({ sent: 0, missed: 0, failed: 0, due: 0, ...(await runMorning()) });
 
   const missed: string[] = [];
   const invite = await photosBackOn();
@@ -193,10 +196,10 @@ async function sweep(req: Request) {
   }));
   const out = built.filter((m): m is NonNullable<typeof m> => !!m);
   await clear(missed);
-  if (out.length === 0) return NextResponse.json({ sent: 0, missed: missed.length, failed: 0, due: due.length, ...morning });
+  if (out.length === 0) return NextResponse.json({ sent: 0, missed: missed.length, failed: 0, due: due.length, ...(await runMorning()) });
   const held = await claim(out.map((m) => m.id));
   const mine = out.filter((m) => held.has(m.id));
-  if (mine.length === 0) return NextResponse.json({ sent: 0, missed: missed.length, failed: 0, due: due.length, ...morning });
+  if (mine.length === 0) return NextResponse.json({ sent: 0, missed: missed.length, failed: 0, due: due.length, ...(await runMorning()) });
 
   const took = new Set<string>();
   let sent = 0;
@@ -220,5 +223,5 @@ async function sweep(req: Request) {
       if (was !== undefined) await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${m.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ told_day: was || "" }) }).catch(() => {});
     }
   }
-  return NextResponse.json({ sent, missed: missed.length, failed: failed.length, due: due.length, ...morning, ...(failed.length ? { errors: failed.slice(0, 5) } : {}) });
+  return NextResponse.json({ sent, missed: missed.length, failed: failed.length, due: due.length, ...(await runMorning()), ...(failed.length ? { errors: failed.slice(0, 5) } : {}) });
 }

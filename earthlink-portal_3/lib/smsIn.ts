@@ -125,6 +125,7 @@ export const dayMinus = (iso: string, n: number): string => {
   return d.toISOString().slice(0, 10);
 };
 export const RECENT_DAYS = 3;
+const nyDayOf = (ms: number) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
 // how far apart two crew texts must be before the later one says which job pictures are for
 export const TOLD_APART_MS = 10 * 60_000;
 
@@ -174,7 +175,8 @@ export function pickJob(body: string, rows: MineRow[], mine: JobKey[], today: st
       // after that text are its. Texts that went out together say nothing.
       const toldAt = (j: JobKey) => Math.max(0, ...rows.filter((r) => r.day === day && (r.pact_job_id || r.release_id) === j.id).map((r) => Date.parse(r.texted_at || "") || 0));
       const told = js.map((j) => ({ j, at: toldAt(j) })).sort((a, b) => b.at - a.at);
-      if (back === 0 && told[0].at > 0 && told[0].at - told[1].at >= TOLD_APART_MS) return picked(told[0].j, "told");
+      // (the later text has to be today's: last night's text about one of them says nothing about today)
+      if (back === 0 && told[0].at > 0 && nyDayOf(told[0].at) === today && told[0].at - told[1].at >= TOLD_APART_MS) return picked(told[0].j, "told");
       return { kind: "ask", why: "many" };
     }
   }

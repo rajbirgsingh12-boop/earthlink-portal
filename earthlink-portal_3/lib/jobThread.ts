@@ -10,7 +10,7 @@ import {
   countKinds, doneNoteLine, endedNoteLine, firstBeforeAt, kindOfName, namesFrom, stageOf, undoneNoteLine, unmarkedNoteLine,
   type Stage,
 } from "./jobFlow";
-import { continueDay, currentWorkDay, daysThrough, MAX_WORK_DAYS, workDaysOf } from "./workDays";
+import { continueDay, currentWorkDay, daysThrough, MAX_WORK_DAYS, nextWorkDay, workDaysOf } from "./workDays";
 import { langOf } from "./crewText";
 import { pactKey, type JobKey } from "./smsIn";
 import { sendTexts, twilioConfigured, type TextOut } from "./twilio";
@@ -127,14 +127,17 @@ async function cardsOff(db: Db, jobId: string) {
 }
 // AFTER photos moved off a job (the worker's "wrong job, it's 220011", the
 // office's Wrong job?): a job marked done by them, with no after pictures
-// left for its day, is not done after all
-export async function clearDoneIfNoAfter(db: Db, jobId: string, toLabel: string, now: Date, today: string): Promise<void> {
+// left for its day, is not done after all. `movedAfter`: the pictures that
+// moved were after pictures (before pictures moving off never touch the mark)
+export async function clearDoneIfNoAfter(db: Db, jobId: string, toLabel: string, now: Date, today: string, movedAfter: boolean): Promise<void> {
+  if (!movedAfter) return;
   const job = await threadJob(db, jobId);
   if (!job || !job.work_done || billed(job)) return;
   if (dayPile(job, today).afterN > 0) return;
-  // only a mark the texted photos put on (a done row), never one the office set by hand
-  const marked = (await db.get<{ id: string }>(`texted_photos?pact_job_id=eq.${jobId}&how=eq.done&select=id&limit=1`)).rows.length > 0;
-  if (!marked) return;
+  // only a mark the texted AFTER photos put on, never one the office set by
+  // hand or a worker's DONE (the answer to the morning's question) put on
+  const marks = (await db.get<{ note?: string | null }>(`texted_photos?pact_job_id=eq.${jobId}&how=eq.done&select=note&order=created_at.desc&limit=1`)).rows;
+  if (!marks.length || /texted DONE/.test(marks[0].note || "")) return;
   const notes = withNote(job.notes, unmarkedNoteLine(nyWhen(now), toLabel));
   if (!(await db.patch(`pact_jobs?id=eq.${jobId}`, { work_done: false, finish_date: "", notes })) && !(await db.patch(`pact_jobs?id=eq.${jobId}`, { work_done: false, notes }))) return;
   await cardsOff(db, jobId);
@@ -178,6 +181,12 @@ export async function continueJob(db: Db, job: ThreadJob, o: { emp: Emp; emps: E
   const days = daysOfJob(job);
   const last = days[days.length - 1] || "";
   const wasDone = !!job.work_done;
+  // a co-worker's NOT DONE a moment ago already ran it on to today: the same day, not one more
+  if (last && last === o.today) {
+    const since = encodeURIComponent(new Date(o.now.getTime() - 3 * 3_600_000).toISOString());
+    const recent = (await db.get<{ id: string }>(`texted_photos?pact_job_id=eq.${job.id}&how=eq.notdone&created_at=gte.${since}&select=id&limit=1`)).rows.length > 0;
+    if (recent) return { kind: "still", next: last, day: days.length, of: days.length };
+  }
   // still inside its days (NOT DONE on day 1 of 3): it was going on anyway
   if (last && o.today < last) {
     const next = days.find((d) => d > o.today) || last;
@@ -203,8 +212,11 @@ export async function continueJob(db: Db, job: ThreadJob, o: { emp: Emp; emps: E
   }
   if (wasDone) await cardsOff(db, job.id);
   job.work_days = n;
-  const told = o.tell ? await textCrew(db, job.id, o.emps, [o.emp.id], (e) => o.words(e, next, n)) : [];
-  return { kind: "added", next, day: n, told };
+  // a day number only when the days run on without a gap (a NOT DONE days
+  // late counts the days nobody worked: "day 4" would mean nothing to the crew)
+  const day = next === nextWorkDay(last) ? n : 0;
+  const told = o.tell ? await textCrew(db, job.id, o.emps, [o.emp.id], (e) => o.words(e, next, day)) : [];
+  return { kind: "added", next, day, told };
 }
 
 // ---- ALL DONE before the last day: the days after today come off ----

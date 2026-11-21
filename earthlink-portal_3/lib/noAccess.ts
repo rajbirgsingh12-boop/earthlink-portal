@@ -154,6 +154,12 @@ export function whichMissed(ctx: {
   const open = today.filter((j) => !ctx.flagged.has(j.id) && !ctx.visited.has(j.id) && !ctx.justSent?.has(j.id));
   if (open.length === 1) return { kind: "missed", job: open[0], already: false };
   if (open.length > 1) return { kind: "ask", options: open };
+  // the job the portal just sent them to is in the same building as the door
+  // they reported: they can be there already. Which one has nobody home?
+  const street = (j: DayJob) => norm(j.street || "");
+  const reported = today.filter((j) => ctx.flagged.has(j.id));
+  const near = today.filter((j) => ctx.justSent?.has(j.id) && !ctx.flagged.has(j.id) && !ctx.visited.has(j.id) && !!street(j) && reported.some((f) => street(f) === street(j)));
+  if (near.length) return { kind: "ask", options: near };
   const flaggedToday = today.filter((j) => ctx.flagged.has(j.id));
   if (flaggedToday.length) return { kind: "missed", job: flaggedToday[flaggedToday.length - 1], already: true };
   return { kind: "nothing_today" }; // they've sent photos from every job today: that "no" is about something else

@@ -57,6 +57,9 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   const askOf = (lang: Lang) => (days.length > 1 ? daysAsk(lang) : askFor ? askFor[lang] : jobAsk(lang, true));
   // the job's days are behind us: nobody is texted about them
   const passed = !!lastDay && dayPassed(lastDay);
+  // the day a text set for later is about: the job's first day still ahead or
+  // under way (a helper added on day 2 of 3 is texted for day 2's morning)
+  const sendDay = days.find((d) => !dayPassed(d)) || day;
   // the work the crew is told: the rows' saved wording, else the PO's own
   const savedWork = rows.find((r) => (r.description || "").trim())?.description || "";
   const [work, setWork] = useState(savedWork || workOf(job));
@@ -99,13 +102,13 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
   const waiting = rows.filter((r) => isQueued(r));
   const nextWhen = waiting.map((r) => r.send_at || "").sort()[0] || "";
   const late = waiting.length > 0 && isLate(waiting[0]);
-  const tooLate = waiting.some((r) => queuedTooLate(r, day));
+  const tooLate = waiting.some((r) => queuedTooLate(r, sendDay));
   // set the whole crew's texts up for a time: the ones still to tell
   const setLater0 = async (t: Date) => {
     const ids = (need.length ? need : rows).map((r) => r.id);
     if (ids.length === 0) { flash("Nobody on the job yet"); return; }
     if (!day) { flash("Give the job a day first: the crew is texted the day"); return; }
-    const bad = await queueRows(ids, t, day);
+    const bad = await queueRows(ids, t, sendDay);
     if (bad) { flash(bad); return; }
     setLaterOpen(false);
     flash(`${ids.length === 1 ? "The text goes" : `${ids.length} texts go`} out ${prettyWhen(t.toISOString())}`);
@@ -234,7 +237,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
             <b className="text-[13px]">{name}</b>
             {e && <LangToggle value={langOf(e.lang)} onChange={(l) => setLang(e, l)} disabled={!canEdit} name={`Language for ${name}`} />}
             {r.texted && !needs && <Stamp label="TEXTED ✓" tone="ok" />}
-            {needs && isQueued(r) && (queuedTooLate(r, day)
+            {needs && isQueued(r) && (queuedTooLate(r, sendDay)
               ? <Stamp label={`TOO LATE · ${prettyWhen(r.send_at)}`} tone="alert" />
               : <Stamp label={`${isLate(r) ? "STILL WAITING · " : "GOES OUT "}${prettyWhen(r.send_at)}`} tone={isLate(r) ? "alert" : "work"} />)}
             {r.texted && needs && !isQueued(r) && <Stamp label="NEEDS THE NEW DAY" tone="alert" />}
@@ -280,7 +283,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
               </button>
             ) : passed && untold.length > 0 ? <span className="text-[13px] text-inksoft">This job's days have passed. Move the job to a day ahead to text the crew.</span>
               : rows.length > 0 ? <Stamp label="CREW UP TO DATE ✓" tone="ok" /> : null}
-            {machine && need.length > 0 && !later && sendLaterOpen(day) && (
+            {machine && need.length > 0 && !later && sendLaterOpen(sendDay) && (
               <button type="button" className="btn btn-ghost" disabled={sending || !day} onClick={() => setLaterOpen(true)} data-crew-later>Send it later…</button>
             )}
           </div>
@@ -294,7 +297,7 @@ export default function CrewPanel({ job, rows, emps, canEdit, onChange, onClose,
               </span>
             </div>
           )}
-          {later && <SendLaterPicker dataAttr="data-crew-picker" day={day} onItsOwn={onItsOwn} onCancel={() => setLaterOpen(false)} onPick={(iso) => void setLater0(new Date(iso))} />}
+          {later && <SendLaterPicker dataAttr="data-crew-picker" day={sendDay} onItsOwn={onItsOwn} onCancel={() => setLaterOpen(false)} onPick={(iso) => void setLater0(new Date(iso))} />}
         </>
       )}
     </div>

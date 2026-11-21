@@ -53,12 +53,14 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true, crew,
   // how many days the job runs: the crew sends BEFORE and AFTER photos every
   // day, and it's marked work done on its last (a worker's NOT DONE adds one)
   const n = dayCount(job.work_days);
-  const [daysChanged, setDaysChanged] = useState(false);
   const setDays = (to: number) => once(async () => {
     const next = Math.max(1, Math.min(MAX_WORK_DAYS, to));
     if (next === n) return;
     const ok = await onSave({ work_days: next });
-    if (ok !== false && crew?.told && crew.names.length && onDays) setDaysChanged(true);
+    if (ok === false || !crew?.told || !crew.names.length || !onDays) return;
+    // asked at once: one day fewer can take the card off the day on screen, and a prompt on it with it
+    const end = job.start_date ? lastWorkDay(job.start_date, next) : "";
+    if (window.confirm(`${job.start_date ? `Now ${prettyDate(job.start_date)}${next > 1 ? ` to ${prettyDate(end)}` : ""}. ` : ""}Text ${crew.names.join(", ")} the new days?`)) await onDays();
   });
   const last = job.start_date ? lastWorkDay(job.start_date, n) : "";
   const trips = noAccessCount(job.notes);
@@ -110,13 +112,6 @@ export default function JobDates({ job, canEdit, onSave, showNotes = true, crew,
           <button type="button" className={quick} aria-expanded={moving} onClick={() => (moving ? setMoving(false) : openMove())}>📅 Move it…</button>
         )}
       </div>
-      {daysChanged && crew && onDays && (
-        <div className="anim-open mt-2 flex flex-wrap items-center gap-2 text-[13px]">
-          <span>{crew.names.join(", ")} {crew.names.length === 1 ? "was" : "were"} told the old days.</span>
-          <button type="button" className={`btn btn-primary btn-sm min-h-[44px]${saving ? " btn-busy" : ""}`} disabled={saving} onClick={() => once(async () => { await onDays(); setDaysChanged(false); })}>📱 Text {crew.names.length === 1 ? crew.names[0] : "them"} the new days</button>
-          <button type="button" className="btn btn-ghost btn-sm min-h-[44px]" onClick={() => setDaysChanged(false)}>Not now</button>
-        </div>
-      )}
       {moving && (
         <div className="anim-open mt-2 rounded-sm border border-rulesoft bg-paper p-3">
           <div className="section-label mb-1.5">What happened?</div>

@@ -102,7 +102,9 @@ export async function POST(req: Request) {
   const rowOf = new Map<string, DayRow>();
   const jobOf = new Map<string, DayJob>();
   if (ids.length) {
-    (await read<DayRow>(`schedule_days?id=in.(${ids.join(",")})&select=id,day,pact_job_id,release_id`) || []).forEach((r) => rowOf.set(r.id, r));
+    // told_day (RUN_ME section 23): the day each was last told, put back if a send is let go
+    const rq = `schedule_days?id=in.(${ids.join(",")})&select=id,day,pact_job_id,release_id`;
+    ((await read<DayRow>(`${rq},told_day`)) ?? (await read<DayRow>(rq)) ?? []).forEach((r) => rowOf.set(r.id, r));
     const jobIds = [...new Set([...rowOf.values()].map((r) => r.pact_job_id).filter((j): j is string => !!j))];
     if (jobIds.length) {
       // work_days (a job that runs several days) is newer than the rest: a
@@ -140,6 +142,12 @@ export async function POST(req: Request) {
   const release = async (rel: string[]) => {
     if (!rel.length) return;
     await fetch(`${supaUrl}/rest/v1/schedule_days?id=in.(${rel.join(",")})`, { method: "PATCH", headers: supaHeaders, body: JSON.stringify({ texted: false }) }).catch(() => {});
+    // taking the row marked it told today; the day they were really last told goes back,
+    // so the next try still says the job moved (its own write: a database without the column keeps the rest)
+    for (const id of rel) {
+      const was = rowOf.get(id)?.told_day;
+      if (was !== undefined) await fetch(`${supaUrl}/rest/v1/schedule_days?id=eq.${id}`, { method: "PATCH", headers: supaHeaders, body: JSON.stringify({ told_day: was || "" }) }).catch(() => {});
+    }
   };
   if (body.skipTexted) {
     const want = [...new Set(messages.map((m) => m.id).filter(Boolean))];
@@ -210,7 +218,7 @@ export async function POST(req: Request) {
   }
 }
 
-interface DayRow { id: string; day?: string | null; pact_job_id?: string | null; release_id?: string | null }
+interface DayRow { id: string; day?: string | null; pact_job_id?: string | null; release_id?: string | null; told_day?: string | null }
 interface DayJob { id: string; items?: unknown; start_date?: string | null; work_days?: number | null }
 // the last day of a job that runs `days` work days from `start`, Monday to
 // Saturday (a Sunday is skipped, never counted). The same rule as

@@ -49,12 +49,16 @@ const norm = (s: string) => (s || "").toLowerCase().normalize("NFD").replace(/[�
 const BEFORE_WORDS = /\b(before|antes|previo|al llegar|llegamos|llegue|llegando|arrived|arriving|starting|empezando|empezamos|comenzando|comenzamos)\b/;
 const AFTER_WORDS = /\b(after|despues|final)\b/;
 const DONE_WORDS = /\b(done|finished|finish|complete|completed|terminado|terminada|terminados|terminamos|termine|termino|listo|lista|listos|acabado|acabamos|acabe|all set)\b/;
+// Two kinds of word in one caption: the one said first wins ("all done, way
+// better than before" is finished work; "Before. Will send after when done" is the arrival)
 export function photoKindFor(body: string, stage: Stage, burstKind?: PhotoKind | null): PhotoKind {
   const neg = notDone(body);
   const t = neg ? norm(straight(body)).replace(NOT_DONE_G, " ") : norm(body);
-  if (!neg && DONE_WORDS.test(t)) return "after";
-  if (BEFORE_WORDS.test(t)) return "before";
-  if (AFTER_WORDS.test(t)) return "after";
+  const at = (re: RegExp) => { const m = re.exec(t); return m ? m.index : Infinity; };
+  const before = at(BEFORE_WORDS);
+  const after = Math.min(neg ? Infinity : at(DONE_WORDS), at(AFTER_WORDS));
+  if (before < after) return "before";
+  if (after < Infinity) return "after";
   if (burstKind) return burstKind;
   return stage === "before" ? "before" : "after";
 }
@@ -546,16 +550,16 @@ export function continuesText(label: string, o: { next: string; today: string; d
   const lang = langOf(lang0);
   const next = whenDay(o.next, o.today, lang);
   return lang === "es"
-    ? `Entendido, ${theJob(label, "es")} no está terminado, así que sigue ${next} (${dayOf(o.day, 0, lang)}), con el mismo equipo. Al llegar, responda con fotos de ANTES. Al terminar, responda con fotos de DESPUES.`
-    : `OK, ${label} isn't finished, so it continues ${next} (${dayOf(o.day, 0, lang)}) with the same crew. When you get there, reply with BEFORE photos. When you finish, reply with AFTER photos.`;
+    ? `Entendido, ${theJob(label, "es")} no está terminado, así que sigue ${next}${o.day ? ` (${dayOf(o.day, 0, lang)})` : ""}, con el mismo equipo. Al llegar, responda con fotos de ANTES. Al terminar, responda con fotos de DESPUES.`
+    : `OK, ${label} isn't finished, so it continues ${next}${o.day ? ` (${dayOf(o.day, 0, lang)})` : ""} with the same crew. When you get there, reply with BEFORE photos. When you finish, reply with AFTER photos.`;
 }
 // …and the rest of the crew hears it from the portal
 export function crewContinuesText(first: string, label: string, o: { next: string; today: string; day: number; who: string }, lang0?: string | null): string {
   const lang = langOf(lang0);
   const next = whenDay(o.next, o.today, lang);
   return lang === "es"
-    ? `Hola${first ? ` ${first}` : ""}, le habla Earth Link. ${o.who ? `${o.who} avisó que ` : ""}${theJob(label, "es")} no está terminado, así que sigue ${next} (${dayOf(o.day, 0, lang)}), con el mismo equipo. Al llegar, responda con fotos de ANTES. Al terminar, responda con fotos de DESPUES.`
-    : `Hi${first ? ` ${first}` : ""}, this is Earth Link. ${o.who ? `${o.who} let us know ` : ""}${label} isn't finished, so it continues ${next} (${dayOf(o.day, 0, lang)}) with the same crew. When you get there, reply with BEFORE photos. When you finish, reply with AFTER photos.`;
+    ? `Hola${first ? ` ${first}` : ""}, le habla Earth Link. ${o.who ? `${o.who} avisó que ` : ""}${theJob(label, "es")} no está terminado, así que sigue ${next}${o.day ? ` (${dayOf(o.day, 0, lang)})` : ""}, con el mismo equipo. Al llegar, responda con fotos de ANTES. Al terminar, responda con fotos de DESPUES.`
+    : `Hi${first ? ` ${first}` : ""}, this is Earth Link. ${o.who ? `${o.who} let us know ` : ""}${label} isn't finished, so it continues ${next}${o.day ? ` (${dayOf(o.day, 0, lang)})` : ""} with the same crew. When you get there, reply with BEFORE photos. When you finish, reply with AFTER photos.`;
 }
 // NOT DONE before the job's last day: nothing to add, it was going on anyway
 export function stillOnText(label: string, o: { next: string; today: string; day: number; of: number }, lang0?: string | null): string {

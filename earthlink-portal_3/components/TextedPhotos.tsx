@@ -161,7 +161,7 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
         return (
           <div key={b.id} className="anim-row border-t border-rulesoft py-2.5" data-done={b.id}>
             <div className="text-[14px]"><b className="text-ok">✅ Work done</b> · <b>{at ? at.label : "a job"}</b>{at?.sub ? <span className="text-inksoft"> · {at.sub}</span> : null}</div>
-            <div className="text-[12px] text-inksoft">{who(b)} sent the after photos · {when(b.created_at)} · ready to invoice</div>
+            <div className="text-[12px] text-inksoft">{who(b)} {/texted DONE/.test(b.note || "") ? "texted DONE" : "sent the after photos"} · {when(b.created_at)} · ready to invoice</div>
             <div className="mt-2 flex flex-wrap gap-2">
               {/* a client-side jump: a home-screen install never reloads the whole app for it */}
               {b.pact_job_id && <Link className="btn btn-primary btn-sm" href={`/pact?job=${b.pact_job_id}`} data-open-billing>Open the job</Link>}

@@ -33,7 +33,7 @@ export async function POST(req: Request) {
   if (!(await officeUser(req))) return NextResponse.json({ error: "Not allowed" }, { status: 403 });
   const db = serviceDb();
   if (!db) return NextResponse.json({ error: "Add SUPABASE_SERVICE_ROLE_KEY in Vercel so texted photos can be moved" }, { status: 501 });
-  let body: { id?: string; action?: string; pact_job_id?: string; release_id?: string; paths?: unknown };
+  let body: { id?: string; action?: string; pact_job_id?: string; release_id?: string; paths?: unknown; expect?: { status?: string; job?: string | null } | null };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Bad request" }, { status: 400 }); }
   // a crew picture the office deleted from a job's Documents: off the texted
   // batch that brought it too, so its card counts what's there (a batch with
@@ -55,7 +55,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true });
   }
   if (!body.id || !uuid.test(body.id)) return NextResponse.json({ error: "Bad request" }, { status: 400 });
-  const b = (await db.get<Batch>(`texted_photos?id=eq.${body.id}&select=*`)).rows[0];
+  let b = (await db.get<Batch>(`texted_photos?id=eq.${body.id}&select=*`)).rows[0];
   if (!b) return NextResponse.json({ error: "Those photos aren't there any more" }, { status: 404 });
 
   // a "nobody home" notice, a crew reply, or a texted measurement the office has seen
@@ -69,12 +69,16 @@ export async function POST(req: Request) {
   }
   if (body.action !== "file") return NextResponse.json({ error: "Bad request" }, { status: 400 });
   if (b.status !== "held" && b.status !== "filed") return NextResponse.json({ error: "Those photos were thrown away" }, { status: 409 });
+  // (the card showed them waiting, or on another job: the worker's own text moved them since)
+  const shown = body.expect && typeof body.expect === "object" ? body.expect : null;
+  const jobNow = b.status === "filed" ? b.pact_job_id || b.release_id || "" : "";
+  if (shown && (shown.status !== b.status || (shown.job || "") !== jobNow)) return NextResponse.json({ error: "Those photos just moved. Look again before moving them" }, { status: 409 });
   let target;
   // onto a PACT job: a batch already on a job keeps its pile; one waiting is
   // BEFORE unless the worker said AFTER (lib/jobFlow photoKindFor); a door's
   // picture ("nobody home") stays the door's, in Nobody home
   let kind: PhotoKind | "noaccess" | undefined;
-  const door = b.how === "noaccess" || (b.photos || []).some((p) => /^noaccess/i.test(p?.name || ""));
+  let door = false;
   let thread: ThreadJob | null = null;
   const now = new Date();
   const today = nyDay(now);
@@ -86,13 +90,23 @@ export async function POST(req: Request) {
     if (r) target = relKey(r);
   }
   if (!target) return NextResponse.json({ error: "That job isn't in the portal" }, { status: 404 });
-  // a batch already on a job (Wrong job?) keeps its own pile: it was sorted when it came in
-  const own = b.status === "filed" ? kindOfName((b.photos || [])[0]?.name || "") : null;
-  // one waiting goes where its words (or an AFTER or DONE texted with it) put it: BEFORE unless they said AFTER
-  kind = door ? "noaccess" : own || (b.how === "after" || b.how === "afterall" ? "after" : photoKindFor(b.body || ""));
-  // (a door's picture keeps its mark wherever it goes: the crew's next texts know it for one)
-  const st: FileOut = {};
-  const n = await fileBatch(db, b, target, door ? "noaccess" : "office", kind, st);
+  let st: FileOut = {};
+  let n = 0;
+  for (let i = 0; i < 2; i++) {
+    door = b.how === "noaccess" || (b.photos || []).some((p) => /^noaccess/i.test(p?.name || ""));
+    // a batch already on a job (Wrong job?) keeps its own pile: it was sorted when it came in
+    const own = b.status === "filed" ? kindOfName((b.photos || [])[0]?.name || "") : null;
+    // one waiting goes where its words (or an AFTER or DONE texted with it) put it: BEFORE unless they said AFTER
+    kind = door ? "noaccess" : own || (b.how === "after" || b.how === "afterall" ? "after" : photoKindFor(b.body || ""));
+    // (a door's picture keeps its mark wherever it goes: the crew's next texts know it for one)
+    st = {};
+    n = await fileBatch(db, b, target, door ? "noaccess" : "office", kind, st);
+    // (still waiting, and the worker said AFTER, ALL DONE or the door's about them that moment: the pile follows it)
+    if (!st.changed || b.status !== "held") break;
+    const fresh = (await db.get<Batch>(`texted_photos?id=eq.${b.id}&select=*`)).rows[0];
+    if (!fresh || fresh.status !== "held") break;
+    b = fresh;
+  }
   // (the worker's own text moved them a moment ago: the card shows where they are now)
   if (st.changed) return NextResponse.json({ error: "Those photos just moved. Look again before moving them" }, { status: 409 });
   if (!n) return NextResponse.json({ error: "Couldn't move the photos, try again" }, { status: 500 });

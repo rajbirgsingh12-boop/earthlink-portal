@@ -11,6 +11,7 @@
 // it); the worker's answer goes out as soon as it's written (Twilio gives the
 // whole page 15 seconds, and a co-worker's text or a slow translation must
 // never cost the worker theirs); what the office reads is finished last.
+import { randomUUID } from "crypto";
 import {
   ackText, coworkerText, movedUpNote, nextText, nobodyNote, noNextText, noMoveUpText, notTodayText, askWhichText, hintText, toldOfficeText, shortDay,
   bareNo, byAddress, numbersIn, whichMissed, whichNext, LOOK_AHEAD_DAYS, SAME_DOOR_MS, DOOR_HOURS, MOVE_UP_UNTIL, type DayJob, type Next,
@@ -21,7 +22,7 @@ import { dueBody, dueWork, type DueJob } from "./dueText";
 import { askClaudeSpanish, spanishWorkServer } from "./smartTranslate";
 import { sendTexts, twilioConfigured, type TextOut } from "./twilio";
 import { jobName, langOf } from "./crewText";
-import { pileDir, type Db, type Photo } from "./photoStore";
+import { inboxOf, pileDir, type Db, type Photo } from "./photoStore";
 import { jobAsk } from "./jobFlow";
 import type { SfLine } from "./measure";
 
@@ -31,7 +32,7 @@ interface PJob extends DueJob { id: string; notes?: string | null; items?: SfLin
 // a PACT job's next-job text ends with its own two steps (before photos, after photos; every day on a job of more days)
 const askFor = (j: PJob | undefined, lang?: string | null) => (j ? jobAsk(lang, Number(j.work_days) || 1) : "");
 interface Rel { id: string; rel_number?: string | null; location?: string | null; address?: string | null; canceled?: boolean; notes?: string | null }
-interface Mark { id: string; pact_job_id?: string | null; release_id?: string | null; created_at?: string | null; status?: string | null; note?: string | null; employee_id?: string | null; how?: string | null }
+interface Mark { id: string; pact_job_id?: string | null; release_id?: string | null; created_at?: string | null; status?: string | null; note?: string | null; employee_id?: string | null; how?: string | null; body?: string | null; photos?: Photo[] | null }
 
 const nyDay = (d: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 const nyTime = (d: Date) => new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" }).format(d);
@@ -77,7 +78,8 @@ export async function nobodyFlow(db: Db, o: {
   say?: (to: string, body: string, who?: string, job?: { kind: "pact" | "rel"; id: string }) => Promise<boolean>;
   hint?: string;   // the job the crew's thread it came in on is about: with two open today, that one
   // pictures that came just before the "no" and may be of the door: not a job they've been through
-  ignore?: string[];
+  // (and ones sent with it, landing while this reads: the caller says which)
+  ignore?: (b: Mark) => boolean;
 }): Promise<FlowResult> {
   const { emp, now } = o;
   const today = nyDay(now);
@@ -131,7 +133,7 @@ export async function nobodyFlow(db: Db, o: {
   const marksQ = (cols: string) => db.get<Mark>(`texted_photos?how=eq.nobody&created_at=gte.${since}&select=${cols}&order=created_at.desc&limit=200`);
   let marksGot = await marksQ("id,pact_job_id,release_id,created_at,status,note,employee_id,how");
   if (!marksGot.ok) marksGot = await marksQ("id,pact_job_id,release_id,created_at,status,employee_id,how"); // before section 21: no note
-  const photosGot = await db.get<Mark>(`texted_photos?employee_id=eq.${emp.id}&status=in.(filed,held)&created_at=gte.${since}&select=id,pact_job_id,release_id,created_at,status,how&order=created_at.desc&limit=100`);
+  const photosGot = await db.get<Mark>(`texted_photos?employee_id=eq.${emp.id}&status=in.(filed,held)&created_at=gte.${since}&select=id,pact_job_id,release_id,created_at,status,how,body,photos&order=created_at.desc&limit=100`);
   const todays = (n: Mark) => !!n.created_at && nyDay(new Date(n.created_at)) === today;
   const at = (n: Mark) => Date.parse(n.created_at || "") || 0;
   const marks = marksGot.rows.filter(todays);
@@ -139,7 +141,7 @@ export async function nobodyFlow(db: Db, o: {
   const notices = marks.filter((n) => n.status === "nobody" || n.status === "seen" || n.status === "moved" || n.status === "opened");
   const mine = marks.filter((n) => n.employee_id === emp.id);           // every "nobody" answer this worker has had today
   const flagged = new Set(ids(notices.map(jobOfMark)));
-  const myPhotos = photosGot.rows.filter((b) => todays(b) && b.how !== "noaccess" && !(o.ignore || []).includes(b.id));
+  const myPhotos = photosGot.rows.filter((b) => todays(b) && b.how !== "noaccess" && !o.ignore?.(b));
   const visited = new Set(ids(myPhotos.filter((b) => b.status === "filed").map(jobOfMark)));
   const lastPhotos = Math.max(0, ...myPhotos.map(at));
   const lastMine = Math.max(0, ...mine.map(at));
@@ -322,8 +324,16 @@ export async function nobodyFlow(db: Db, o: {
   }
 
   // ---- the pictures that came with it (the door) go on the missed job ----
-  const proof = o.proof ? await o.proof(pileDir(missed, "noaccess")) : [];
-  if (proof.length) await db.attach(missed, proof, []);
+  let proof = o.proof ? await o.proof(pileDir(missed, "noaccess")) : [];
+  if (proof.length && !(await db.attach(missed, proof, []))) {
+    // (the job's documents wouldn't take them: they wait for the office, as
+    // the door's, on a row of their own; the notice lists none)
+    const batchId = randomUUID();
+    const kept: Photo[] = [];
+    for (const p of proof) if (await db.move(p.path, inboxOf(batchId) + p.name)) kept.push({ name: p.name, path: inboxOf(batchId) + p.name });
+    if (kept.length && !(await db.insert("texted_photos", { id: batchId, employee_id: emp.id, from_phone: o.from, body: o.body, photos: kept, status: "held", how: "noaccess" }))) await db.remove(kept.map((p) => p.path));
+    proof = [];
+  }
 
   // ---- the other worker at the same door: told only when the job just moved
   // up is their own next job too, and they haven't texted about it themselves ----

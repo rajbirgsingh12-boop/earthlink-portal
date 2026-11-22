@@ -126,9 +126,10 @@ export function photoKindFor(body: string, o: { burst?: PhotoKind | null; afterA
 // I'll be there") is not it
 const AFTER_FILLER = new Set(["the", "these", "those", "here", "are", "is", "heres", "here's", "next", "now", "ok", "okay", "estas", "esas", "son", "aqui", "aca", "estan", "van", "ahi", "las", "los", "la", "el", "de", "del", "fotos", "foto", "photos", "photo", "pics", "pic", "pix", "pictures", "picture", "videos", "video", "vids", "vid", "clips", "clip", "imagenes", "imagen", "coming", "incoming", "ahora", "of", "y", "and", "go", "goes", "mis", "my", "our", "nuestras", "sending", "send", "mando", "mandando", "for", "para"]);
 // a job's number said with it ("AFTER 116843", "after PO 116843", "116843
-// after", "despues release 12"): the word is about that job. Any other number
-// ("after 3", "después de las 3") is a time, and the text isn't the word
-const JOB_REF = /\b(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:-]?\s*\d{1,12}\b|#\s*\d{1,12}\b|\b\d{5,12}\b/gi;
+// after", "despues release 12", "AFTER 220011-2"): the word is about that
+// job. Any other number ("after 3", "después de las 3") is a time, and the
+// text isn't the word
+const JOB_REF = /\b(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:-]?\s*[a-z]?\d{1,12}(?:-[\da-z]{1,3})?\b|#\s*\d{1,12}\b|\b[a-z]?\d{4,12}-[\da-z]{1,3}\b|\b[a-z]\d{4,11}\b|\b\d{5,12}\b/gi;
 export function afterSaid(body: string): boolean {
   const raw = (body || "").trim();
   if (!raw || raw.includes("?") || notDone(raw) || raw.length > 40) return false;

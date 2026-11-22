@@ -115,7 +115,9 @@ export default function TextedPhotos({ canEdit, flash, onShow, onReschedule }: {
     setDoing(`${b.id}:${body.action}`);
     try {
       const token = (await sb().auth.getSession()).data.session?.access_token || "";
-      const res = await fetch("/api/texted-photos", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ id: b.id, ...body }) });
+      // (where the card shows them: moved since by the worker's own text, the portal says so)
+      const expect = body.action === "file" ? { status: b.status, job: b.status === "filed" ? b.pact_job_id || b.release_id || "" : "" } : undefined;
+      const res = await fetch("/api/texted-photos", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ id: b.id, ...body, expect }) });
       const j = (await res.json().catch(() => ({}))) as { error?: string; n?: number; label?: string };
       // (moved by the worker's own text a moment ago: the list shows where they are now)
       if (!res.ok) { flash(j.error || "Couldn't do that. Try again."); if (res.status === 409) { setPicking(null); await load(); } return; }

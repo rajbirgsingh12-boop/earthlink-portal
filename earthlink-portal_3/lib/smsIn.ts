@@ -41,7 +41,8 @@ export const phoneKey = (s?: string | null): string => {
 // on the way to saying something else ("On my way to PO 116843", "PO 220011
 // done") is talk, and moves nothing that was already placed.
 const FIX_LEAD = String.raw`(?:wrong(?: job| one| po)?|it'?s|it is|its|is|that'?s|that is|the right one is|right one is|the right po is|correct (?:po|one|job) is|should be|job|number|es el|es|era el|el correcto es|el|el numero|numero|trabajo|trabajo equivocado|equivocado|equivocada)`;
-const FIX_ONLY = new RegExp(String.raw`^(?:${FIX_LEAD}[\s,:.\-]*)*(?:(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:\-]?\s*|#\s*)?\d{1,12}[\s.!]*(?:(?:thanks|thank you|thx|ty|gracias)[\s.!]*)?$`);
+// (a PO with a dash or a letter, the way the texts print it, "220011-2", "A220011", is one too)
+const FIX_ONLY = new RegExp(String.raw`^(?:${FIX_LEAD}[\s,:.\-]*)*(?:(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:\-]?\s*|#\s*)?(?:\d{1,12}|[a-z]?\d{4,12}-[\da-z]{1,3}|[a-z]\d{4,11})[\s.!]*(?:(?:thanks|thank you|thx|ty|gracias)[\s.!]*)?$`);
 // the job's place in brackets after its number, the way the portal's own
 // question lists it ("116843 (2205 Linden Blvd, Apt 4B)", "12 (392 Blake
 // Avenue)"): an answer copied from it is the number
@@ -96,7 +97,8 @@ export function refsIn(body: string): Ref[] {
   const long = /\d{5,12}/g;
   while ((m = long.exec(text))) add(m[0], false);
   // a PO with a letter or a dash in it ("A220011", "220011-2"), the way its key reads
-  const whole = /\b[A-Za-z]?\d+(?:-[\dA-Za-z]+)+\b|\b[A-Za-z]\d{4,11}\b/g;
+  // (four digits at least: "coats 1-2" is never release 12)
+  const whole = /\b[A-Za-z]?\d{4,12}(?:-[\dA-Za-z]+)+\b|\b[A-Za-z]\d{4,11}\b/g;
   while ((m = whole.exec(text))) add(m[0], false);
   return out;
 }

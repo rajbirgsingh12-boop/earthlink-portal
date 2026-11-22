@@ -94,8 +94,10 @@ export function refsIn(body: string): Ref[] {
   while ((m = said.exec(text))) add(m[1], true);
   // long enough to be a PO on its own (one that fits no job is passed over,
   // not asked about — it may be a phone number or a unit)
-  // (not the digits of a PO with a letter or a dash in it: that one is read whole, below)
-  const long = /(?:^|[^A-Za-z\d]|[A-Za-z]{2})(\d{5,12})(?!\d|-[\dA-Za-z])/g;
+  // (not the digits of a PO with a letter in front, A220011, or a dash and its release number or letter
+  // after it, 220011-2: those are read whole, below; a word or an apartment after the dash, 116843-after,
+  // 116843-4B, leaves the PO)
+  const long = /(?:^|[^A-Za-z\d]|[A-Za-z]{2})(\d{5,12})(?!\d|-(?:\d{1,3}|[A-Za-z])\b)/g;
   while ((m = long.exec(text))) add(m[1], false);
   // a PO with a letter or a dash in it ("A220011", "220011-2"), the way its key reads
   // (four digits at least: "coats 1-2" is never release 12)

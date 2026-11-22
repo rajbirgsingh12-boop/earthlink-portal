@@ -358,7 +358,11 @@ async function heldAllAsked(db: Db, o: Said): Promise<Sent | null> {
   // piece of the send: a phone that splits it puts them on one piece; none captioned BEFORE)
   if (!last?.created_at || !((last.how === "afterflip" && !last.pact_job_id && !last.release_id) || (last.status === "held" && last.how !== "noaccess"))) return null;
   const s = await justSent(db, { empId: o.emp.id, now: new Date(msOf(last)), until: msOf(last) });
-  return s && s.held && !s.saidBefore && s.pieces.some(all) ? s : null;
+  if (s && s.held && !s.saidBefore && s.pieces.some(all)) return s;
+  // (the office put its newest piece on a job that moment: the pieces of it still waiting, right behind, are the send)
+  if (!s || s.held || last.how !== "afterflip") return null;
+  const rest = await justSent(db, { empId: o.emp.id, now: new Date(s.oldest - 1), until: s.oldest - 1 });
+  return rest && rest.held && !rest.saidBefore && s.oldest - rest.newest <= SPLIT_MS && rest.pieces.some(all) ? rest : null;
 }
 // the job's pictures (a release's too)
 async function namesOfJob(db: Db, t: Target, thread: ThreadJob | null): Promise<string[]> {
@@ -574,9 +578,10 @@ async function sentWithDone(db: Db, o: Said, jobId: string): Promise<string | nu
 async function afterOrDone(db: Db, o: Said, w: { after: boolean; done: DoneSaid }): Promise<string | null> {
   const lang = o.emp.lang;
   const byNumber = await namedJob(db, o);
-  // (a number given out loud that fits none of their jobs is never guessed past: the office sorts it)
-  if (byNumber === "unknown") return null;
-  const named = byNumber;
+  // (a number given out loud that fits none of their jobs is never guessed past: the office sorts it.
+  // Photos still waiting for their number guess nothing: they're marked, and "which job?" asks, below)
+  const unknown = byNumber === "unknown";
+  const named = unknown ? null : byNumber;
   let s = await justSent(db, { empId: o.emp.id, now: o.now });
   const wait = afterWaitMs();
   if ((!s || s.newest < o.now.getTime() - FRESH_MS) && wait) {
@@ -584,6 +589,7 @@ async function afterOrDone(db: Db, o: Said, w: { after: boolean; done: DoneSaid 
     s = (await justSent(db, { empId: o.emp.id, now: o.now })) || s;
   }
   if (o.hint) { const t = await justSent(db, { jobId: o.hint.id, now: o.now }); if (t && (!s || t.newest > s.newest)) s = t; }
+  if (unknown && !(s && s.held && !s.saidBefore)) return null;
   // (nothing sent just now, and the photos they said ALL DONE about still wait
   // for the number "which job?" asked them for: a DONE naming a job answers
   // it, as the bare number would, unless the morning asked about that job since)
@@ -655,8 +661,9 @@ const jobRefsOnly = (body: string): string => {
     // (with a dash or a letter after the label too, "PO220011-2", "release 12-A": whole, as afterSaid takes it)
     ...b.matchAll(/\b(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:\-]?\s*[a-z]?\d{1,12}(?:-[\da-z]{1,3})?\b/gi),
     ...[...b.matchAll(/(?:^|[^\w#])#\s*(\d{1,12})\b/g)].filter((m) => m[1].length >= 5 || short),
-    // (not the digits of a PO with a dash in it: that one is read whole, below)
-    ...b.matchAll(/\b\d{5,12}\b(?!-[\dA-Za-z]{1,3}\b)/g),
+    // (not the digits of a PO with a dash and its release number or letter after it, 220011-2: that one
+    // is read whole, below; a word or an apartment after the dash, 116843-after, 116843-4B, leaves the PO)
+    ...b.matchAll(/\b\d{5,12}\b(?!-(?:\d{1,3}|[A-Za-z])\b)/g),
     // a PO with a dash or a letter in it ("DONE 220011-2", "A220011"), whole
     ...b.matchAll(/\b[A-Za-z]?\d{4,12}-[\dA-Za-z]{1,3}\b|\b[A-Za-z]\d{4,11}\b/g),
   ].map((m) => (m[1] ? `#${m[1]}` : m[0])).join(" ");
@@ -1259,6 +1266,8 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
     let doorPieces: SendRow[] = [];
     let doorOn: Target | null = null;
     let doorNamed = false;
+    // (the send the word came with, as the second look read it)
+    let wordSend = new Set<string>();
     // (a send from the last five minutes with no words but the door's, all in BEFORE)
     const doorSend = (s: Sent | null) => !!s && now.getTime() - s.newest <= 5 * 60_000 && s.pieces.every((b) => !(b.body || "").trim() || doorOnly(b.body || "")) && s.before.length === s.pieces.length;
     // (a piece like that sent with the word, that landed while the word was read)
@@ -1280,8 +1289,14 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
         const byNumber = s.pieces.every((b) => b.how === "number" || b.how === "burst");
         const own = !!t && names([t as JobKey]);
         // (pictures they put on a job by its number are that job's: a "no" that names another of today's jobs
-        // is about that one; a count or a time names none: "knocked 3 times")
-        const other = !!t && byNumber && !own && names((await todaysJobs(db, emp, today)).filter((k) => k.id !== t.id));
+        // is about that one, read as whichMissed reads it: a PO first, else the house narrowed by the apartment
+        // ("nobody home at 2205 Linden 4B" names 4B, not every job at 2205); a count or a time names none: "knocked 3 times")
+        let other = false;
+        if (t && byNumber) {
+          const js = await todaysJobs(db, emp, today);
+          const hit = js.filter((k) => (k.keys || []).some((x) => nums.includes(x)));
+          other = (hit.length ? hit : byAddress(body, js.map((k) => ({ ...k, day: today, rowIds: [] })))).some((k) => k.id !== t.id);
+        }
         if (t && !other) {
           doorPieces = s.pieces;
           doorOn = t;
@@ -1309,6 +1324,7 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
               // (only those, and the ones the first look took: older pieces of the send it left
               // on their job are that job's, and told nobodyFlow they had been there)
               const take = s.pieces.filter((b) => withWord(b) || doorIds.has(b.id));
+              wordSend = new Set(s.pieces.map((b) => b.id));
               doorPieces = [...take, ...doorPieces.filter((d) => !take.some((b) => b.id === d.id))];
               doorOn = doorOn || (await targetOf(db, take[0]));
             }
@@ -1319,14 +1335,20 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
           const col = doorOn.kind === "pact" ? "pact_job_id" : "release_id";
           const ids = new Set(doorPieces.map((b) => b.id));
           const others = (await db.get<{ id: string; created_at?: string | null; how?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&status=eq.filed&${col}=eq.${doorOn.id}&created_at=gte.${since(20 * 3_600_000)}&select=id,created_at,how`)).rows
-            .filter((r) => !ids.has(r.id) && r.how !== "noaccess" && r.created_at && nyDay(new Date(r.created_at)) === today);
-          let n = 0;
+            .filter((r) => !ids.has(r.id) && r.how !== "noaccess" && r.created_at && nyDay(new Date(r.created_at)) === today)
+            // (when the door is their job, the older pieces of the send the word came with are no sign they got in)
+            .filter((r) => !(flow.missed && flow.missed.id === doorOn?.id && wordSend.has(r.id)));
+          let n = 0, kept = 0;
           if (flow.missed && (flow.missed.id !== doorOn.id || !others.length)) {
-            for (const b of [...doorPieces].reverse()) n += await fileBatch(db, b, flow.missed, "noaccess", "noaccess");
+            for (const b of [...doorPieces].reverse()) {
+              // (pictures they put on their job by its number, not sent with the word, stay that job's: they got in there)
+              if (flow.missed.id !== doorOn.id && (b.how === "number" || b.how === "burst") && !withWord(b)) { kept++; continue; }
+              n += await fileBatch(db, b, flow.missed, "noaccess", "noaccess");
+            }
           } else if (flow.asked && !others.length) {
             for (const b of doorPieces) n += await holdBatch(db, b, "noaccess");
           }
-          if (n && !others.length) await doorShutAgain(db, doorOn, emp, today);
+          if (n && !others.length && !kept) await doorShutAgain(db, doorOn, emp, today);
         }
         // the pictures of that door waiting for its number go on it
         if (flow.missed) for (const d of await heldDoors(db, emp.id, now)) await fileBatch(db, d, flow.missed, "noaccess", "noaccess");
@@ -1354,14 +1376,23 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
       // they put on its job by its own number is not one a bare number moves,
       // unless it says the job was wrong: the door's picture is still waiting)
       // (the database looks, not a few rows read back: five pieces placed by their number would hide one still waiting)
-      const newer = from0 ? (await db.get<{ id: string }>(`texted_photos?employee_id=eq.${emp.id}&status=in.(held,filed)&created_at=gt.${enc(from0)}&and=(or(how.is.null,how.neq.noaccess)${FIX_WORDS.test(body) ? "" : ",or(status.eq.held,how.is.null,how.not.in.(number,burst))"})&select=id&limit=1`)).rows.length > 0 : false;
-      // (a send they put on a job by its own number is no answer either, as for newer)
-      const talked = asked?.created_at ? (await db.get<{ id: string }>(`texted_photos?employee_id=eq.${emp.id}&msg_sid=not.is.null&created_at=gt.${enc(asked.created_at)}&and=(or(how.is.null,how.neq.noaccess)${FIX_WORDS.test(body) ? "" : ",or(status.neq.filed,how.is.null,how.not.in.(number,burst))"})&select=id&limit=1`)).rows.length > 0 : false;
+      const fix = FIX_WORDS.test(body);
+      // (the jobs they named by number since: a send put on one by its own number, or an AFTER that said
+      // its number. What they said about that send there, AFTER or DONE, and the photos that AFTER's
+      // window took, answers nothing a bare number would)
+      const at0 = from0 ? (await db.get<{ how?: string | null; pact_job_id?: string | null; release_id?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&created_at=gt.${enc(from0)}&or=(and(status.eq.filed,how.in.(number,burst)),and(how.eq.aftersay,note.eq.named))&select=how,pact_job_id,release_id&limit=20`)).rows : [];
+      const idsOf = (rows: typeof at0) => [...new Set(rows.map((b) => b.pact_job_id || b.release_id || "").filter(Boolean))];
+      const atIds = fix ? [] : idsOf(at0), saidIds = fix ? [] : idsOf(at0.filter((b) => b.how === "aftersay"));
+      const notOn = (ids: string[]) => `and(or(pact_job_id.is.null,pact_job_id.not.in.(${ids.join(",")})),or(release_id.is.null,release_id.not.in.(${ids.join(",")})))`;
+      const newer = from0 ? (await db.get<{ id: string }>(`texted_photos?employee_id=eq.${emp.id}&status=in.(held,filed)&created_at=gt.${enc(from0)}&and=(or(how.is.null,how.neq.noaccess)${fix ? "" : ",or(status.eq.held,how.is.null,how.not.in.(number,burst))"}${saidIds.length ? `,or(how.is.null,how.neq.aftersaid,${notOn(saidIds)})` : ""})&select=id&limit=1`)).rows.length > 0 : false;
+      // (a send they put on a job by its own number is no answer either, as for newer, nor what they said about it there:
+      // AFTER, DONE or NOT DONE)
+      const talked = asked?.created_at ? (await db.get<{ id: string }>(`texted_photos?employee_id=eq.${emp.id}&msg_sid=not.is.null&created_at=gt.${enc(asked.created_at)}&and=(or(how.is.null,how.neq.noaccess)${fix ? "" : ",or(status.neq.filed,how.is.null,how.not.in.(number,burst))"}${atIds.length ? `,or(how.is.null,how.not.in.(afterflip,afterask,aftersay,aftersaid,afterwait,donetext,notdone),${notOn(atIds)})` : ""})&select=id&limit=1`)).rows.length > 0 : false;
       // (a PO with a dash or a letter, "220011-2": the whole of it, the way its key reads)
       const n = refsIn(noPlace(body)).map((r) => r.n).sort((a, b) => b.length - a.length)[0] || "";
-      // (the job they put pictures on by its number since: they're at that one, it isn't the door)
+      // (the job they named by number since: they're at that one, it isn't the door)
       const there = async () => {
-        const on = (await db.get<{ pact_job_id?: string | null; release_id?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&status=eq.filed&how=in.(number,burst)&created_at=gt.${enc(from0)}&select=pact_job_id,release_id&limit=20`)).rows.map((b) => b.pact_job_id || b.release_id || "");
+        const on = idsOf(at0);
         return on.length > 0 && (await todaysJobs(db, emp, today)).some((k) => on.includes(k.id) && k.keys.includes(n));
       };
       if ((doors.length || (asked && !talked)) && !newer && !(await there())) {

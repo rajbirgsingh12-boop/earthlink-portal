@@ -1355,10 +1355,16 @@ export async function handleInbound(db: Db, inb: Inbound, seen: Seen): Promise<s
       // unless it says the job was wrong: the door's picture is still waiting)
       // (the database looks, not a few rows read back: five pieces placed by their number would hide one still waiting)
       const newer = from0 ? (await db.get<{ id: string }>(`texted_photos?employee_id=eq.${emp.id}&status=in.(held,filed)&created_at=gt.${enc(from0)}&and=(or(how.is.null,how.neq.noaccess)${FIX_WORDS.test(body) ? "" : ",or(status.eq.held,how.is.null,how.not.in.(number,burst))"})&select=id&limit=1`)).rows.length > 0 : false;
-      const talked = asked?.created_at ? (await db.get<{ id: string }>(`texted_photos?employee_id=eq.${emp.id}&msg_sid=not.is.null&or=(how.is.null,how.neq.noaccess)&created_at=gt.${enc(asked.created_at)}&select=id&limit=1`)).rows.length > 0 : false;
-      if ((doors.length || (asked && !talked)) && !newer) {
-        // (a PO with a dash or a letter, "220011-2": the whole of it, the way its key reads)
-        const n = refsIn(noPlace(body)).map((r) => r.n).sort((a, b) => b.length - a.length)[0] || "";
+      // (a send they put on a job by its own number is no answer either, as for newer)
+      const talked = asked?.created_at ? (await db.get<{ id: string }>(`texted_photos?employee_id=eq.${emp.id}&msg_sid=not.is.null&created_at=gt.${enc(asked.created_at)}&and=(or(how.is.null,how.neq.noaccess)${FIX_WORDS.test(body) ? "" : ",or(status.neq.filed,how.is.null,how.not.in.(number,burst))"})&select=id&limit=1`)).rows.length > 0 : false;
+      // (a PO with a dash or a letter, "220011-2": the whole of it, the way its key reads)
+      const n = refsIn(noPlace(body)).map((r) => r.n).sort((a, b) => b.length - a.length)[0] || "";
+      // (the job they put pictures on by its number since: they're at that one, it isn't the door)
+      const there = async () => {
+        const on = (await db.get<{ pact_job_id?: string | null; release_id?: string | null }>(`texted_photos?employee_id=eq.${emp.id}&status=eq.filed&how=in.(number,burst)&created_at=gt.${enc(from0)}&select=pact_job_id,release_id&limit=20`)).rows.map((b) => b.pact_job_id || b.release_id || "");
+        return on.length > 0 && (await todaysJobs(db, emp, today)).some((k) => on.includes(k.id) && k.keys.includes(n));
+      };
+      if ((doors.length || (asked && !talked)) && !newer && !(await there())) {
         const flow = await nobodyFlow(db, { emp, emps: emps.rows, body: `NO ${n}`, from, sid, now, say: inb.deliver });
         if (flow.handled) {
           if (flow.missed) for (const d of doors) await fileBatch(db, d, flow.missed, "noaccess", "noaccess");

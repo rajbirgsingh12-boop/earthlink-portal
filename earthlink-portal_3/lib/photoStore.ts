@@ -152,11 +152,12 @@ export async function fileBatch(db: Db, b0: Batch, t: Target, how = "office", ki
   } else {
     // moved since the caller read it (to another job, out of the inbox, onto the other pile), or
     // still waiting and said AFTER (or ALL DONE, or the door's) about since: not this caller's to move
-    // (a claim that was never let go says nothing of what was said)
+    // (a claim that was never let go says nothing of what was said; the door's mark, to a
+    // caller putting them on a door, is what it is doing already)
     const paths = (x: Batch) => (Array.isArray(x.photos) ? x.photos : []).map((p) => p?.path || "").sort().join("|");
     const jobOf = (x: Batch) => (x.status === "filed" ? x.pact_job_id || x.release_id || "" : "");
     const saidOf = (h?: string | null) => (h === MOVING ? "" : h || "");
-    const saidSince = b.status === "held" && claim.had !== undefined && saidOf(claim.had) !== saidOf(b0.how);
+    const saidSince = b.status === "held" && claim.had !== undefined && saidOf(claim.had) !== saidOf(b0.how) && !(kind === "noaccess" && claim.had === "noaccess");
     if (b.status !== b0.status || jobOf(b) !== jobOf(b0) || paths(b) !== paths(b0) || saidSince) { await letGo(); if (out) out.changed = true; return 0; }
     if (!(await db.attach(t, want.map((w) => ({ name: w.name, path: w.to })), []))) { await letGo(); return 0; }
   }

@@ -327,11 +327,12 @@ export async function nobodyFlow(db: Db, o: {
   let proof = o.proof ? await o.proof(pileDir(missed, "noaccess")) : [];
   if (proof.length && !(await db.attach(missed, proof, []))) {
     // (the job's documents wouldn't take them: they wait for the office, as
-    // the door's, on a row of their own; the notice lists none)
+    // the door's, on a row of their own; the notice lists none. The row
+    // names the door, so a later "no" or number doesn't take them for its own)
     const batchId = randomUUID();
     const kept: Photo[] = [];
     for (const p of proof) if (await db.move(p.path, inboxOf(batchId) + p.name)) kept.push({ name: p.name, path: inboxOf(batchId) + p.name });
-    if (kept.length && !(await db.insert("texted_photos", { id: batchId, employee_id: emp.id, from_phone: o.from, body: o.body, photos: kept, status: "held", how: "noaccess" }))) await db.remove(kept.map((p) => p.path));
+    if (kept.length && !(await db.insert("texted_photos", { id: batchId, employee_id: emp.id, from_phone: o.from, body: o.body, photos: kept, status: "held", how: "noaccess", pact_job_id: missed.kind === "pact" ? missed.id : null, release_id: missed.kind === "rel" ? missed.id : null }))) await db.remove(kept.map((p) => p.path));
     proof = [];
   }
 

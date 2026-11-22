@@ -220,7 +220,7 @@ const noGreeting = (crew: string) => crew.replace(/^(Hi|Hola)\b[^.]*?, (this is|
 export function nextText(crew: string, lang0?: string | null, invite = true, label = "", ask = ""): string {
   const lang = langOf(lang0);
   const body = noGreeting(crew);
-  const num = (label.match(/\d[\w-]*$/) || [""])[0];
+  const num = (label.match(/[A-Za-z]?\d[\w-]*$/) || [""])[0];
   const again = num ? (lang === "es" ? `¿Tampoco hay nadie allí? Responda NO ${num}.` : `Nobody home there either? Reply NO ${num}.`) : "";
   return `${lang === "es" ? "Su próximo trabajo" : "Your next job"}: ${body}${invite ? `\n\n${ask || PHOTO_INVITE[lang]}` : ""}${again ? `\n${again}` : ""}`;
 }

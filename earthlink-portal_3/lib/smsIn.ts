@@ -85,17 +85,18 @@ export function refsIn(body: string): Ref[] {
     const n = normPo(raw);
     if (n && !out.some((r) => r.n === n)) out.push(bare ? { n, said, bare } : { n, said });
   };
-  // the whole text is the number
-  const only = text.match(/^((?:p\.?\s*o\.?|release|rel\.?)\s*)?([#:\s-]*)(\d{1,12})[.!\s]*$/i);
+  // the whole text is the number (a PO with a dash or a letter in it too, "220011-2", "A220011")
+  const only = text.match(/^((?:p\.?\s*o\.?|release|rel\.?)\s*)?([#:\s-]*)([A-Za-z]?\d{4,12}-[\dA-Za-z]{1,3}|[A-Za-z]\d{4,11}|\d{1,12})[.!\s]*$/i);
   if (only) { add(only[3], true, !only[1] && !only[2].includes("#")); return out; }
-  // said out loud: "PO 116843", "po#116843", "release 12", "rel. 12"
-  const said = /\b(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:\-]?\s*(\d{1,12})\b/gi;
+  // said out loud: "PO 116843", "po#116843", "release 12", "rel. 12", "PO220011-2", "release 12-A"
+  const said = /\b(?:p\.?\s*o\.?|release|rel\.?)\s*(?:number|no\.?|num|#)?\s*[#:\-]?\s*([a-z]?\d{1,12}(?:-[\da-z]{1,3})?)\b/gi;
   let m: RegExpExecArray | null;
   while ((m = said.exec(text))) add(m[1], true);
   // long enough to be a PO on its own (one that fits no job is passed over,
   // not asked about — it may be a phone number or a unit)
-  const long = /\d{5,12}/g;
-  while ((m = long.exec(text))) add(m[0], false);
+  // (not the digits of a PO with a letter or a dash in it: that one is read whole, below)
+  const long = /(?:^|[^A-Za-z\d]|[A-Za-z]{2})(\d{5,12})(?!\d|-[\dA-Za-z])/g;
+  while ((m = long.exec(text))) add(m[1], false);
   // a PO with a letter or a dash in it ("A220011", "220011-2"), the way its key reads
   // (four digits at least: "coats 1-2" is never release 12)
   const whole = /\b[A-Za-z]?\d{4,12}(?:-[\dA-Za-z]+)+\b|\b[A-Za-z]\d{4,11}\b/g;

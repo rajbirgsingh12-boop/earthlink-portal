@@ -51,6 +51,14 @@
 -- nothing changed (this only lasts while the file runs)
 set local lock_timeout = '5s';
 
+-- Every statement that could still run if a paste were cut off in the
+-- middle of it (the one-time fixes to rows already here, each new column
+-- with its default, and the indexes that hold a rule) runs inside a
+-- "do $$ ... $$" block. A paste cut off partway through one of them stops
+-- with an error and changes nothing, instead of running a shortened
+-- statement; a paste cut off between statements is finished by pasting the
+-- whole file again.
+
 -- ---------- from upgrade_invoices_aging_docs.sql ----------
 
 -- ---- line items imported from a NYCHA release PDF ----
@@ -82,22 +90,26 @@ create policy "release_items del" on release_items for delete
   using (my_role() in ('admin','office'));
 
 -- ---- releases: aging dates, address, attached documents ----
-alter table releases add column if not exists address text default '';
-alter table releases add column if not exists labor_breakdown jsonb default '[]'::jsonb;
-alter table releases add column if not exists labor_hours numeric default 0;
-alter table releases add column if not exists invoice_sent date;
-alter table releases add column if not exists paid_date date;
-alter table releases add column if not exists attachments jsonb default '[]'::jsonb;
+do $$ begin
+  alter table releases add column if not exists address text default '';
+  alter table releases add column if not exists labor_breakdown jsonb default '[]'::jsonb;
+  alter table releases add column if not exists labor_hours numeric default 0;
+  alter table releases add column if not exists invoice_sent date;
+  alter table releases add column if not exists paid_date date;
+  alter table releases add column if not exists attachments jsonb default '[]'::jsonb;
+end $$;
 
 -- ---- invoices: NYCHA header fields ----
-alter table invoices add column if not exists release_id uuid references releases(id) on delete set null;
-alter table invoices add column if not exists contract_number text default '';
-alter table invoices add column if not exists release_number text default '';
-alter table invoices add column if not exists development text default '';
-alter table invoices add column if not exists work_order text default '';
-alter table invoices add column if not exists period_from date;
-alter table invoices add column if not exists period_to date;
-alter table invoice_items add column if not exists category text default '';
+do $$ begin
+  alter table invoices add column if not exists release_id uuid references releases(id) on delete set null;
+  alter table invoices add column if not exists contract_number text default '';
+  alter table invoices add column if not exists release_number text default '';
+  alter table invoices add column if not exists development text default '';
+  alter table invoices add column if not exists work_order text default '';
+  alter table invoices add column if not exists period_from date;
+  alter table invoices add column if not exists period_to date;
+  alter table invoice_items add column if not exists category text default '';
+end $$;
 
 -- ---- private storage bucket for release documents ----
 insert into storage.buckets (id, name, public) values ('docs', 'docs', false)
@@ -156,25 +168,29 @@ create policy "contract_items del" on contract_items for delete
 
 -- ---- NYCHA walk-sheet fields on proposals (additive; the existing
 --      proposals table and page keep working unchanged) ----
-alter table proposals add column if not exists contract_id uuid references contracts(id);
-alter table proposals add column if not exists development text default '';
-alter table proposals add column if not exists address text default '';
-alter table proposals add column if not exists apt text default '';
-alter table proposals add column if not exists stairhall text default '';
-alter table proposals add column if not exists walk_date text default '';
-alter table proposals add column if not exists release_number text default '';
-alter table proposals add column if not exists total numeric default 0;
-alter table proposals add column if not exists nycha_staff text default '';
-alter table proposals add column if not exists vendor_staff text default '';
-alter table proposals add column if not exists start_date text default '';
-alter table proposals add column if not exists finish_date text default '';
-alter table proposals add column if not exists qty_map jsonb default '{}'::jsonb;
-alter table price_items add column if not exists line int default 0;
-alter table proposal_items add column if not exists category text default '';
-alter table proposal_items add column if not exists line int default 0;
+do $$ begin
+  alter table proposals add column if not exists contract_id uuid references contracts(id);
+  alter table proposals add column if not exists development text default '';
+  alter table proposals add column if not exists address text default '';
+  alter table proposals add column if not exists apt text default '';
+  alter table proposals add column if not exists stairhall text default '';
+  alter table proposals add column if not exists walk_date text default '';
+  alter table proposals add column if not exists release_number text default '';
+  alter table proposals add column if not exists total numeric default 0;
+  alter table proposals add column if not exists nycha_staff text default '';
+  alter table proposals add column if not exists vendor_staff text default '';
+  alter table proposals add column if not exists start_date text default '';
+  alter table proposals add column if not exists finish_date text default '';
+  alter table proposals add column if not exists qty_map jsonb default '{}'::jsonb;
+  alter table price_items add column if not exists line int default 0;
+  alter table proposal_items add column if not exists category text default '';
+  alter table proposal_items add column if not exists line int default 0;
+end $$;
 
 -- ---------- from upgrade_payroll_paid.sql ----------
-alter table timesheet_weeks add column if not exists paid_map jsonb default '{}'::jsonb;
+do $$ begin
+  alter table timesheet_weeks add column if not exists paid_map jsonb default '{}'::jsonb;
+end $$;
 
 -- ---------- from upgrade_pact.sql ----------
 create table if not exists pact_jobs (
@@ -194,15 +210,17 @@ create table if not exists pact_jobs (
   notes text default '',
   created_at timestamptz default now()
 );
-alter table pact_jobs add column if not exists po_number text default '';
-alter table pact_jobs add column if not exists po_date text default '';
-alter table pact_jobs add column if not exists address text default '';
-alter table pact_jobs add column if not exists property_unit text default '';
-alter table pact_jobs add column if not exists contact text default '';
-alter table pact_jobs add column if not exists bill_to text default '';
-alter table pact_jobs add column if not exists items jsonb default '[]'::jsonb;
-alter table pact_jobs add column if not exists invoice_number text default '';
-alter table pact_jobs add column if not exists tax_pct numeric default 8.875;
+do $$ begin
+  alter table pact_jobs add column if not exists po_number text default '';
+  alter table pact_jobs add column if not exists po_date text default '';
+  alter table pact_jobs add column if not exists address text default '';
+  alter table pact_jobs add column if not exists property_unit text default '';
+  alter table pact_jobs add column if not exists contact text default '';
+  alter table pact_jobs add column if not exists bill_to text default '';
+  alter table pact_jobs add column if not exists items jsonb default '[]'::jsonb;
+  alter table pact_jobs add column if not exists invoice_number text default '';
+  alter table pact_jobs add column if not exists tax_pct numeric default 8.875;
+end $$;
 alter table pact_jobs enable row level security;
 drop policy if exists "pact_jobs read" on pact_jobs;
 create policy "pact_jobs read" on pact_jobs for select
@@ -218,14 +236,18 @@ create policy "pact_jobs del" on pact_jobs for delete
   using (my_role() in ('admin','office'));
 
 -- ---------- from upgrade_payroll_class.sql ----------
-alter table timesheet_entries add column if not exists trade text;
+do $$ begin
+  alter table timesheet_entries add column if not exists trade text;
+end $$;
 
 -- ---------- from upgrade_schedule.sql ----------
-alter table releases add column if not exists crew jsonb default '[]'::jsonb;
-alter table releases add column if not exists start_date text default '';
-alter table releases add column if not exists finish_date text default '';
-alter table pact_jobs add column if not exists start_date text default '';
-alter table pact_jobs add column if not exists finish_date text default '';
+do $$ begin
+  alter table releases add column if not exists crew jsonb default '[]'::jsonb;
+  alter table releases add column if not exists start_date text default '';
+  alter table releases add column if not exists finish_date text default '';
+  alter table pact_jobs add column if not exists start_date text default '';
+  alter table pact_jobs add column if not exists finish_date text default '';
+end $$;
 
 -- ---------- from upgrade_realtime.sql ----------
 do $$ begin alter publication supabase_realtime add table releases; exception when duplicate_object then null; end $$;
@@ -241,7 +263,9 @@ do $$ begin alter publication supabase_realtime add table profiles; exception wh
 do $$ begin alter publication supabase_realtime add table pact_jobs; exception when duplicate_object then null; end $$;
 
 -- ---------- from upgrade_worker_phone.sql ----------
-alter table employees add column if not exists phone text default '';
+do $$ begin
+  alter table employees add column if not exists phone text default '';
+end $$;
 
 -- ---------- from upgrade_day_schedule.sql ----------
 create table if not exists schedule_days (
@@ -267,7 +291,9 @@ do $$ begin
   create policy "schedule_days del" on schedule_days for delete using (my_role() in ('admin','office'));
 exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table schedule_days; exception when duplicate_object then null; end $$;
-alter table schedule_days add column if not exists address text default '';
+do $$ begin
+  alter table schedule_days add column if not exists address text default '';
+end $$;
 
 -- ---------- from upgrade_storage_meter.sql ----------
 -- Storage meter: lets the Settings page show how much of the file storage is
@@ -312,7 +338,9 @@ create index if not exists timesheet_weeks_ending_idx on timesheet_weeks(week_en
 create index if not exists schedule_days_day_idx on schedule_days(day);
 create index if not exists proposals_contract_idx on proposals(contract_id);
 create index if not exists proposal_items_proposal_idx on proposal_items(proposal_id);
-create index if not exists releases_assigned_idx on releases(assigned_to) where assigned_to is not null;
+do $$ begin
+  create index if not exists releases_assigned_idx on releases(assigned_to) where assigned_to is not null;
+end $$;
 create index if not exists invoices_proposal_idx on invoices(proposal_id);
 create index if not exists invoice_items_invoice_idx on invoice_items(invoice_id);
 create index if not exists pact_jobs_po_idx on pact_jobs(po_number);
@@ -426,7 +454,9 @@ end $$;
 
 -- 6) PACT proposals: the date one went out, so a quote waiting on a
 --    signature is visible the same way an unpaid invoice is.
-alter table pact_jobs add column if not exists proposal_sent date;
+do $$ begin
+  alter table pact_jobs add column if not exists proposal_sent date;
+end $$;
 
 -- 7) PACT invoicing belongs to Admin 1 only. The app already hides it from
 --    Admin 2; this makes the database itself refuse an Admin 2 edit of a
@@ -453,13 +483,17 @@ create trigger pact_invoice_fields_admin_only
 -- 8) Every person's email shows on the Settings page. Emails live in
 --    auth.users, which the app cannot read; this copies each one onto the
 --    person's profile row and keeps it there as accounts come and go.
-alter table profiles add column if not exists email text default '';
+do $$ begin
+  alter table profiles add column if not exists email text default '';
+end $$;
 
-update profiles p
-   set email = u.email
-  from auth.users u
- where u.id = p.id
-   and coalesce(p.email, '') is distinct from coalesce(u.email, '');
+do $$ begin
+  update profiles p
+     set email = u.email
+    from auth.users u
+   where u.id = p.id
+     and coalesce(p.email, '') is distinct from coalesce(u.email, '');
+end $$;
 
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer set search_path = public as $$
@@ -491,16 +525,18 @@ create trigger on_auth_user_email_changed after update of email on auth.users
 --    their password. A signup nobody here made still has the default
 --    foreman role and no name of its own, so it stays waiting, and so do
 --    deleted and anonymous accounts.
-update auth.users u
-   set email_confirmed_at = now()
- where u.email_confirmed_at is null
-   and coalesce(u.email, '') <> ''
-   and u.deleted_at is null
-   and not coalesce(u.is_anonymous, false)
-   and exists (select 1 from public.profiles p
-                where p.id = u.id
-                  and (p.role <> 'foreman'
-                       or coalesce(p.name, '') <> split_part(u.email, '@', 1)));
+do $$ begin
+  update auth.users u
+     set email_confirmed_at = now()
+   where u.email_confirmed_at is null
+     and coalesce(u.email, '') <> ''
+     and u.deleted_at is null
+     and not coalesce(u.is_anonymous, false)
+     and exists (select 1 from public.profiles p
+                  where p.id = u.id
+                    and (p.role <> 'foreman'
+                         or coalesce(p.name, '') <> split_part(u.email, '@', 1)));
+end $$;
 
 -- 10) To set someone's password directly (instead of a reset email that
 --     won't arrive): take the -- off the two lines below, fill in the email
@@ -510,33 +546,93 @@ update auth.users u
 --    set encrypted_password = extensions.crypt('THE_NEW_PASSWORD', extensions.gen_salt('bf'))
 --  where email = 'info@earthlinkgc.com';
 
+-- 17, first part (section 17 below tells the whole story). The invoice
+--     number rules go in before the wording fix, so a job whose lines the
+--     fix rewrites is judged by these rules, even on a database where an
+--     older copy of this file left its own numbering trigger behind.
+--     Jobs invoiced or paid before automatic numbering came in, and still
+--     without a number, are marked once, the first time this runs: the
+--     trigger never gives one of them a number (taking PAID off and putting
+--     it back on included); only the invoice builder does, when it makes
+--     the invoice.
+do $$ begin
+  if not exists (select 1 from pg_attribute
+                  where attrelid = 'public.pact_jobs'::regclass
+                    and attname = 'no_auto_number' and not attisdropped) then
+    alter table pact_jobs add column no_auto_number boolean not null default false;
+    update pact_jobs set no_auto_number = true
+     where coalesce(trim(invoice_number), '') = ''
+       and (invoice_sent is not null or coalesce(received, false) or paid_date is not null);
+  end if;
+end $$;
+create or replace function public.pact_next_invoice_no() returns text
+language plpgsql security definer set search_path = public as $$
+declare n bigint;
+begin
+  -- one at a time, whoever asks: the counter never hands out a twin
+  perform pg_advisory_xact_lock(hashtext('pact_invoice_no'));
+  -- a number typed by hand may carry a stray space (still the same number);
+  -- one far too long to be ours (a date-style 20260921001) is outside the
+  -- run, like the old "8300-1" style, and never breaks the counter
+  select greatest(568, coalesce(max(trim(invoice_number)::bigint), 0)) + 1 into n
+    from pact_jobs where trim(invoice_number) ~ '^[0-9]{1,9}$';
+  return n::text;
+end $$;
+-- signed-in users and the server only (the trigger below runs as the person saving)
+revoke all on function public.pact_next_invoice_no() from public, anon;
+grant execute on function public.pact_next_invoice_no() to authenticated, service_role;
+create or replace function public.pact_job_invoice_no() returns trigger
+language plpgsql as $$
+begin
+  if coalesce(new.priced, false)
+     and coalesce(trim(new.invoice_number), '') = ''
+     -- the moment it becomes priced, not any later save of a job already priced
+     and (tg_op = 'INSERT' or not coalesce(old.priced, false))
+     -- a canceled PO never turned into work, so it never takes a number
+     and not coalesce(new.canceled, false)
+     -- invoiced or paid before automatic numbering: only the invoice builder numbers it
+     and not coalesce(new.no_auto_number, false)
+     -- a line to bill: a description and a quantity above 0 (the app's own rule)
+     and exists (select 1 from jsonb_array_elements(case when jsonb_typeof(new.items) = 'array' then new.items else '[]'::jsonb end) it
+                  where coalesce(trim(it->>'description'), '') <> ''
+                    and (case when (it->>'qty') ~ '^-?[0-9]+(\.[0-9]+)?$' then (it->>'qty')::numeric else 0 end) > 0)
+  then
+    new.invoice_number := public.pact_next_invoice_no();
+  end if;
+  return new;
+end $$;
+
 -- 11) The wording fix, applied to every job ALREADY in the portal, not just
---     the ones uploaded from now on: a line reading exactly "Wall repair"
---     reads "Scrape and plaster", and a "1 coat" / "2 coats" tail after a long
---     dash comes off the end of a line (\u2014 below is that long dash; the
---     app cleans the same wording, any capitals too, when a job is opened).
---     Only lines whose wording really changes are written, and only jobs that
---     have one, so a second run touches no job. Prices and quantities are
---     not touched.
-update pact_jobs
-   set items = (
-     select coalesce(jsonb_agg(
-       case when t.it->>'description' = 'Wall repair'
-              or t.it->>'description' ~ '\s*\u2014\s*[12]\s*coats?\s*$'
-       then jsonb_set(t.it, '{description}', to_jsonb(
-              case when t.it->>'description' = 'Wall repair' then 'Scrape and plaster'
-                   else regexp_replace(t.it->>'description', '\s*\u2014\s*[12]\s*coats?\s*$', '')
-              end))
-       else t.it end
-       order by t.ord
-     ), '[]'::jsonb)
-     from jsonb_array_elements(items) with ordinality as t(it, ord)
-   )
- where case when jsonb_typeof(items) = 'array' then exists (
-         select 1 from jsonb_array_elements(items) e
-          where e->>'description' = 'Wall repair'
-             or e->>'description' ~ '\s*\u2014\s*[12]\s*coats?\s*$')
-       else false end;
+--     the ones uploaded from now on: every "1 coat" / "2 coats" tail after a
+--     long dash comes off the end of a line, in any capitals (\u2014 below is
+--     that long dash), and a line that then reads exactly "Wall repair"
+--     reads "Scrape and plaster": the wording the app ends up giving a line
+--     when a job is opened, done in one pass. Only lines whose wording
+--     really changes are written, and only jobs that have one, so a second
+--     run touches no job. Prices and quantities are not touched.
+create or replace function public.pact_line_wording(d text) returns text
+language sql immutable as $$
+  select case when t = 'Wall repair' then 'Scrape and plaster' else t end
+    from (select regexp_replace(d, '(\s*\u2014\s*[12]\s*coats?)+\s*$', '', 'i') as t) w
+$$;
+do $$ begin
+  update pact_jobs
+     set items = (
+       select coalesce(jsonb_agg(
+         case when jsonb_typeof(t.it->'description') = 'string'
+                   and public.pact_line_wording(t.it->>'description') <> (t.it->>'description')
+              then jsonb_set(t.it, '{description}', to_jsonb(public.pact_line_wording(t.it->>'description')))
+              else t.it end
+         order by t.ord
+       ), '[]'::jsonb)
+       from jsonb_array_elements(items) with ordinality as t(it, ord)
+     )
+   where case when jsonb_typeof(items) = 'array' then exists (
+           select 1 from jsonb_array_elements(items) e
+            where jsonb_typeof(e->'description') = 'string'
+              and public.pact_line_wording(e->>'description') <> (e->>'description'))
+         else false end;
+end $$;
 
 -- 12) A paper trail for PACT jobs, same as releases have had all along.
 --     Every change to a job keeps its before-and-after in audit_log (minus
@@ -612,7 +708,9 @@ create index if not exists pact_jobs_norm_job on pact_jobs (public.norm_po(job_n
 -- guard (/api/text skips rows already stamped) cover PACT with no new machinery.
 -- releases.crew (from the older schedule upgrade, above) is dormant:
 -- schedule_days superseded it; do not reuse it for PACT.
-alter table schedule_days add column if not exists pact_job_id uuid references pact_jobs(id) on delete cascade;
+do $$ begin
+  alter table schedule_days add column if not exists pact_job_id uuid references pact_jobs(id) on delete cascade;
+end $$;
 create index if not exists schedule_days_pact_job on schedule_days (pact_job_id);
 
 -- The job's site exactly as the app writes it on a crew row: lib/pactCrew.ts
@@ -628,11 +726,13 @@ $$;
 -- matched to their job by day + site and linked, only when exactly ONE job
 -- has that day and site (two POs for one apartment on one day stay as they
 -- were, unlinked) and never a row with no day.
-update schedule_days s set pact_job_id = p.id from pact_jobs p
-  where s.pact_job_id is null and s.release_id is null and s.day <> ''
-    and s.day = coalesce(p.start_date, '') and s.address = public.pact_site(p)
-    and not exists (select 1 from pact_jobs q where q.id <> p.id
-                     and coalesce(q.start_date, '') = s.day and public.pact_site(q) = s.address);
+do $$ begin
+  update schedule_days s set pact_job_id = p.id from pact_jobs p
+    where s.pact_job_id is null and s.release_id is null and s.day <> ''
+      and s.day = coalesce(p.start_date, '') and s.address = public.pact_site(p)
+      and not exists (select 1 from pact_jobs q where q.id <> p.id
+                       and coalesce(q.start_date, '') = s.day and public.pact_site(q) = s.address);
+end $$;
 
 -- The job's date and site and its crew rows are ONE fact. This trigger is the
 -- only thing that moves crew rows; app code never does (the PACT page's
@@ -676,8 +776,10 @@ create trigger pact_job_follows
 -- only by money that exists (an invoice sent, a payment in) or when the
 -- work is marked done and the lines carry a real measurement; a PO's own
 -- square feet on an untouched job never hide it.
-alter table pact_jobs add column if not exists list_subtotal numeric;
-alter table pact_jobs add column if not exists priced boolean default false;
+do $$ begin
+  alter table pact_jobs add column if not exists list_subtotal numeric;
+  alter table pact_jobs add column if not exists priced boolean default false;
+end $$;
 
 -- the lines' subtotal (qty × price): 0 when there are no lines or the value isn't a list
 create or replace function public.pact_items_total(items jsonb) returns numeric
@@ -718,30 +820,38 @@ create trigger pact_job_priced
   before insert or update of amount, list_subtotal, invoice_sent, received, work_done, items, priced on pact_jobs
   for each row execute function public.pact_job_priced();
 -- the jobs already here: priced if an invoice went out, money came in, or the work is done on measured lines
-update pact_jobs set priced = (invoice_sent is not null or coalesce(received, false) or (coalesce(work_done, false) and public.pact_items_measured(items)))
-  where list_subtotal is null
-    and priced is distinct from (invoice_sent is not null or coalesce(received, false) or (coalesce(work_done, false) and public.pact_items_measured(items)));
+do $$ begin
+  update pact_jobs set priced = (invoice_sent is not null or coalesce(received, false) or (coalesce(work_done, false) and public.pact_items_measured(items)))
+    where list_subtotal is null
+      and priced is distinct from (invoice_sent is not null or coalesce(received, false) or (coalesce(work_done, false) and public.pact_items_measured(items)));
+end $$;
 
 -- 16) One row per code in a contract's price book. The survey upload adds
 --     the move-out release's lines to the book when they are missing; two
 --     phones doing that in the same second must not leave a code in twice
 --     (a doubled line doubles the sheet, its PDF and the release).
---     Duplicates already there are folded first, keeping the oldest row (a
---     row with no date counts as oldest; rows loaded together keep the one
---     highest on the sheet, as the price book upload does); every folded row
+--     Duplicates already there are folded first, keeping the row the
+--     walk-sheet survey prices that code from today: the one lowest on the
+--     sheet (the highest line number; a row with no line counts as lowest),
+--     then the newest. Walk sheets and release papers bill every row of a
+--     code, so folding never raises what any paper bills. Every folded row
 --     is kept in audit_log, so a price it carried is one query away.
 --     Lines with no code (a sheet whose Item column is the description) are
 --     left alone: they are not duplicates of one another.
-with folded as (
-  delete from contract_items a
-    using contract_items b
-    where a.contract_id = b.contract_id and a.code = b.code and a.code <> ''
-      and (coalesce(a.created_at, '-infinity'), coalesce(a.line, 0), a.id)
-        > (coalesce(b.created_at, '-infinity'), coalesce(b.line, 0), b.id)
-  returning a.*)
-insert into audit_log (user_id, action, table_name, record_id, before, after)
-select auth.uid(), 'DELETE', 'contract_items', f.id, to_jsonb(f), null from folded f;
-create unique index if not exists contract_items_contract_code_uq on contract_items (contract_id, code) where code <> '';
+do $$ begin
+  with folded as (
+    delete from contract_items a
+      using contract_items b
+      where a.contract_id = b.contract_id and a.code = b.code and a.code <> ''
+        and (coalesce(a.line, 2147483647), coalesce(a.created_at, '-infinity'), a.id)
+          < (coalesce(b.line, 2147483647), coalesce(b.created_at, '-infinity'), b.id)
+    returning a.*)
+  insert into audit_log (user_id, action, table_name, record_id, before, after)
+  select auth.uid(), 'DELETE', 'contract_items', f.id, to_jsonb(f), null from folded f;
+end $$;
+do $$ begin
+  create unique index if not exists contract_items_contract_code_uq on contract_items (contract_id, code) where code <> '';
+end $$;
 
 -- 17) Invoice numbers are held until a job is priced.
 --     A PO coming in gets no invoice number. The number is given out the
@@ -753,45 +863,12 @@ create unique index if not exists contract_items_contract_code_uq on contract_it
 --     numbers. The app asks for a number by hand when it builds an invoice
 --     for a job the trigger hasn't numbered yet (pact_claim_invoice_no).
 --     Jobs numbered before this section keep their numbers. A number is
---     given only at the moment a job with a line to bill BECOMES priced: a
---     job already priced before a save (invoiced or paid before this file
---     ran, or a number cleared by hand) is never given one by a later save,
---     and neither is a canceled job; its number comes when the invoice
---     builder makes its invoice.
-create or replace function public.pact_next_invoice_no() returns text
-language plpgsql security definer set search_path = public as $$
-declare n bigint;
-begin
-  -- one at a time, whoever asks: the counter never hands out a twin
-  perform pg_advisory_xact_lock(hashtext('pact_invoice_no'));
-  -- a number typed by hand may carry a stray space (still the same number);
-  -- one far too long to be ours (a date-style 20260921001) is outside the
-  -- run, like the old "8300-1" style, and never breaks the counter
-  select greatest(568, coalesce(max(trim(invoice_number)::bigint), 0)) + 1 into n
-    from pact_jobs where trim(invoice_number) ~ '^[0-9]{1,9}$';
-  return n::text;
-end $$;
--- signed-in users and the server only (the trigger below runs as the person saving)
-revoke all on function public.pact_next_invoice_no() from public, anon;
-grant execute on function public.pact_next_invoice_no() to authenticated, service_role;
-create or replace function public.pact_job_invoice_no() returns trigger
-language plpgsql as $$
-begin
-  if coalesce(new.priced, false)
-     and coalesce(trim(new.invoice_number), '') = ''
-     -- the moment it becomes priced, not any later save of a job already priced
-     and (tg_op = 'INSERT' or not coalesce(old.priced, false))
-     -- a canceled PO never turned into work, so it never takes a number
-     and not coalesce(new.canceled, false)
-     -- a line to bill: a description and a quantity above 0 (the app's own rule)
-     and exists (select 1 from jsonb_array_elements(case when jsonb_typeof(new.items) = 'array' then new.items else '[]'::jsonb end) it
-                  where coalesce(trim(it->>'description'), '') <> ''
-                    and (case when (it->>'qty') ~ '^-?[0-9]+(\.[0-9]+)?$' then (it->>'qty')::numeric else 0 end) > 0)
-  then
-    new.invoice_number := public.pact_next_invoice_no();
-  end if;
-  return new;
-end $$;
+--     given only at the moment a job with a line to bill BECOMES priced; a
+--     later save of a job already priced never gives one (a number cleared
+--     by hand stays clear), nor does a canceled job, nor a job invoiced or
+--     paid before this file first ran: their number comes when the invoice
+--     builder makes the invoice. The counter and the rule are made above
+--     section 11 (17, first part); here the rule is switched on.
 -- named to run right after pact_job_priced (triggers fire in name order), so it sees the fresh flag
 drop trigger if exists pact_job_priced_invoice on pact_jobs;
 create trigger pact_job_priced_invoice
@@ -816,7 +893,9 @@ end $$;
 -- 18) Each worker's language. The crew text goes out in English or
 --     Spanish, worker by worker, set on Settings → Crew. Nothing set
 --     reads as English.
-alter table employees add column if not exists lang text default 'en';
+do $$ begin
+  alter table employees add column if not exists lang text default 'en';
+end $$;
 
 -- 19) A crew text can be set up for later.
 --     The office picks a time (tonight, or tomorrow morning) and the text
@@ -825,8 +904,12 @@ alter table employees add column if not exists lang text default 'en';
 --     means "no text waiting"; it is cleared the moment the text goes out.
 --     Texts go out on their own once CRON_SECRET and SUPABASE_SERVICE_ROLE_KEY
 --     are set in Vercel; until then they go out while the portal is open.
-alter table schedule_days add column if not exists send_at timestamptz;
-create index if not exists schedule_days_send_at on schedule_days (send_at) where send_at is not null;
+do $$ begin
+  alter table schedule_days add column if not exists send_at timestamptz;
+end $$;
+do $$ begin
+  create index if not exists schedule_days_send_at on schedule_days (send_at) where send_at is not null;
+end $$;
 
 -- 20) Photos the crew texts back. A worker answers the crew text with
 --     pictures; the company number hands them to the portal, which puts them
@@ -851,9 +934,15 @@ create table if not exists texted_photos (
   created_at timestamptz default now()
 );
 -- a table made by an earlier copy of this file may predate the "how" column
-alter table texted_photos add column if not exists how text default '';
-create unique index if not exists texted_photos_msg on texted_photos (msg_sid) where msg_sid is not null;
-create index if not exists texted_photos_recent on texted_photos (created_at desc);
+do $$ begin
+  alter table texted_photos add column if not exists how text default '';
+end $$;
+do $$ begin
+  create unique index if not exists texted_photos_msg on texted_photos (msg_sid) where msg_sid is not null;
+end $$;
+do $$ begin
+  create index if not exists texted_photos_recent on texted_photos (created_at desc);
+end $$;
 alter table texted_photos enable row level security;
 -- the office reads them; every write comes from the server, which checks
 -- who is asking (Twilio's signature, or an admin/office sign-in) first
@@ -898,17 +987,25 @@ grant execute on function public.texted_photos_put(uuid, uuid, jsonb, text[]) to
 --     they have today, or their next day's job moved up to today). The mark
 --     comes off by itself once the office gives the job a new day. Needs
 --     section 20.
-alter table texted_photos add column if not exists note text default '';   -- what the portal did about it: "Moved PO 220011 up from Wed Sep 23 and sent Jose"
-alter table texted_photos add column if not exists day text;                -- the work day (New York) a door was reported on
-create index if not exists texted_photos_open on texted_photos (status) where status in ('held', 'nobody', 'reply');
+do $$ begin
+  alter table texted_photos add column if not exists note text default '';   -- what the portal did about it: "Moved PO 220011 up from Wed Sep 23 and sent Jose"
+  alter table texted_photos add column if not exists day text;                -- the work day (New York) a door was reported on
+end $$;
+do $$ begin
+  create index if not exists texted_photos_open on texted_photos (status) where status in ('held', 'nobody', 'reply');
+end $$;
 -- one report per door per day: two workers at the same door texting in the
 -- same second can't both move the next job up: the second one is told it's
 -- already reported
-create unique index if not exists texted_photos_one_door on texted_photos (coalesce(pact_job_id, release_id), day)
-  where status = 'nobody' and day is not null;
+do $$ begin
+  create unique index if not exists texted_photos_one_door on texted_photos (coalesce(pact_job_id, release_id), day)
+    where status = 'nobody' and day is not null;
+end $$;
 -- when each crew text went out from the company number: a plain "no" soon
 -- after a text about tomorrow is an answer to that text, not a door
-alter table schedule_days add column if not exists texted_at timestamptz;
+do $$ begin
+  alter table schedule_days add column if not exists texted_at timestamptz;
+end $$;
 -- a PACT job given a new day: its ⚠ is done with
 create or replace function public.texted_nobody_moved() returns trigger
 language plpgsql security definer set search_path = public as $$
@@ -950,7 +1047,9 @@ create trigger schedule_days_nobody_rebooked
 --     the work-done rows cleared when a worker texts NOT DONE, and the
 --     office's per-job card. (The PACT Schedule reads its marks for all jobs
 --     at once by created_at, which the table's own order serves.)
-create index if not exists texted_photos_job on texted_photos (pact_job_id, created_at desc) where pact_job_id is not null;
+do $$ begin
+  create index if not exists texted_photos_job on texted_photos (pact_job_id, created_at desc) where pact_job_id is not null;
+end $$;
 
 -- 23) Jobs that take more than one day, and a job that isn't finished.
 --     work_days: how many days a PACT job runs from its start_date, Monday
@@ -963,13 +1062,17 @@ create index if not exists texted_photos_job on texted_photos (pact_job_id, crea
 --     never text twice. told_day on a crew row: the day that worker was
 --     last told, so a job moved after they were told is texted as a move.
 --     Needs sections 14, 20 and 21.
-alter table pact_jobs add column if not exists work_days integer not null default 1;
-alter table pact_jobs add column if not exists checked_day text not null default '';
+do $$ begin
+  alter table pact_jobs add column if not exists work_days integer not null default 1;
+  alter table pact_jobs add column if not exists checked_day text not null default '';
+end $$;
 do $$ begin
   alter table pact_jobs add constraint pact_jobs_work_days_range check (work_days between 1 and 30);
 exception when duplicate_object then null; end $$;
-alter table schedule_days add column if not exists told_day text not null default '';
-update schedule_days set told_day = day where texted and told_day = '' and day <> '';
+do $$ begin
+  alter table schedule_days add column if not exists told_day text not null default '';
+  update schedule_days set told_day = day where texted and told_day = '' and day <> '';
+end $$;
 create or replace function public.schedule_days_told() returns trigger
 language plpgsql as $$
 begin
@@ -997,8 +1100,10 @@ create trigger pact_job_undone
   after update of work_done on pact_jobs
   for each row execute function public.pact_job_undone();
 -- the morning's "Finished?" question goes out once per job per last day
-create unique index if not exists texted_photos_one_ask on texted_photos (pact_job_id, day)
-  where how = 'finished' and day is not null;
+do $$ begin
+  create unique index if not exists texted_photos_one_ask on texted_photos (pact_job_id, day)
+    where how = 'finished' and day is not null;
+end $$;
 
 -- ============================================================
 -- Done: the result below reads "RUN_ME finished, all 23 steps ran".

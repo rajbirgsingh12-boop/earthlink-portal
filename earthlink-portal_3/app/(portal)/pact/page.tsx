@@ -126,6 +126,9 @@ export default function Pact() {
   // or a file path (the console keeps those)
   const upgradeHint = (m: string, what = "Couldn't save") => {
     console.warn(m);
+    // the database's one PO, one job refusal (RUN_ME section 13): name the PO, not the signal
+    const twin = /PO (.+?) is already a job/i.exec(m);
+    if (twin) return `PO ${twin[1]} is already a job. One PO is one job: open that one`;
     if (/proposal_sent/i.test(m)) return "Proposals sent can't be tracked until the database update is run (Settings → System check)";
     if (/relation|column|schema/i.test(m)) return "This can't be saved until the database update is run (Settings → System check)";
     return `${what}. Check your signal and try again.`;

@@ -16,10 +16,13 @@ import { useLive } from "@/lib/useLive";
 
 interface Item { id: string; code: string; description: string; unit: string; unit_price: number; category: string; line?: number; }
 
-// what the office reads when the database says no: the upgrade it needs, or a
-// plain "try again" (never the database's own words)
+// what the office reads when the database says no: the upgrade it needs, a
+// code the book already holds (RUN_ME section 16 keeps each code once in a
+// contract's book), or a plain "try again" (never the database's own words)
 const UPGRADE_MSG = "The portal's database needs an upgrade before this works (Settings → System check).";
-const dbMsg = (m: string, what: string) => (/relation|column|schema cache/i.test(m) ? UPGRADE_MSG : `Couldn't ${what}. Check your signal and try again.`);
+const dbMsg = (m: string, what: string) => (/relation|column|schema cache/i.test(m) ? UPGRADE_MSG
+  : /contract_items_contract_code_uq|duplicate key/i.test(m) ? "That code is already in this price book. Change the line that has it instead."
+  : `Couldn't ${what}. Check your signal and try again.`);
 
 export default function Items() {
   const [contracts, setContracts] = useState<Contract[]>([]);

@@ -1436,62 +1436,12 @@ export default function Pact() {
 
   // one job's full package as PDF bytes — invoice page, PO pages, photos
   const buildPackageBytes = async (j: Job, org2: Org): Promise<Uint8Array | null> => {
-    const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
-    const { money: usd } = await import("@/lib/proposalDoc");
+    const { PDFDocument, StandardFonts } = await import("pdf-lib");
     const items = cleanLineWording(workLines(itemsOf(j))).items.filter((it) => Number(it.qty) > 0 && it.description.trim());
     if (items.length === 0) return null;
       const pkg = await PDFDocument.create();
-      const helv = await pkg.embedFont(StandardFonts.Helvetica);
       const bold = await pkg.embedFont(StandardFonts.HelveticaBold);
-      // --- invoice page: clean letterhead layout ---
-      let page = pkg.addPage([612, 792]);
-      const L = 54, R = 558;
-      let y = 736;
-      const ink = rgb(0.09, 0.09, 0.08), soft = rgb(0.45, 0.44, 0.42);
-      const ruleC = rgb(0.86, 0.84, 0.79), fillC = rgb(0.957, 0.945, 0.922);
-      // the same orange as the proposal letter, so the pair look like one company
-      const brand = rgb(0.761, 0.290, 0.039), white = rgb(1, 1, 1);
-      const put = (t: string, x: number, yy: number, size = 9.5, font = helv, color = ink) =>
-        page.drawText(t, { x, y: yy, size, font, color });
-      const putR = (t: string, xr: number, yy: number, size = 9.5, font = helv, color = ink) =>
-        put(t, xr - font.widthOfTextAtSize(t, size), yy, size, font, color);
-      const hr = (yy: number, w = 0.6, color = ruleC) =>
-        page.drawLine({ start: { x: L, y: yy }, end: { x: R, y: yy }, thickness: w, color });
-
-      // letterhead: the logo with the company block beside it, same as the proposal
-      void org2;
-      let lx = L;
-      try {
-        const logoBytes = await fetch("/logo.png").then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error("no logo"))));
-        const logo = await pkg.embedPng(logoBytes);
-        const lh2 = 60, lw2 = (logo.width / logo.height) * lh2;
-        page.drawImage(logo, { x: L, y: y - lh2 + 13, width: lw2, height: lh2 });
-        lx = L + lw2 + 12;
-      } catch { /* logo unavailable — text-only letterhead */ }
-      put(COMPANY.letterhead.name, lx, y, 14, bold);
-      putR("INVOICE", R, y - 3, 22, bold, brand);
-      y -= 14;
-      put(COMPANY.letterhead.address, lx, y, 8.5, helv, soft);
-      y -= 11;
-      put(COMPANY.letterhead.phones, lx, y, 8.5, helv, soft);
-      y -= 11;
-      put(COMPANY.letterhead.emails, lx, y, 8.5, helv, soft);
-      y -= 12;
-      hr(y, 2, brand);
-      y -= 26;
-
-      // invoice meta
-      ([["INVOICE #", j.invoice_number || j.po_number || ""], ["DATE", prettyDate(today())], ["PURCHASE ORDER", j.po_number || j.job_number || ""]] as [string, string][]).forEach(([k, v], i) => {
-        const x = L + i * 172;
-        put(k, x, y, 7, bold, soft);
-        put(v, x, y - 14, 10.5, bold);
-      });
-      y -= 40;
-
-      // bill to / job site
-      put("BILL TO", L, y, 7, bold, soft);
-      put("JOB SITE", 330, y, 7, bold, soft);
-      y -= 14;
+      // --- the invoice page(s): the same look as the proposal letter (lib/invoicePdf) ---
       // strip the partner name off the bill-to block only when it really starts with it —
       // a hand-edited partner otherwise chops the address at a random offset
       const billRest = (j.bill_to || "").startsWith(j.partner || "") && j.partner
@@ -1505,73 +1455,17 @@ export default function Pact() {
         if (billParts.length > 0 && /^[A-Z]{2}\b\s*\d{5}(?:-\d{4})?$/.test(part)) billParts[billParts.length - 1] += `, ${part}`;
         else billParts.push(part);
       }
-      const billLines = [j.partner, ...billParts].filter(Boolean).slice(0, 6) as string[];
-      const siteLines = [j.address || "", unitLabel(j.property_unit || "")].filter(Boolean) as string[];
-      const startY = y;
-      billLines.forEach((s, i) => put(String(s).slice(0, 48), L, startY - i * 12, 9.5, i === 0 ? bold : helv));
-      siteLines.forEach((s, i) => put(String(s).slice(0, 46), 330, startY - i * 12, 9.5, i === 0 ? bold : helv));
-      y = startY - Math.max(billLines.length, siteLines.length, 1) * 12 - 16;
-
-      // work table
-      const tableHead = (label: string) => {
-        page.drawRectangle({ x: L, y: y - 6, width: R - L, height: 20, color: fillC });
-        page.drawLine({ start: { x: L, y: y - 6 }, end: { x: R, y: y - 6 }, thickness: 1.4, color: brand });
-        put(label, L + 8, y, 8, bold, soft);
-        putR("QTY", 388, y, 8, bold, soft);
-        put("UNIT", 400, y, 8, bold, soft);
-        putR("UNIT PRICE", 500, y, 8, bold, soft);
-        putR("AMOUNT", R - 8, y, 8, bold, soft);
-        y -= 22;
-      };
-      tableHead("DESCRIPTION OF WORK");
-      // a long work list spills onto extra pages instead of running off the sheet
-      const newItemsPage = () => {
-        page = pkg.addPage([612, 792]);
-        y = 736;
-        tableHead("DESCRIPTION OF WORK (continued)");
-      };
-      let subtotal = 0;
-      items.forEach((it) => {
-        const amount = (Number(it.qty) || 0) * (Number(it.unit_price) || 0);
-        subtotal += amount;
-        const words = it.description.split(" ");
-        let cur = "";
-        const rowsTxt: string[] = [];
-        words.forEach((w) => { if ((cur + " " + w).trim().length > 52) { rowsTxt.push(cur.trim()); cur = w; } else cur += " " + w; });
-        if (cur.trim()) rowsTxt.push(cur.trim());
-        rowsTxt.forEach((rt, i2) => {
-          if (y < 96) newItemsPage();
-          put(rt, L + 8, y);
-          if (i2 === 0) {
-            putR(String(it.qty), 388, y, 9.5, helv, soft);
-            put(it.unit, 400, y, 9.5, helv, soft);
-            putR(usd(Number(it.unit_price)), 500, y, 9.5, helv, soft);
-            putR(usd(amount), R - 8, y);
-          }
-          y -= 14;
-        });
-        y -= 3;
-        hr(y + 9, 0.5);
-      });
-
-      // totals
-      if (y < 150) { page = pkg.addPage([612, 792]); y = 736; }
-      y -= 8;
-      const taxAmt = subtotal * taxRate(j) / 100;
-      putR("Subtotal", 466, y, 9.5, helv, soft);
-      putR(usd(subtotal), R - 8, y);
-      y -= 16;
-      putR(`Sales tax ${taxRate(j)}%`, 466, y, 9.5, helv, soft);
-      putR(usd(taxAmt), R - 8, y);
-      y -= 30;
-      page.drawRectangle({ x: 330, y: y - 6, width: R - 330, height: 26, color: brand });
-      putR("TOTAL DUE", 466, y, 10.5, bold, white);
-      putR(usd(subtotal + taxAmt), R - 8, y, 13, bold, white);
-
-      // footer
-      hr(72, 0.6);
-      const foot = `Make all checks payable to ${(org2.company || "").toUpperCase()} · Thank you for your business`;
-      put(foot, (612 - helv.widthOfTextAtSize(foot, 8.5)) / 2, 58, 8.5, helv, soft);
+      const { drawInvoicePages } = await import("@/lib/invoicePdf");
+      await drawInvoicePages(pkg, {
+        invoiceNumber: j.invoice_number || j.po_number || "",
+        poNumber: j.po_number || j.job_number || "",
+        date: prettyDate(today()),
+        billTo: [j.partner, ...billParts].filter(Boolean).slice(0, 6) as string[],
+        jobSite: [j.address || "", unitLabel(j.property_unit || "")].filter(Boolean),
+        lines: items,
+        taxPct: taxRate(j),
+        payTo: org2.company || "",
+      }, await logoBytes());
       // --- the PO pdf(s) --- (never a package this job already produced)
       const atts = (j.attachments || []).filter((a) => !isMade(a));
       for (const a of atts.filter((x) => /\.pdf$/i.test(x.name))) {
